@@ -1,0 +1,7 @@
+{
+  "name": "Entity Renamer",
+  "filename": "ha-entity-renamer.js",
+  "render_readme": true,
+  "content_in_root": true,
+  "homeassistant": "2024.1.0"
+}
