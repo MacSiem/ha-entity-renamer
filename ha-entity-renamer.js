@@ -511,6 +511,7 @@ class HAEntityRenamer extends HTMLElement {
   getCardSize() { return 8; }
 
   static getStubConfig() { return { type: 'custom:ha-entity-renamer', title: 'Entity Renamer' }; }
+  setConfig(config) { this._config = config || {}; }
   constructor() {
     super();
     this._toolId = this.tagName.toLowerCase().replace('ha-', '');
