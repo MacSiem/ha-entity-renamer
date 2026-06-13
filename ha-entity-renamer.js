@@ -701,6 +701,8 @@ class HAEntityRenamer extends HTMLElement {
   static getConfigElement() { return document.createElement('ha-entity-renamer-editor'); }
   getCardSize() { return 8; }
 
+  getGridOptions() { return { rows: 10, columns: 12, min_rows: 3, min_columns: 6 }; }
+
   static getStubConfig() { return { type: 'custom:ha-entity-renamer', title: 'Entity Renamer' }; }
   setConfig(config) { this._config = config || {}; }
   constructor() {
