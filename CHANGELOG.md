@@ -1,3 +1,10 @@
+# Changelog
+
+## [4.2.3] - 2026-06-15
+
+- Theme: dark/light now follows the active Home Assistant theme (luminance of --card-background-color) instead of OS prefers-color-scheme.
+- Fix: restore missing _renderApplyResult() that blanked the card.
+
 ## [4.2.2] - 2026-06-13
 
 ### Fixed
