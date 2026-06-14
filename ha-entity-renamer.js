@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v4.2.0 (2026-06-12) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v4.2.2 (2026-06-12) — single-tool standalone repo */
 (function() {
 'use strict';
 
@@ -1563,6 +1563,14 @@ class HAEntityRenamer extends HTMLElement {
   }
 
 
+
+  _renderApplyResult() {
+    // Stub: render() referenced this._renderApplyResult() but the method was
+    // never implemented, so it threw "is not a function" and blanked the whole
+    // card (regression since v4.2.0). Apply/rename feedback is surfaced via
+    // this._message above, so an empty string is the correct no-op here.
+    return '';
+  }
 
   _renderDevicesTab(devices) {
     const t = this._t;

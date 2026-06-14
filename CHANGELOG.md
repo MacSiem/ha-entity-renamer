@@ -1,3 +1,8 @@
+## [4.2.2] - 2026-06-13
+
+### Fixed
+- **Card no longer renders blank.** render() called an undefined _renderApplyResult(), throwing "is not a function" and blanking the entire panel (regression since v4.2.0). Added a no-op stub; rename feedback is shown via the status message as before.
+
 # Changelog — Entity Renamer
 
 ## [4.1.3] - 2026-05-12
