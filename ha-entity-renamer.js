@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v4.2.3 (2026-06-12) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v4.2.4 (2026-06-12) — single-tool standalone repo */
 (function() {
 'use strict';
 
@@ -19,6 +19,8 @@ if (typeof window !== 'undefined' && !window.HAToolsBentoCSS) {
    HA Tools — Bento Design System v2.0 (Premium)
    ═══════════════════════════════════════════════ */
 
+/* keyboard a11y */
+:focus-visible { outline: 2px solid var(--bento-primary, #6366f1); outline-offset: 2px; border-radius: 3px; }
 
 :host {
   /* Brand palette — diamond top, gradient-friendly */
@@ -1691,7 +1693,7 @@ class HAEntityRenamer extends HTMLElement {
       <div class="queue-actions">
         <button class="btn btn-outline" id="clearQueue">🗑️ ${t.clear}</button>
         <button class="btn btn-outline" id="analyzeImpact" ${this._loading ? 'disabled' : ''}>🔍 ${t.analyzeImpact}</button>
-        <button class="btn btn-danger" id="executeRenames" ${this._loading ? 'disabled' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length})</button>
+        <button class="btn btn-danger" id="executeRenames" ${this._loading ? 'disabled aria-busy="true"' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length})</button>
       </div>`;
   }
 
