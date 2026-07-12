@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ER screenshot harness</title>
+<style>
+  html, body { margin: 0; padding: 24px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body.light { background: #f4f5f7; }
+  body.light ha-entity-renamer { --card-background-color: #ffffff; --primary-background-color: #f4f5f7; }
+  body.dark { background: #111318; }
+  body.dark ha-entity-renamer { --card-background-color: #1c1e26; --primary-background-color: #111318; }
+  ha-entity-renamer { display: block; width: 480px; }
+</style>
+</head>
+<body>
+<ha-entity-renamer id="card"></ha-entity-renamer>
+<script>
+  try { localStorage.setItem('ha-intro-dismissed-ha-entity-renamer', '1'); } catch (e) {}
+</script>
+<script src="../../ha-entity-renamer.js"></script>
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const theme = params.get('theme') === 'dark' ? 'dark' : 'light';
+  const tab = params.get('tab') || '';
+  document.body.className = theme;
+
+  // Device registry (config/device_registry/list) — id / name / name_by_user are read by the card.
+  const devices = [
+    { id: 'dev_living_room_sensor', name: 'Aqara Motion Sensor', name_by_user: null, manufacturer: 'Aqara', model: 'RTCGQ11LM' },
+    { id: 'dev_kitchen_light', name: 'Shelly Duo Kitchen', name_by_user: null, manufacturer: 'Shelly', model: 'Shelly Duo' },
+    { id: 'dev_front_door_lock', name: 'August Smart Lock', name_by_user: 'Front Door Lock', manufacturer: 'August', model: 'Wi-Fi Smart Lock' },
+    { id: 'dev_thermostat', name: 'Ecobee Thermostat', name_by_user: null, manufacturer: 'ecobee', model: 'ecobee4' },
+  ];
+
+  // Entity registry (config/entity_registry/list) — entity_id / device_id / name / original_name are read by the card.
+  const entities = [
+    { entity_id: 'sensor.living_room_motion', device_id: 'dev_living_room_sensor', name: null, original_name: 'Motion' },
+    { entity_id: 'sensor.living_room_illuminance', device_id: 'dev_living_room_sensor', name: null, original_name: 'Illuminance' },
+    { entity_id: 'sensor.living_room_battery', device_id: 'dev_living_room_sensor', name: null, original_name: 'Battery' },
+    { entity_id: 'light.kitchen_duo_1', device_id: 'dev_kitchen_light', name: null, original_name: 'Kitchen Duo 1' },
+    { entity_id: 'light.kitchen_duo_2', device_id: 'dev_kitchen_light', name: null, original_name: 'Kitchen Duo 2' },
+    { entity_id: 'lock.front_door', device_id: 'dev_front_door_lock', name: null, original_name: 'Lock' },
+    { entity_id: 'sensor.front_door_battery', device_id: 'dev_front_door_lock', name: null, original_name: 'Battery' },
+    { entity_id: 'climate.thermostat', device_id: 'dev_thermostat', name: null, original_name: 'Thermostat' },
+    { entity_id: 'sensor.thermostat_humidity', device_id: 'dev_thermostat', name: null, original_name: 'Humidity' },
+  ];
+
+  // search/related demo hits, keyed by entity_id — used by the Analyze Impact button (Queue tab).
+  const RELATED = {
+    'sensor.living_room_motion': { automation: ['automation.morning_routine'], script: [], scene: [] },
+    'sensor.living_room_battery': { automation: [], script: ['script.notify_battery_low'], scene: [] },
+    'light.kitchen_duo_1': { automation: [], script: [], scene: ['scene.movie_night'] },
+  };
+
+  const states = {
+    'automation.morning_routine': { entity_id: 'automation.morning_routine', state: 'on', attributes: { friendly_name: 'Morning routine' } },
+    'script.notify_battery_low': { entity_id: 'script.notify_battery_low', state: 'off', attributes: { friendly_name: 'Notify battery low' } },
+    'scene.movie_night': { entity_id: 'scene.movie_night', state: 'scening', attributes: { friendly_name: 'Movie night' } },
+  };
+
+  const hass = {
+    language: 'en',
+    themes: { darkMode: theme === 'dark' },
+    states,
+    services: {},
+    connection: { subscribeEvents: () => Promise.resolve(() => {}) },
+    callWS: async (msg) => {
+      const t = String(msg && msg.type || '');
+      if (t === 'config/device_registry/list') return devices;
+      if (t === 'config/entity_registry/list') return entities;
+      if (t === 'search/related') return RELATED[msg.item_id] || {};
+      if (t === 'lovelace/dashboards/list') return [{ url_path: 'default-view', title: 'Home' }];
+      if (t === 'lovelace/config') {
+        return { views: [{ title: 'Home', cards: [{ type: 'entities', entities: ['sensor.living_room_motion', 'light.kitchen_duo_1'] }] }] };
+      }
+      if (t === 'config/entity_registry/update') return {};
+      if (t === 'config/device_registry/update') return {};
+      return {};
+    },
+    callApi: async () => ({}),
+    callService: async () => ({}),
+  };
+
+  const card = document.getElementById('card');
+  card.setConfig({ type: 'custom:ha-entity-renamer', title: 'Entity Renamer' });
+  card.hass = hass;
+  setTimeout(() => { card.hass = { ...hass }; }, 400);
+
+  const scrub = () => { try { card.shadowRoot && card.shadowRoot.querySelectorAll('#tip-banner, [class*="banner"], .donate-section').forEach(n => n.remove()); } catch (e) {} };
+  setInterval(scrub, 150);
+
+  setTimeout(() => {
+    try {
+      if (tab && card.shadowRoot) {
+        const btn = card.shadowRoot.querySelector('[data-tab="' + tab + '"]');
+        if (btn) btn.click();
+      } else if (card.shadowRoot) {
+        // Default view: expand the first device so the screenshot shows entities + rename controls.
+        const hdr = card.shadowRoot.querySelector('.device-header');
+        if (hdr) hdr.click();
+      }
+    } catch (e) {}
+  }, 600);
+
+  setTimeout(() => { scrub(); document.title = 'READY'; }, 1500);
+})();
+</script>
+</body>
+</html>
