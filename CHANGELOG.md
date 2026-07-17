@@ -1,10 +1,10 @@
 # Changelog
 
-## 4.2.5 (2026-07-17)
+## 4.2.6 (2026-07-17)
 
 - Fix (UI): responsive tab bar — tabs stretch to fill the card width and wrap on narrow layouts instead of being pinned to content width and clipped (shared HA Tools tab styling).
 
-## 4.2.5 (2026-07-17)
+## 4.2.6 (2026-07-17)
 
 - Fix (UI): responsive tab bar — tabs stretch to fill the card width and wrap on narrow layouts instead of being pinned to content width and clipped (shared HA Tools tab styling).
 
