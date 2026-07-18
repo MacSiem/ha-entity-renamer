@@ -1,5 +1,9 @@
 # Changelog
 
+## 4.2.8 (2026-07-18)
+
+- Fix: "Apply Changes" no longer blanks the card. The rename confirmation dialog was referenced by render() but never implemented, so it threw a TypeError and wiped the card. The dialog now lists the queued entity and device renames with Rename / Cancel.
+
 ## 4.2.7 (2026-07-18)
 
 - Fix (UI): the small accent dot before section titles no longer detaches from the title text (it was pushed to the opposite edge by the header's flex space-between); it is now pinned next to the title.

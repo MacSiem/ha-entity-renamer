@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v4.2.7 (2026-06-12) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v4.2.8 (2026-06-12) — single-tool standalone repo */
 (function() {
 'use strict';
 
@@ -1596,6 +1596,45 @@ class HAEntityRenamer extends HTMLElement {
   }
 
 
+
+  _renderRenameConfirmation() {
+    // render() calls this whenever _confirmDialogOpen is true (Apply Changes).
+    // It was never implemented, so the call threw "is not a function" and
+    // blanked the card — same regression class as _renderApplyResult below.
+    const t = this._t;
+    const queue = this._renameQueue || [];
+    const idChanges = queue.filter(r => r.newId && r.newId !== r.oldId);
+    const devEntries = Object.entries(this._deviceRenameQueue || {});
+    const MAX = 8;
+    const shown = idChanges.slice(0, MAX);
+    const more = idChanges.length - shown.length;
+    const rowStyle = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--bento-border,#e5e7eb);font-size:12.5px';
+    const codeStyle = 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--bento-bg-2,#f3f4f6);padding:2px 6px;border-radius:6px';
+    const sub = 'color:var(--bento-text-secondary,#6b7280)';
+    const rows = shown.map(r => `
+        <div style="${rowStyle}">
+          <code style="${codeStyle}">${_esc(r.oldId)}</code>
+          <span style="opacity:.6">&rarr;</span>
+          <code style="${codeStyle}">${_esc(r.newId)}</code>
+          ${r.newName ? `<span style="${sub}">"${_esc(r.newName)}"</span>` : ''}
+        </div>`).join('');
+    const devRows = devEntries.slice(0, MAX).map(([, name]) => `
+        <div style="${rowStyle}"><span>&#128295;</span><span>${_esc(String(name))}</span></div>`).join('');
+    const fill = (s, n) => _esc(String(s || '').replace('{count}', n));
+    return `
+      <div class="confirm-dialog" style="border:1px solid var(--bento-primary,#3B82F6);border-radius:var(--bento-radius-md,14px);background:var(--bento-card,#fff);padding:16px 18px;margin:12px 0;box-shadow:var(--bento-shadow-md)">
+        <div style="font-weight:700;font-size:14px;margin-bottom:6px">&#9888;&#65039; ${_esc(t.confirmRenameTitle)}</div>
+        <div style="font-size:12.5px;${sub};margin-bottom:10px">${_esc(t.confirmRenameBody)}</div>
+        <div style="font-size:12.5px;font-weight:600;margin-bottom:4px">${fill(t.confirmRenameCount, idChanges.length)}</div>
+        ${idChanges.length ? rows : `<div style="font-size:12.5px;${sub}">${_esc(t.confirmNoEntityChanges)}</div>`}
+        ${more > 0 ? `<div style="font-size:12px;opacity:.7;padding-top:6px">${fill(t.confirmMore, more)}</div>` : ''}
+        ${devEntries.length ? `<div style="font-size:12.5px;font-weight:600;margin:10px 0 4px">${fill(t.confirmDeviceCount, devEntries.length)}</div>${devRows}` : ''}
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+          <button id="cancelRenameDialog" class="btn btn-outline">${_esc(t.cancel)}</button>
+          <button id="confirmRenameApply" class="btn btn-primary">${_esc(t.rename)}</button>
+        </div>
+      </div>`;
+  }
 
   _renderApplyResult() {
     // Stub: render() referenced this._renderApplyResult() but the method was
