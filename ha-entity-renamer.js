@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v4.2.8 (2026-06-12) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v4.2.9 (2026-08-20) — single-tool standalone repo */
 (function() {
 'use strict';
 
@@ -1663,9 +1663,9 @@ class HAEntityRenamer extends HTMLElement {
             const isSelected = this._selectedDevice === d.id;
             return `
             <div class="device-item ${isSelected ? 'selected' : ''}">
-              <div class="device-header" data-device-id="${d.id}">
+              <div class="device-header" data-device-id="${_esc(d.id)}">
                 <span class="device-expand ${isExpanded ? 'open' : ''}">▶</span>
-                <span class="device-name">${this._getDeviceName(d)}</span>
+                <span class="device-name">${_esc(this._getDeviceName(d))}</span>
                 <span class="device-meta">${ents.length} ${t.entities.toLowerCase()}</span>
               </div>
               ${isExpanded ? `
@@ -1675,12 +1675,12 @@ class HAEntityRenamer extends HTMLElement {
                   const inQueue = this._renameQueue.some(r => r.oldId === e.entity_id);
                   return `
                   <div class="entity-row">
-                    <span class="entity-domain">${domain}</span>
-                    <span class="entity-id">${e.entity_id}</span>
-                    <span class="entity-name">${e.name || e.original_name || ''}</span>
+                    <span class="entity-domain">${_esc(domain)}</span>
+                    <span class="entity-id">${_esc(e.entity_id)}</span>
+                    <span class="entity-name">${_esc(e.name || e.original_name || '')}</span>
                     ${inQueue
-                      ? '<button class="btn btn-sm btn-danger" data-remove-queue="' + e.entity_id + '" aria-label="Remove">✕</button>'
-                      : `<button class="btn btn-sm btn-outline" data-add-single="${e.entity_id}">+ ${t.queue}</button>`
+                      ? '<button class="btn btn-sm btn-danger" data-remove-queue="' + _esc(e.entity_id) + '" aria-label="Remove">✕</button>'
+                      : `<button class="btn btn-sm btn-outline" data-add-single="${_esc(e.entity_id)}">+ ${t.queue}</button>`
                     }
                   </div>`;
                 }).join('')}
@@ -1690,7 +1690,7 @@ class HAEntityRenamer extends HTMLElement {
                 <h3>📱 ${t.newDeviceName}</h3>
                 <div class="prefix-row" style="margin-bottom:12px">
                   <input type="text" id="deviceName" value="${_esc(this._deviceRenameQueue[d.id] || this._getDeviceName(d))}" placeholder="${t.newDeviceName}" style="width:300px;font-family:inherit">
-                  <button class="btn btn-primary btn-sm" id="applyDeviceName" data-device-id="${d.id}">${t.changeName}</button>
+                  <button class="btn btn-primary btn-sm" id="applyDeviceName" data-device-id="${_esc(d.id)}">${t.changeName}</button>
                 </div>
                 <h3>📄 ${t.prefixChange}</h3>
                 <div class="prefix-row">
@@ -1717,7 +1717,7 @@ class HAEntityRenamer extends HTMLElement {
         <strong style="font-size:12px;">📱 ${t.devicesToRename}</strong>
         ${devEntries.map(([did, name]) => {
           const dev = this._devices.find(d => d.id === did);
-          return `<div style="font-size:12px;margin-top:4px;"><span class="old">${dev ? this._getDeviceName(dev) : did}</span> → <span class="new">${name}</span> <button class="btn btn-sm btn-danger" data-remove-dev-queue="${did}" aria-label="Remove">✕</button></div>`;
+          return `<div style="font-size:12px;margin-top:4px;"><span class="old">${_esc(dev ? this._getDeviceName(dev) : did)}</span> → <span class="new">${_esc(name)}</span> <button class="btn btn-sm btn-danger" data-remove-dev-queue="${_esc(did)}" aria-label="Remove">✕</button></div>`;
         }).join('')}
       </div>` : ''}
       <div class="queue-list">
@@ -1726,20 +1726,20 @@ class HAEntityRenamer extends HTMLElement {
             const hasImpact = imp && (imp.automations.length || imp.scripts.length || imp.dashboards.length || (imp.scenes||[]).length);
             return `<div style="border:1px solid var(--bento-border,#334155);border-radius:8px;padding:12px;margin-bottom:8px;">
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                <span class="old" style="flex:1;font-family:'JetBrains Mono',monospace;font-size:11px;">${r.oldId}</span>
-                <button class="btn btn-sm btn-danger" data-remove-queue="${r.oldId}" aria-label="Remove">✕</button>
+                <span class="old" style="flex:1;font-family:'JetBrains Mono',monospace;font-size:11px;">${_esc(r.oldId)}</span>
+                <button class="btn btn-sm btn-danger" data-remove-queue="${_esc(r.oldId)}" aria-label="Remove">✕</button>
               </div>
               <div style="display:flex;align-items:center;gap:8px;">
                 <span style="color:var(--bento-text-secondary,#94A3B8);">→</span>
-                <span class="new" style="font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? r.newId : '<span style="opacity:0.4">no entity_id change</span>'}</span>
-                ${r.newName ? '<span style="font-size:11px;color:#93C5FD;">📝 ' + r.newName + '</span>' : ''}
+                <span class="new" style="font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? _esc(r.newId) : '<span style="opacity:0.4">no entity_id change</span>'}</span>
+                ${r.newName ? '<span style="font-size:11px;color:#93C5FD;">📝 ' + _esc(r.newName) + '</span>' : ''}
               </div>
               ${hasImpact ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05);">
                 <span style="font-size:10px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
-                ${imp.automations.map(a => '<span class="impact-badge automation">⚙ ' + a + '</span>').join('')}
-                ${imp.scripts.map(s => '<span class="impact-badge script">📜 ' + s + '</span>').join('')}
-                ${imp.dashboards.map(d => '<span class="impact-badge dashboard">📊 ' + d + '</span>').join('')}
-                ${(imp.scenes||[]).map(s => '<span class="impact-badge scene">🎬 ' + s + '</span>').join('')}
+                ${imp.automations.map(a => '<span class="impact-badge automation">⚙ ' + _esc(a) + '</span>').join('')}
+                ${imp.scripts.map(s => '<span class="impact-badge script">📜 ' + _esc(s) + '</span>').join('')}
+                ${imp.dashboards.map(d => '<span class="impact-badge dashboard">📊 ' + _esc(d) + '</span>').join('')}
+                ${(imp.scenes||[]).map(s => '<span class="impact-badge scene">🎬 ' + _esc(s) + '</span>').join('')}
               </div>` : (imp ? `<div style="margin-top:4px;font-size:10px;color:var(--bento-text-secondary,#94A3B8);">✓ ${t.notUsed}</div>` : '')}
             </div>`;
           }).join('')}
@@ -1763,17 +1763,17 @@ class HAEntityRenamer extends HTMLElement {
           const hasImpact = imp && (imp.automations.length || imp.scripts.length || imp.dashboards.length || (imp.scenes||[]).length);
           return `
           <div class="log-entry" style="padding:8px 0;${hasImpact ? 'padding-bottom:12px;' : ''}">
-            <span class="log-time">${l.time}</span>
+            <span class="log-time">${_esc(l.time)}</span>
             <span class="${l.status === 'ok' ? 'log-ok' : 'log-err'}">
-              ${l.status === 'ok' ? '✅' : '❌'} ${l.oldId} → ${l.newId}
+              ${l.status === 'ok' ? '✅' : '❌'} ${_esc(l.oldId)} → ${_esc(l.newId)}
             </span>
-            ${l.error ? `<br><small style="color:#FCA5A5">${l.error}</small>` : ''}
+            ${l.error ? `<br><small style="color:#FCA5A5">${_esc(l.error)}</small>` : ''}
             ${hasImpact ? `<div style="margin-top:4px;padding-left:24px;">
               <span style="font-size:10px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
-              ${imp.automations.map(a => '<span class="impact-badge automation">⚙ ' + a + '</span>').join('')}
-              ${imp.scripts.map(s => '<span class="impact-badge script">📜 ' + s + '</span>').join('')}
-              ${imp.dashboards.map(d => '<span class="impact-badge dashboard">📊 ' + d + '</span>').join('')}
-              ${(imp.scenes||[]).map(s => '<span class="impact-badge scene">🎬 ' + s + '</span>').join('')}
+              ${imp.automations.map(a => '<span class="impact-badge automation">⚙ ' + _esc(a) + '</span>').join('')}
+              ${imp.scripts.map(s => '<span class="impact-badge script">📜 ' + _esc(s) + '</span>').join('')}
+              ${imp.dashboards.map(d => '<span class="impact-badge dashboard">📊 ' + _esc(d) + '</span>').join('')}
+              ${(imp.scenes||[]).map(s => '<span class="impact-badge scene">🎬 ' + _esc(s) + '</span>').join('')}
             </div>` : ''}
           </div>`;
         }).join('')}

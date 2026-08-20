@@ -1,5 +1,10 @@
 # Changelog
 
+## 4.2.9 (2026-08-20)
+
+- Security: escape Home Assistant names, entity IDs, impact results, and persisted rename-log values before inserting them into card HTML or data attributes.
+- Test: add a dependency-free regression check covering every HTML sink identified during HACS review.
+
 ## 4.2.8 (2026-07-18)
 
 - Fix: "Apply Changes" no longer blanks the card. The rename confirmation dialog was referenced by render() but never implemented, so it threw a TypeError and wiped the card. The dialog now lists the queued entity and device renames with Rename / Cancel.
