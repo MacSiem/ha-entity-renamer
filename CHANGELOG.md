@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.2.10 (2026-08-28)
+
+- Isolation: Bento CSS is component-local and cannot be captured from `window.HAToolsBentoCSS` by load order.
+- Isolation: persistence is now card-local, removing `window._haToolsPersistence` load-order coupling while retaining the legacy `ha-tools-entity-renamer-history` key.
+- Security: remove the suite-wide DOM/shadow-root injector; intro and support UI now render only inside this card.
+- Security: normalize non-string values before both local and inherited HTML escaping.
+- Fix: reload persisted rename history synchronously and tolerate malformed persisted impact arrays.
+- Test: extend runtime coverage with foreign-card isolation, no-document-observer, persisted dismiss and hostile arrays.
+
 ## 4.2.9 (2026-08-20)
 
 - Security: escape Home Assistant names, entity IDs, impact results, and persisted rename-log values before inserting them into card HTML or data attributes.

@@ -1,10 +1,18 @@
-/* HA Tools split — ha-entity-renamer v4.2.9 (2026-08-20) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v4.2.10 (2026-08-28) — single-tool standalone repo */
 (function() {
 'use strict';
 
-// XSS protection helper (global singleton — tools reuse via window._haToolsEsc)
-window._haToolsEsc = window._haToolsEsc || ((s) => typeof s === 'string' ? s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]) : (s ?? ''));
-const _esc = window._haToolsEsc;
+// Component-local persistence: never reads from or publishes a global helper.
+const haToolsPersistence = {
+  setHass() {},
+  async save(key, data) {
+    try { localStorage.setItem(`ha-tools-${key}`, JSON.stringify(data)); } catch (e) { console.debug('[ha-entity-renamer] caught:', e); }
+  },
+  loadSync(key) {
+    try { const value = localStorage.getItem(`ha-tools-${key}`); return value ? JSON.parse(value) : null; } catch (e) { return null; }
+  },
+};
+const _esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 
 /**
  * HA Entity Renamer – Device & Entity Rename Tool
@@ -13,8 +21,7 @@ const _esc = window._haToolsEsc;
  */
 /* ===== HA Tools split — inline shared infrastructure ===== */
 // Bento Design System CSS (inline copy — keeps tool standalone)
-if (typeof window !== 'undefined' && !window.HAToolsBentoCSS) {
-  window.HAToolsBentoCSS = `
+const HA_ENTITY_RENAMER_BENTO_CSS = `
 /* ═══════════════════════════════════════════════
    HA Tools — Bento Design System v2.0 (Premium)
    ═══════════════════════════════════════════════ */
@@ -504,211 +511,43 @@ pre {
   .stat-value, .stat-val, .kpi-val { font-size: 18px; }
 }
 `;
+// Card-owned support footer. Never mutates document or foreign cards.
+const _LOCAL_INTRO_KEY = 'ha-intro-dismissed-ha-entity-renamer';
+const _LOCAL_INTRO = {
+  headline: "Bulk-rename HA entities + friendly names.",
+  steps: ["Pick an entity, set new ID — entity_registry/update.","Bulk pattern: sensor.old_* → sensor.new_*.","Optional: rewrite Lovelace dashboard refs."]
+};
+const _LOCAL_DONATE_HTML = ''
+  + '<div class="donate-section" data-source="ha-entity-renamer">'
+  + '  <div class="donate-text">'
+  + '    <h3>❤️ Support HA Tools Development</h3>'
+  + '    <p>If this tool makes your Home Assistant life easier, consider supporting the project. Every coffee motivates further development!</p>'
+  + '  </div>'
+  + '  <div class="donate-buttons">'
+  + '    <a class="donate-btn coffee" href="https://buymeacoffee.com/macsiem" target="_blank" rel="noopener noreferrer">☕ Buy Me a Coffee</a>'
+  + '    <a class="donate-btn paypal" href="https://www.paypal.com/donate/?hosted_button_id=Y967H4PLRBN8W" target="_blank" rel="noopener noreferrer">💳 PayPal</a>'
+  + '  </div>'
+  + '</div>';
+function _localIntroDismissed() {
+  try { return localStorage.getItem(_LOCAL_INTRO_KEY) === '1'; } catch(e) { return false; }
 }
-// XSS escape singleton (idempotent)
-if (typeof window !== 'undefined') {
-  window._haToolsEsc = window._haToolsEsc || (function(){
-    var MAP = {};
-    MAP[String.fromCharCode(38)] = '&amp;';
-    MAP[String.fromCharCode(60)] = '&lt;';
-    MAP[String.fromCharCode(62)] = '&gt;';
-    MAP[String.fromCharCode(34)] = '&quot;';
-    MAP[String.fromCharCode(39)] = '&#39;';
-    return function(s){ return typeof s === 'string' ? s.replace(/[&<>"']/g, function(c){ return MAP[c]; }) : (s == null ? '' : s); };
-  })();
-}
-// Universal donate footer injector — guarantees the support box appears
-// on every split-tool card regardless of internal render state.
-if (typeof window !== 'undefined' && !window.__haToolsSplitDonateInjector) {
-  window.__haToolsSplitDonateInjector = true;
-  var SPLIT_TAGS = ['ha-purge-cache','ha-yaml-checker','ha-data-exporter','ha-baby-tracker','ha-chore-tracker','ha-energy-optimizer','ha-energy-insights','ha-energy-email','ha-log-email','ha-smart-reports','ha-network-map','ha-trace-viewer','ha-automation-analyzer','ha-storage-monitor','ha-backup-manager','ha-security-check','ha-device-health','ha-sentence-manager','ha-encoding-fixer','ha-entity-renamer','ha-frigate-privacy','ha-vacuum-water-monitor'];
-  var DONATE_HTML = ''
-    + '<div class="donate-section" data-source="ha-tools-split-injector">'
-    + '  <div class="donate-text">'
-    + '    <h3>❤️ Support HA Tools Development</h3>'
-    + '    <p>If this tool makes your Home Assistant life easier, consider supporting the project. Every coffee motivates further development!</p>'
-    + '  </div>'
-    + '  <div class="donate-buttons">'
-    + '    <a class="donate-btn coffee" href="https://buymeacoffee.com/macsiem" target="_blank" rel="noopener noreferrer">☕ Buy Me a Coffee</a>'
-    + '    <a class="donate-btn paypal" href="https://www.paypal.com/donate/?hosted_button_id=Y967H4PLRBN8W" target="_blank" rel="noopener noreferrer">💳 PayPal</a>'
-    + '  </div>'
+function _renderLocalIntro() {
+  if (_localIntroDismissed()) return '';
+  const steps = _LOCAL_INTRO.steps.map(step => '<li>' + _esc(step) + '</li>').join('');
+  return '<div class="intro-banner" data-intro="ha-entity-renamer">'
+    + '<button class="intro-dismiss" type="button" title="Dismiss" aria-label="Dismiss">✕</button>'
+    + '<div class="intro-headline">💡 ' + _esc(_LOCAL_INTRO.headline) + '</div>'
+    + '<ol class="intro-steps">' + steps + '</ol>'
     + '</div>';
-  function deepFindAll(tag, root) {
-    var out = [];
-    (function walk(node){
-      if (!node || !node.querySelectorAll) return;
-      var children = node.querySelectorAll('*');
-      for (var i = 0; i < children.length; i++) {
-        var c = children[i];
-        if (c.tagName && c.tagName.toLowerCase() === tag) out.push(c);
-        if (c.shadowRoot) walk(c.shadowRoot);
-      }
-    })(root || document);
-    return out;
-  }
-  // Per-tool prerequisite check + inline install banner
-  var PREREQS = {
-    'ha-energy-email': { service: 'ha_tools_email', repo: 'ha-tools-email-integration', label: 'HA Tools Email integration', kind: 'integration' },
-    'ha-log-email':    { service: 'ha_tools_email', repo: 'ha-tools-email-integration', label: 'HA Tools Email integration', kind: 'integration' },
-    'ha-encoding-fixer': { shellCommand: 'fix_encoding', label: 'shell_command.fix_encoding (optional advanced feature)', kind: 'shell_command_optional' }
-  };
-  // Per-tool first-run intro banner (one-line scope + 3 use cases)
-  var INTROS = {
-    'ha-yaml-checker': { headline: 'Validate Home Assistant YAML configuration on demand.', steps: ['Click \'Check HA Configuration\' to run homeassistant.check_config.', 'Switch to \'Encje\' tab to search entities by domain.', 'Use \'Template\' tab to preview Jinja2 templates.'] },
-    'ha-data-exporter': { headline: 'Browse, filter, and export Home Assistant entity data.', steps: ['Filter by domain or search entities live.', 'Take a snapshot or export selection to CSV / JSON.', 'Privacy warning before downloading attributes with sensitive data.'] },
-    'ha-chore-tracker': { headline: 'Household chore tracker with kanban + recurring schedules.', steps: ['Add a chore: name + assignee + frequency.', 'Drag from \'Todo\' to \'Done\' to mark complete.', 'Stats tab shows counts per assignee.'] },
-    'ha-energy-optimizer': { headline: 'Tariff-aware energy usage with hourly heatmaps + tips.', steps: ['Today / Yesterday / 7-day / 30-day usage and cost.', 'Patterns tab — hourly heatmap of consumption.', 'Recommendations tab — auto-generated tips.'] },
-    'ha-energy-insights': { headline: 'Daily / weekly / monthly energy charts + top consumers.', steps: ['Switch view tabs to see consumption over time.', 'Top devices ranked by kWh.', 'Tips tab with energy-saving suggestions.'] },
-    'ha-energy-email': { headline: 'Energy reports delivered by email via ha_tools_email.', steps: ['Click \'Send Now\' to email the current snapshot.', 'Schedule daily / weekly / monthly delivery.', 'Configure SMTP in the Schedule tab (one-time).'] },
-    'ha-log-email': { headline: 'Daily error / warning digests delivered by email.', steps: ['Click \'Send Now\' to email the current digest.', 'Schedule daily delivery + threshold (e.g. \u22653 errors).', 'Requires ha-tools-email-integration.'] },
-    'ha-smart-reports': { headline: 'Aggregate weekly / monthly reports — energy + automations + state changes.', steps: ['Weekly summary card on Overview.', 'Drill down by Energy / Automations / System sub-tabs.', 'Privacy-safe view strips entity names before sharing.'] },
-    'ha-network-map': { headline: 'Visualise the network around HA — devices, topology, MAC bindings.', steps: ['Devices tab — table of all known devices.', 'Topology tab — graph view of the network.', 'Click \'Rescan\' to ping the local subnet (user-initiated).'] },
-    'ha-trace-viewer': { headline: 'Step through HA automation traces with a flow graph.', steps: ['Pick automation in sidebar to see latest 5 traces.', 'Click trace for full path through triggers / conditions / actions.', 'Export trace as JSON for offline debug.'] },
-    'ha-automation-analyzer': { headline: 'Surface slow / failing / suspicious automations.', steps: ['Overview shows total + health score + top failing.', 'Performance tab ranks by avg runtime.', 'Optimization tab suggests improvements (loops, redundant triggers).'] },
-    'ha-storage-monitor': { headline: 'Disk + recorder DB + add-on storage breakdown.', steps: ['Overview shows used / free + per-category breakdown.', 'Backups tab — count + size warning.', 'Cleanup tab — actionable suggestions.'] },
-    'ha-backup-manager': { headline: 'Create + list + inspect HA backups.', steps: ['List existing backups (date / size / encryption).', 'Click \'Create backup now\' to invoke backup.create.', 'Restore selected backup.'] },
-    'ha-security-check': { headline: 'Security audit + remediation tips.', steps: ['Overview shows score (X/100) + letter grade.', 'Click warning row for step-by-step remediation.', 'Tips tab — checklist of best practices.'] },
-    'ha-device-health': { headline: 'Device battery / signal / last-seen health.', steps: ['List devices grouped by health (OK / Warning / Critical).', 'Filter by low battery (<20%) or weak signal.', 'Click device for model / manufacturer / last seen.'] },
-    'ha-encoding-fixer': { headline: 'Detect + fix UTF-8 / mojibake issues across HA.', steps: ['Click \'Scan\' to walk entity registry + states.', 'Per-entity \'Fix\' button calls homeassistant.reload.', 'Optional: deep file scan via shell_command (see README).'] },
-    'ha-entity-renamer': { headline: 'Bulk-rename HA entities + friendly names.', steps: ['Pick an entity, set new ID — entity_registry/update.', 'Bulk pattern: sensor.old_* \u2192 sensor.new_*.', 'Optional: rewrite Lovelace dashboard refs.'] },
-    'ha-frigate-privacy': { headline: 'One-click Frigate privacy mode (pause detection / recording / snapshots).', steps: ['Click \'Pause 15 min\' for instant privacy.', 'Schedules tab — daily privacy window (e.g. 22:00\u201306:00).', 'Resume at any time to re-enable cameras.'] }
-  };
-  var PREREQ_HTML_CACHE = {};
-  function buildPrereqBanner(tag, prereq, hass) {
-    if (PREREQ_HTML_CACHE[tag]) return PREREQ_HTML_CACHE[tag];
-    var html = '';
-    if (prereq.kind === 'integration') {
-      html = '<div class="prereq-banner prereq-error" data-prereq="' + tag + '">' +
-        '<div class="prereq-icon">⚠️</div>' +
-        '<div class="prereq-text">' +
-          '<strong>This tool requires the ' + prereq.label + '</strong><br>' +
-          'Install it from HACS: <code>https://github.com/MacSiem/' + prereq.repo + '</code> ' +
-          '(Category: <strong>Integration</strong>) — then add <code>' + prereq.service + ':</code> to your <code>configuration.yaml</code> and restart HA.' +
-        '</div>' +
-        '<a class="prereq-cta" href="https://github.com/MacSiem/' + prereq.repo + '" target="_blank" rel="noopener noreferrer">Open install guide ↗</a>' +
-      '</div>';
-    } else if (prereq.kind === 'shell_command_optional') {
-      html = '<div class="prereq-banner prereq-info" data-prereq="' + tag + '">' +
-        '<div class="prereq-icon">💡</div>' +
-        '<div class="prereq-text">' +
-          '<strong>Optional advanced feature: deep file scan</strong><br>' +
-          'To enable scanning of <code>configuration.yaml</code> files, install the bundled <code>encoding_scanner.py</code> + add <code>shell_command:</code> entries. See README.' +
-        '</div>' +
-      '</div>';
-    }
-    PREREQ_HTML_CACHE[tag] = html;
-    return html;
-  }
-  function buildIntroBanner(tag, intro) {
-    var stepsHtml = intro.steps.map(function(s){ return '<li>' + s + '</li>'; }).join('');
-    return '<div class="intro-banner" data-intro="' + tag + '">' +
-      '<button class="intro-dismiss" type="button" title="Dismiss" aria-label="Dismiss">✕</button>' +
-      '<div class="intro-headline">💡 ' + intro.headline + '</div>' +
-      '<ol class="intro-steps">' + stepsHtml + '</ol>' +
-    '</div>';
-  }
-  function introDismissed(tag) {
-    try { return localStorage.getItem('ha-intro-dismissed-' + tag) === '1'; } catch(e) { return false; }
-  }
-  function dismissIntro(tag, el) {
-    try { localStorage.setItem('ha-intro-dismissed-' + tag, '1'); } catch(e) {}
-    var node = el.shadowRoot && el.shadowRoot.querySelector('.intro-banner[data-intro="' + tag + '"]');
-    if (node) node.remove();
-  }
-  function injectInto(tag, el) {
-        // panel_custom auto-init: HA assigns hass/panel/narrow but does not always call setConfig.
-        if (typeof el.setConfig === 'function' && !el.config && !el._config) {
-          try { el.setConfig({ type: 'custom:' + tag, title: tag }); } catch(e) {}
-        }
-        if (!el.shadowRoot) return;
-        // 0) First-run intro banner (skip if tool has its own native tip)
-        var intro = INTROS[tag];
-        if (intro && !introDismissed(tag)) {
-          var hasOwnTip = el.shadowRoot.querySelector('#tip-banner, .tip-banner');
-          var injectedIntro = el.shadowRoot.querySelector('.intro-banner[data-intro="' + tag + '"]');
-          if (!hasOwnTip && !injectedIntro) {
-            try {
-              var _introTmp = document.createElement('div');
-              _introTmp.innerHTML = buildIntroBanner(tag, intro);
-              var _introNode = _introTmp.firstElementChild;
-              if (_introNode) el.shadowRoot.insertBefore(_introNode, el.shadowRoot.firstChild);
-              var btn = el.shadowRoot.querySelector('.intro-banner[data-intro="' + tag + '"] .intro-dismiss');
-              if (btn) btn.addEventListener('click', function(ev){ ev.stopPropagation(); dismissIntro(tag, el); });
-            } catch(e) {}
-          }
-        }
-        // 1) Prereq banner — checked every poll so it disappears when prereq becomes available
-        var prereq = PREREQS[tag];
-        if (prereq && el._hass) {
-          var hassReady = !!el._hass;
-          var present = true;
-          if (prereq.service) present = !!(el._hass.services && el._hass.services[prereq.service]);
-          if (prereq.shellCommand) present = !!(el._hass.services && el._hass.services.shell_command && el._hass.services.shell_command[prereq.shellCommand]);
-          var existing = el.shadowRoot.querySelector('.prereq-banner[data-prereq="' + tag + '"]');
-          if (!present && hassReady) {
-            if (!existing) {
-              try {
-                var _prereqTmp = document.createElement('div');
-                _prereqTmp.innerHTML = buildPrereqBanner(tag, prereq, el._hass);
-                var _prereqNode = _prereqTmp.firstElementChild;
-                if (_prereqNode) el.shadowRoot.insertBefore(_prereqNode, el.shadowRoot.firstChild);
-              } catch(e) {}
-            }
-          } else if (present && existing) {
-            existing.remove();
-          }
-        }
-        // 2) Donate footer
-        if (el.shadowRoot.querySelector('.donate-section')) return;
-        try {
-          var _donateTmp = document.createElement('div');
-          _donateTmp.innerHTML = DONATE_HTML;
-          while (_donateTmp.firstChild) el.shadowRoot.appendChild(_donateTmp.firstChild);
-        } catch(e) {}
-    // Anti-flicker: watch this card's own shadowRoot so a re-render (innerHTML wipe)
-    // re-injects the footer synchronously in the same microtask, before paint.
-    if (el.shadowRoot && !el.__haToolsReinjectObs) {
-      try {
-        el.__haToolsReinjectObs = new MutationObserver(function(){
-          if (el.__haToolsReinjecting) return;
-          el.__haToolsReinjecting = true;
-          try { injectInto(tag, el); } catch(e) {}
-          el.__haToolsReinjecting = false;
-        });
-        el.__haToolsReinjectObs.observe(el.shadowRoot, { childList: true });
-      } catch(e) {}
-    }
-  }
-  function injectAll() {
-    SPLIT_TAGS.forEach(function(tag){
-      deepFindAll(tag).forEach(function(el){ injectInto(tag, el); });
-    });
-  }
-  // Run immediately, then aggressive MutationObserver for late mounts + view switches.
-  injectAll();
-  setTimeout(injectAll, 250);
-  setTimeout(injectAll, 1000);
-  setTimeout(injectAll, 3000);
-  // MutationObserver catches every new node anywhere in the DOM, including shadow root attachments
-  // that are deferred until the user navigates to a view.
-  try {
-    var obs = new MutationObserver(function(muts){
-      // Debounce: schedule a microtask injection
-      if (window.__haToolsDonateScheduled) return;
-      window.__haToolsDonateScheduled = true;
-      setTimeout(function(){ window.__haToolsDonateScheduled = false; injectAll(); }, 100);
-    });
-    obs.observe(document.body, { childList: true, subtree: true });
-  } catch(e) {}
-  // Also re-inject on hash/path change (Lovelace view switches)
-  window.addEventListener('hashchange', function(){ setTimeout(injectAll, 200); });
-  window.addEventListener('popstate', function(){ setTimeout(injectAll, 200); });
-  // Backup interval (every 3s for first 5min — handles cases where MutationObserver missed events)
-  var pollCount = 0;
-  var pollInterval = setInterval(function(){
-    injectAll();
-    if (++pollCount >= 100) clearInterval(pollInterval);
-  }, 3000);
+}
+function _bindLocalIntroDismiss(root) {
+  const button = root && root.querySelector('.intro-banner[data-intro="ha-entity-renamer"] .intro-dismiss');
+  if (!button) return;
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    try { localStorage.setItem(_LOCAL_INTRO_KEY, '1'); } catch(e) {}
+    button.closest('.intro-banner')?.remove();
+  });
 }
 /* ============================================================ */
 
@@ -746,26 +585,23 @@ class HAEntityRenamer extends HTMLElement {
 
   _loadHistoryFromStorage() {
     try {
-      const stored = window._haToolsPersistence?.load('entity-renamer-history');
+      const stored = haToolsPersistence.loadSync('entity-renamer-history');
       if (Array.isArray(stored)) {
         this._renameLog = stored;
+        return;
       }
-    } catch (e) {
-      // Fallback: localStorage as backup
-      try {
-        const stored = localStorage.getItem('ha-tools-entity-renamer-history');
-        if (stored) this._renameLog = JSON.parse(stored);
-      } catch (e2) { console.debug('[ha-entity-renamer] caught:', e); }
-    }
+      // Backward-compatible fallback for installs that predate the persistence stub.
+      const legacy = localStorage.getItem('ha-tools-entity-renamer-history');
+      if (legacy) {
+        const parsed = JSON.parse(legacy);
+        if (Array.isArray(parsed)) this._renameLog = parsed;
+      }
+    } catch (e) { console.debug('[ha-entity-renamer] caught:', e); }
   }
 
   _saveHistoryToStorage() {
     try {
-      if (window._haToolsPersistence?.save) {
-        window._haToolsPersistence.save('entity-renamer-history', this._renameLog);
-      } else {
-        localStorage.setItem('ha-tools-entity-renamer-history', JSON.stringify(this._renameLog));
-      }
+      haToolsPersistence.save('entity-renamer-history', this._renameLog);
     } catch (e) { console.debug('[ha-entity-renamer] caught:', e); }
   }
 
@@ -1268,7 +1104,7 @@ class HAEntityRenamer extends HTMLElement {
     const t = this._t;
 
     this.shadowRoot.innerHTML = `
-    <style>${window.HAToolsBentoCSS || ""}
+    <style>${HA_ENTITY_RENAMER_BENTO_CSS}
 /* === HA Tools split — premium banners (donate / intro / prereq) === */
 
 /* Donation footer — diamond top */
@@ -1572,6 +1408,7 @@ class HAEntityRenamer extends HTMLElement {
           .log-entry { font-size: 11px; padding: 4px 0; }
         }
         </style>
+    ${_renderLocalIntro()}
     <div class="card">
       <h1>📱️ ${t.deviceEntityRenamer}</h1>
       <div class="subtitle">${this._devices.length} ${t.devices.toLowerCase()} • ${this._entities.length} ${t.entities.toLowerCase()}
@@ -1590,8 +1427,10 @@ class HAEntityRenamer extends HTMLElement {
       ${this._activeTab === 'devices' ? this._renderDevicesTab(devices) : ''}
       ${this._activeTab === 'queue' ? this._renderQueueTab() : ''}
       ${this._activeTab === 'log' ? this._renderLogTab() : ''}
-    </div>`;
+    </div>
+    ${_LOCAL_DONATE_HTML}`;
 
+    _bindLocalIntroDismiss(this.shadowRoot);
     this._attachEvents();
   }
 
@@ -1760,7 +1599,11 @@ class HAEntityRenamer extends HTMLElement {
       <div>
         ${this._renameLog.map(l => {
           const imp = l.impact;
-          const hasImpact = imp && (imp.automations.length || imp.scripts.length || imp.dashboards.length || (imp.scenes||[]).length);
+          const automations = Array.isArray(imp?.automations) ? imp.automations : [];
+          const scripts = Array.isArray(imp?.scripts) ? imp.scripts : [];
+          const dashboards = Array.isArray(imp?.dashboards) ? imp.dashboards : [];
+          const scenes = Array.isArray(imp?.scenes) ? imp.scenes : [];
+          const hasImpact = automations.length || scripts.length || dashboards.length || scenes.length;
           return `
           <div class="log-entry" style="padding:8px 0;${hasImpact ? 'padding-bottom:12px;' : ''}">
             <span class="log-time">${_esc(l.time)}</span>
@@ -1770,10 +1613,10 @@ class HAEntityRenamer extends HTMLElement {
             ${l.error ? `<br><small style="color:#FCA5A5">${_esc(l.error)}</small>` : ''}
             ${hasImpact ? `<div style="margin-top:4px;padding-left:24px;">
               <span style="font-size:10px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
-              ${imp.automations.map(a => '<span class="impact-badge automation">⚙ ' + _esc(a) + '</span>').join('')}
-              ${imp.scripts.map(s => '<span class="impact-badge script">📜 ' + _esc(s) + '</span>').join('')}
-              ${imp.dashboards.map(d => '<span class="impact-badge dashboard">📊 ' + _esc(d) + '</span>').join('')}
-              ${(imp.scenes||[]).map(s => '<span class="impact-badge scene">🎬 ' + _esc(s) + '</span>').join('')}
+              ${automations.map(a => '<span class="impact-badge automation">⚙ ' + _esc(a) + '</span>').join('')}
+              ${scripts.map(s => '<span class="impact-badge script">📜 ' + _esc(s) + '</span>').join('')}
+              ${dashboards.map(d => '<span class="impact-badge dashboard">📊 ' + _esc(d) + '</span>').join('')}
+              ${scenes.map(s => '<span class="impact-badge scene">🎬 ' + _esc(s) + '</span>').join('')}
             </div>` : ''}
           </div>`;
         }).join('')}
