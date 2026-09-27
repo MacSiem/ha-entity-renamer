@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add a read-only Automatic IDs view using HA's `config/entity_registry/get_automatic_entity_ids`, grouped by device with per-entity, per-device and all-at-once queueing. Null and target collisions are kept separate.
+- Revalidate automatic proposals and source identity immediately before apply; stale proposals fail without writes and failed items remain queued.
+- Bound related-entity impact requests to batches of 20 and avoid silently treating failed related lookups as no impact.
+- Clarify impact coverage for unreadable dashboards/YAML references.
+
 ## 4.2.10 (2026-08-28)
 
 - Isolation: Bento CSS is component-local and cannot be captured from `window.HAToolsBentoCSS` by load order.

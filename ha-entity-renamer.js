@@ -578,6 +578,9 @@ class HAEntityRenamer extends HTMLElement {
     this._confirmDialogOpen = false;
     this._lastApplyResult = null;
     this._activeTab = 'devices'; // devices | queue | log
+    this._automaticRows = [];
+    this._automaticNull = [];
+    this._automaticLoaded = false;
     this._renameLog = [];
     this._expandedDevices = new Set();
     this._loadHistoryFromStorage();
@@ -647,8 +650,13 @@ class HAEntityRenamer extends HTMLElement {
         resultFailures: 'Błędy:',
         noHistory: 'Brak historii zmian.\nWykonaj zmiany z zakładki Kolejka.',
         usedIn: 'Używane w:',
-        notUsed: 'Nieużywane w automatyzacjach, skryptach ani dashboardach',
+        notUsed: 'Nie znaleziono powiązań w dostępnych zasobach',
         deviceAdded: 'Nazwa urządzenia "{name}" dodana do kolejki.',
+        automatic: 'Automatyczne ID', loadAutomatic: 'Porównaj z Recreate entity IDs',
+        automaticInfo: 'Podgląd jest tylko do odczytu. HA wylicza ID według bieżącego języka i formatu. Powiązań w automatyzacjach ani dashboardach karta nie zmienia.',
+        automaticUnknown: 'Brak automatycznego ID', addAllAutomatic: 'Dodaj wszystkie', addDeviceAutomatic: 'Dodaj urządzenie',
+        automaticEmpty: 'Brak różnic do dodania.', automaticConflict: 'Kolizja docelowego ID',
+        adminRequired: 'Zmiany rejestru wymagają konta administratora HA.',
       },
       en: {
         deviceEntityRenamer: 'Device & Entity Renamer',
@@ -690,8 +698,13 @@ class HAEntityRenamer extends HTMLElement {
         resultFailures: 'Failed writes:',
         noHistory: 'No rename history.\nMake changes from the Queue tab.',
         usedIn: 'Used in:',
-        notUsed: 'Not used in automations, scripts, or dashboards',
+        notUsed: 'No references found in readable resources',
         deviceAdded: 'Device name "{name}" added to queue.',
+        automatic: 'Automatic IDs', loadAutomatic: 'Compare with Recreate entity IDs',
+        automaticInfo: 'Preview is read-only. HA calculates IDs using the current language and format. This card does not rewrite automation or dashboard references.',
+        automaticUnknown: 'No automatic ID', addAllAutomatic: 'Queue all', addDeviceAutomatic: 'Queue device',
+        automaticEmpty: 'No differences to queue.', automaticConflict: 'Target ID collision',
+        adminRequired: 'Registry changes require a Home Assistant administrator account.',
       }
     };
     return T[this._lang] || T.en;
@@ -758,6 +771,62 @@ class HAEntityRenamer extends HTMLElement {
       this._message = { type: 'error', text: this._t.errorLoadingData + e.message };
     }
     this._loading = false;
+  }
+
+  async _loadAutomaticIds() {
+    if (this._loading || !this._hass) return;
+    this._loading = true;
+    this._automaticLoaded = false;
+    this._message = null;
+    this.render();
+    try {
+      const ids = this._entities.filter(ent => ent.device_id).map(ent => ent.entity_id);
+      const mapping = {};
+      for (let i = 0; i < ids.length; i += 100) {
+        const batch = ids.slice(i, i + 100);
+        const result = await this._hass.callWS({ type: 'config/entity_registry/get_automatic_entity_ids', entity_ids: batch });
+        for (const id of batch) {
+          if (!Object.prototype.hasOwnProperty.call(result, id)) throw new Error('Incomplete HA automatic ID response');
+          mapping[id] = result[id];
+        }
+      }
+      const occupied = new Set(this._entities.map(ent => ent.entity_id));
+      const seenTargets = new Set();
+      const rows = [];
+      const noId = [];
+      for (const ent of this._entities.filter(entry => entry.device_id)) {
+        const target = mapping[ent.entity_id];
+        if (target === null) { noId.push(ent); continue; }
+        if (!target || target === ent.entity_id) continue;
+        const conflict = occupied.has(target) || seenTargets.has(target);
+        seenTargets.add(target);
+        rows.push({ oldId: ent.entity_id, newId: target, deviceId: ent.device_id, uniqueId: ent.unique_id, conflict });
+      }
+      this._automaticRows = rows;
+      this._automaticNull = noId;
+      this._automaticLoaded = true;
+    } catch (error) {
+      this._automaticRows = [];
+      this._automaticNull = [];
+      this._message = { type: 'error', text: this._formatError(error) };
+    } finally {
+      this._loading = false;
+      this.render();
+    }
+  }
+
+  _queueAutomaticIds(deviceId = null, oldId = null) {
+    const queued = new Set(this._renameQueue.map(row => row.oldId));
+    for (const row of this._automaticRows) {
+      if (row.conflict || queued.has(row.oldId)) continue;
+      if (deviceId && row.deviceId !== deviceId) continue;
+      if (oldId && row.oldId !== oldId) continue;
+      this._renameQueue.push({ ...row, automatic: true, newName: null });
+      queued.add(row.oldId);
+    }
+    this._activeTab = 'queue';
+    this._impactResults = null;
+    this.render();
   }
 
 
@@ -855,12 +924,14 @@ class HAEntityRenamer extends HTMLElement {
 
     const impact = {};
     // 1. Use search/related WS API for each entity (automations, scripts, scenes, areas)
-    const searchPromises = this._renameQueue.map(rename =>
-      this._hass.callWS({ type: 'search/related', item_type: 'entity', item_id: rename.oldId })
-        .then(result => ({ oldId: rename.oldId, result }))
-        .catch(() => ({ oldId: rename.oldId, result: {} }))
-    );
-    const searchResults = await Promise.all(searchPromises);
+    let searchResults;
+    try { searchResults = await this._loadRelatedResults(this._renameQueue); }
+    catch (error) {
+      this._loading = false;
+      this._message = { type: 'error', text: 'Impact lookup failed: ' + this._formatError(error) };
+      this.render();
+      return;
+    }
 
     // Build friendly names lookup for automations/scripts
     const hass = this._hass;
@@ -893,10 +964,12 @@ class HAEntityRenamer extends HTMLElement {
     // 2. Also scan dashboards (search/related doesn't cover lovelace)
     try {
       const lovelaceConfig = await this._loadLovelaceConfigs();
+      const dashboardText = lovelaceConfig.map(dash => ({ title: dash.title || dash.url_path || 'default', text: JSON.stringify(dash.config || {}) }));
       for (const rename of this._renameQueue) {
-        for (const dash of lovelaceConfig) {
-          if (JSON.stringify(dash.config || {}).includes(rename.oldId)) {
-            impact[rename.oldId].dashboards.push(dash.title || dash.url_path || 'default');
+        if (!impact[rename.oldId]) continue;
+        for (const dash of dashboardText) {
+          if (dash.text.includes(rename.oldId)) {
+            impact[rename.oldId].dashboards.push(dash.title);
           }
         }
       }
@@ -907,6 +980,19 @@ class HAEntityRenamer extends HTMLElement {
     this._message = null;
     this._activeTab = 'queue';
     this.render();
+  }
+
+  async _loadRelatedResults(rows) {
+    const results = [];
+    for (let i = 0; i < rows.length; i += 20) {
+      const batch = rows.slice(i, i + 20);
+      const related = await Promise.all(batch.map(async row => ({
+        oldId: row.oldId,
+        result: await this._hass.callWS({ type: 'search/related', item_type: 'entity', item_id: row.oldId })
+      })));
+      results.push(...related);
+    }
+    return results;
   }
 
   async _loadLovelaceConfigs() {
@@ -955,6 +1041,39 @@ class HAEntityRenamer extends HTMLElement {
     }
   }
 
+  async _revalidateAutomaticQueue() {
+    const automatic = this._renameQueue.filter(row => row.automatic);
+    const failures = new Map();
+    if (!automatic.length) return failures;
+    try {
+      const current = await this._hass.callWS({ type: 'config/entity_registry/list' });
+      const byId = new Map(current.map(row => [row.entity_id, row]));
+      const ids = automatic.map(row => row.oldId);
+      const targets = {};
+      for (let i = 0; i < ids.length; i += 100) {
+        Object.assign(targets, await this._hass.callWS({
+          type: 'config/entity_registry/get_automatic_entity_ids', entity_ids: ids.slice(i, i + 100)
+        }));
+      }
+      const reserved = new Set();
+      for (const row of automatic) {
+        const entry = byId.get(row.oldId);
+        if (!entry || entry.unique_id !== row.uniqueId || entry.device_id !== row.deviceId) {
+          failures.set(row.oldId, 'Source entity changed since preview');
+        } else if (targets[row.oldId] !== row.newId) {
+          failures.set(row.oldId, 'Automatic ID changed since preview');
+        } else if (byId.has(row.newId) || reserved.has(row.newId)) {
+          failures.set(row.oldId, 'Target ID collision');
+        } else {
+          reserved.add(row.newId);
+        }
+      }
+    } catch (error) {
+      for (const row of automatic) failures.set(row.oldId, 'Could not revalidate automatic ID: ' + this._formatError(error));
+    }
+    return failures;
+  }
+
   _showRenameConfirmation() {
     if (this._loading || (!this._renameQueue.length && !Object.keys(this._deviceRenameQueue || {}).length)) return;
     this._confirmDialogOpen = true;
@@ -965,6 +1084,11 @@ class HAEntityRenamer extends HTMLElement {
 
   async _executeRenames(confirmed = false) {
     if (!this._renameQueue.length && !Object.keys(this._deviceRenameQueue).length) return;
+    if (this._hass?.user?.is_admin === false) {
+      this._message = { type: 'error', text: this._t.adminRequired };
+      this.render();
+      return;
+    }
     if (!confirmed) {
       this._showRenameConfirmation();
       return;
@@ -974,17 +1098,13 @@ class HAEntityRenamer extends HTMLElement {
     this._loading = true;
     this._message = { type: 'info', text: this._t.analyzing2 };
     this.render();
+    const automaticFailures = await this._revalidateAutomaticQueue();
 
     // Auto-run impact analysis before execution using search/related
     let impact = {};
     try {
       const hass = this._hass;
-      const searchPromises = this._renameQueue.map(rename =>
-        hass.callWS({ type: 'search/related', item_type: 'entity', item_id: rename.oldId })
-          .then(result => ({ oldId: rename.oldId, result }))
-          .catch(() => ({ oldId: rename.oldId, result: {} }))
-      );
-      const searchResults = await Promise.all(searchPromises);
+      const searchResults = await this._loadRelatedResults(this._renameQueue.filter(row => !automaticFailures.has(row.oldId)));
       for (const { oldId, result } of searchResults) {
         const hits = { automations: [], scripts: [], dashboards: [], scenes: [] };
         if (result.automation) {
@@ -1009,14 +1129,21 @@ class HAEntityRenamer extends HTMLElement {
       }
       // Also scan dashboards
       const lovelaceConfig = await this._loadLovelaceConfigs();
+      const dashboardText = lovelaceConfig.map(dash => ({ title: dash.title || dash.url_path || 'default', text: JSON.stringify(dash.config || {}) }));
       for (const rename of this._renameQueue) {
-        for (const dash of lovelaceConfig) {
-          if (JSON.stringify(dash.config || {}).includes(rename.oldId)) {
-            impact[rename.oldId].dashboards.push(dash.title || dash.url_path || 'default');
+        if (!impact[rename.oldId]) continue;
+        for (const dash of dashboardText) {
+          if (dash.text.includes(rename.oldId)) {
+            impact[rename.oldId].dashboards.push(dash.title);
           }
         }
       }
-    } catch(e) { console.debug('[ha-entity-renamer] caught:', e); }
+    } catch(e) {
+      this._loading = false;
+      this._message = { type: 'error', text: 'Impact lookup failed; no changes applied: ' + this._formatError(e) };
+      this.render();
+      return;
+    }
 
     const results = [];
     const deviceResults = [];
@@ -1039,6 +1166,7 @@ class HAEntityRenamer extends HTMLElement {
     for (const rename of this._renameQueue) {
       const imp = impact[rename.oldId] || { automations: [], scripts: [], dashboards: [] };
       try {
+        if (automaticFailures.has(rename.oldId)) throw new Error(automaticFailures.get(rename.oldId));
         await this._applyEntityRename(rename);
         results.push({ ...rename, status: 'ok' });
         this._renameLog.unshift({
@@ -1086,8 +1214,8 @@ class HAEntityRenamer extends HTMLElement {
       type: fail + devFail > 0 ? 'warning' : 'success',
       text: msg,
     };
-    this._renameQueue = [];
-    this._deviceRenameQueue = {};
+    this._renameQueue = results.filter(row => row.status === 'error').map(({status, error, ...row}) => row);
+    this._deviceRenameQueue = Object.fromEntries(deviceResults.filter(row => row.status === 'error').map(row => [row.devId, row.newName]));
     this._impactResults = null;
     this._loading = false;
     this._activeTab = 'log';
@@ -1420,11 +1548,13 @@ class HAEntityRenamer extends HTMLElement {
 
       <div class="tabs">
         <button class="tab-button ${this._activeTab === 'devices' ? 'active' : ''}" data-tab="devices">📱 ${t.devices}</button>
+        <button class="tab-button ${this._activeTab === 'automatic' ? 'active' : ''}" data-tab="automatic">↻ ${t.automatic}</button>
         <button class="tab-button ${this._activeTab === 'queue' ? 'active' : ''}" data-tab="queue">📋 ${t.queue}${queueCount > 0 ? ` (${queueCount})` : ''}</button>
         <button class="tab-button ${this._activeTab === 'log' ? 'active' : ''}" data-tab="log">📜 ${t.log}</button>
       </div>
 
       ${this._activeTab === 'devices' ? this._renderDevicesTab(devices) : ''}
+      ${this._activeTab === 'automatic' ? this._renderAutomaticTab() : ''}
       ${this._activeTab === 'queue' ? this._renderQueueTab() : ''}
       ${this._activeTab === 'log' ? this._renderLogTab() : ''}
     </div>
@@ -1481,6 +1611,35 @@ class HAEntityRenamer extends HTMLElement {
     // card (regression since v4.2.0). Apply/rename feedback is surfaced via
     // this._message above, so an empty string is the correct no-op here.
     return '';
+  }
+
+  _renderAutomaticTab() {
+    const t = this._t;
+    const groups = new Map();
+    for (const row of this._automaticRows) {
+      if (!groups.has(row.deviceId)) groups.set(row.deviceId, []);
+      groups.get(row.deviceId).push(row);
+    }
+    const canQueue = this._automaticRows.some(row => !row.conflict);
+    const deviceHtml = [...groups].map(([deviceId, rows]) => {
+      const device = this._devices.find(item => item.id === deviceId);
+      return `<details style="border:1px solid var(--bento-border,#ddd);border-radius:8px;padding:8px;margin:8px 0">
+        <summary>${_esc(device ? this._getDeviceName(device) : deviceId)} (${rows.length})</summary>
+        ${rows.map(row => `<div class="rename-preview-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <code>${_esc(row.oldId)}</code> → <code>${_esc(row.newId)}</code>
+          ${row.conflict ? `<span>${t.automaticConflict}</span>` : `<button class="btn btn-sm btn-outline" data-auto-entity="${_esc(row.oldId)}">+ ${t.queue}</button>`}
+        </div>`).join('')}
+        <button class="btn btn-sm btn-outline" data-auto-device="${_esc(deviceId)}" ${rows.some(row => !row.conflict) ? '' : 'disabled'}>${t.addDeviceAutomatic}</button>
+      </details>`;
+    }).join('');
+    return `<div class="automatic-tab">
+      <p>${t.automaticInfo}</p>
+      <button class="btn btn-outline" id="loadAutomatic" ${this._loading ? 'disabled' : ''}>${this._loading ? '…' : t.loadAutomatic}</button>
+      ${this._automaticLoaded ? `<p>${this._automaticRows.length} ${t.automatic}; ${this._automaticNull.length} ${t.automaticUnknown}</p>
+        ${canQueue ? `<button class="btn btn-primary" id="queueAllAutomatic">${t.addAllAutomatic}</button>` : `<p>${t.automaticEmpty}</p>`}
+        ${deviceHtml}
+        ${this._automaticNull.length ? `<details><summary>${t.automaticUnknown} (${this._automaticNull.length})</summary>${this._automaticNull.map(ent => `<div><code>${_esc(ent.entity_id)}</code></div>`).join('')}</details>` : ''}` : ''}
+    </div>`;
   }
 
   _renderDevicesTab(devices) {
@@ -1586,7 +1745,8 @@ class HAEntityRenamer extends HTMLElement {
       <div class="queue-actions">
         <button class="btn btn-outline" id="clearQueue">🗑️ ${t.clear}</button>
         <button class="btn btn-outline" id="analyzeImpact" ${this._loading ? 'disabled' : ''}>🔍 ${t.analyzeImpact}</button>
-        <button class="btn btn-danger" id="executeRenames" ${this._loading ? 'disabled aria-busy="true"' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length})</button>
+        <button class="btn btn-danger" id="executeRenames" ${this._loading || this._hass?.user?.is_admin === false ? 'disabled' : ''} ${this._loading ? 'aria-busy="true"' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length})</button>
+        ${this._hass?.user?.is_admin === false ? `<span>${t.adminRequired}</span>` : ''}
       </div>`;
   }
 
@@ -1635,6 +1795,13 @@ class HAEntityRenamer extends HTMLElement {
         this.render();
       });
     });
+
+    const loadAutomatic = root.getElementById('loadAutomatic');
+    if (loadAutomatic) loadAutomatic.addEventListener('click', () => this._loadAutomaticIds());
+    const queueAllAutomatic = root.getElementById('queueAllAutomatic');
+    if (queueAllAutomatic) queueAllAutomatic.addEventListener('click', () => this._queueAutomaticIds());
+    root.querySelectorAll('[data-auto-device]').forEach(btn => btn.addEventListener('click', () => this._queueAutomaticIds(btn.dataset.autoDevice)));
+    root.querySelectorAll('[data-auto-entity]').forEach(btn => btn.addEventListener('click', () => this._queueAutomaticIds(null, btn.dataset.autoEntity)));
 
     // Search
     const searchInput = root.getElementById('searchInput');
