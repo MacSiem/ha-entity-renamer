@@ -55,9 +55,9 @@ references visible through Home Assistant's APIs.
 |---|---|
 | ![Devices tab, light theme](docs/screenshots/card-devices-light.png) | ![Devices tab, dark theme](docs/screenshots/card-devices-dark.png) |
 
-*The Devices tab: expand a device to see its entities, queue a rename, or
-bulk-rename by prefix. Dark mode follows your Home Assistant theme
-automatically.*
+*The Devices tab with synthetic entity IDs: expand a device to see its
+entities, queue a rename, or rename by prefix. Dark mode follows your Home
+Assistant theme.*
 
 ## Installation
 
