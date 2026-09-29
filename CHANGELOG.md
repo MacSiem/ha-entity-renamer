@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 4.2.11 (2026-09-29)
 
 - Add a read-only Automatic IDs view using HA's `config/entity_registry/get_automatic_entity_ids`, grouped by device with per-entity, per-device and all-at-once queueing. Null and target collisions are kept separate.
 - Revalidate automatic proposals and source identity immediately before apply; stale proposals fail without writes and failed items remain queued.
