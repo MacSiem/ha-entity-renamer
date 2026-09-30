@@ -126,3 +126,9 @@ The optional in-card support link is shown only to administrators. Dismiss it in
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+## Privacy and data
+
+The card reads entity/device registries and configuration references to preview changes to entity IDs. Applying a confirmed queue changes Home Assistant registry IDs; related configuration references need separate review. Keep impact reports and rollback mappings private.
+
+See [SECURITY.md](SECURITY.md) for safe vulnerability reporting and [NOTICE](NOTICE) for licensing notices.
