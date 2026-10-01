@@ -41,4 +41,5 @@ jobs:
         run: |
           npm init -y >/dev/null 2>&1
           npm ci >/dev/null 2>&1
+          node --test tests/automatic_ids.test.cjs
           node .github/smoke.cjs
