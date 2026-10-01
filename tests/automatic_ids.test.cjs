@@ -69,3 +69,24 @@ test('large automatic preview batches HA requests and queues one device', async 
     assert.ok(card._renameQueue.every(row => row.deviceId === 'one'));
   } finally { dom.window.close(); }
 });
+
+
+test('large queue can be abandoned before keyboard traversal of hundreds of per-entity actions', () => {
+  const dom = new JSDOM('', { runScripts: 'dangerously', url: 'http://localhost/' });
+  try {
+    dom.window.eval(readFileSync(join(__dirname, '..', 'ha-entity-renamer.js'), 'utf8'));
+    const card = dom.window.document.createElement('ha-entity-renamer');
+    card._hass = { language: 'en', states: {}, user: { is_admin: true }, callWS: () => {
+      throw new Error('Clearing a preview must not write to Home Assistant');
+    } };
+    card._activeTab = 'queue';
+    card._renameQueue = Array.from({ length: 881 }, (_, i) => ({ oldId: `sensor.old_${i}`, newId: `sensor.new_${i}` }));
+    card.render();
+    const queueStops = card.shadowRoot.querySelectorAll('.queue-list button, .queue-actions button');
+    assert.equal(queueStops[0].id, 'clearQueue', 'Whole-queue cancellation must precede hundreds of individual remove actions');
+    queueStops[0].click();
+    assert.equal(card._renameQueue.length, 0);
+    assert.match(card.shadowRoot.textContent, /Queue is empty/);
+    assert.equal(card.shadowRoot.querySelectorAll('[data-remove-queue]').length, 0);
+  } finally { dom.window.close(); }
+});
