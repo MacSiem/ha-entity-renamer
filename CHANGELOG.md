@@ -2,6 +2,7 @@
 
 ## 4.2.11 (2026-09-29)
 
+- Place whole-queue controls before the proposed changes so large queues can be reviewed or cancelled without hundreds of keyboard stops.
 - Report successful entity-registry updates without requesting an unnecessary Core restart; direct users to review affected references instead.
 
 - Add a read-only Automatic IDs view using HA's `config/entity_registry/get_automatic_entity_ids`, grouped by device with per-entity, per-device and all-at-once queueing. Null and target collisions are kept separate.

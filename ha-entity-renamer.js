@@ -1479,7 +1479,7 @@ class HAEntityRenamer extends HTMLElement {
       .impact-badge.script { background: rgba(245,158,11,0.15); color: #FCD34D; }
       .impact-badge.dashboard { background: rgba(59,130,246,0.15); color: #93C5FD; }
       .impact-badge.scene { background: rgba(16,185,129,0.15); color: #6EE7B7; }
-      .queue-actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+      .queue-actions { display: flex; gap: 8px; margin-bottom: 12px; justify-content: flex-end; }
 
       .log-entry { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 12px; }
       .log-time { color: var(--bento-text-secondary, #94A3B8); font-size: 10px; }
@@ -1705,6 +1705,12 @@ class HAEntityRenamer extends HTMLElement {
     }
     const devEntries = Object.entries(this._deviceRenameQueue);
     return `
+      <div class="queue-actions">
+        <button class="btn btn-outline" id="clearQueue">🗑️ ${t.clear}</button>
+        <button class="btn btn-outline" id="analyzeImpact" ${this._loading ? 'disabled' : ''}>🔍 ${t.analyzeImpact}</button>
+        <button class="btn btn-danger" id="executeRenames" ${this._loading || this._hass?.user?.is_admin === false ? 'disabled' : ''} ${this._loading ? 'aria-busy="true"' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length})</button>
+        ${this._hass?.user?.is_admin === false ? `<span>${t.adminRequired}</span>` : ''}
+      </div>
       ${devEntries.length ? `<div style="margin-bottom:12px;padding:10px 14px;border-radius:8px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.2);">
         <strong style="font-size:12px;">📱 ${t.devicesToRename}</strong>
         ${devEntries.map(([did, name]) => {
@@ -1736,12 +1742,7 @@ class HAEntityRenamer extends HTMLElement {
             </div>`;
           }).join('')}
       </div>
-      <div class="queue-actions">
-        <button class="btn btn-outline" id="clearQueue">🗑️ ${t.clear}</button>
-        <button class="btn btn-outline" id="analyzeImpact" ${this._loading ? 'disabled' : ''}>🔍 ${t.analyzeImpact}</button>
-        <button class="btn btn-danger" id="executeRenames" ${this._loading || this._hass?.user?.is_admin === false ? 'disabled' : ''} ${this._loading ? 'aria-busy="true"' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length})</button>
-        ${this._hass?.user?.is_admin === false ? `<span>${t.adminRequired}</span>` : ''}
-      </div>`;
+`;
   }
 
   _renderLogTab() {
