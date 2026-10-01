@@ -2,6 +2,8 @@
 
 ## 4.2.11 (2026-09-29)
 
+- Keep long old/new entity IDs wrapped inside narrow queue rows and keep each Remove button visible.
+
 - Place whole-queue controls before the proposed changes so large queues can be reviewed or cancelled without hundreds of keyboard stops.
 - Report successful entity-registry updates without requesting an unnecessary Core restart; direct users to review affected references instead.
 

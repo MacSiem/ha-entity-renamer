@@ -1724,13 +1724,13 @@ class HAEntityRenamer extends HTMLElement {
             const hasImpact = imp && (imp.automations.length || imp.scripts.length || imp.dashboards.length || (imp.scenes||[]).length);
             return `<div style="border:1px solid var(--bento-border,#334155);border-radius:8px;padding:12px;margin-bottom:8px;">
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                <span class="old" style="flex:1;font-family:'JetBrains Mono',monospace;font-size:11px;">${_esc(r.oldId)}</span>
-                <button class="btn btn-sm btn-danger" data-remove-queue="${_esc(r.oldId)}" aria-label="Remove">✕</button>
+                <span class="old" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${_esc(r.oldId)}</span>
+                <button class="btn btn-sm btn-danger" style="flex-shrink:0;" data-remove-queue="${_esc(r.oldId)}" aria-label="Remove">✕</button>
               </div>
-              <div style="display:flex;align-items:center;gap:8px;">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 <span style="color:var(--bento-text-secondary,#94A3B8);">→</span>
-                <span class="new" style="font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? _esc(r.newId) : '<span style="opacity:0.4">no entity_id change</span>'}</span>
-                ${r.newName ? '<span style="font-size:11px;color:#93C5FD;">📝 ' + _esc(r.newName) + '</span>' : ''}
+                <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? _esc(r.newId) : '<span style="opacity:0.4">no entity_id change</span>'}</span>
+                ${r.newName ? '<span style="min-width:0;overflow-wrap:anywhere;font-size:11px;color:#93C5FD;">📝 ' + _esc(r.newName) + '</span>' : ''}
               </div>
               ${hasImpact ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05);">
                 <span style="font-size:10px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
