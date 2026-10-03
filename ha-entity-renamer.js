@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v4.2.10 (2026-08-28) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v4.2.11 (2026-09-29) — single-tool standalone repo */
 (function() {
 'use strict';
 
@@ -517,26 +517,25 @@ const _LOCAL_INTRO = {
   headline: "Bulk-rename HA entities + friendly names.",
   steps: ["Pick an entity, set new ID — entity_registry/update.","Bulk pattern: sensor.old_* → sensor.new_*.","Optional: rewrite Lovelace dashboard refs."]
 };
-const _LOCAL_DONATE_HTML = ''
-  + '<div class="donate-section" data-source="ha-entity-renamer">'
-  + '  <div class="donate-text">'
-  + '    <h3>❤️ Support HA Tools Development</h3>'
-  + '    <p>If this tool makes your Home Assistant life easier, consider supporting the project. Every coffee motivates further development!</p>'
-  + '  </div>'
-  + '  <div class="donate-buttons">'
-  + '    <a class="donate-btn coffee" href="https://buymeacoffee.com/macsiem" target="_blank" rel="noopener noreferrer">☕ Buy Me a Coffee</a>'
-  + '    <a class="donate-btn paypal" href="https://www.paypal.com/donate/?hosted_button_id=Y967H4PLRBN8W" target="_blank" rel="noopener noreferrer">💳 PayPal</a>'
-  + '  </div>'
-  + '</div>';
+const _LOCAL_INTRO_PL = {
+  headline: 'Masowa zmiana identyfikatorów encji i ich nazw.',
+  steps: ['Wybierz encję i ustaw nowy identyfikator.', 'Zmiana prefiksu: sensor.old_* → sensor.new_*.', 'Sprawdź i w razie potrzeby popraw odwołania w dashboardach Lovelace.']
+};
+const _LOCAL_SUPPORT_KEY = 'ha-entity-renamer-support-dismissed';
+const _LOCAL_DONATE_HTML = '<div class="donate-section" data-source="own-card" style="margin:8px 0 0;padding:4px 0;background:none;border:0;box-shadow:none;min-height:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex-direction:row;justify-content:flex-start;text-align:left"><a href="https://buymeacoffee.com/macsiem" target="_blank" rel="noopener noreferrer" style="font-size:11px;color:var(--secondary-text-color,#64748b);font-weight:400;text-decoration:underline">Optional support for HA Tools</a><button type="button" class="support-dismiss" aria-label="Dismiss support link" style="margin-left:auto;padding:2px 6px;min-height:0;line-height:1;border:0;background:none;color:var(--secondary-text-color,#64748b);cursor:pointer">×</button></div>';
+function _localSupportDismissed() { try { return localStorage.getItem(_LOCAL_SUPPORT_KEY) === '1'; } catch (_) { return false; } }
+function _bindLocalSupportDismiss(root) { root.querySelector('.support-dismiss')?.addEventListener('click', () => { try { localStorage.setItem(_LOCAL_SUPPORT_KEY, '1'); } catch (_) {} root.querySelector('.donate-section[data-source="own-card"]')?.remove(); }); }
 function _localIntroDismissed() {
   try { return localStorage.getItem(_LOCAL_INTRO_KEY) === '1'; } catch(e) { return false; }
 }
-function _renderLocalIntro() {
+function _renderLocalIntro(language = 'en') {
   if (_localIntroDismissed()) return '';
-  const steps = _LOCAL_INTRO.steps.map(step => '<li>' + _esc(step) + '</li>').join('');
+  const intro = language === 'pl' ? _LOCAL_INTRO_PL : _LOCAL_INTRO;
+  const dismiss = language === 'pl' ? 'Ukryj instrukcję' : 'Dismiss instructions';
+  const steps = intro.steps.map(step => '<li>' + _esc(step) + '</li>').join('');
   return '<div class="intro-banner" data-intro="ha-entity-renamer">'
-    + '<button class="intro-dismiss" type="button" title="Dismiss" aria-label="Dismiss">✕</button>'
-    + '<div class="intro-headline">💡 ' + _esc(_LOCAL_INTRO.headline) + '</div>'
+    + '<button class="intro-dismiss" type="button" title="' + _esc(dismiss) + '" aria-label="' + _esc(dismiss) + '">✕</button>'
+    + '<div class="intro-headline">💡 ' + _esc(intro.headline) + '</div>'
     + '<ol class="intro-steps">' + steps + '</ol>'
     + '</div>';
 }
@@ -555,10 +554,10 @@ class HAEntityRenamer extends HTMLElement {
   static getConfigElement() { return document.createElement('ha-entity-renamer-editor'); }
   getCardSize() { return 8; }
 
-  getGridOptions() { return { rows: 10, columns: 12, min_rows: 3, min_columns: 6 }; }
+  getGridOptions() { return { columns: 12, min_rows: 3, min_columns: 6 }; }
 
   static getStubConfig() { return { type: 'custom:ha-entity-renamer', title: 'Entity Renamer' }; }
-  setConfig(config) { this._config = config || {}; }
+  setConfig(config) { this._config = config || {}; if (this._hass) this.render(); }
   constructor() {
     super();
     this._toolId = this.tagName.toLowerCase().replace('ha-', '');
@@ -578,6 +577,9 @@ class HAEntityRenamer extends HTMLElement {
     this._confirmDialogOpen = false;
     this._lastApplyResult = null;
     this._activeTab = 'devices'; // devices | queue | log
+    this._automaticRows = [];
+    this._automaticNull = [];
+    this._automaticLoaded = false;
     this._renameLog = [];
     this._expandedDevices = new Set();
     this._loadHistoryFromStorage();
@@ -630,7 +632,7 @@ class HAEntityRenamer extends HTMLElement {
         errorLoadingData: 'Błąd ładowania danych: ',
         analyzing: 'Analizuję wpływ zmian...',
         analyzing2: 'Analizuję wpływ i zmieniam nazwy...',
-        renameSuccess: 'Zmieniono {ok} encji{devCount}{fail}{impact}. Zrestartuj HA.',
+        renameSuccess: 'Zmieniono {ok} encji{devCount}{fail}{impact}. Sprawdź powiązania zmienionych encji.',
         newEntity: 'Nowy entity_id (object_id) – zostaw bez zmian jeśli chcesz zmienić tylko friendly name:',
         newFriendly: 'Nowy friendly name (zostaw puste = bez zmian):',
         confirmRename: 'Czy na pewno chcesz zmienić nazwy {count} encji? Ta operacja jest nieodwracalna.',
@@ -647,8 +649,14 @@ class HAEntityRenamer extends HTMLElement {
         resultFailures: 'Błędy:',
         noHistory: 'Brak historii zmian.\nWykonaj zmiany z zakładki Kolejka.',
         usedIn: 'Używane w:',
-        notUsed: 'Nieużywane w automatyzacjach, skryptach ani dashboardach',
+        notUsed: 'Nie znaleziono powiązań w dostępnych zasobach',
         deviceAdded: 'Nazwa urządzenia "{name}" dodana do kolejki.',
+        automatic: 'Automatyczne ID', loadAutomatic: 'Porównaj z Recreate entity IDs',
+        automaticInfo: 'Podgląd jest tylko do odczytu. HA wylicza ID według bieżącego języka i formatu. Powiązań w automatyzacjach ani dashboardach karta nie zmienia.',
+        automaticUnknown: 'Brak automatycznego ID', addAllAutomatic: 'Dodaj wszystkie', addDeviceAutomatic: 'Dodaj urządzenie',
+        automaticEmpty: 'Brak różnic do dodania.', automaticConflict: 'Kolizja docelowego ID',
+        adminRequired: 'Zmiany rejestru wymagają konta administratora HA.',
+        removeFromQueue: 'Usuń z kolejki',
       },
       en: {
         deviceEntityRenamer: 'Device & Entity Renamer',
@@ -673,7 +681,7 @@ class HAEntityRenamer extends HTMLElement {
         errorLoadingData: 'Error loading data: ',
         analyzing: 'Analyzing impact...',
         analyzing2: 'Analyzing impact and changing names...',
-        renameSuccess: 'Renamed {ok} entities{devCount}{fail}{impact}. Restart HA.',
+        renameSuccess: 'Renamed {ok} entities{devCount}{fail}{impact}. Review any affected references.',
         newEntity: 'New entity_id (object_id) – leave unchanged if you only want to change the friendly name:',
         newFriendly: 'New friendly name (leave empty = no change):',
         confirmRename: 'Are you sure you want to rename {count} entities? This operation is irreversible.',
@@ -690,8 +698,14 @@ class HAEntityRenamer extends HTMLElement {
         resultFailures: 'Failed writes:',
         noHistory: 'No rename history.\nMake changes from the Queue tab.',
         usedIn: 'Used in:',
-        notUsed: 'Not used in automations, scripts, or dashboards',
+        notUsed: 'No references found in readable resources',
         deviceAdded: 'Device name "{name}" added to queue.',
+        automatic: 'Automatic IDs', loadAutomatic: 'Compare with Recreate entity IDs',
+        automaticInfo: 'Preview is read-only. HA calculates IDs using the current language and format. This card does not rewrite automation or dashboard references.',
+        automaticUnknown: 'No automatic ID', addAllAutomatic: 'Queue all', addDeviceAutomatic: 'Queue device',
+        automaticEmpty: 'No differences to queue.', automaticConflict: 'Target ID collision',
+        adminRequired: 'Registry changes require a Home Assistant administrator account.',
+        removeFromQueue: 'Remove from queue',
       }
     };
     return T[this._lang] || T.en;
@@ -707,6 +721,8 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   set hass(hass) {
+    const previousLanguage = this._lang;
+    const previousAdmin = this._hass?.user?.is_admin === true;
     try {
       var _bg = (getComputedStyle(this).getPropertyValue('--card-background-color') || getComputedStyle(this).getPropertyValue('--primary-background-color') || '').trim();
       var _d = false;
@@ -721,7 +737,35 @@ class HAEntityRenamer extends HTMLElement {
     const first = !this._hass;
     this._hass = hass;
     if (hass?.language) this._lang = hass.language.startsWith('pl') ? 'pl' : 'en';
+    if (!hass) return;
     if (first) this._init();
+    else if (previousAdmin !== (hass.user?.is_admin === true)) {
+      this._confirmDialogOpen = false;
+      this.render();
+    } else if (previousLanguage !== this._lang) this._renderLocalePreservingDrafts();
+  }
+
+  _renderLocalePreservingDrafts() {
+    const fields = Array.from(this.shadowRoot.querySelectorAll('input[id],textarea[id],select[id]'), field => ({
+      id: field.id, value: field.value, checked: field.checked, scrollTop: field.scrollTop,
+    }));
+    const active = this.shadowRoot.activeElement;
+    const focus = active?.id ? { id: active.id, start: active.selectionStart, end: active.selectionEnd, direction: active.selectionDirection } : null;
+    this.render();
+    for (const saved of fields) {
+      const field = this.shadowRoot.getElementById(saved.id);
+      if (!field) continue;
+      field.value = saved.value;
+      if (typeof saved.checked === 'boolean') field.checked = saved.checked;
+      field.scrollTop = saved.scrollTop;
+    }
+    const current = focus && this.shadowRoot.getElementById(focus.id);
+    if (current) {
+      current.focus({ preventScroll: true });
+      if (typeof focus.start === 'number' && typeof current.setSelectionRange === 'function') {
+        current.setSelectionRange(focus.start, focus.end, focus.direction || 'none');
+      }
+    }
   }
 
   async _init() {
@@ -758,6 +802,62 @@ class HAEntityRenamer extends HTMLElement {
       this._message = { type: 'error', text: this._t.errorLoadingData + e.message };
     }
     this._loading = false;
+  }
+
+  async _loadAutomaticIds() {
+    if (this._loading || !this._hass) return;
+    this._loading = true;
+    this._automaticLoaded = false;
+    this._message = null;
+    this.render();
+    try {
+      const ids = this._entities.filter(ent => ent.device_id).map(ent => ent.entity_id);
+      const mapping = {};
+      for (let i = 0; i < ids.length; i += 100) {
+        const batch = ids.slice(i, i + 100);
+        const result = await this._hass.callWS({ type: 'config/entity_registry/get_automatic_entity_ids', entity_ids: batch });
+        for (const id of batch) {
+          if (!Object.prototype.hasOwnProperty.call(result, id)) throw new Error('Incomplete HA automatic ID response');
+          mapping[id] = result[id];
+        }
+      }
+      const occupied = new Set(this._entities.map(ent => ent.entity_id));
+      const seenTargets = new Set();
+      const rows = [];
+      const noId = [];
+      for (const ent of this._entities.filter(entry => entry.device_id)) {
+        const target = mapping[ent.entity_id];
+        if (target === null) { noId.push(ent); continue; }
+        if (!target || target === ent.entity_id) continue;
+        const conflict = occupied.has(target) || seenTargets.has(target);
+        seenTargets.add(target);
+        rows.push({ oldId: ent.entity_id, newId: target, deviceId: ent.device_id, uniqueId: ent.unique_id, conflict });
+      }
+      this._automaticRows = rows;
+      this._automaticNull = noId;
+      this._automaticLoaded = true;
+    } catch (error) {
+      this._automaticRows = [];
+      this._automaticNull = [];
+      this._message = { type: 'error', text: this._formatError(error) };
+    } finally {
+      this._loading = false;
+      this.render();
+    }
+  }
+
+  _queueAutomaticIds(deviceId = null, oldId = null) {
+    const queued = new Set(this._renameQueue.map(row => row.oldId));
+    for (const row of this._automaticRows) {
+      if (row.conflict || queued.has(row.oldId)) continue;
+      if (deviceId && row.deviceId !== deviceId) continue;
+      if (oldId && row.oldId !== oldId) continue;
+      this._renameQueue.push({ ...row, automatic: true, newName: null });
+      queued.add(row.oldId);
+    }
+    this._activeTab = 'queue';
+    this._impactResults = null;
+    this.render();
   }
 
 
@@ -855,12 +955,14 @@ class HAEntityRenamer extends HTMLElement {
 
     const impact = {};
     // 1. Use search/related WS API for each entity (automations, scripts, scenes, areas)
-    const searchPromises = this._renameQueue.map(rename =>
-      this._hass.callWS({ type: 'search/related', item_type: 'entity', item_id: rename.oldId })
-        .then(result => ({ oldId: rename.oldId, result }))
-        .catch(() => ({ oldId: rename.oldId, result: {} }))
-    );
-    const searchResults = await Promise.all(searchPromises);
+    let searchResults;
+    try { searchResults = await this._loadRelatedResults(this._renameQueue); }
+    catch (error) {
+      this._loading = false;
+      this._message = { type: 'error', text: 'Impact lookup failed: ' + this._formatError(error) };
+      this.render();
+      return;
+    }
 
     // Build friendly names lookup for automations/scripts
     const hass = this._hass;
@@ -893,10 +995,12 @@ class HAEntityRenamer extends HTMLElement {
     // 2. Also scan dashboards (search/related doesn't cover lovelace)
     try {
       const lovelaceConfig = await this._loadLovelaceConfigs();
+      const dashboardText = lovelaceConfig.map(dash => ({ title: dash.title || dash.url_path || 'default', text: JSON.stringify(dash.config || {}) }));
       for (const rename of this._renameQueue) {
-        for (const dash of lovelaceConfig) {
-          if (JSON.stringify(dash.config || {}).includes(rename.oldId)) {
-            impact[rename.oldId].dashboards.push(dash.title || dash.url_path || 'default');
+        if (!impact[rename.oldId]) continue;
+        for (const dash of dashboardText) {
+          if (dash.text.includes(rename.oldId)) {
+            impact[rename.oldId].dashboards.push(dash.title);
           }
         }
       }
@@ -907,6 +1011,19 @@ class HAEntityRenamer extends HTMLElement {
     this._message = null;
     this._activeTab = 'queue';
     this.render();
+  }
+
+  async _loadRelatedResults(rows) {
+    const results = [];
+    for (let i = 0; i < rows.length; i += 20) {
+      const batch = rows.slice(i, i + 20);
+      const related = await Promise.all(batch.map(async row => ({
+        oldId: row.oldId,
+        result: await this._hass.callWS({ type: 'search/related', item_type: 'entity', item_id: row.oldId })
+      })));
+      results.push(...related);
+    }
+    return results;
   }
 
   async _loadLovelaceConfigs() {
@@ -955,7 +1072,46 @@ class HAEntityRenamer extends HTMLElement {
     }
   }
 
+  async _revalidateAutomaticQueue() {
+    const automatic = this._renameQueue.filter(row => row.automatic);
+    const failures = new Map();
+    if (!automatic.length) return failures;
+    try {
+      const current = await this._hass.callWS({ type: 'config/entity_registry/list' });
+      const byId = new Map(current.map(row => [row.entity_id, row]));
+      const ids = automatic.map(row => row.oldId);
+      const targets = {};
+      for (let i = 0; i < ids.length; i += 100) {
+        Object.assign(targets, await this._hass.callWS({
+          type: 'config/entity_registry/get_automatic_entity_ids', entity_ids: ids.slice(i, i + 100)
+        }));
+      }
+      const reserved = new Set();
+      for (const row of automatic) {
+        const entry = byId.get(row.oldId);
+        if (!entry || entry.unique_id !== row.uniqueId || entry.device_id !== row.deviceId) {
+          failures.set(row.oldId, 'Source entity changed since preview');
+        } else if (targets[row.oldId] !== row.newId) {
+          failures.set(row.oldId, 'Automatic ID changed since preview');
+        } else if (byId.has(row.newId) || reserved.has(row.newId)) {
+          failures.set(row.oldId, 'Target ID collision');
+        } else {
+          reserved.add(row.newId);
+        }
+      }
+    } catch (error) {
+      for (const row of automatic) failures.set(row.oldId, 'Could not revalidate automatic ID: ' + this._formatError(error));
+    }
+    return failures;
+  }
+
   _showRenameConfirmation() {
+    if (this._hass?.user?.is_admin !== true) {
+      this._confirmDialogOpen = false;
+      this._message = { type: 'error', text: this._t.adminRequired };
+      this.render();
+      return;
+    }
     if (this._loading || (!this._renameQueue.length && !Object.keys(this._deviceRenameQueue || {}).length)) return;
     this._confirmDialogOpen = true;
     this._lastApplyResult = null;
@@ -965,6 +1121,12 @@ class HAEntityRenamer extends HTMLElement {
 
   async _executeRenames(confirmed = false) {
     if (!this._renameQueue.length && !Object.keys(this._deviceRenameQueue).length) return;
+    if (this._hass?.user?.is_admin !== true) {
+      this._confirmDialogOpen = false;
+      this._message = { type: 'error', text: this._t.adminRequired };
+      this.render();
+      return;
+    }
     if (!confirmed) {
       this._showRenameConfirmation();
       return;
@@ -974,17 +1136,13 @@ class HAEntityRenamer extends HTMLElement {
     this._loading = true;
     this._message = { type: 'info', text: this._t.analyzing2 };
     this.render();
+    const automaticFailures = await this._revalidateAutomaticQueue();
 
     // Auto-run impact analysis before execution using search/related
     let impact = {};
     try {
       const hass = this._hass;
-      const searchPromises = this._renameQueue.map(rename =>
-        hass.callWS({ type: 'search/related', item_type: 'entity', item_id: rename.oldId })
-          .then(result => ({ oldId: rename.oldId, result }))
-          .catch(() => ({ oldId: rename.oldId, result: {} }))
-      );
-      const searchResults = await Promise.all(searchPromises);
+      const searchResults = await this._loadRelatedResults(this._renameQueue.filter(row => !automaticFailures.has(row.oldId)));
       for (const { oldId, result } of searchResults) {
         const hits = { automations: [], scripts: [], dashboards: [], scenes: [] };
         if (result.automation) {
@@ -1009,14 +1167,21 @@ class HAEntityRenamer extends HTMLElement {
       }
       // Also scan dashboards
       const lovelaceConfig = await this._loadLovelaceConfigs();
+      const dashboardText = lovelaceConfig.map(dash => ({ title: dash.title || dash.url_path || 'default', text: JSON.stringify(dash.config || {}) }));
       for (const rename of this._renameQueue) {
-        for (const dash of lovelaceConfig) {
-          if (JSON.stringify(dash.config || {}).includes(rename.oldId)) {
-            impact[rename.oldId].dashboards.push(dash.title || dash.url_path || 'default');
+        if (!impact[rename.oldId]) continue;
+        for (const dash of dashboardText) {
+          if (dash.text.includes(rename.oldId)) {
+            impact[rename.oldId].dashboards.push(dash.title);
           }
         }
       }
-    } catch(e) { console.debug('[ha-entity-renamer] caught:', e); }
+    } catch(e) {
+      this._loading = false;
+      this._message = { type: 'error', text: 'Impact lookup failed; no changes applied: ' + this._formatError(e) };
+      this.render();
+      return;
+    }
 
     const results = [];
     const deviceResults = [];
@@ -1039,6 +1204,7 @@ class HAEntityRenamer extends HTMLElement {
     for (const rename of this._renameQueue) {
       const imp = impact[rename.oldId] || { automations: [], scripts: [], dashboards: [] };
       try {
+        if (automaticFailures.has(rename.oldId)) throw new Error(automaticFailures.get(rename.oldId));
         await this._applyEntityRename(rename);
         results.push({ ...rename, status: 'ok' });
         this._renameLog.unshift({
@@ -1086,8 +1252,8 @@ class HAEntityRenamer extends HTMLElement {
       type: fail + devFail > 0 ? 'warning' : 'success',
       text: msg,
     };
-    this._renameQueue = [];
-    this._deviceRenameQueue = {};
+    this._renameQueue = results.filter(row => row.status === 'error').map(({status, error, ...row}) => row);
+    this._deviceRenameQueue = Object.fromEntries(deviceResults.filter(row => row.status === 'error').map(row => [row.devId, row.newName]));
     this._impactResults = null;
     this._loading = false;
     this._activeTab = 'log';
@@ -1109,7 +1275,7 @@ class HAEntityRenamer extends HTMLElement {
 
 /* Donation footer — diamond top */
 .donate-section {  margin: 24px 0 4px; padding: 20px 24px; position: relative; overflow: hidden;  background: linear-gradient(135deg, rgba(99,102,241,0.06), rgba(236,72,153,0.06));  border: 1px solid rgba(99,102,241,0.18); border-radius: var(--bento-radius-md, 18px);  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 18px;  font-family: 'Inter', -apple-system, sans-serif;}
-.donate-section::before {  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;  background: linear-gradient(90deg, #6366f1, #8b5cf6, #ec4899);}
+.donate-section:not([data-source="own-card"])::before {  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;  background: linear-gradient(90deg, #6366f1, #8b5cf6, #ec4899);}
 .donate-section .donate-text { flex: 1; min-width: 240px; }
 .donate-section h3 {  margin: 0 0 6px; font-size: 16px; font-weight: 700; letter-spacing: -0.02em;  background: linear-gradient(135deg, #6366f1, #ec4899);  -webkit-background-clip: text; background-clip: text; color: transparent;}
 .donate-section p { margin: 0; font-size: 13px; line-height: 1.55; color: var(--bento-text-secondary, #57534e); letter-spacing: -0.005em; }
@@ -1358,7 +1524,7 @@ class HAEntityRenamer extends HTMLElement {
       .impact-badge.script { background: rgba(245,158,11,0.15); color: #FCD34D; }
       .impact-badge.dashboard { background: rgba(59,130,246,0.15); color: #93C5FD; }
       .impact-badge.scene { background: rgba(16,185,129,0.15); color: #6EE7B7; }
-      .queue-actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+      .queue-actions { display: flex; gap: 8px; margin-bottom: 12px; justify-content: flex-end; }
 
       .log-entry { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 12px; }
       .log-time { color: var(--bento-text-secondary, #94A3B8); font-size: 10px; }
@@ -1408,7 +1574,7 @@ class HAEntityRenamer extends HTMLElement {
           .log-entry { font-size: 11px; padding: 4px 0; }
         }
         </style>
-    ${_renderLocalIntro()}
+    ${_renderLocalIntro(this._lang)}
     <div class="card">
       <h1>📱️ ${t.deviceEntityRenamer}</h1>
       <div class="subtitle">${this._devices.length} ${t.devices.toLowerCase()} • ${this._entities.length} ${t.entities.toLowerCase()}
@@ -1420,17 +1586,20 @@ class HAEntityRenamer extends HTMLElement {
 
       <div class="tabs">
         <button class="tab-button ${this._activeTab === 'devices' ? 'active' : ''}" data-tab="devices">📱 ${t.devices}</button>
+        <button class="tab-button ${this._activeTab === 'automatic' ? 'active' : ''}" data-tab="automatic">↻ ${t.automatic}</button>
         <button class="tab-button ${this._activeTab === 'queue' ? 'active' : ''}" data-tab="queue">📋 ${t.queue}${queueCount > 0 ? ` (${queueCount})` : ''}</button>
         <button class="tab-button ${this._activeTab === 'log' ? 'active' : ''}" data-tab="log">📜 ${t.log}</button>
       </div>
 
       ${this._activeTab === 'devices' ? this._renderDevicesTab(devices) : ''}
+      ${this._activeTab === 'automatic' ? this._renderAutomaticTab() : ''}
       ${this._activeTab === 'queue' ? this._renderQueueTab() : ''}
       ${this._activeTab === 'log' ? this._renderLogTab() : ''}
     </div>
-    ${_LOCAL_DONATE_HTML}`;
+    ${this._hass?.user?.is_admin && this._config?.show_support !== false && !_localSupportDismissed() ? _LOCAL_DONATE_HTML : ''}`;
 
     _bindLocalIntroDismiss(this.shadowRoot);
+    _bindLocalSupportDismiss(this.shadowRoot);
     this._attachEvents();
   }
 
@@ -1483,6 +1652,35 @@ class HAEntityRenamer extends HTMLElement {
     return '';
   }
 
+  _renderAutomaticTab() {
+    const t = this._t;
+    const groups = new Map();
+    for (const row of this._automaticRows) {
+      if (!groups.has(row.deviceId)) groups.set(row.deviceId, []);
+      groups.get(row.deviceId).push(row);
+    }
+    const canQueue = this._automaticRows.some(row => !row.conflict);
+    const deviceHtml = [...groups].map(([deviceId, rows]) => {
+      const device = this._devices.find(item => item.id === deviceId);
+      return `<details style="border:1px solid var(--bento-border,#ddd);border-radius:8px;padding:8px;margin:8px 0">
+        <summary>${_esc(device ? this._getDeviceName(device) : deviceId)} (${rows.length})</summary>
+        ${rows.map(row => `<div class="rename-preview-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <code>${_esc(row.oldId)}</code> → <code>${_esc(row.newId)}</code>
+          ${row.conflict ? `<span>${t.automaticConflict}</span>` : `<button class="btn btn-sm btn-outline" data-auto-entity="${_esc(row.oldId)}">+ ${t.queue}</button>`}
+        </div>`).join('')}
+        <button class="btn btn-sm btn-outline" data-auto-device="${_esc(deviceId)}" ${rows.some(row => !row.conflict) ? '' : 'disabled'}>${t.addDeviceAutomatic}</button>
+      </details>`;
+    }).join('');
+    return `<div class="automatic-tab">
+      <p>${t.automaticInfo}</p>
+      <button class="btn btn-outline" id="loadAutomatic" ${this._loading ? 'disabled' : ''}>${this._loading ? '…' : t.loadAutomatic}</button>
+      ${this._automaticLoaded ? `<p>${this._automaticRows.length} ${t.automatic}; ${this._automaticNull.length} ${t.automaticUnknown}</p>
+        ${canQueue ? `<button class="btn btn-primary" id="queueAllAutomatic">${t.addAllAutomatic}</button>` : `<p>${t.automaticEmpty}</p>`}
+        ${deviceHtml}
+        ${this._automaticNull.length ? `<details><summary>${t.automaticUnknown} (${this._automaticNull.length})</summary>${this._automaticNull.map(ent => `<div><code>${_esc(ent.entity_id)}</code></div>`).join('')}</details>` : ''}` : ''}
+    </div>`;
+  }
+
   _renderDevicesTab(devices) {
     const t = this._t;
     return `
@@ -1518,7 +1716,7 @@ class HAEntityRenamer extends HTMLElement {
                     <span class="entity-id">${_esc(e.entity_id)}</span>
                     <span class="entity-name">${_esc(e.name || e.original_name || '')}</span>
                     ${inQueue
-                      ? '<button class="btn btn-sm btn-danger" data-remove-queue="' + _esc(e.entity_id) + '" aria-label="Remove">✕</button>'
+                      ? '<button class="btn btn-sm btn-danger" data-remove-queue="' + _esc(e.entity_id) + '" aria-label="' + _esc(t.removeFromQueue) + '">✕</button>'
                       : `<button class="btn btn-sm btn-outline" data-add-single="${_esc(e.entity_id)}">+ ${t.queue}</button>`
                     }
                   </div>`;
@@ -1552,11 +1750,17 @@ class HAEntityRenamer extends HTMLElement {
     }
     const devEntries = Object.entries(this._deviceRenameQueue);
     return `
+      <div class="queue-actions">
+        <button class="btn btn-outline" id="clearQueue">🗑️ ${t.clear}</button>
+        <button class="btn btn-outline" id="analyzeImpact" ${this._loading ? 'disabled' : ''}>🔍 ${t.analyzeImpact}</button>
+        <button class="btn btn-danger" id="executeRenames" ${this._loading || this._hass?.user?.is_admin !== true ? 'disabled' : ''} ${this._loading ? 'aria-busy="true"' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length})</button>
+        ${this._hass?.user?.is_admin !== true ? `<span>${t.adminRequired}</span>` : ''}
+      </div>
       ${devEntries.length ? `<div style="margin-bottom:12px;padding:10px 14px;border-radius:8px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.2);">
         <strong style="font-size:12px;">📱 ${t.devicesToRename}</strong>
         ${devEntries.map(([did, name]) => {
           const dev = this._devices.find(d => d.id === did);
-          return `<div style="font-size:12px;margin-top:4px;"><span class="old">${_esc(dev ? this._getDeviceName(dev) : did)}</span> → <span class="new">${_esc(name)}</span> <button class="btn btn-sm btn-danger" data-remove-dev-queue="${_esc(did)}" aria-label="Remove">✕</button></div>`;
+          return `<div style="font-size:12px;margin-top:4px;"><span class="old">${_esc(dev ? this._getDeviceName(dev) : did)}</span> → <span class="new">${_esc(name)}</span> <button class="btn btn-sm btn-danger" data-remove-dev-queue="${_esc(did)}" aria-label="${_esc(t.removeFromQueue)}">✕</button></div>`;
         }).join('')}
       </div>` : ''}
       <div class="queue-list">
@@ -1565,13 +1769,13 @@ class HAEntityRenamer extends HTMLElement {
             const hasImpact = imp && (imp.automations.length || imp.scripts.length || imp.dashboards.length || (imp.scenes||[]).length);
             return `<div style="border:1px solid var(--bento-border,#334155);border-radius:8px;padding:12px;margin-bottom:8px;">
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                <span class="old" style="flex:1;font-family:'JetBrains Mono',monospace;font-size:11px;">${_esc(r.oldId)}</span>
-                <button class="btn btn-sm btn-danger" data-remove-queue="${_esc(r.oldId)}" aria-label="Remove">✕</button>
+                <span class="old" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${_esc(r.oldId)}</span>
+                <button class="btn btn-sm btn-danger" style="flex-shrink:0;" data-remove-queue="${_esc(r.oldId)}" aria-label="${_esc(t.removeFromQueue)}">✕</button>
               </div>
-              <div style="display:flex;align-items:center;gap:8px;">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 <span style="color:var(--bento-text-secondary,#94A3B8);">→</span>
-                <span class="new" style="font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? _esc(r.newId) : '<span style="opacity:0.4">no entity_id change</span>'}</span>
-                ${r.newName ? '<span style="font-size:11px;color:#93C5FD;">📝 ' + _esc(r.newName) + '</span>' : ''}
+                <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? _esc(r.newId) : '<span style="opacity:0.4">no entity_id change</span>'}</span>
+                ${r.newName ? '<span style="min-width:0;overflow-wrap:anywhere;font-size:11px;color:#93C5FD;">📝 ' + _esc(r.newName) + '</span>' : ''}
               </div>
               ${hasImpact ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05);">
                 <span style="font-size:10px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
@@ -1583,11 +1787,7 @@ class HAEntityRenamer extends HTMLElement {
             </div>`;
           }).join('')}
       </div>
-      <div class="queue-actions">
-        <button class="btn btn-outline" id="clearQueue">🗑️ ${t.clear}</button>
-        <button class="btn btn-outline" id="analyzeImpact" ${this._loading ? 'disabled' : ''}>🔍 ${t.analyzeImpact}</button>
-        <button class="btn btn-danger" id="executeRenames" ${this._loading ? 'disabled aria-busy="true"' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length})</button>
-      </div>`;
+`;
   }
 
   _renderLogTab() {
@@ -1635,6 +1835,13 @@ class HAEntityRenamer extends HTMLElement {
         this.render();
       });
     });
+
+    const loadAutomatic = root.getElementById('loadAutomatic');
+    if (loadAutomatic) loadAutomatic.addEventListener('click', () => this._loadAutomaticIds());
+    const queueAllAutomatic = root.getElementById('queueAllAutomatic');
+    if (queueAllAutomatic) queueAllAutomatic.addEventListener('click', () => this._queueAutomaticIds());
+    root.querySelectorAll('[data-auto-device]').forEach(btn => btn.addEventListener('click', () => this._queueAutomaticIds(btn.dataset.autoDevice)));
+    root.querySelectorAll('[data-auto-entity]').forEach(btn => btn.addEventListener('click', () => this._queueAutomaticIds(null, btn.dataset.autoEntity)));
 
     // Search
     const searchInput = root.getElementById('searchInput');

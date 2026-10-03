@@ -3,9 +3,8 @@
 ![Preview](banner.png)
 
 Bulk-rename Home Assistant devices and entities — `entity_id`, friendly names,
-or a whole device's entities at once by prefix — with an impact preview that
-shows exactly which automations, scripts, scenes, and dashboards reference an
-entity before you touch anything.
+or a whole device's entities at once by prefix — with an impact preview for
+references visible through Home Assistant's APIs.
 
 [![Version](https://img.shields.io/github/v/release/MacSiem/ha-entity-renamer)](https://github.com/MacSiem/ha-entity-renamer/releases) [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -20,17 +19,25 @@ entity before you touch anything.
    rename the device's display name, or use **Change prefix** to bulk-rename
    every entity under a device that shares a common `object_id` prefix (e.g.
    `sensor.old_*` → `sensor.new_*`).
+   The **Automatic IDs** tab calls the same Home Assistant command as
+   **Recreate entity IDs**, shows proposed changes grouped by device, and
+   lets you queue one entity, one device or all eligible rows. HA chooses the
+   names using its current language and entity ID format. Rows with no
+   automatic ID or a target collision are shown but cannot be queued.
 3. **Analyze impact before applying.** The Queue tab's **Analyze Impact**
    button calls `search/related` for each queued entity to list the
    automations, scripts, and scenes that reference it, then scans every
    Lovelace dashboard (`lovelace/dashboards/list` + `lovelace/config`) for raw
-   references — so you know what needs a manual follow-up edit before you
-   rename.
+   references where those resources are readable. You may still need to check
+   YAML, templates and other references manually.
 4. **Apply with confirmation.** **Apply Changes** shows a confirmation
    dialog, then writes the changes via `config/entity_registry/update`
    (entity_id and/or name) and `config/device_registry/update` (device
    display name), and logs every attempt — success or failure — to the Log
    tab.
+   Automatic proposals are checked against the current registry and
+   regenerated IDs again immediately before applying. Stale proposals fail
+   without a registry write and remain in the queue for review.
 
 ### What is automatic vs. manual
 
@@ -40,6 +47,7 @@ entity before you touch anything.
 | Impact scan across automations, scripts, scenes, dashboards | Editing the automations/scripts/dashboards a rename affects — the card does not rewrite YAML or Lovelace config for you |
 | Rename confirmation dialog before any registry write | Bulk prefix rename — you choose the old/new prefix per device |
 | Rename history log kept in your browser | Restarting Home Assistant after `entity_id` changes (recommended) |
+| Read-only automatic ID preview | Choosing which proposed changes to queue and confirming writes |
 
 ## Screenshots
 
@@ -47,9 +55,9 @@ entity before you touch anything.
 |---|---|
 | ![Devices tab, light theme](docs/screenshots/card-devices-light.png) | ![Devices tab, dark theme](docs/screenshots/card-devices-dark.png) |
 
-*The Devices tab: expand a device to see its entities, queue a rename, or
-bulk-rename by prefix. Dark mode follows your Home Assistant theme
-automatically.*
+*The Devices tab with synthetic entity IDs: expand a device to see its
+entities, queue a rename, or rename by prefix. Dark mode follows your Home
+Assistant theme.*
 
 ## Installation
 
@@ -76,8 +84,10 @@ available in the card's visual editor.
 - **Device rename** — rename a device's display name.
 - **Bulk prefix rename** — rename every entity under a device that shares a
   common `object_id` prefix in one action.
-- **Impact analysis** — see every automation, script, scene, and dashboard
-  that references a queued entity before you rename it.
+- **Recreate entity IDs preview** — compare with HA's own automatic ID
+  calculation, queue per entity/device/all, and reject stale or colliding IDs.
+- **Impact analysis** — inspect references that HA's related search and
+  readable dashboards expose before you rename.
 - **Rename history** — a log of every rename attempt (success/error), kept in
   your browser.
 
@@ -111,6 +121,14 @@ See [CHANGELOG.md](CHANGELOG.md).
 - [Buy Me a Coffee](https://buymeacoffee.com/macsiem)
 - [PayPal](https://www.paypal.com/donate/?hosted_button_id=Y967H4PLRBN8W)
 
+The optional in-card support link is shown only to administrators. Dismiss it in the card or set `show_support: false` in the card configuration.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+## Privacy and data
+
+The card reads entity/device registries and configuration references to preview changes to entity IDs. Applying a confirmed queue changes Home Assistant registry IDs; related configuration references need separate review. Keep impact reports and rollback mappings private.
+
+See [SECURITY.md](SECURITY.md) for safe vulnerability reporting and [NOTICE](NOTICE) for licensing notices.

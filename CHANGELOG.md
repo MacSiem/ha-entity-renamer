@@ -1,5 +1,21 @@
 # Changelog
 
+- Translate the first-run introduction, its dismiss action and all queue removal accessible names per card in Polish and English, including ordinary language changes.
+
+- Refresh open-card translations after ordinary Home Assistant language changes while preserving unqueued device/prefix drafts, focus and selection. Same-language state updates keep the live form. Losing administrator access closes pending confirmation; unresolved roles cannot confirm or send registry changes. Locale updates do not reload registries or apply drafts.
+
+## 4.2.11 (2026-09-29)
+
+- Keep long old/new entity IDs wrapped inside narrow queue rows and keep each Remove button visible.
+
+- Place whole-queue controls before the proposed changes so large queues can be reviewed or cancelled without hundreds of keyboard stops.
+- Report successful entity-registry updates without requesting an unnecessary Core restart; direct users to review affected references instead.
+
+- Add a read-only Automatic IDs view using HA's `config/entity_registry/get_automatic_entity_ids`, grouped by device with per-entity, per-device and all-at-once queueing. Null and target collisions are kept separate.
+- Revalidate automatic proposals and source identity immediately before apply; stale proposals fail without writes and failed items remain queued.
+- Bound related-entity impact requests to batches of 20 and avoid silently treating failed related lookups as no impact.
+- Clarify impact coverage for unreadable dashboards/YAML references.
+
 ## 4.2.10 (2026-08-28)
 
 - Isolation: Bento CSS is component-local and cannot be captured from `window.HAToolsBentoCSS` by load order.
