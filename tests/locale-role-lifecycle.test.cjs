@@ -67,3 +67,33 @@ test('same-language and same-role state updates keep the live form DOM', async (
   assert.equal(f.card.shadowRoot.getElementById('searchInput'), input); assert.equal(f.card.shadowRoot.activeElement, input); assert.equal(f.requests.length, 2);
  } finally { f.dom.window.close(); }
 });
+
+test('first-run introduction and dismiss translate per instance after ordinary locale updates', async () => {
+ const a = await fixture('pl'), b = await fixture('en');
+ try {
+  assert.match(a.card.shadowRoot.querySelector('.intro-headline').textContent, /Masowa zmiana/);
+  assert.equal(a.card.shadowRoot.querySelector('.intro-dismiss').getAttribute('aria-label'), 'Ukryj instrukcję');
+  assert.match(b.card.shadowRoot.querySelector('.intro-headline').textContent, /Bulk-rename/);
+  a.card.hass = { ...a.hass, language: 'en' };
+  assert.match(a.card.shadowRoot.querySelector('.intro-headline').textContent, /Bulk-rename/);
+  assert.equal(a.card.shadowRoot.querySelector('.intro-dismiss').getAttribute('aria-label'), 'Dismiss instructions');
+  assert.equal(a.requests.length, 2); assert.equal(b.requests.length, 2);
+ } finally { a.dom.window.close(); b.dom.window.close(); }
+});
+
+test('all queued entity and device remove controls have translated accessible names', async () => {
+ const f = await fixture('pl');
+ try {
+  f.card._renameQueue = [{ oldId: 'sensor.qa_old', newId: 'sensor.qa_new' }];
+  f.card._deviceRenameQueue = { 'qa-device': 'QA renamed' };
+  f.card.shadowRoot.querySelector('.device-header[data-device-id="qa-device"]').click();
+  assert.equal(f.card.shadowRoot.querySelector('[data-remove-queue]').getAttribute('aria-label'), 'Usuń z kolejki');
+  f.card.shadowRoot.querySelector('[data-tab="queue"]').click();
+  const buttons = [...f.card.shadowRoot.querySelectorAll('[data-remove-queue],[data-remove-dev-queue]')];
+  assert.equal(buttons.length, 2);
+  assert.ok(buttons.every(b => b.getAttribute('aria-label') === 'Usuń z kolejki'));
+  f.card.hass = { ...f.hass, language: 'en' };
+  assert.ok([...f.card.shadowRoot.querySelectorAll('[data-remove-queue],[data-remove-dev-queue]')].every(b => b.getAttribute('aria-label') === 'Remove from queue'));
+  assert.equal(f.requests.length, 2);
+ } finally { f.dom.window.close(); }
+});
