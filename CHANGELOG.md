@@ -1,5 +1,7 @@
 # Changelog
 
+- Translate the first-run introduction, its dismiss action and all queue removal accessible names per card in Polish and English, including ordinary language changes.
+
 - Refresh open-card translations after ordinary Home Assistant language changes while preserving unqueued device/prefix drafts, focus and selection. Same-language state updates keep the live form. Losing administrator access closes pending confirmation; unresolved roles cannot confirm or send registry changes. Locale updates do not reload registries or apply drafts.
 
 ## 4.2.11 (2026-09-29)

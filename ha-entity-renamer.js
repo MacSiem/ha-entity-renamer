@@ -517,6 +517,10 @@ const _LOCAL_INTRO = {
   headline: "Bulk-rename HA entities + friendly names.",
   steps: ["Pick an entity, set new ID — entity_registry/update.","Bulk pattern: sensor.old_* → sensor.new_*.","Optional: rewrite Lovelace dashboard refs."]
 };
+const _LOCAL_INTRO_PL = {
+  headline: 'Masowa zmiana identyfikatorów encji i ich nazw.',
+  steps: ['Wybierz encję i ustaw nowy identyfikator.', 'Zmiana prefiksu: sensor.old_* → sensor.new_*.', 'Sprawdź i w razie potrzeby popraw odwołania w dashboardach Lovelace.']
+};
 const _LOCAL_SUPPORT_KEY = 'ha-entity-renamer-support-dismissed';
 const _LOCAL_DONATE_HTML = '<div class="donate-section" data-source="own-card" style="margin:8px 0 0;padding:4px 0;background:none;border:0;box-shadow:none;min-height:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex-direction:row;justify-content:flex-start;text-align:left"><a href="https://buymeacoffee.com/macsiem" target="_blank" rel="noopener noreferrer" style="font-size:11px;color:var(--secondary-text-color,#64748b);font-weight:400;text-decoration:underline">Optional support for HA Tools</a><button type="button" class="support-dismiss" aria-label="Dismiss support link" style="margin-left:auto;padding:2px 6px;min-height:0;line-height:1;border:0;background:none;color:var(--secondary-text-color,#64748b);cursor:pointer">×</button></div>';
 function _localSupportDismissed() { try { return localStorage.getItem(_LOCAL_SUPPORT_KEY) === '1'; } catch (_) { return false; } }
@@ -524,12 +528,14 @@ function _bindLocalSupportDismiss(root) { root.querySelector('.support-dismiss')
 function _localIntroDismissed() {
   try { return localStorage.getItem(_LOCAL_INTRO_KEY) === '1'; } catch(e) { return false; }
 }
-function _renderLocalIntro() {
+function _renderLocalIntro(language = 'en') {
   if (_localIntroDismissed()) return '';
-  const steps = _LOCAL_INTRO.steps.map(step => '<li>' + _esc(step) + '</li>').join('');
+  const intro = language === 'pl' ? _LOCAL_INTRO_PL : _LOCAL_INTRO;
+  const dismiss = language === 'pl' ? 'Ukryj instrukcję' : 'Dismiss instructions';
+  const steps = intro.steps.map(step => '<li>' + _esc(step) + '</li>').join('');
   return '<div class="intro-banner" data-intro="ha-entity-renamer">'
-    + '<button class="intro-dismiss" type="button" title="Dismiss" aria-label="Dismiss">✕</button>'
-    + '<div class="intro-headline">💡 ' + _esc(_LOCAL_INTRO.headline) + '</div>'
+    + '<button class="intro-dismiss" type="button" title="' + _esc(dismiss) + '" aria-label="' + _esc(dismiss) + '">✕</button>'
+    + '<div class="intro-headline">💡 ' + _esc(intro.headline) + '</div>'
     + '<ol class="intro-steps">' + steps + '</ol>'
     + '</div>';
 }
@@ -650,6 +656,7 @@ class HAEntityRenamer extends HTMLElement {
         automaticUnknown: 'Brak automatycznego ID', addAllAutomatic: 'Dodaj wszystkie', addDeviceAutomatic: 'Dodaj urządzenie',
         automaticEmpty: 'Brak różnic do dodania.', automaticConflict: 'Kolizja docelowego ID',
         adminRequired: 'Zmiany rejestru wymagają konta administratora HA.',
+        removeFromQueue: 'Usuń z kolejki',
       },
       en: {
         deviceEntityRenamer: 'Device & Entity Renamer',
@@ -698,6 +705,7 @@ class HAEntityRenamer extends HTMLElement {
         automaticUnknown: 'No automatic ID', addAllAutomatic: 'Queue all', addDeviceAutomatic: 'Queue device',
         automaticEmpty: 'No differences to queue.', automaticConflict: 'Target ID collision',
         adminRequired: 'Registry changes require a Home Assistant administrator account.',
+        removeFromQueue: 'Remove from queue',
       }
     };
     return T[this._lang] || T.en;
@@ -1566,7 +1574,7 @@ class HAEntityRenamer extends HTMLElement {
           .log-entry { font-size: 11px; padding: 4px 0; }
         }
         </style>
-    ${_renderLocalIntro()}
+    ${_renderLocalIntro(this._lang)}
     <div class="card">
       <h1>📱️ ${t.deviceEntityRenamer}</h1>
       <div class="subtitle">${this._devices.length} ${t.devices.toLowerCase()} • ${this._entities.length} ${t.entities.toLowerCase()}
@@ -1708,7 +1716,7 @@ class HAEntityRenamer extends HTMLElement {
                     <span class="entity-id">${_esc(e.entity_id)}</span>
                     <span class="entity-name">${_esc(e.name || e.original_name || '')}</span>
                     ${inQueue
-                      ? '<button class="btn btn-sm btn-danger" data-remove-queue="' + _esc(e.entity_id) + '" aria-label="Remove">✕</button>'
+                      ? '<button class="btn btn-sm btn-danger" data-remove-queue="' + _esc(e.entity_id) + '" aria-label="' + _esc(t.removeFromQueue) + '">✕</button>'
                       : `<button class="btn btn-sm btn-outline" data-add-single="${_esc(e.entity_id)}">+ ${t.queue}</button>`
                     }
                   </div>`;
@@ -1752,7 +1760,7 @@ class HAEntityRenamer extends HTMLElement {
         <strong style="font-size:12px;">📱 ${t.devicesToRename}</strong>
         ${devEntries.map(([did, name]) => {
           const dev = this._devices.find(d => d.id === did);
-          return `<div style="font-size:12px;margin-top:4px;"><span class="old">${_esc(dev ? this._getDeviceName(dev) : did)}</span> → <span class="new">${_esc(name)}</span> <button class="btn btn-sm btn-danger" data-remove-dev-queue="${_esc(did)}" aria-label="Remove">✕</button></div>`;
+          return `<div style="font-size:12px;margin-top:4px;"><span class="old">${_esc(dev ? this._getDeviceName(dev) : did)}</span> → <span class="new">${_esc(name)}</span> <button class="btn btn-sm btn-danger" data-remove-dev-queue="${_esc(did)}" aria-label="${_esc(t.removeFromQueue)}">✕</button></div>`;
         }).join('')}
       </div>` : ''}
       <div class="queue-list">
@@ -1762,7 +1770,7 @@ class HAEntityRenamer extends HTMLElement {
             return `<div style="border:1px solid var(--bento-border,#334155);border-radius:8px;padding:12px;margin-bottom:8px;">
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
                 <span class="old" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${_esc(r.oldId)}</span>
-                <button class="btn btn-sm btn-danger" style="flex-shrink:0;" data-remove-queue="${_esc(r.oldId)}" aria-label="Remove">✕</button>
+                <button class="btn btn-sm btn-danger" style="flex-shrink:0;" data-remove-queue="${_esc(r.oldId)}" aria-label="${_esc(t.removeFromQueue)}">✕</button>
               </div>
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 <span style="color:var(--bento-text-secondary,#94A3B8);">→</span>
