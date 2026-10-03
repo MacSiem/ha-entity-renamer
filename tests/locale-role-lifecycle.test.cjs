@@ -29,7 +29,7 @@ test('ordinary language change translates two independent cards without reloadin
 test('ordinary locale preserves unqueued device and prefix drafts, focus and backward selection', async () => {
  const f = await fixture();
  try {
-  f.card._selectedDevice = 'qa-device'; f.card.render();
+  f.card._selectDevice('qa-device');
   const input = f.card.shadowRoot.getElementById('deviceName'); assert.ok(input);
   input.value = 'QA unsaved room'; f.card.shadowRoot.getElementById('prefixOld').value = 'qa_'; f.card.shadowRoot.getElementById('prefixNew').value = 'new_unsaved_';
   input.focus(); input.setSelectionRange(2, 8, 'backward'); f.card.hass = { ...f.hass, language: 'pl' };
