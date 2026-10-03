@@ -1,5 +1,7 @@
 # Changelog
 
+- Refresh open-card translations after ordinary Home Assistant language changes while preserving unqueued device/prefix drafts, focus and selection. Same-language state updates keep the live form. Losing administrator access closes pending confirmation; unresolved roles cannot confirm or send registry changes. Locale updates do not reload registries or apply drafts.
+
 ## 4.2.11 (2026-09-29)
 
 - Keep long old/new entity IDs wrapped inside narrow queue rows and keep each Remove button visible.

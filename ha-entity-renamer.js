@@ -713,6 +713,8 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   set hass(hass) {
+    const previousLanguage = this._lang;
+    const previousAdmin = this._hass?.user?.is_admin === true;
     try {
       var _bg = (getComputedStyle(this).getPropertyValue('--card-background-color') || getComputedStyle(this).getPropertyValue('--primary-background-color') || '').trim();
       var _d = false;
@@ -727,7 +729,35 @@ class HAEntityRenamer extends HTMLElement {
     const first = !this._hass;
     this._hass = hass;
     if (hass?.language) this._lang = hass.language.startsWith('pl') ? 'pl' : 'en';
+    if (!hass) return;
     if (first) this._init();
+    else if (previousAdmin !== (hass.user?.is_admin === true)) {
+      this._confirmDialogOpen = false;
+      this.render();
+    } else if (previousLanguage !== this._lang) this._renderLocalePreservingDrafts();
+  }
+
+  _renderLocalePreservingDrafts() {
+    const fields = Array.from(this.shadowRoot.querySelectorAll('input[id],textarea[id],select[id]'), field => ({
+      id: field.id, value: field.value, checked: field.checked, scrollTop: field.scrollTop,
+    }));
+    const active = this.shadowRoot.activeElement;
+    const focus = active?.id ? { id: active.id, start: active.selectionStart, end: active.selectionEnd, direction: active.selectionDirection } : null;
+    this.render();
+    for (const saved of fields) {
+      const field = this.shadowRoot.getElementById(saved.id);
+      if (!field) continue;
+      field.value = saved.value;
+      if (typeof saved.checked === 'boolean') field.checked = saved.checked;
+      field.scrollTop = saved.scrollTop;
+    }
+    const current = focus && this.shadowRoot.getElementById(focus.id);
+    if (current) {
+      current.focus({ preventScroll: true });
+      if (typeof focus.start === 'number' && typeof current.setSelectionRange === 'function') {
+        current.setSelectionRange(focus.start, focus.end, focus.direction || 'none');
+      }
+    }
   }
 
   async _init() {
@@ -1068,6 +1098,12 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _showRenameConfirmation() {
+    if (this._hass?.user?.is_admin !== true) {
+      this._confirmDialogOpen = false;
+      this._message = { type: 'error', text: this._t.adminRequired };
+      this.render();
+      return;
+    }
     if (this._loading || (!this._renameQueue.length && !Object.keys(this._deviceRenameQueue || {}).length)) return;
     this._confirmDialogOpen = true;
     this._lastApplyResult = null;
@@ -1077,7 +1113,8 @@ class HAEntityRenamer extends HTMLElement {
 
   async _executeRenames(confirmed = false) {
     if (!this._renameQueue.length && !Object.keys(this._deviceRenameQueue).length) return;
-    if (this._hass?.user?.is_admin === false) {
+    if (this._hass?.user?.is_admin !== true) {
+      this._confirmDialogOpen = false;
       this._message = { type: 'error', text: this._t.adminRequired };
       this.render();
       return;
@@ -1708,8 +1745,8 @@ class HAEntityRenamer extends HTMLElement {
       <div class="queue-actions">
         <button class="btn btn-outline" id="clearQueue">🗑️ ${t.clear}</button>
         <button class="btn btn-outline" id="analyzeImpact" ${this._loading ? 'disabled' : ''}>🔍 ${t.analyzeImpact}</button>
-        <button class="btn btn-danger" id="executeRenames" ${this._loading || this._hass?.user?.is_admin === false ? 'disabled' : ''} ${this._loading ? 'aria-busy="true"' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length})</button>
-        ${this._hass?.user?.is_admin === false ? `<span>${t.adminRequired}</span>` : ''}
+        <button class="btn btn-danger" id="executeRenames" ${this._loading || this._hass?.user?.is_admin !== true ? 'disabled' : ''} ${this._loading ? 'aria-busy="true"' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length})</button>
+        ${this._hass?.user?.is_admin !== true ? `<span>${t.adminRequired}</span>` : ''}
       </div>
       ${devEntries.length ? `<div style="margin-bottom:12px;padding:10px 14px;border-radius:8px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.2);">
         <strong style="font-size:12px;">📱 ${t.devicesToRename}</strong>

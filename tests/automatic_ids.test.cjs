@@ -18,7 +18,7 @@ test('automatic ID preview separates null and collision, queues safe rows, rejec
     ];
     card._deviceEntities = { device1: card._entities };
     let currentTarget = 'sensor.new_a';
-    card._hass = { language: 'en', states: {}, callWS: async msg => {
+    card._hass = { language: 'en', states: {}, user: { is_admin: true }, callWS: async msg => {
       if (msg.type === 'config/entity_registry/list') return card._entities;
       if (msg.type === 'config/device_registry/list') return card._devices;
       if (msg.type === 'lovelace/dashboards/list') return [];
