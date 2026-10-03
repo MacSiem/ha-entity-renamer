@@ -12,7 +12,7 @@ const requiredEscapedSinks = [
   '${_esc(domain)}',
   '${_esc(e.entity_id)}',
   "${_esc(e.name || e.original_name || '')}",
-  "_esc(e.entity_id) + '\" aria-label=\"Remove",
+  "_esc(e.entity_id) + '\" aria-label=\"' + _esc(t.removeFromQueue)",
   'data-add-single="${_esc(e.entity_id)}"',
   'data-device-id="${_esc(d.id)}"',
   '${_esc(dev ? this._getDeviceName(dev) : did)}',
