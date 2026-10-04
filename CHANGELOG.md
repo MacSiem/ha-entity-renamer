@@ -6,6 +6,8 @@
 
 ## 4.2.11 (2026-09-29)
 
+- Correct first-run wording to describe the available controls and manual reference review.
+
 - Keep long old/new entity IDs wrapped inside narrow queue rows and keep each Remove button visible.
 
 - Place whole-queue controls before the proposed changes so large queues can be reviewed or cancelled without hundreds of keyboard stops.

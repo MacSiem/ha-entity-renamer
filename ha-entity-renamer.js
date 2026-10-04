@@ -16,7 +16,7 @@ const _esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&
 
 /**
  * HA Entity Renamer – Device & Entity Rename Tool
- * Renames devices/entities and propagates changes across dashboards, automations, scripts, config.
+ * Renames devices/entities and scans readable resources for references requiring manual updates.
  * Part of HA Tools suite.
  */
 /* ===== HA Tools split — inline shared infrastructure ===== */
@@ -515,7 +515,7 @@ pre {
 const _LOCAL_INTRO_KEY = 'ha-intro-dismissed-ha-entity-renamer';
 const _LOCAL_INTRO = {
   headline: "Bulk-rename HA entities + friendly names.",
-  steps: ["Pick an entity, set new ID — entity_registry/update.","Bulk pattern: sensor.old_* → sensor.new_*.","Optional: rewrite Lovelace dashboard refs."]
+  steps: ["Pick an entity and preview its new ID or friendly name.","Bulk pattern: sensor.old_* → sensor.new_*.","Review affected references and update dashboards or automations manually."]
 };
 const _LOCAL_INTRO_PL = {
   headline: 'Masowa zmiana identyfikatorów encji i ich nazw.',
@@ -2019,4 +2019,4 @@ if (!customElements.get('ha-entity-renamer-editor')) { customElements.define('ha
 })();
 
 window.customCards = window.customCards || [];
-window.customCards.push({ type: 'ha-entity-renamer', name: 'Entity Renamer', description: 'Rename entities and devices with propagation to dashboards and automations', preview: false });
+window.customCards.push({ type: 'ha-entity-renamer', name: 'Entity Renamer', description: 'Rename entities and devices, then review affected references', preview: false });
