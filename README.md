@@ -34,7 +34,10 @@ references visible through Home Assistant's APIs.
    dialog, then writes the changes via `config/entity_registry/update`
    (entity_id and/or name) and `config/device_registry/update` (device
    display name), and logs every attempt — success or failure — to the Log
-   tab.
+   tab. ID and friendly name are sent in one update per entity. Successful
+   items leave the queue; failed items remain available for review and retry.
+   The confirmed queue is frozen while it runs. A change of account, role or
+   connection cancels any remaining writes; completed writes are kept in the log.
    Automatic proposals are checked against the current registry and
    regenerated IDs again immediately before applying. Stale proposals fail
    without a registry write and remain in the queue for review.
@@ -46,7 +49,7 @@ references visible through Home Assistant's APIs.
 | Loading every device and entity from the registries | Choosing which entities/devices to queue |
 | Impact scan across automations, scripts, scenes, dashboards | Editing the automations/scripts/dashboards a rename affects — the card does not rewrite YAML or Lovelace config for you |
 | Rename confirmation dialog before any registry write | Bulk prefix rename — you choose the old/new prefix per device |
-| Rename history log kept in your browser | Restarting Home Assistant after `entity_id` changes (recommended) |
+| Rename history log kept in your browser | Checking integrations and references after an `entity_id` change |
 | Read-only automatic ID preview | Choosing which proposed changes to queue and confirming writes |
 
 ## Screenshots
@@ -61,10 +64,15 @@ Assistant theme.*
 
 ## Installation
 
-1. Open HACS → Custom repositories.
-2. Add `https://github.com/MacSiem/ha-entity-renamer` as category
-   **Dashboard** (Lovelace plugin).
-3. Install **Entity Renamer** and reload your browser.
+Requires **Home Assistant 2025.6 or newer** for the automatic ID preview.
+
+1. Open HACS and search for **Entity Renamer** in the **Dashboard** category.
+2. Download the latest release and reload your browser.
+3. Add a manual card using the configuration below.
+
+If the repository is unavailable in your HACS catalogue, add
+`https://github.com/MacSiem/ha-entity-renamer` as a custom repository in
+category **Dashboard** (Lovelace plugin).
 
 ## Quick start
 
@@ -103,8 +111,9 @@ reference a renamed entity so you know what to fix, but it does not rewrite
 that YAML or Lovelace config for you.
 
 **Do I need to restart Home Assistant after a rename?**
-For friendly-name-only changes, no. For `entity_id` changes, a restart is
-recommended so every integration picks up the new ID.
+A successful registry update takes effect without a routine Core restart.
+Review the affected references and check the integration after an ID change;
+follow that integration's instructions if it needs a reload.
 
 **Does this send data anywhere?**
 No. Everything runs locally in your browser against your Home Assistant
@@ -129,6 +138,11 @@ MIT, see [LICENSE](LICENSE).
 
 ## Privacy and data
 
-The card reads entity/device registries and configuration references to preview changes to entity IDs. Applying a confirmed queue changes Home Assistant registry IDs; related configuration references need separate review. Keep impact reports and rollback mappings private.
+The card reads entity/device registries and configuration references to preview changes to entity IDs. Applying a confirmed queue changes Home Assistant registry IDs; related configuration references need separate review. Keep impact reports and rollback mappings private. Rename history and dismissed
+intro/support preferences use browser local storage for this Home Assistant
+origin. They persist across reloads and are shared by cards and accounts using
+the same browser profile and origin; they are not synchronized to other devices.
+Use separate browser profiles on a shared computer. Queued proposals stay in
+memory and are lost on a page reload.
 
 See [SECURITY.md](SECURITY.md) for safe vulnerability reporting and [NOTICE](NOTICE) for licensing notices.

@@ -1197,7 +1197,6 @@ class HAEntityRenamer extends HTMLElement {
       && this._sameReadSession(operation.session, this._readSession()) && this._hass?.user?.is_admin === true;
     this._confirmation = null;
     this._confirmDialogOpen = false;
-    this._confirmation = null;
     this._lastApplyResult = null;
     this._loading = true;
     this._message = { type: 'info', text: this._t.analyzing2 };
