@@ -1304,12 +1304,15 @@ class HAEntityRenamer extends HTMLElement {
     const devOk = deviceResults.filter(r => r.status === 'ok').length;
     const devFail = deviceResults.filter(r => r.status === 'error').length;
     const devCount = deviceResults.length;
-    const totalImpact = Object.values(impact).reduce((a, i) => a + i.automations.length + i.scripts.length + i.dashboards.length, 0);
+    const totalImpact = results.filter(row => row.status === 'ok' && row.newId !== row.oldId).reduce((count, row) => {
+      const hits = impact[row.oldId];
+      return count + (hits ? hits.automations.length + hits.scripts.length + hits.dashboards.length + (hits.scenes || []).length : 0);
+    }, 0);
     
     let msg = this._t.renameSuccess.replace('{ok}', ok);
     msg = msg.replace('{devCount}', devOk ? ', ' + devOk + ' ' + (this._lang === 'pl' ? 'urządzeń' : 'devices') : '');
     msg = msg.replace('{fail}', fail + devFail > 0 ? `, ${fail + devFail} ${this._lang === 'pl' ? 'błędów' : 'errors'}` : '');
-    msg = msg.replace('{impact}', totalImpact > 0 ? ` ⚠️ ${totalImpact} ${this._lang === 'pl' ? 'miejsc wymaga aktualizacji (szczegóły w historii).' : 'places require update (details in history).'}` : '');
+    msg = msg.replace('{impact}', totalImpact > 0 ? ` ⚠️ ${totalImpact} ${this._lang === 'pl' ? 'miejsc wymaga sprawdzenia (szczegóły w historii)' : 'places require review (details in history)'}` : '');
     
     const deviceFailures = deviceResults.filter(r => r.status === 'error').map(r => ({
       oldId: 'device ' + r.devId,

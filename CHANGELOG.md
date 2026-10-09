@@ -6,6 +6,7 @@
 
 - Refresh open-card translations after ordinary Home Assistant language changes while preserving unqueued device/prefix drafts, focus and selection. Same-language state updates keep the live form. Losing administrator access closes pending confirmation; unresolved roles cannot confirm or send registry changes. Locale updates do not reload registries or apply drafts.
 
+- Report affected references only for successful ID changes, including scenes; a rejected write does not claim references were changed.
 - Send an entity ID and friendly name in one registry update; preserve failed items for safe retry. Freeze confirmed entity/device proposals and prevent duplicate apply operations.
 - Cancel remaining writes after account, role or connection changes; discard late preview, registry and impact responses from the old session.
 - Recheck stable source identity after impact analysis and immediately before each automatic write. Cancelled confirmations cannot authorize later changes; Clear removes both entity and device proposals.

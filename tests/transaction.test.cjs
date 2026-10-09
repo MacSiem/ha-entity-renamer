@@ -140,6 +140,6 @@ test('failed ID writes do not claim readable references need updating', async t 
     return call(msg);
   };
   card._addToQueue('sensor.a','sensor.invalid id');await confirm();
-  assert.doesNotMatch(card._message.text,/places require update/);
+  assert.doesNotMatch(card._message.text,/places require (update|review)/);
   assert.equal(card._renameQueue.length,1);
 });
