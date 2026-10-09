@@ -79,3 +79,33 @@ test('second confirm cannot duplicate an active transaction', async t => {
   await new Promise(resolve => setImmediate(resolve)); const duplicate = card._executeRenames(true);
   wait.release({}); await Promise.all([applying, duplicate]); assert.equal(writes.length, 1);
 });
+
+for (const kind of ['automatic', 'registry', 'impact']) test('late ' + kind + ' read cannot repopulate a changed session', async t => {
+  const { card, hass } = fixture(t); const wait = gate(); const call = hass.callWS;
+  const type = kind === 'automatic' ? 'config/entity_registry/get_automatic_entity_ids' : kind === 'registry' ? 'config/entity_registry/list' : 'search/related';
+  hass.callWS = async msg => msg.type === type ? wait.promise : call(msg);
+  if (kind === 'impact') card._addToQueue('sensor.a', 'sensor.new_a');
+  const reading = kind === 'automatic' ? card._loadAutomaticIds() : kind === 'registry' ? card._loadData() : card._analyzeImpact();
+  await new Promise(resolve => setImmediate(resolve));
+  card.hass = { ...hass, user: { id: 'admin-b', is_admin: true } };
+  wait.release(kind === 'automatic' ? {'sensor.a':'sensor.new_a','sensor.b':'sensor.new_b'} : kind === 'registry' ? [{entity_id:'sensor.private_old_session'}] : {});
+  await reading;
+  assert.equal(card._automaticLoaded, false); assert.equal(card._impactResults, null);
+  assert.equal(card._entities.some(e => e.entity_id === 'sensor.private_old_session'), false);
+});
+
+test('device removal is frozen while the confirmed transaction awaits impact', async t => {
+  const { card, hass, confirm } = fixture(t); const wait = gate(); const call = hass.callWS;
+  card._addToQueue('sensor.a', 'sensor.new_a'); card._deviceRenameQueue = {dev:'QA new device'};
+  hass.callWS = async msg => msg.type === 'search/related' ? wait.promise : call(msg);
+  const applying = confirm(); await new Promise(resolve => setImmediate(resolve));
+  card.shadowRoot.querySelector('[data-remove-dev-queue]').click();
+  const retained = card._deviceRenameQueue.dev; wait.release({}); await applying;
+  assert.equal(retained, 'QA new device');
+});
+
+test('cancelled confirmation cannot authorize a later direct apply', async t => {
+  const { card, writes } = fixture(t); card._addToQueue('sensor.a', 'sensor.new_a'); card._showRenameConfirmation();
+  card.shadowRoot.getElementById('cancelRenameDialog').click(); await card._executeRenames(true);
+  assert.equal(writes.length, 0); assert.equal(card._renameQueue.length, 1);
+});
