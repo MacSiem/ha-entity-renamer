@@ -109,3 +109,25 @@ test('cancelled confirmation cannot authorize a later direct apply', async t => 
   card.shadowRoot.getElementById('cancelRenameDialog').click(); await card._executeRenames(true);
   assert.equal(writes.length, 0); assert.equal(card._renameQueue.length, 1);
 });
+
+test('partial success retries only failed entity and device writes', async t => {
+  const { card, hass, writes, confirm } = fixture(t); const call = hass.callWS; let failing = true;
+  hass.callWS = async msg => {
+    if (failing && (msg.entity_id === 'sensor.b' || msg.device_id === 'dev') && msg.type.endsWith('/update')) throw new Error('controlled rejected write');
+    return call(msg);
+  };
+  card._addToQueue('sensor.a', 'sensor.new_a'); card._addToQueue('sensor.b', 'sensor.new_b'); card._deviceRenameQueue = {dev:'New QA'};
+  await confirm(); assert.equal(card._lastApplyResult.ok, 1); assert.equal(card._lastApplyResult.total, 3);
+  assert.deepEqual(Array.from(card._renameQueue, row=>row.oldId), ['sensor.b']); assert.equal(card._deviceRenameQueue.dev, 'New QA');
+  failing = false; await confirm(); assert.equal(card._lastApplyResult.ok, 2); assert.equal(card._lastApplyResult.total, 2);
+  assert.deepEqual(writes.map(msg=>msg.entity_id || msg.device_id), ['sensor.a','dev','sensor.b']);
+  assert.equal(card._renameQueue.length,0); assert.equal(Object.keys(card._deviceRenameQueue).length,0);
+});
+
+test('impact lookup failure retains all proposals without registry writes', async t => {
+  const {card,hass,writes,confirm}=fixture(t);const call=hass.callWS;
+  hass.callWS=async msg=>{if(msg.type==='search/related') throw new Error('controlled lookup unavailable');return call(msg);};
+  card._addToQueue('sensor.a','sensor.new_a');card._deviceRenameQueue={dev:'New QA'};
+  await confirm();assert.equal(writes.length,0);assert.equal(card._renameQueue.length,1);assert.equal(card._deviceRenameQueue.dev,'New QA');
+  assert.match(card._message.text,/no changes applied/);assert.equal(card._loading,false);
+});
