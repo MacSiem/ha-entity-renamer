@@ -577,6 +577,7 @@ class HAEntityRenamer extends HTMLElement {
     this._confirmDialogOpen = false;
     this._confirmation = null;
     this._applyOperation = null;
+    this._readEpoch = 0;
     this._lastApplyResult = null;
     this._activeTab = 'devices'; // devices | queue | log
     this._automaticRows = [];
@@ -731,6 +732,13 @@ class HAEntityRenamer extends HTMLElement {
     return a.connection === b.connection && a.userId === b.userId && a.admin === b.admin;
   }
 
+  _captureRead() {
+    const hass = this._hass;
+    const session = this._readSession(hass);
+    const epoch = this._readEpoch;
+    return { hass, current: () => epoch === this._readEpoch && this._sameReadSession(session, this._readSession()) };
+  }
+
   _sourceIdentity(entry) {
     return entry && JSON.stringify([entry.id, entry.platform, entry.unique_id, entry.device_id]);
   }
@@ -743,6 +751,8 @@ class HAEntityRenamer extends HTMLElement {
     const sessionChanged = this._hass && !this._sameReadSession(previousSession, nextSession);
     this._lastSession = nextSession;
     if (sessionChanged) {
+      this._readEpoch++;
+      if (!this._applyOperation) this._loading = false;
       if (this._applyOperation) this._applyOperation.cancelled = true;
       this._confirmation = null;
       this._confirmDialogOpen = false;
@@ -803,13 +813,15 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   async _loadData() {
+    const { hass, current } = this._captureRead();
     this._loading = true;
     this.render();
     try {
       const [devResult, entResult] = await Promise.all([
-        this._hass.callWS({ type: 'config/device_registry/list' }),
-        this._hass.callWS({ type: 'config/entity_registry/list' }),
+        hass.callWS({ type: 'config/device_registry/list' }),
+        hass.callWS({ type: 'config/entity_registry/list' }),
       ]);
+      if (!current()) return;
       this._devices = devResult.sort((a, b) =>
         (a.name_by_user || a.name || '').localeCompare(b.name_by_user || b.name || '')
       );
@@ -827,33 +839,37 @@ class HAEntityRenamer extends HTMLElement {
         this._deviceEntities[did].sort((a, b) => a.entity_id.localeCompare(b.entity_id));
       }
     } catch (e) {
+      if (!current()) return;
       this._message = { type: 'error', text: this._t.errorLoadingData + e.message };
     }
-    this._loading = false;
+    if (current()) this._loading = false;
   }
 
   async _loadAutomaticIds() {
     if (this._loading || !this._hass) return;
+    const { hass, current } = this._captureRead();
+    const entities = this._entities.map(entry => ({ ...entry }));
     this._loading = true;
     this._automaticLoaded = false;
     this._message = null;
     this.render();
     try {
-      const ids = this._entities.filter(ent => ent.device_id).map(ent => ent.entity_id);
+      const ids = entities.filter(ent => ent.device_id).map(ent => ent.entity_id);
       const mapping = {};
       for (let i = 0; i < ids.length; i += 100) {
         const batch = ids.slice(i, i + 100);
-        const result = await this._hass.callWS({ type: 'config/entity_registry/get_automatic_entity_ids', entity_ids: batch });
+        const result = await hass.callWS({ type: 'config/entity_registry/get_automatic_entity_ids', entity_ids: batch });
+        if (!current()) return;
         for (const id of batch) {
           if (!Object.prototype.hasOwnProperty.call(result, id)) throw new Error('Incomplete HA automatic ID response');
           mapping[id] = result[id];
         }
       }
-      const occupied = new Set(this._entities.map(ent => ent.entity_id));
+      const occupied = new Set(entities.map(ent => ent.entity_id));
       const seenTargets = new Set();
       const rows = [];
       const noId = [];
-      for (const ent of this._entities.filter(entry => entry.device_id)) {
+      for (const ent of entities.filter(entry => entry.device_id)) {
         const target = mapping[ent.entity_id];
         if (target === null) { noId.push(ent); continue; }
         if (!target || target === ent.entity_id) continue;
@@ -865,12 +881,12 @@ class HAEntityRenamer extends HTMLElement {
       this._automaticNull = noId;
       this._automaticLoaded = true;
     } catch (error) {
+      if (!current()) return;
       this._automaticRows = [];
       this._automaticNull = [];
       this._message = { type: 'error', text: this._formatError(error) };
     } finally {
-      this._loading = false;
-      this.render();
+      if (current()) { this._loading = false; this.render(); }
     }
   }
 
@@ -884,6 +900,8 @@ class HAEntityRenamer extends HTMLElement {
       this._renameQueue.push({ ...row, automatic: true, newName: null });
       queued.add(row.oldId);
     }
+    this._confirmation = null;
+    this._confirmDialogOpen = false;
     this._activeTab = 'queue';
     this._impactResults = null;
     this.render();
@@ -936,6 +954,7 @@ class HAEntityRenamer extends HTMLElement {
     // Allow adding if EITHER entity_id changed OR friendly_name/alias changed
     if (oldId === newId && !newName) return;
     this._confirmDialogOpen = false;
+    this._confirmation = null;
     this._lastApplyResult = null;
     if (this._renameQueue.some(r => r.oldId === oldId)) {
       this._renameQueue = this._renameQueue.map(r => r.oldId === oldId ? { ...r, newId, ...(newName !== undefined ? { newName } : {}) } : r);
@@ -949,6 +968,7 @@ class HAEntityRenamer extends HTMLElement {
   _removeFromQueue(oldId) {
     if (this._loading) return;
     this._confirmDialogOpen = false;
+    this._confirmation = null;
     this._lastApplyResult = null;
     this._renameQueue = this._renameQueue.filter(r => r.oldId !== oldId);
     this.render();
@@ -957,6 +977,7 @@ class HAEntityRenamer extends HTMLElement {
   _clearQueue() {
     if (this._loading) return;
     this._confirmDialogOpen = false;
+    this._confirmation = null;
     this._lastApplyResult = null;
     this._renameQueue = [];
     this._deviceRenameQueue = {};
@@ -983,6 +1004,8 @@ class HAEntityRenamer extends HTMLElement {
 
   async _analyzeImpact() {
     if (this._loading || !this._renameQueue.length) return;
+    const { hass, current } = this._captureRead();
+    const queue = this._renameQueue.map(row => ({ ...row }));
     this._loading = true;
     this._message = { type: 'info', text: this._t.analyzing };
     this.render();
@@ -990,8 +1013,9 @@ class HAEntityRenamer extends HTMLElement {
     const impact = {};
     // 1. Use search/related WS API for each entity (automations, scripts, scenes, areas)
     let searchResults;
-    try { searchResults = await this._loadRelatedResults(this._renameQueue); }
+    try { searchResults = await this._loadRelatedResults(queue, hass); }
     catch (error) {
+      if (!current()) return;
       this._loading = false;
       this._message = { type: 'error', text: 'Impact lookup failed: ' + this._formatError(error) };
       this.render();
@@ -999,7 +1023,7 @@ class HAEntityRenamer extends HTMLElement {
     }
 
     // Build friendly names lookup for automations/scripts
-    const hass = this._hass;
+    if (!current()) return;
     for (const { oldId, result } of searchResults) {
       const hits = { automations: [], scripts: [], dashboards: [], scenes: [] };
       // Automations
@@ -1028,9 +1052,10 @@ class HAEntityRenamer extends HTMLElement {
 
     // 2. Also scan dashboards (search/related doesn't cover lovelace)
     try {
-      const lovelaceConfig = await this._loadLovelaceConfigs();
+      const lovelaceConfig = await this._loadLovelaceConfigs(hass);
       const dashboardText = lovelaceConfig.map(dash => ({ title: dash.title || dash.url_path || 'default', text: JSON.stringify(dash.config || {}) }));
-      for (const rename of this._renameQueue) {
+      if (!current()) return;
+      for (const rename of queue) {
         if (!impact[rename.oldId]) continue;
         for (const dash of dashboardText) {
           if (dash.text.includes(rename.oldId)) {
@@ -1040,6 +1065,7 @@ class HAEntityRenamer extends HTMLElement {
       }
     } catch(e) { console.debug('[ha-entity-renamer] caught:', e); }
 
+    if (!current()) return;
     this._impactResults = impact;
     this._loading = false;
     this._message = null;
@@ -1171,16 +1197,17 @@ class HAEntityRenamer extends HTMLElement {
       && this._sameReadSession(operation.session, this._readSession()) && this._hass?.user?.is_admin === true;
     this._confirmation = null;
     this._confirmDialogOpen = false;
+    this._confirmation = null;
     this._lastApplyResult = null;
     this._loading = true;
     this._message = { type: 'info', text: this._t.analyzing2 };
     this.render();
-    let automaticFailures = new Map();
+    let automaticFailures = await this._revalidateAutomaticQueue(queue, hass);
 
     // Auto-run impact analysis before execution using search/related
     let impact = {};
     try {
-      const searchResults = await this._loadRelatedResults(queue, hass);
+      const searchResults = await this._loadRelatedResults(queue.filter(row => !automaticFailures.has(row.oldId)), hass);
       for (const { oldId, result } of searchResults) {
         const hits = { automations: [], scripts: [], dashboards: [], scenes: [] };
         if (result.automation) {
@@ -1933,6 +1960,7 @@ class HAEntityRenamer extends HTMLElement {
         const newName = (root.getElementById('deviceName') || {}).value || '';
         if (newName) {
           this._confirmDialogOpen = false;
+          this._confirmation = null;
           this._lastApplyResult = null;
           this._deviceRenameQueue[devId] = newName;
           this._message = { type: 'info', text: t.deviceAdded.replace('{name}', newName) };
@@ -1974,6 +2002,8 @@ class HAEntityRenamer extends HTMLElement {
     root.querySelectorAll('[data-remove-dev-queue]').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (this._loading) return;
+        this._confirmation = null;
         this._confirmDialogOpen = false;
         this._lastApplyResult = null;
         delete this._deviceRenameQueue[btn.dataset.removeDevQueue];
@@ -2001,6 +2031,7 @@ class HAEntityRenamer extends HTMLElement {
     const cancelRenameDialog = root.getElementById('cancelRenameDialog');
     if (cancelRenameDialog) {
       cancelRenameDialog.addEventListener('click', () => {
+        this._confirmation = null;
         this._confirmDialogOpen = false;
         this.render();
       });
@@ -2021,6 +2052,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this._readEpoch++;
     if (this._applyOperation) this._applyOperation.cancelled = true;
     this._confirmation = null;
     this._confirmDialogOpen = false;
