@@ -131,3 +131,15 @@ test('impact lookup failure retains all proposals without registry writes', asyn
   await confirm();assert.equal(writes.length,0);assert.equal(card._renameQueue.length,1);assert.equal(card._deviceRenameQueue.dev,'New QA');
   assert.match(card._message.text,/no changes applied/);assert.equal(card._loading,false);
 });
+
+test('failed ID writes do not claim readable references need updating', async t => {
+  const {card,hass,confirm}=fixture(t);const call=hass.callWS;
+  hass.callWS=async msg=>{
+    if(msg.type==='search/related')return {automation:['automation.qa_reference']};
+    if(msg.type.endsWith('/update'))throw new Error('Invalid entity ID');
+    return call(msg);
+  };
+  card._addToQueue('sensor.a','sensor.invalid id');await confirm();
+  assert.doesNotMatch(card._message.text,/places require update/);
+  assert.equal(card._renameQueue.length,1);
+});
