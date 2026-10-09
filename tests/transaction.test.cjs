@@ -61,6 +61,20 @@ test('inline editor closes when the authenticated session changes', t => {
   assert.equal(card.shadowRoot.getElementById('queueEntityEdit'),null); assert.equal(card._renameQueue.length,0); assert.equal(writes.length,0);
 });
 
+test('apply action counts device-only and mixed queues accurately', t => {
+  const {card}=fixture(t); card._deviceRenameQueue={dev:'New QA'}; card.setActiveTab('queue');
+  assert.match(card.shadowRoot.getElementById('executeRenames').textContent, /\(1\)/);
+  card._addToQueue('sensor.a','sensor.new_a');
+  assert.match(card.shadowRoot.getElementById('executeRenames').textContent, /\(2\)/);
+});
+
+test('Polish friendly-only queue describes the unchanged ID in Polish', t => {
+  const {card,hass}=fixture(t); card.hass={...hass,language:'pl'};
+  card._addToQueue('sensor.a','sensor.a','QA nazwa'); card.setActiveTab('queue');
+  assert.doesNotMatch(card.shadowRoot.querySelector('.queue-list').textContent,/no entity_id change/);
+  assert.match(card.shadowRoot.querySelector('.queue-list').textContent,/Bez zmiany entity_id/);
+});
+
 test('ID and friendly name are one registry transaction, failed item retries safely', async t => {
   const { card, hass, writes, confirm } = fixture(t);
   const call = hass.callWS; let fail = true;
