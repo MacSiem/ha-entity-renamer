@@ -25,6 +25,42 @@ function fixture(t) {
 }
 function gate() { let release; const promise = new Promise(resolve => { release = resolve; }); return { promise, release }; }
 
+function openEntityEditor(card) {
+  card._expandedDevices.add('dev'); card.render();
+  card.shadowRoot.querySelector('[data-add-single="sensor.a"]').click();
+  assert.ok(card.shadowRoot.getElementById('entityEditObjectId'), 'manual ID field is available without a browser prompt');
+}
+
+test('inline manual editor queues literal ID and name, then one confirmed transaction', async t => {
+  const { card, writes } = fixture(t); openEntityEditor(card);
+  card.shadowRoot.getElementById('entityEditObjectId').value = 'qa_changed';
+  card.shadowRoot.getElementById('entityEditName').value = '<img src=x onerror=alert(1)> QA';
+  card.shadowRoot.getElementById('queueEntityEdit').click();
+  assert.equal(writes.length, 0); assert.equal(card._renameQueue.length, 1);
+  card._showRenameConfirmation();
+  assert.match(card.shadowRoot.querySelector('.confirm-dialog').textContent, /<img src=x onerror=alert\(1\)> QA/);
+  assert.equal(card.shadowRoot.querySelector('.confirm-dialog img'), null);
+  await card._executeRenames(true);
+  assert.equal(writes.length, 1); assert.equal(writes[0].new_entity_id, 'sensor.qa_changed');
+  assert.equal(writes[0].name, '<img src=x onerror=alert(1)> QA');
+});
+
+test('inline editor preserves draft and keyboard focus across locale change, cancel writes nothing', t => {
+  const {card,hass,writes}=fixture(t); openEntityEditor(card);
+  const field=card.shadowRoot.getElementById('entityEditName'); field.value='Draft QA'; field.focus(); field.setSelectionRange(2,5);
+  card.hass={...hass,language:'pl'};
+  assert.equal(card.shadowRoot.getElementById('entityEditName').value,'Draft QA');
+  assert.equal(card.shadowRoot.activeElement.id,'entityEditName'); assert.equal(card.shadowRoot.activeElement.selectionStart,2);
+  card.shadowRoot.getElementById('cancelEntityEdit').click();
+  assert.equal(card.shadowRoot.getElementById('entityEditName'),null); assert.equal(card._renameQueue.length,0); assert.equal(writes.length,0);
+});
+
+test('inline editor closes when the authenticated session changes', t => {
+  const {card,hass,writes}=fixture(t); openEntityEditor(card);
+  card.hass={...hass,user:{id:'admin-b',is_admin:true}};
+  assert.equal(card.shadowRoot.getElementById('queueEntityEdit'),null); assert.equal(card._renameQueue.length,0); assert.equal(writes.length,0);
+});
+
 test('ID and friendly name are one registry transaction, failed item retries safely', async t => {
   const { card, hass, writes, confirm } = fixture(t);
   const call = hass.callWS; let fail = true;
