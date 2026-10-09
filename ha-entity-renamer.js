@@ -576,6 +576,7 @@ class HAEntityRenamer extends HTMLElement {
     this._message = null;
     this._confirmDialogOpen = false;
     this._confirmation = null;
+    this._entityEditor = null;
     this._applyOperation = null;
     this._readEpoch = 0;
     this._lastApplyResult = null;
@@ -636,6 +637,7 @@ class HAEntityRenamer extends HTMLElement {
         analyzing: 'Analizuję wpływ zmian...',
         analyzing2: 'Analizuję wpływ i zmieniam nazwy...',
         renameSuccess: 'Zmieniono {ok} encji{devCount}{fail}{impact}. Sprawdź powiązania zmienionych encji.',
+        editEntity: 'Zmień encję', queueEdit: 'Dodaj do kolejki',
         newEntity: 'Nowy entity_id (object_id) – zostaw bez zmian jeśli chcesz zmienić tylko friendly name:',
         newFriendly: 'Nowy friendly name (zostaw puste = bez zmian):',
         confirmRename: 'Czy na pewno chcesz zmienić nazwy {count} encji? Ta operacja jest nieodwracalna.',
@@ -685,6 +687,7 @@ class HAEntityRenamer extends HTMLElement {
         analyzing: 'Analyzing impact...',
         analyzing2: 'Analyzing impact and changing names...',
         renameSuccess: 'Renamed {ok} entities{devCount}{fail}{impact}. Review any affected references.',
+        editEntity: 'Edit entity', queueEdit: 'Add to queue',
         newEntity: 'New entity_id (object_id) – leave unchanged if you only want to change the friendly name:',
         newFriendly: 'New friendly name (leave empty = no change):',
         confirmRename: 'Are you sure you want to rename {count} entities? This operation is irreversible.',
@@ -755,6 +758,7 @@ class HAEntityRenamer extends HTMLElement {
       if (!this._applyOperation) this._loading = false;
       if (this._applyOperation) this._applyOperation.cancelled = true;
       this._confirmation = null;
+      this._entityEditor = null;
       this._confirmDialogOpen = false;
       this._automaticLoaded = false;
       this._automaticRows = [];
@@ -1665,6 +1669,7 @@ class HAEntityRenamer extends HTMLElement {
       ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${_esc(this._message.text || '')}</div>` : ''}
       ${this._renderApplyResult()}
       ${this._confirmDialogOpen ? this._renderRenameConfirmation() : ''}
+      ${this._renderEntityEditor()}
 
       <div class="tabs">
         <button class="tab-button ${this._activeTab === 'devices' ? 'active' : ''}" data-tab="devices">📱 ${t.devices}</button>
@@ -1686,6 +1691,35 @@ class HAEntityRenamer extends HTMLElement {
   }
 
 
+
+  _showEntityEditor(oldId) {
+    if (this._loading || this._hass?.user?.is_admin !== true) return;
+    const entity = this._entities.find(e => e.entity_id === oldId);
+    if (!entity) return;
+    const objectId = oldId.split('.')[1] || '';
+    const currentName = entity.name || entity.original_name || '';
+    this._entityEditor = { oldId, objectId, currentName, objectIdDraft: objectId, nameDraft: currentName };
+    this.render();
+    this.shadowRoot.getElementById('entityEditObjectId')?.focus();
+  }
+
+  _renderEntityEditor() {
+    if (!this._entityEditor) return '';
+    const t = this._t;
+    const draft = this._entityEditor;
+    return `<form id="entityEditForm" aria-labelledby="entityEditHeading" style="margin:16px 0;padding:16px;border:1px solid var(--bento-border,var(--divider-color,#ddd));border-radius:12px;min-width:0;">
+      <h2 id="entityEditHeading" style="font-size:16px;margin:0 0 8px;">${t.editEntity}</h2>
+      <p style="overflow-wrap:anywhere;margin:0 0 12px;">${_esc(draft.oldId)}</p>
+      <label for="entityEditObjectId" style="display:block;">${t.newEntity}</label>
+      <input id="entityEditObjectId" type="text" value="${_esc(draft.objectIdDraft)}" style="display:block;width:100%;min-width:0;box-sizing:border-box;margin:6px 0 12px;" ${this._loading ? 'disabled' : ''}>
+      <label for="entityEditName" style="display:block;">${t.newFriendly}</label>
+      <input id="entityEditName" type="text" value="${_esc(draft.nameDraft)}" style="display:block;width:100%;min-width:0;box-sizing:border-box;margin:6px 0 12px;" ${this._loading ? 'disabled' : ''}>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;">
+        <button id="queueEntityEdit" type="submit" class="btn btn-primary" ${this._loading ? 'disabled' : ''}>${t.queueEdit}</button>
+        <button id="cancelEntityEdit" type="button" class="btn btn-outline">${t.cancel}</button>
+      </div>
+    </form>`;
+  }
 
   _renderRenameConfirmation() {
     // render() calls this whenever _confirmDialogOpen is true (Apply Changes).
@@ -1971,26 +2005,35 @@ class HAEntityRenamer extends HTMLElement {
       });
     }
 
-    // Add single entity to queue (prompt for new entity_id and optional friendly name)
+    // Stage manual changes in the card; registry writes still require confirmation.
     root.querySelectorAll('[data-add-single]').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const oldId = btn.dataset.addSingle;
-        const domain = oldId.split('.')[0];
-        const objId = oldId.split('.')[1] || '';
-        const ent = this._entities.find(en => en.entity_id === oldId);
-        const currentName = ent ? (ent.name || ent.original_name || '') : '';
-        const newObjId = prompt(t.newEntity, objId);
-        if (newObjId === null) return; // cancelled
-        const newFriendly = prompt(t.newFriendly, currentName);
-        if (newFriendly === null) return; // cancelled
-        const newId = domain + '.' + (newObjId || objId);
-        const nameToSet = (newFriendly && newFriendly !== currentName) ? newFriendly : null;
-        if (newId !== oldId || nameToSet) {
-          this._addToQueue(oldId, newId, nameToSet);
-        }
+        this._showEntityEditor(btn.dataset.addSingle);
       });
     });
+    const editor = root.getElementById('entityEditForm');
+    if (editor) {
+      editor.addEventListener('submit', e => {
+        e.preventDefault();
+        if (this._loading || !this._entityEditor) return;
+        const { oldId, objectId, currentName } = this._entityEditor;
+        const newObjectId = root.getElementById('entityEditObjectId').value || objectId;
+        const name = root.getElementById('entityEditName').value;
+        this._entityEditor = null;
+        this._addToQueue(oldId, oldId.split('.')[0] + '.' + newObjectId, name && name !== currentName ? name : null);
+        this.render();
+      });
+      root.getElementById('cancelEntityEdit').addEventListener('click', () => {
+        this._entityEditor = null; this.render();
+      });
+      for (const [id, key] of [['entityEditObjectId','objectIdDraft'], ['entityEditName','nameDraft']]) {
+        root.getElementById(id).addEventListener('input', e => { if (this._entityEditor) this._entityEditor[key] = e.target.value; });
+      }
+      editor.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { e.preventDefault(); this._entityEditor = null; this.render(); }
+      });
+    }
 
     // Remove from queue
     root.querySelectorAll('[data-remove-queue]').forEach(btn => {
@@ -2054,6 +2097,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this._entityEditor = null;
     this._readEpoch++;
     if (this._applyOperation) this._applyOperation.cancelled = true;
     this._confirmation = null;

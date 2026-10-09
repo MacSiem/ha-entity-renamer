@@ -15,7 +15,8 @@ references visible through Home Assistant's APIs.
    (`config/entity_registry/list`), groups entities under their parent
    device, and lets you search across both.
 2. **Queue renames without touching anything yet.** Expand a device to add an
-   entity to the queue with a new `entity_id` and/or a new friendly name,
+   entity to the queue with a new `entity_id` and/or a new friendly name
+   using the inline form (**Add to queue** or **Cancel**, Enter or Escape),
    rename the device's display name, or use **Change prefix** to bulk-rename
    every entity under a device that shares a common `object_id` prefix (e.g.
    `sensor.old_*` → `sensor.new_*`).
