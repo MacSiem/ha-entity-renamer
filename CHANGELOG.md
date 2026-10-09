@@ -2,6 +2,8 @@
 
 ## 4.2.11 (2026-10-09)
 
+- Keep friendly names, unchanged-ID labels and blue badges readable in both Home Assistant light and dark themes.
+
 - Count both device and entity proposals in the apply action, translate friendly-only queue labels, and give long target IDs their own row above the friendly name.
 - Edit individual IDs and friendly names in an inline, labelled form with keyboard submit/cancel; preserve drafts across language changes and close them when the session changes. Registry writes still require confirmation.
 

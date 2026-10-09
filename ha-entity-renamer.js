@@ -1494,7 +1494,7 @@ class HAEntityRenamer extends HTMLElement {
       .rename-preview-new { color: #86EFAC; }
       .rename-preview-arrow { color: var(--bento-text-secondary, #94A3B8); }
       .rename-preview-detail {
-        grid-column: 1 / -1; color: #93C5FD; font-family: inherit; font-size: 10px;
+        grid-column: 1 / -1; color: var(--bento-text, var(--primary-text-color, #E2E8F0)); font-family: inherit; font-size: 10px;
       }
       .rename-preview-more, .rename-preview-empty {
         padding: 10px; color: var(--bento-text-secondary, #94A3B8);
@@ -1567,7 +1567,7 @@ class HAEntityRenamer extends HTMLElement {
       }
       .entity-id { flex: 1; font-family: 'JetBrains Mono', 'Fira Code', monospace; color: var(--bento-text-secondary, #94A3B8); word-break: break-all; }
       .entity-name { flex: 1; min-width: 120px; }
-      .entity-domain { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.12); color: #93C5FD; }
+      .entity-domain { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.12); color: var(--bento-text, var(--primary-text-color, #E2E8F0)); }
 
       .btn {
         padding: 8px 16px; border: none; border-radius: 8px; cursor: pointer;
@@ -1608,7 +1608,7 @@ class HAEntityRenamer extends HTMLElement {
       .impact-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; margin: 1px; }
       .impact-badge.automation { background: rgba(168,85,247,0.15); color: #C084FC; }
       .impact-badge.script { background: rgba(245,158,11,0.15); color: #FCD34D; }
-      .impact-badge.dashboard { background: rgba(59,130,246,0.15); color: #93C5FD; }
+      .impact-badge.dashboard { background: rgba(59,130,246,0.15); color: var(--bento-text, var(--primary-text-color, #E2E8F0)); }
       .impact-badge.scene { background: rgba(16,185,129,0.15); color: #6EE7B7; }
       .queue-actions { display: flex; gap: 8px; margin-bottom: 12px; justify-content: flex-end; }
 
@@ -1890,9 +1890,9 @@ class HAEntityRenamer extends HTMLElement {
               </div>
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 <span style="color:var(--bento-text-secondary,#94A3B8);">→</span>
-                <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? _esc(r.newId) : '<span style="opacity:0.4">' + t.noIdChange + '</span>'}</span>
+                <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? _esc(r.newId) : '<span>' + t.noIdChange + '</span>'}</span>
               </div>
-              ${r.newName ? '<div style="margin:6px 0 0 24px;min-width:0;overflow-wrap:anywhere;font-size:11px;color:#93C5FD;">📝 ' + _esc(r.newName) + '</div>' : ''}
+              ${r.newName ? '<div style="margin:6px 0 0 24px;min-width:0;overflow-wrap:anywhere;font-size:11px;color:var(--bento-text, var(--primary-text-color, #E2E8F0));">📝 ' + _esc(r.newName) + '</div>' : ''}
               ${hasImpact ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05);">
                 <span style="font-size:10px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
                 ${imp.automations.map(a => '<span class="impact-badge automation">⚙ ' + _esc(a) + '</span>').join('')}
