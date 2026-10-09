@@ -41,6 +41,7 @@ test('automatic ID preview separates null and collision, queues safe rows, rejec
     currentTarget = 'sensor.changed';
     const failures = await card._revalidateAutomaticQueue();
     assert.match(failures.get('sensor.a'), /changed since preview/);
+    card._showRenameConfirmation();
     await card._executeRenames(true);
     assert.equal(card._renameQueue.length, 1);
     assert.equal(card._renameLog[0].status, 'error');
