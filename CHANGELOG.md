@@ -2,6 +2,7 @@
 
 ## 4.2.11 (2026-10-09)
 
+- Count both device and entity proposals in the apply action, translate friendly-only queue labels, and give long target IDs their own row above the friendly name.
 - Edit individual IDs and friendly names in an inline, labelled form with keyboard submit/cancel; preserve drafts across language changes and close them when the session changes. Registry writes still require confirmation.
 
 - Translate the first-run introduction, its dismiss action and all queue removal accessible names per card in Polish and English, including ordinary language changes.

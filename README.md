@@ -119,8 +119,8 @@ follow that integration's instructions if it needs a reload.
 **Does this send data anywhere?**
 No. Everything runs locally in your browser against your Home Assistant
 instance — no telemetry, no analytics, no CDN-hosted assets. The only
-external links in the card are the optional Buy Me a Coffee / PayPal support
-buttons, which only load anything if you click them.
+external link in the card is the optional Buy Me a Coffee support link,
+which only loads anything if you click it.
 
 ## Changelog
 

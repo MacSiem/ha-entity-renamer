@@ -637,7 +637,7 @@ class HAEntityRenamer extends HTMLElement {
         analyzing: 'Analizuję wpływ zmian...',
         analyzing2: 'Analizuję wpływ i zmieniam nazwy...',
         renameSuccess: 'Zmieniono {ok} encji{devCount}{fail}{impact}. Sprawdź powiązania zmienionych encji.',
-        editEntity: 'Zmień encję', queueEdit: 'Dodaj do kolejki',
+        editEntity: 'Zmień encję', queueEdit: 'Dodaj do kolejki', noIdChange: 'Bez zmiany entity_id',
         newEntity: 'Nowy entity_id (object_id) – zostaw bez zmian jeśli chcesz zmienić tylko friendly name:',
         newFriendly: 'Nowy friendly name (zostaw puste = bez zmian):',
         confirmRename: 'Czy na pewno chcesz zmienić nazwy {count} encji? Ta operacja jest nieodwracalna.',
@@ -687,7 +687,7 @@ class HAEntityRenamer extends HTMLElement {
         analyzing: 'Analyzing impact...',
         analyzing2: 'Analyzing impact and changing names...',
         renameSuccess: 'Renamed {ok} entities{devCount}{fail}{impact}. Review any affected references.',
-        editEntity: 'Edit entity', queueEdit: 'Add to queue',
+        editEntity: 'Edit entity', queueEdit: 'Add to queue', noIdChange: 'No entity_id change',
         newEntity: 'New entity_id (object_id) – leave unchanged if you only want to change the friendly name:',
         newFriendly: 'New friendly name (leave empty = no change):',
         confirmRename: 'Are you sure you want to rename {count} entities? This operation is irreversible.',
@@ -1869,7 +1869,7 @@ class HAEntityRenamer extends HTMLElement {
       <div class="queue-actions">
         <button class="btn btn-outline" id="clearQueue" ${this._loading ? 'disabled' : ''}>🗑️ ${t.clear}</button>
         <button class="btn btn-outline" id="analyzeImpact" ${this._loading ? 'disabled' : ''}>🔍 ${t.analyzeImpact}</button>
-        <button class="btn btn-danger" id="executeRenames" ${this._loading || this._hass?.user?.is_admin !== true ? 'disabled' : ''} ${this._loading ? 'aria-busy="true"' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length})</button>
+        <button class="btn btn-danger" id="executeRenames" ${this._loading || this._hass?.user?.is_admin !== true ? 'disabled' : ''} ${this._loading ? 'aria-busy="true"' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length + devEntries.length})</button>
         ${this._hass?.user?.is_admin !== true ? `<span>${t.adminRequired}</span>` : ''}
       </div>
       ${devEntries.length ? `<div style="margin-bottom:12px;padding:10px 14px;border-radius:8px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.2);">
@@ -1890,9 +1890,9 @@ class HAEntityRenamer extends HTMLElement {
               </div>
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 <span style="color:var(--bento-text-secondary,#94A3B8);">→</span>
-                <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? _esc(r.newId) : '<span style="opacity:0.4">no entity_id change</span>'}</span>
-                ${r.newName ? '<span style="min-width:0;overflow-wrap:anywhere;font-size:11px;color:#93C5FD;">📝 ' + _esc(r.newName) + '</span>' : ''}
+                <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? _esc(r.newId) : '<span style="opacity:0.4">' + t.noIdChange + '</span>'}</span>
               </div>
+              ${r.newName ? '<div style="margin:6px 0 0 24px;min-width:0;overflow-wrap:anywhere;font-size:11px;color:#93C5FD;">📝 ' + _esc(r.newName) + '</div>' : ''}
               ${hasImpact ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05);">
                 <span style="font-size:10px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
                 ${imp.automations.map(a => '<span class="impact-badge automation">⚙ ' + _esc(a) + '</span>').join('')}
