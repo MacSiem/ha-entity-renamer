@@ -35,10 +35,9 @@ jobs:
             fi
           done
           echo "a11y check done"
-      - name: HTML escaping regression
-        run: node tests/html-escaping.test.cjs
-      - name: Runtime smoke (jsdom render)
+      - name: Install test dependencies
+        run: npm ci
+      - name: Runtime and HTML security regressions
         run: |
-          npm ci >/dev/null 2>&1
           node --test tests/*.test.cjs
           node .github/smoke.cjs
