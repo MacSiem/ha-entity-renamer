@@ -1,5 +1,9 @@
 # Changelog
 
+## 4.2.12 (2026-10-11)
+
+- Cancel pending rename confirmation with Escape without changing entities or discarding proposals. Focus starts on Cancel, stays on the confirmation actions with Tab, and returns to Apply Changes after cancellation.
+
 ## 4.2.11 (2026-10-09)
 
 - Keep friendly names, unchanged-ID labels and blue badges readable in both Home Assistant light and dark themes.

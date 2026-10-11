@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v4.2.11 (2026-09-29) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v4.2.12 (2026-10-11) — single-tool standalone repo */
 (function() {
 'use strict';
 
@@ -1175,6 +1175,14 @@ class HAEntityRenamer extends HTMLElement {
     this._lastApplyResult = null;
     this._activeTab = 'queue';
     this.render();
+    this.shadowRoot.getElementById('cancelRenameDialog')?.focus();
+  }
+
+  _cancelRenameConfirmation() {
+    this._confirmation = null;
+    this._confirmDialogOpen = false;
+    this.render();
+    this.shadowRoot.getElementById('executeRenames')?.focus();
   }
 
   async _executeRenames(confirmed = false) {
@@ -1746,8 +1754,8 @@ class HAEntityRenamer extends HTMLElement {
         <div style="${rowStyle}"><span>&#128295;</span><span>${_esc(this._getDeviceName(this._devices.find(d => d.id === id) || { id }))} → ${_esc(String(name))}</span></div>`).join('');
     const fill = (s, n) => _esc(String(s || '').replace('{count}', n));
     return `
-      <div class="confirm-dialog" style="border:1px solid var(--bento-primary,#3B82F6);border-radius:var(--bento-radius-md,14px);background:var(--bento-card,#fff);padding:16px 18px;margin:12px 0;box-shadow:var(--bento-shadow-md)">
-        <div style="font-weight:700;font-size:14px;margin-bottom:6px">&#9888;&#65039; ${_esc(t.confirmRenameTitle)}</div>
+      <div class="confirm-dialog" role="dialog" aria-labelledby="renameConfirmTitle" style="border:1px solid var(--bento-primary,#3B82F6);border-radius:var(--bento-radius-md,14px);background:var(--bento-card,#fff);padding:16px 18px;margin:12px 0;box-shadow:var(--bento-shadow-md)">
+        <div id="renameConfirmTitle" style="font-weight:700;font-size:14px;margin-bottom:6px">&#9888;&#65039; ${_esc(t.confirmRenameTitle)}</div>
         <div style="font-size:12.5px;${sub};margin-bottom:10px">${_esc(t.confirmRenameBody)}</div>
         <div style="font-size:12.5px;font-weight:600;margin-bottom:4px">${fill(t.confirmRenameCount, idChanges.length)}</div>
         ${idChanges.length ? rows : `<div style="font-size:12.5px;${sub}">${_esc(t.confirmNoEntityChanges)}</div>`}
@@ -2075,12 +2083,20 @@ class HAEntityRenamer extends HTMLElement {
 
     const cancelRenameDialog = root.getElementById('cancelRenameDialog');
     if (cancelRenameDialog) {
-      cancelRenameDialog.addEventListener('click', () => {
-        this._confirmation = null;
-        this._confirmDialogOpen = false;
-        this.render();
-      });
+      cancelRenameDialog.addEventListener('click', () => this._cancelRenameConfirmation());
     }
+
+    root.querySelector('.confirm-dialog')?.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {
+        e.preventDefault(); e.stopPropagation();
+        this._cancelRenameConfirmation();
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+        const cancel = root.getElementById('cancelRenameDialog');
+        const apply = root.getElementById('confirmRenameApply');
+        (root.activeElement === cancel ? apply : cancel)?.focus();
+      }
+    });
 
     const confirmRenameApply = root.getElementById('confirmRenameApply');
     if (confirmRenameApply) {
