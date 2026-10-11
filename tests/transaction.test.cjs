@@ -193,3 +193,31 @@ test('failed ID writes do not claim readable references need updating', async t 
   assert.doesNotMatch(card._message.text,/places require (update|review)/);
   assert.equal(card._renameQueue.length,1);
 });
+
+// Missing keyboard cancellation must never authorize registry writes.
+test('Escape cancels confirmation, retains the proposal and cannot authorize apply', async t => {
+  const { card, writes, dom } = fixture(t);
+  card._addToQueue('sensor.a', 'sensor.new_a'); card.setActiveTab('queue');
+  card.shadowRoot.getElementById('executeRenames').click();
+  card.shadowRoot.getElementById('cancelRenameDialog').dispatchEvent(new dom.window.KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true}));
+  assert.equal(card.shadowRoot.querySelector('.confirm-dialog'), null, 'Escape closes the visible confirmation');
+  assert.equal(card._renameQueue.length, 1, 'cancellation keeps the local proposal');
+  await card._executeRenames(true); assert.equal(writes.length, 0, 'cancelled confirmation cannot authorize direct apply');
+});
+test('confirmation defaults to Cancel and returns focus to Apply after cancellation', t => {
+  const { card, dom } = fixture(t);
+  card._addToQueue('sensor.a', 'sensor.new_a'); card.setActiveTab('queue');
+  const trigger=card.shadowRoot.getElementById('executeRenames'); trigger.focus(); trigger.click();
+  assert.equal(card.shadowRoot.activeElement.id, 'cancelRenameDialog');
+  card.shadowRoot.getElementById('cancelRenameDialog').click();
+  assert.equal(card.shadowRoot.activeElement.id, 'executeRenames');
+});
+test('confirmation keyboard stays on its two actions while the proposal is pending', t => {
+  const { card, dom, writes } = fixture(t);
+  card._addToQueue('sensor.a', 'sensor.new_a'); card.setActiveTab('queue'); card._showRenameConfirmation();
+  const cancel=card.shadowRoot.getElementById('cancelRenameDialog'); cancel.focus();
+  cancel.dispatchEvent(new dom.window.KeyboardEvent('keydown', {key:'Tab',shiftKey:true,bubbles:true,cancelable:true}));
+  assert.equal(card.shadowRoot.activeElement.id,'confirmRenameApply');
+  card.shadowRoot.getElementById('confirmRenameApply').dispatchEvent(new dom.window.KeyboardEvent('keydown', {key:'Tab',bubbles:true,cancelable:true}));
+  assert.equal(card.shadowRoot.activeElement.id,'cancelRenameDialog'); assert.equal(writes.length,0);
+});
