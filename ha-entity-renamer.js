@@ -346,7 +346,7 @@ function createExportDialog(options) {
 }
 // END HA TOOLS EXPORT V3
 
-// BEGIN HA RENAMER REPORTS V1 source-sha256=39c02e34a3f76354cc7c803e00f9b524dde870451cce42c7c5d2621fb5a94f35
+// BEGIN HA RENAMER REPORTS V1 source-sha256=19fba84883d01bc6db5c09acbe6b407e7c6bfee69e6ecaf2f3a4b4d8cb622f73
 // Reviewed completed-history projection. Never serialize arbitrary log/state/config.
 function createRenameReports() {
   const entityId = value => typeof value === 'string' && value.length <= 255 && /^[a-z][a-z0-9_]*\.[a-z0-9_]+$/.test(value) ? value : null;
@@ -370,10 +370,11 @@ function createRenameReports() {
       if (!entry || typeof entry !== 'object' || !['ok', 'error'].includes(entry.status)
         || typeof entry.oldId !== 'string' || typeof entry.newId !== 'string') { omitted++; continue; }
       const old = entityId(entry.oldId), next = entityId(entry.targetEntityId) || entityId(entry.newId);
-      const phase = ['not_started', 'attempted', 'acknowledged'].includes(entry.writePhase) ? entry.writePhase : null;
+      const phase = ['not_started', 'attempted', 'acknowledged', 'readback_confirmed'].includes(entry.writePhase) ? entry.writePhase : null;
       // ACK is never a readback. Legacy error text cannot prove rejection before a write.
-      const status = entry.status === 'error' && phase === 'not_started' ? 'failed' : 'unknown';
-      const reason = status === 'failed' ? 'preflight_rejected' : entry.status === 'ok' ? 'ack_without_readback' : phase === 'attempted' ? 'write_outcome_unconfirmed' : 'legacy_error_without_phase';
+      const verified = entry.status === 'ok' && phase === 'readback_confirmed' && entry.verification === 'independent_registry_list_exact_fields';
+      const status = verified ? 'applied' : entry.status === 'error' && phase === 'not_started' ? 'failed' : 'unknown';
+      const reason = verified ? 'registry_readback_confirmed' : status === 'failed' ? 'preflight_rejected' : entry.status === 'ok' ? 'ack_without_readback' : phase === 'attempted' ? 'write_outcome_unconfirmed' : 'legacy_error_without_phase';
       const references = Object.fromEntries(referenceTypes.map(type => [type, Array.isArray(entry.impact?.[type]) ? entry.impact[type].length : null]));
       const hasKnownReferences = Object.values(references).some(count => typeof count === 'number' && count > 0);
       rows.push({index: rows.length + 1, timestamp: timestamp(entry), timestampScope: typeof entry.completedAt === 'string' && timestamp(entry) === entry.completedAt ? 'utc_completion' : timestamp(entry) ? 'local_time_date_unknown' : 'unknown',
@@ -389,16 +390,16 @@ function createRenameReports() {
     const {rows, omitted} = snapshot(log, includePrivate), pl = language === 'pl';
     if (!rows.length) return {serialized: '', status: 'no_data', confirmed: true, sourceConfirmed: true};
     const limits = pl
-      ? 'Tylko ukończone wpisy lokalnej historii. ACK nie potwierdza odczytu po zapisie: applied=0. Starsze błędy bez fazy zapisu są unknown. Pochodzenie konta, pełna data starszych wpisów i kompletność odwołań nie są potwierdzone. Liczby obejmują tylko zapisane trafienia z search/related i czytelnych dashboardów Lovelace; null oznacza brak danych, 0 zapisany brak trafień. Eksport nie wykonuje odczytów ani zmian HA.'
-      : 'Completed entries in local history only. ACK has no registry readback: applied=0. Legacy errors without a write phase are unknown. Account origin, full dates of legacy entries and reference completeness are unconfirmed. Counts cover recorded search/related and readable Lovelace hits only; null means unavailable, 0 recorded no hits. Export performs no HA reads or changes.';
+      ? 'Tylko ukończone wpisy lokalnej historii. ACK nie potwierdza zmiany. Applied wymaga zapisanego, niezależnego odczytu rejestru ze zgodną stałą tożsamością i wszystkimi żądanymi polami. Starsze błędy bez fazy zapisu są unknown. Pochodzenie konta, pełna data starszych wpisów i kompletność odwołań nie są potwierdzone. Liczby obejmują tylko zapisane trafienia z search/related i czytelnych dashboardów Lovelace; null oznacza brak danych, 0 zapisany brak trafień. Eksport nie wykonuje odczytów ani zmian HA.'
+      : 'Completed entries in local history only. ACK alone does not confirm a change. Applied requires recorded independent registry readback with matching stable identity and all requested fields. Legacy errors without a write phase are unknown. Account origin, full dates of legacy entries and reference completeness are unconfirmed. Counts cover recorded search/related and readable Lovelace hits only; null means unavailable, 0 recorded no hits. Export performs no HA reads or changes.';
     const instructions = pl
       ? 'Dla unknown sprawdź aktualny rejestr przed kolejną zmianą. Dla zapisanych trafień po potwierdzeniu zmiany ID ręcznie sprawdź automatyzacje, skrypty, sceny i dashboardy w HA; popraw stare odwołania i przetestuj. Failed dotyczy wyłącznie odrzuconej próby przed zapisem. Raport nie uruchamia naprawy, undo ani kolejnej zmiany nazw.'
       : 'For unknown, verify the current registry before another change. For recorded hits, after confirming an ID change manually inspect automations, scripts, scenes and dashboards in HA, update old references and test. Failed covers only rejection before a write. This report performs no repair, undo or repeat rename.';
     const included = [pl ? 'Liczby applied/failed/unknown, bezpieczny czas/status/powód, liczby znanych odwołań i ręczne kroki.' : 'Applied/failed/unknown counts, reviewed time/status/reason, known reference counts and manual steps.',
       includePrivate ? (pl ? 'Tylko ścisłe identyfikatory old/new entity_id; pozostałe identyfikatory jako null.' : 'Strict old/new entity_id only; other identifiers are null.') : (pl ? 'Powiązane pseudonimy old → new; bez prawdziwych ID.' : 'Paired old → new pseudonyms; no real IDs.')];
     const excluded = [pl ? 'Tokeny, użytkownicy, adresy, nazwy, surowe błędy/wiadomości, konfiguracja, YAML i szablony.' : 'Tokens, users, addresses, names, raw errors/messages, configuration, YAML and templates.', pl ? 'Propozycje w kolejce, niepotwierdzony sukces i automatyczne naprawy.' : 'Queued proposals, unconfirmed success and automatic repairs.'];
-    const report = {schema: 'ha-entity-renamer.completed-history.v1', status: 'partial', source: 'native_completed_local_history', method: 'recorded_registry_attempts_without_readback',
-      privateIds: includePrivate === true, counts: {total: rows.length, applied: 0, failed: rows.filter(row => row.status === 'failed').length, unknown: rows.filter(row => row.status === 'unknown').length, omitted}, included, excluded, limits, instructions, rows};
+    const report = {schema: 'ha-entity-renamer.completed-history.v1', status: 'partial', source: 'native_completed_local_history', method: 'recorded_registry_attempts_with_optional_verified_readback',
+      privateIds: includePrivate === true, counts: {total: rows.length, applied: rows.filter(row => row.status === 'applied').length, failed: rows.filter(row => row.status === 'failed').length, unknown: rows.filter(row => row.status === 'unknown').length, omitted}, included, excluded, limits, instructions, rows};
     let serialized;
     if (format === 'json') serialized = JSON.stringify(report, null, 2) + '\n';
     else if (format === 'csv') {
