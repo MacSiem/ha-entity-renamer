@@ -15,8 +15,8 @@
       "transform": "remove ESM export keyword only"
     },
     "shared/ha-renamer-reports.js": {
-      "sourceSha256": "39c02e34a3f76354cc7c803e00f9b524dde870451cce42c7c5d2621fb5a94f35",
-      "runtimeSha256": "c4c216604db29bb0f36cff89a40ad173d7863db48ec5cbc242367769c6e15a70",
+      "sourceSha256": "19fba84883d01bc6db5c09acbe6b407e7c6bfee69e6ecaf2f3a4b4d8cb622f73",
+      "runtimeSha256": "a162a78bc8012721c76da266949c752004f28a6c4026cea1d016364d45a9cc4b",
       "transform": "omit Node test export footer"
     }
   }

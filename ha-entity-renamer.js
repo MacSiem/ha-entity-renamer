@@ -1173,7 +1173,6 @@ class HAEntityRenamer extends HTMLElement {
     this._exportEventCleanups.splice(0).forEach(off => off());
     this._exportBoundConnection = connection;
     this._exportConnectionOnline = connection?.connected === true;
-    this._exportBrowserOnline = navigator.onLine === true;
     const listen = (target, event, handler) => {
       if (typeof target?.addEventListener !== 'function' || typeof target?.removeEventListener !== 'function') return;
       target.addEventListener(event, handler);
@@ -1181,7 +1180,7 @@ class HAEntityRenamer extends HTMLElement {
     };
     listen(window, 'offline', () => { this._exportBrowserOnline = false; this._invalidateRenameExport(); });
     listen(window, 'online', () => { this._exportBrowserOnline = navigator.onLine === true; this._invalidateRenameExport(); });
-    listen(connection, 'ready', () => { this._exportConnectionOnline = connection.connected === true; this._invalidateRenameExport(); });
+    listen(connection, 'ready', () => { this._exportConnectionOnline = true; this._invalidateRenameExport(); });
     listen(connection, 'disconnected', () => { this._exportConnectionOnline = false; this._invalidateRenameExport(); });
   }
 
@@ -1332,6 +1331,7 @@ class HAEntityRenamer extends HTMLElement {
 
   async _loadData() {
     const { hass, current } = this._captureRead();
+    let receipt = null;
     this._loading = true;
     this.render();
     try {
@@ -1340,6 +1340,7 @@ class HAEntityRenamer extends HTMLElement {
         hass.callWS({ type: 'config/entity_registry/list' }),
       ]);
       if (!current()) return;
+      if (!Array.isArray(devResult) || !Array.isArray(entResult)) throw new Error('Malformed registry read');
       this._devices = devResult.sort((a, b) =>
         (a.name_by_user || a.name || '').localeCompare(b.name_by_user || b.name || '')
       );
@@ -1356,11 +1357,13 @@ class HAEntityRenamer extends HTMLElement {
       for (const did of Object.keys(this._deviceEntities)) {
         this._deviceEntities[did].sort((a, b) => a.entity_id.localeCompare(b.entity_id));
       }
+      receipt = {devices: devResult, entities: entResult, session: this._readSession(hass)};
     } catch (e) {
       if (!current()) return;
       this._message = { type: 'error', text: this._t.errorLoadingData + e.message };
     }
     if (current()) this._loading = false;
+    return receipt;
   }
 
   async _loadAutomaticIds() {
@@ -1631,6 +1634,27 @@ class HAEntityRenamer extends HTMLElement {
     try { return JSON.stringify(e); } catch(err) { return String(e); }
   }
 
+  _confirmRenameReadback(completed, snapshot) {
+    let confirmed = 0;
+    for (const target of completed) {
+      let matches = false;
+      if (target.deviceId) matches = snapshot.devices.some(row => row?.id === target.deviceId && row.name_by_user === target.name);
+      else {
+        let identity;
+        try { identity = JSON.parse(target.identity); } catch (_) { continue; }
+        if (!Array.isArray(identity) || typeof identity[0] !== 'string' || !identity[0]) continue;
+        const rows = snapshot.entities.filter(row => row?.id === identity[0]);
+        matches = rows.length === 1 && rows[0].entity_id === target.entityId && this._sourceIdentity(rows[0]) === target.identity
+          && (target.name === null || rows[0].name === target.name);
+      }
+      if (!matches || !this._renameLog.includes(target.entry)) continue;
+      target.entry.writePhase = 'readback_confirmed';
+      target.entry.verification = 'independent_registry_list_exact_fields';
+      confirmed++;
+    }
+    return confirmed;
+  }
+
   async _applyEntityRename(rename, hass = this._hass) {
     const update = { type: 'config/entity_registry/update', entity_id: rename.oldId };
     if (rename.newId && rename.newId !== rename.oldId) update.new_entity_id = rename.newId;
@@ -1776,6 +1800,7 @@ class HAEntityRenamer extends HTMLElement {
 
     automaticFailures = await this._revalidateAutomaticQueue(queue, hass);
     const results = [];
+    const completedEntries = [];
     const deviceResults = [];
     const ts = new Date().toLocaleTimeString();
 
@@ -1789,6 +1814,7 @@ class HAEntityRenamer extends HTMLElement {
         writePhase = 'acknowledged';
         deviceResults.push({ devId, newName, status: 'ok' });
         this._renameLog.unshift({ time: ts, oldId: '📱 ' + devId.substring(0, 8) + '...', newId: '📱 ' + newName, status: 'ok', impact: null, operationKind: 'device', writePhase, completedAt: new Date().toISOString() });
+        completedEntries.push({entry: this._renameLog[0], deviceId: devId, name: newName});
       } catch (e) {
         const error = this._formatError(e);
         deviceResults.push({ devId, newName, status: 'error', error });
@@ -1798,6 +1824,7 @@ class HAEntityRenamer extends HTMLElement {
 
     // 2. Rename entities (entity_id + optional friendly name)
     for (const rename of queue) {
+      const expectedIdentity = rename.sourceIdentity || this._sourceIdentity(rename.entity || this._entities.find(row => row.entity_id === rename.oldId));
       const imp = impact[rename.oldId] || { automations: [], scripts: [], dashboards: [] };
       let writePhase = 'not_started';
       try {
@@ -1825,6 +1852,7 @@ class HAEntityRenamer extends HTMLElement {
           impact: imp,
           targetEntityId: rename.newId || rename.oldId, operationKind: 'entity', writePhase, completedAt: new Date().toISOString(),
         });
+        completedEntries.push({entry: this._renameLog[0], entityId: rename.newId || rename.oldId, identity: expectedIdentity, name: rename.newName || null});
       } catch (e) {
         const error = this._formatError(e);
         results.push({ ...rename, status: 'error', error });
@@ -1873,7 +1901,11 @@ class HAEntityRenamer extends HTMLElement {
     this._applyOperation = null;
     this._activeTab = 'log';
     this._saveHistoryToStorage();
-    await this._loadData();
+    const refreshed = await this._loadData();
+    if (!operation.cancelled && refreshed && this._sameReadSession(operation.session, refreshed.session)
+      && this._sameReadSession(operation.session, this._readSession()) && this._renameExportContext().connected) {
+      if (this._confirmRenameReadback(completedEntries, refreshed)) this._saveHistoryToStorage();
+    }
     this.render();
   }
 
