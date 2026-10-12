@@ -111,3 +111,7 @@ for(const persisted of [true,false])test(`existing independent registry refresh 
  f.hass.callWS=async msg=>{f.requests.push(msg);if(msg.type==='config/entity_registry/list')return registry.map(x=>({...x}));if(msg.type==='config/device_registry/list')return [];if(msg.type==='config/entity_registry/update'){if(persisted)registry=[{...source,entity_id:msg.new_entity_id,name:msg.name}];return {...source,entity_id:msg.new_entity_id,name:msg.name};}return {};};f.card._hass=f.hass;
  f.card._showRenameConfirmation();await f.card._executeRenames(true);const r=JSON.parse(payload(f.card).serialized);assert.equal(r.counts.applied,persisted?1:0);assert.equal(r.counts.unknown,persisted?0:1);assert.equal(f.requests.filter(x=>x.type==='config/entity_registry/update').length,1);assert.equal(f.requests.filter(x=>x.type==='config/entity_registry/list').length,2);assert.ok(!r.rows[0].old.includes('sensor.'));assert.ok(!JSON.stringify(r).includes('Reviewed private name'));
 });
+
+test('offline event remains authoritative after replacing a connection with a cached true flag',async t=>{
+ const f=fixture(t);let d=await f.open();f.dom.window.dispatchEvent(new f.dom.window.Event('offline'));const connection=new f.dom.window.EventTarget();connection.connected=true;f.card.hass={...f.hass,connection};d=await f.open();assert.equal(f.node(d,'save').disabled,true);assert.equal(f.requests.length,0);
+});
