@@ -1801,6 +1801,7 @@ class HAEntityRenamer extends HTMLElement {
 
     automaticFailures = await this._revalidateAutomaticQueue(queue, hass);
     const results = [];
+    const historyBefore = new Set(this._renameLog);
     const completedEntries = [];
     const deviceResults = [];
     const ts = new Date().toLocaleTimeString();
@@ -1901,12 +1902,30 @@ class HAEntityRenamer extends HTMLElement {
     this._loading = false;
     this._applyOperation = null;
     this._activeTab = 'log';
+    this._message = {type:'warning',outcome:'unconfirmed',text:this._lang === 'pl' ? 'Sprawdzam wyniki zmian w rejestrze.' : 'Verifying registry change outcomes.'};
     this._saveHistoryToStorage();
     const refreshed = await this._loadData();
     if (!operation.cancelled && refreshed && this._sameReadSession(operation.session, refreshed.session)
       && this._sameReadSession(operation.session, this._readSession()) && this._renameExportContext().connected) {
       if (this._confirmRenameReadback(completedEntries, refreshed)) this._saveHistoryToStorage();
     }
+    const observed = renameReports.snapshot(this._renameLog.filter(row => !historyBefore.has(row)), true).rows;
+    const applied = observed.filter(row => row.status === 'applied').length;
+    const unconfirmed = observed.filter(row => row.status === 'unknown').length;
+    const rejected = observed.filter(row => row.status === 'failed').length;
+    const outcome = unconfirmed > 0 ? (applied > 0 || rejected > 0 ? 'partial' : 'unconfirmed')
+      : rejected > 0 ? (applied > 0 ? 'partial' : 'error') : applied > 0 ? 'success' : 'no_data';
+    this._lastApplyResult.ok = applied;
+    this._lastApplyResult.unknown = unconfirmed;
+    this._lastApplyResult.rejectedBeforeWrite = rejected;
+    const reviewCount = observed.filter(row => row.status === 'applied' && row.kind === 'entity' && row.old !== row.new)
+      .reduce((count,row) => count + Object.values(row.references).filter(value => typeof value === 'number').reduce((a,b) => a+b,0),0);
+    const pl = this._lang === 'pl';
+    let summary = pl ? `Potwierdzone zmiany: ${applied}. Niepotwierdzone: ${unconfirmed}. Odrzucone przed zapisem: ${rejected}.`
+      : `Confirmed changes: ${applied}. Unconfirmed: ${unconfirmed}. Rejected before write: ${rejected}.`;
+    if (unconfirmed > 0) summary += pl ? ' Sprawdź rejestr i historię przed kolejną zmianą.' : ' Review the registry and history before another change.';
+    if (reviewCount > 0) summary += pl ? ` ${reviewCount} zapisanych odwołań wymaga ręcznego sprawdzenia.` : ` ${reviewCount} recorded references require manual review.`;
+    this._message = {type:outcome === 'success' ? 'success' : outcome === 'error' ? 'error' : 'warning',outcome,text:summary};
     this.render();
   }
 
@@ -1919,7 +1938,7 @@ class HAEntityRenamer extends HTMLElement {
     const t = this._t;
 
     this.shadowRoot.innerHTML = `
-    <style>${HA_ENTITY_RENAMER_BENTO_CSS}
+    <style>${HA_ENTITY_RENAMER_BENTO_CSS}${createUiV3({language:this._lang}).css}
 /* === HA Tools split — premium banners (donate / intro / prereq) === */
 
 /* Donation footer — diamond top */
@@ -2229,7 +2248,7 @@ class HAEntityRenamer extends HTMLElement {
       <div class="subtitle">${this._devices.length} ${t.devices.toLowerCase()} • ${this._entities.length} ${t.entities.toLowerCase()}
         </div>
 
-      ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${_esc(this._message.text || '')}</div>` : ''}
+      ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${this._message.outcome ? createUiV3({language:this._lang}).statusHtml(this._message.outcome) : ''} ${_esc(this._message.text || '')}</div>` : ''}
       ${this._renderApplyResult()}
       ${this._confirmDialogOpen ? this._renderRenameConfirmation() : ''}
       ${this._renderEntityEditor()}
@@ -2470,7 +2489,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _renderLogTab() {
-    const t = this._t;
+    const t = this._t, ui = createUiV3({language:this._lang});
     const exportButton = `<button id="exportRenameLog" type="button" class="btn btn-outline" style="min-height:44px;min-width:44px;margin:0 0 12px;max-width:100%;white-space:normal;overflow-wrap:anywhere;">${this._lang === 'pl' ? 'Eksport historii zmian' : 'Export completed history'}</button>`;
     if (!this._renameLog.length) {
       return exportButton + `<div class="empty-state"><div class="icon">📜</div>${t.noHistory}</div>`;
@@ -2478,6 +2497,8 @@ class HAEntityRenamer extends HTMLElement {
     return exportButton + `
       <div>
         ${this._renameLog.map(l => {
+          const reported = renameReports.snapshot([l], true).rows[0]?.status;
+          const resultState = reported === 'applied' ? 'success' : reported === 'failed' ? 'error' : 'unconfirmed';
           const imp = l.impact;
           const automations = Array.isArray(imp?.automations) ? imp.automations : [];
           const scripts = Array.isArray(imp?.scripts) ? imp.scripts : [];
@@ -2487,8 +2508,8 @@ class HAEntityRenamer extends HTMLElement {
           return `
           <div class="log-entry" style="padding:8px 0;${hasImpact ? 'padding-bottom:12px;' : ''}">
             <span class="log-time">${_esc(l.time)}</span>
-            <span class="${l.status === 'ok' ? 'log-ok' : 'log-err'}">
-              ${l.status === 'ok' ? '✅' : '❌'} ${_esc(l.oldId)} → ${_esc(l.newId)}
+            <span class="${resultState === 'success' ? 'log-ok' : resultState === 'error' ? 'log-err' : ''}">
+              ${ui.statusHtml(resultState)} ${_esc(l.oldId)} → ${_esc(l.newId)}
             </span>
             ${l.error ? `<br><small style="color:#FCA5A5">${_esc(l.error)}</small>` : ''}
             ${hasImpact ? `<div style="margin-top:4px;padding-left:24px;">

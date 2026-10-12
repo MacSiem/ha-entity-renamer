@@ -11,15 +11,18 @@ function fixture(t) {
   dom.window.document.body.append(card);
   const entries = ['a', 'b'].map(id => ({ id: 'entry-' + id, entity_id: 'sensor.' + id, device_id: 'dev', unique_id: id, platform: 'mqtt' }));
   const writes = [];
-  const hass = { language: 'en', connection: {}, user: { id: 'admin-a', is_admin: true }, states: {}, callWS: async msg => {
-    if (msg.type.endsWith('/update')) { writes.push(msg); return {}; }
-    if (msg.type === 'config/entity_registry/list') return entries;
-    if (msg.type === 'config/device_registry/list') return [{ id: 'dev', name: 'QA' }];
+  const devices = [{id:'dev',name:'QA',name_by_user:null}];
+  const connection = new dom.window.EventTarget(); connection.connected = true;
+  const hass = { language: 'en', connection, user: { id: 'admin-a', is_admin: true }, states: {}, callWS: async msg => {
+    if (msg.type.endsWith('/update')) { writes.push(msg);if(msg.entity_id){const row=entries.find(x=>x.entity_id===msg.entity_id);if(row){if(msg.new_entity_id)row.entity_id=msg.new_entity_id;if(msg.name)row.name=msg.name;}}if(msg.device_id){const row=devices.find(x=>x.id===msg.device_id);if(row)row.name_by_user=msg.name_by_user;}return {}; }
+    if (msg.type === 'config/entity_registry/list') return entries.map(row=>({...row}));
+    if (msg.type === 'config/device_registry/list') return devices.map(row=>({...row}));
     if (msg.type === 'config/entity_registry/get_automatic_entity_ids') return Object.fromEntries(msg.entity_ids.map(id => [id, id + '_auto']));
     if (msg.type === 'lovelace/dashboards/list') return [];
     return {};
   } };
-  card._hass = hass; card._entities = entries; card._devices = [{ id: 'dev', name: 'QA' }]; card._deviceEntities = { dev: entries };
+  card._hass = hass; card._entities = entries; card._devices = devices; card._deviceEntities = { dev: entries };
+  card._bindRenameExportEvents();
   function confirm() { card._showRenameConfirmation(); return card._executeRenames(true); }
   return { card, hass, entries, writes, confirm, dom };
 }
