@@ -1128,6 +1128,7 @@ class HAEntityRenamer extends HTMLElement {
     this._deviceRenameQueue = {}; // deviceId -> newName
     this._impactResults = null;
     this._loading = false;
+    this._registryRefreshPending = false;
     this._message = null;
     this._confirmDialogOpen = false;
     this._confirmation = null;
@@ -1194,6 +1195,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _cancelRenameAuthority() {
+    if (this._loading && !this._applyOperation) this._registryRefreshPending = true;
     this._legacyReviewLog = [];
     this._authorityEpoch++;
     this._readEpoch++;
@@ -1315,11 +1317,12 @@ class HAEntityRenamer extends HTMLElement {
 
   connectedCallback() {
     this._bindRenameExportEvents();
-    this._lang = (navigator.language || '').startsWith('pl') ? 'pl' : 'en';
+    this._lang = (this._hass?.language || navigator.language || '').startsWith('pl') ? 'pl' : 'en';
     _bindFamilyNavigation(this);
     // HA may detach/reparent a card while its initial registry read is pending.
     // Retry only reads; a cancelled rename or export never resumes here.
-    if (this._hass && !this._applyOperation && (this._loading || (!this._entities.length && !this._devices.length))) this._init();
+    if (this._hass && !this._applyOperation && (this._loading || (!this._entities.length && !this._devices.length))) this._registryRefreshPending = true;
+    this._resumePermittedRegistryRead();
   }
 
   _invalidateRenameExport() {
@@ -1339,8 +1342,8 @@ class HAEntityRenamer extends HTMLElement {
       this._exportEventCleanups.push(() => target.removeEventListener(event, handler));
     };
     listen(window, 'offline', () => { this._exportBrowserOnline = false; this._cancelRenameAuthority(); this.render(); });
-    listen(window, 'online', () => { this._exportBrowserOnline = navigator.onLine === true; this._invalidateRenameExport(); });
-    listen(connection, 'ready', () => { this._exportConnectionOnline = true; this._invalidateRenameExport(); });
+    listen(window, 'online', () => { this._exportBrowserOnline = navigator.onLine === true; this._invalidateRenameExport(); this._resumePermittedRegistryRead(); });
+    listen(connection, 'ready', () => { this._exportConnectionOnline = true; this._invalidateRenameExport(); this._resumePermittedRegistryRead(); });
     listen(connection, 'disconnected', () => { this._exportConnectionOnline = false; this._cancelRenameAuthority(); this.render(); });
   }
 
@@ -1506,10 +1509,13 @@ class HAEntityRenamer extends HTMLElement {
     if (hass?.language) this._lang = hass.language.startsWith('pl') ? 'pl' : 'en';
     if (previousLanguage !== this._lang) { this._invalidateRenameExport(); this._exportDialog?.cancel(); }
     if (!hass) return;
-    if (first || (sessionChanged && ![true, false].includes(previousSession.admin) && [true, false].includes(nextSession.admin) && !this._applyOperation)) this._init();
+    if (first) this._init();
     else if (sessionChanged || previousAdmin !== (hass.user?.is_admin === true)) {
+      const identityChanged = previousSession.userId !== nextSession.userId || previousSession.admin !== nextSession.admin;
+      if (identityChanged) this._registryRefreshPending = [true, false].includes(nextSession.admin);
       this._confirmDialogOpen = false;
       this.render();
+      this._resumePermittedRegistryRead();
     } else if (previousLanguage !== this._lang) this._renderLocalePreservingDrafts();
   }
 
@@ -1536,10 +1542,19 @@ class HAEntityRenamer extends HTMLElement {
     }
   }
 
+  _resumePermittedRegistryRead() {
+    if (!this._registryRefreshPending || this._applyOperation || !this.isConnected
+      || ![true, false].includes(this._hass?.user?.is_admin)
+      || this._exportConnectionOnline !== true || this._exportBrowserOnline !== true) return;
+    this._registryRefreshPending = false;
+    this._init(); // Only registry reads; no rename, old consent or impact retry.
+  }
+
   async _init() {
+    const { current } = this._captureRead();
     this.render();
     await this._loadData();
-    this.render();
+    if (current()) this.render();
   }
 
   async _loadData() {
@@ -2199,6 +2214,7 @@ class HAEntityRenamer extends HTMLElement {
         this._loading = false;
         if (!current) { this._lastApplyResult = null; this._message = null; }
         this.render();
+        this._resumePermittedRegistryRead();
       }
     }
   }

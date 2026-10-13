@@ -48,7 +48,8 @@ test('ordinary role loss closes confirmation and disables registry apply without
   f.card.hass = { ...f.hass, language: 'pl', user: { is_admin: false } };
   assert.equal(f.card.shadowRoot.getElementById('confirmRenameApply'), null);
   assert.equal(f.card.shadowRoot.getElementById('executeRenames'), null); assert.match(f.card._renderLogTab(), /administratora/);
-  assert.equal(f.card._confirmDialogOpen, false); assert.equal(f.card._renameQueue.length, 0); assert.equal(f.requests.length, 2);
+  assert.equal(f.card._confirmDialogOpen, false); assert.equal(f.card._renameQueue.length, 0); assert.equal(f.requests.length, 4);
+  assert.equal(f.requests.filter(message => message.type.endsWith('/update')).length, 0);
  } finally { f.dom.window.close(); }
 });
 test('unresolved role cannot confirm or send registry updates', async () => {
