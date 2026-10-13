@@ -38,7 +38,10 @@ references visible through Home Assistant's APIs.
    tab. ID and friendly name are sent in one update per entity. Successful
    items leave the queue; failed items remain available for review and retry.
    The confirmed queue is frozen while it runs. A change of account, role or
-   connection cancels any remaining writes; completed writes are kept in the log.
+   connection or browser availability cancels any remaining writes and requires
+   a fresh confirmation. A sent request with no verified readback remains unknown
+   in its originating administrator’s local history. Reconnecting does not restore
+   an earlier confirmation.
    Automatic proposals are checked against the current registry and
    regenerated IDs again immediately before applying. Stale proposals fail
    without a registry write and remain in the queue for review.
@@ -97,8 +100,13 @@ available in the card's visual editor.
   calculation, queue per entity/device/all, and reject stale or colliding IDs.
 - **Impact analysis** — inspect references that HA's related search and
   readable dashboards expose before you rename.
-- **Rename history** — a log of every rename attempt (success/error), kept in
-  your browser.
+- **Rename history** — recorded attempts and independently verified outcomes, kept
+  in this browser for the originating administrator. An ACK alone stays unconfirmed.
+- **Export completed history** — JSON, CSV or TXT with the exact file preview and
+  a filename before download. The default uses paired pseudonyms; explicitly opt in
+  to strict old/new entity IDs for your private mapping. Names, raw errors, accounts,
+  addresses, tokens and configuration are excluded. Recorded reference counts keep
+  missing data distinct from zero and disclose partial dashboard coverage.
 
 ## FAQ
 
@@ -141,9 +149,19 @@ MIT, see [LICENSE](LICENSE).
 
 The card reads entity/device registries and configuration references to preview changes to entity IDs. Applying a confirmed queue changes Home Assistant registry IDs; related configuration references need separate review. Keep impact reports and rollback mappings private. Rename history and dismissed
 intro/support preferences use browser local storage for this Home Assistant
-origin. They persist across reloads and are shared by cards and accounts using
-the same browser profile and origin; they are not synchronized to other devices.
-Use separate browser profiles on a shared computer. Queued proposals stay in
-memory and are lost on a page reload.
+origin. New rename history persists across reloads in a separate namespace for
+its administrator account and origin. Changing account or authority clears the
+previous account’s private results, drafts and history from the card. Resolved
+household users retain registry browsing allowed by Home Assistant; applying
+changes and reviewing/exporting private history require an administrator.
+
+Older unscoped history remains untouched. An administrator can explicitly choose
+**Review legacy history from this browser**. Its account origin remains unknown,
+and reviewing/exporting it does not assign it to the current account or overwrite
+the original storage. This choice clears when authority changes. Preferences
+remain shared by cards on this origin. History is not synchronized to other devices;
+use separate browser profiles on a shared computer. Queued proposals stay in memory
+and are lost on a page reload. A browser download initiation does not confirm that
+a file was written to disk; check your Downloads before starting another attempt.
 
 See [SECURITY.md](SECURITY.md) for safe vulnerability reporting and [NOTICE](NOTICE) for licensing notices.

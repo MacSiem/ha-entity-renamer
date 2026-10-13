@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.3.0 (2026-10-13)
+
+- Export completed rename history as JSON, CSV or TXT with an exact preview, filename choice and optional private entity-ID mapping. Acknowledgements without independent registry readback remain unconfirmed.
+- Keep private rename history separate for each administrator on this browser origin. Preserve older history and offer an explicit local review with unknown account origin.
+- Cancel confirmation and remaining writes after account, role, connection or browser availability changes; late replies cannot restore private results in another context. Preserve uncertain sent attempts in their original account history.
+- Retain permitted household registry browsing and existing manual, automatic-ID and bulk-prefix tools.
+- Distinguish unavailable and partially readable dashboards from known zero reference hits, including exported reports.
+- Improve narrow layouts, accessible navigation, 44px controls, keyboard focus and editor drafts across ordinary updates.
+
 ## 4.2.12 (2026-10-11)
 
 - Cancel pending rename confirmation with Escape without changing entities or discarding proposals. Focus starts on Cancel, stays on the confirmation actions with Tab, and returns to Apply Changes after cancellation.
