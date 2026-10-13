@@ -112,3 +112,22 @@ test('resolved household keeps authorized read-only browsing while rename histor
   assert.equal(f.requests.filter(x=>x.type.endsWith('/update')).length,0);
  } finally { f.dom.window.close(); }
 });
+
+test('household retains allowed automatic-ID and impact previews without registry writes',async ()=>{
+ const f=await fixture('en',false);
+ try {
+  const base=f.hass.callWS;
+  f.hass.callWS=async msg=>{
+   if(msg.type==='config/entity_registry/get_automatic_entity_ids'){f.requests.push(msg);return {'sensor.qa_old':'sensor.qa_restored'};}
+   if(msg.type==='search/related'){f.requests.push(msg);return {automation:[],script:[],scene:[]};}
+   if(msg.type==='lovelace/dashboards/list'){f.requests.push(msg);return [];}
+   if(msg.type==='lovelace/config'){f.requests.push(msg);return {views:[]};}
+   return base(msg);
+  };
+  await f.card._loadAutomaticIds();assert.equal(f.card._automaticRows.length,1);
+  f.card._renameQueue=[{oldId:'sensor.qa_old',newId:'sensor.qa_restored'}];
+  await f.card._analyzeImpact();assert.equal(f.card._impactResults['sensor.qa_old'].dashboardCoverage,'complete');
+  assert.equal(f.requests.filter(x=>x.type.endsWith('/update')).length,0);
+  assert.match(f.card._renderLogTab(),/administrator/i);
+ } finally {f.dom.window.close();}
+});
