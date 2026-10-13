@@ -190,6 +190,7 @@ test('configured title is rendered as plain text and default headings remain loc
  try {
   dom.window.eval(readFileSync(path.join(__dirname,'../ha-entity-renamer.js'),'utf8'));
   const card=dom.window.document.createElement('ha-entity-renamer');dom.window.document.body.append(card);
+  card._hass={language:'en',user:{id:'title-admin',is_admin:true},states:{},themes:{}};
   const title='<img src=x onerror=alert(1)> Synthetic QA title';
   card.setConfig({title,show_support:false});card.render();
   assert.ok(card.shadowRoot.querySelector('h1').textContent.includes(title));
