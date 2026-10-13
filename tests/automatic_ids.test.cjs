@@ -62,7 +62,7 @@ test('large automatic preview batches HA requests and queues one device', async 
     card._entities = Array.from({ length: 250 }, (_, i) => ({ entity_id: `sensor.old_${i}`, device_id: i < 125 ? 'one' : 'two', unique_id: String(i) }));
     card._deviceEntities = { one: card._entities.slice(0, 125), two: card._entities.slice(125) };
     const sizes = [];
-    card._hass = { language: 'en', states: {}, callWS: async msg => {
+    card._hass = { language: 'en', connection, user: {id: 'admin-a', is_admin: true}, states: {}, callWS: async msg => {
       if (msg.type !== 'config/entity_registry/get_automatic_entity_ids') throw new Error(msg.type);
       sizes.push(msg.entity_ids.length);
       return Object.fromEntries(msg.entity_ids.map(id => [id, id.replace('old_', 'new_')]));
