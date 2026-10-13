@@ -140,7 +140,7 @@ for (const kind of ['automatic', 'registry', 'impact']) test('late ' + kind + ' 
   if (kind === 'impact') card._addToQueue('sensor.a', 'sensor.new_a');
   const reading = kind === 'automatic' ? card._loadAutomaticIds() : kind === 'registry' ? card._loadData() : card._analyzeImpact();
   await new Promise(resolve => setImmediate(resolve));
-  card.hass = { ...hass, user: { id: 'admin-b', is_admin: true } };
+  card.hass = { ...hass, user: { id: 'admin-b', is_admin: true }, callWS: call };
   wait.release(kind === 'automatic' ? {'sensor.a':'sensor.new_a','sensor.b':'sensor.new_b'} : kind === 'registry' ? [{entity_id:'sensor.private_old_session'}] : {});
   await reading;
   assert.equal(card._automaticLoaded, false); assert.equal(card._impactResults, null);
@@ -283,8 +283,8 @@ for (const entity of [true,false]) for (const reject of [false,true]) for (const
   f.hass.callWS=async msg=>{if(msg.type==='config/entity_registry/list' && f.writes.length){started.release();const rows=await reply.promise;if(reject)throw new Error('PRIVATE readback failure');return rows;}return call(msg);};
   if(entity)f.card._addToQueue('sensor.a','sensor.new_a');else f.card._deviceRenameQueue={dev:'PRIVATE new device'};const applying=f.confirm();await started.promise;
   if(change==='disconnect') { f.hass.connection.dispatchEvent(new f.dom.window.Event('disconnected')); f.hass.connection.dispatchEvent(new f.dom.window.Event('ready')); }
-  else f.card.hass={...f.hass,user:change==='account'?{id:'admin-b',is_admin:true}:{id:'admin-a',is_admin:false}};
-  reply.release(f.entries.map(row=>({...row})));await applying;
+  else f.card.hass={...f.hass,callWS:call,user:change==='account'?{id:'admin-b',is_admin:true}:{id:'admin-a',is_admin:false}};
+  reply.release(f.entries.map(row=>({...row})));await applying;await new Promise(resolve=>setImmediate(resolve));
   assert.equal(f.card._lastApplyResult,null);assert.equal(f.card._applyOperation,null);assert.equal(f.card._loading,false);
   assert.doesNotMatch(f.card._message?.text || '',/Confirmed changes:/);
   if(change!=='disconnect') assert.equal(f.card._renameLog.length,0);

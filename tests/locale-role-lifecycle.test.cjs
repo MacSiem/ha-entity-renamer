@@ -199,9 +199,10 @@ test('recovery retries a cancelled initial read and its late response cannot clo
   connection.connected=true;connection.dispatchEvent(new f.dom.window.Event('ready'));
   await new Promise(resolve=>setImmediate(resolve));assert.equal(card._entities[0]?.entity_id,'sensor.recovered');assert.equal(card._loading,false);
   card._activeTab='log';card.render();card._openRenameExport(card.shadowRoot.querySelector('button'));
-  const dialog=card.shadowRoot.querySelector('[role="dialog"]');assert.ok(dialog);
+  await new Promise(resolve=>setImmediate(resolve));
+  const dialog=card.shadowRoot.querySelector('[data-ha-tools-export]').shadowRoot.querySelector('[role="dialog"]');assert.ok(dialog);
   resolveOld();await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(card._entities[0].entity_id,'sensor.recovered');assert.equal(card.shadowRoot.querySelector('[role="dialog"]'),dialog);
+  assert.equal(card._entities[0].entity_id,'sensor.recovered');assert.equal(card.shadowRoot.querySelector('[data-ha-tools-export]').shadowRoot.querySelector('[role="dialog"]'),dialog);
  } finally {f.dom.window.close();}
 });
 

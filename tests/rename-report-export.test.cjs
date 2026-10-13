@@ -65,13 +65,14 @@ test('Save passes exactly preview and one frozen Blob, double click is latched a
  f.node(d,'save').click(); f.node(d,'save').click(); assert.equal(f.downloads.length,1); assert.equal(f.downloads[0].serialized,bytes); assert.equal(f.downloads[0].blob.size,new TextEncoder().encode(bytes).length);
  release({outcome:'initiated'}); await tick(); assert.equal(f.node(d,'status').dataset.resultState,'unconfirmed'); assert.equal(f.node(d,'save').disabled,true); assert.equal(f.requests.length,0);
 });
-for(const change of ['account','role','connection','typed','offline','language','source']) test(change+' invalidates preview/consent without HA calls',async t=>{
+for(const change of ['account','role','connection','typed','offline','language','source']) test(change+' invalidates preview/consent without writes or downloads',async t=>{
  const f=fixture(t); const d=await f.open(); const privateInput=f.node(d,'private'); privateInput.checked=true; privateInput.dispatchEvent(new f.dom.window.Event('change')); f.node(d,'refresh').click(); await tick(); assert.equal(f.node(d,'save').disabled,false);
  if(change==='source') { f.card._renameLog.push({status:'error',oldId:'sensor.x',newId:'sensor.y'}); f.card._saveHistoryToStorage(); }
  else if(change==='offline') f.dom.window.dispatchEvent(new f.dom.window.Event('offline'));
  else if(change==='typed') { f.connection.connected='true'; f.connection.dispatchEvent(new f.dom.window.Event('ready')); }
  else f.card.hass={...f.hass,language:change==='language'?'pl':'en',user:change==='account'?{id:'admin-b',is_admin:true}:change==='role'?{id:'admin-a',is_admin:false}:f.hass.user,connection:change==='connection'?{connected:true}:f.connection};
- assert.equal(f.downloads.length,0); assert.equal(f.requests.length,0);
+ assert.equal(f.downloads.length,0); assert.equal(f.requests.length,['account','role'].includes(change)?2:0);
+ assert.ok(f.requests.every(message=>['config/device_registry/list','config/entity_registry/list'].includes(message.type)));
  if(d.host.isConnected) {assert.equal(f.node(d,'save').disabled,true); assert.equal(f.node(d,'private').checked,false);}
 });
 test('source mutation is checked again at Save even without a history event',async t=>{const f=fixture(t);const d=await f.open();f.card._renameLog[0].newId='sensor.changed';f.node(d,'save').click();assert.equal(f.downloads.length,0);assert.equal(f.node(d,'private').checked,false);});
