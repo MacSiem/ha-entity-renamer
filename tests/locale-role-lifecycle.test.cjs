@@ -131,3 +131,19 @@ test('household retains allowed automatic-ID and impact previews without registr
   assert.match(f.card._renderLogTab(),/administrator/i);
  } finally {f.dom.window.close();}
 });
+
+test('initial unresolved HA user loads permitted registries when identity arrives later', async () => {
+ const f = await fixture('en', undefined);
+ try {
+  // Reproduce HA startup: the first hass projection has no resolved user yet.
+  f.card.hass = { ...f.hass, user: {} };
+  await new Promise(resolve => setImmediate(resolve));
+  const before = f.requests.length;
+  f.card.hass = { ...f.hass, user: { id: 'late-admin', is_admin: true } };
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.card._entities.length, 1);
+  assert.equal(f.card._devices.length, 1);
+  assert.equal(f.requests.length, before + 2);
+  assert.equal(f.requests.filter(x => x.type.endsWith('/update')).length, 0);
+ } finally { f.dom.window.close(); }
+});
