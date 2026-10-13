@@ -290,3 +290,20 @@ for (const entity of [true,false]) for (const reject of [false,true]) for (const
   if(change!=='disconnect') assert.equal(f.card._renameLog.length,0);
   else assert.equal(f.card._renameLog[0].writePhase,'acknowledged');
 });
+
+test('a sent request records attempt intent before transport and completion only after its reply', async t=>{
+ const f=fixture(t),sent=gate(),reply=gate(),call=f.hass.callWS;
+ f.hass.callWS=async msg=>{
+  if(msg.type==='config/entity_registry/update'){sent.release();await reply.promise;}
+  return call(msg);
+ };
+ f.card._addToQueue('sensor.a','sensor.new_a');const applying=f.confirm();await sent.promise;
+ const pending=f.card._renameLog[0];
+ assert.equal(pending.completedAt,undefined);
+ assert.match(pending.attemptedAt,/^\d{4}-\d{2}-\d{2}T.*Z$/);
+ const before=JSON.parse(f.card._buildRenameReport({draft:{format:'json',includePrivate:false}}).serialized);
+ assert.equal(before.rows[0].timestampScope,'utc_attempt_intent');assert.equal(before.counts.applied,0);
+ reply.release();await applying;
+ const after=JSON.parse(f.card._buildRenameReport({draft:{format:'json',includePrivate:false}}).serialized);
+ assert.equal(after.rows[0].timestampScope,'utc_completion');assert.equal(after.counts.applied,1);
+});
