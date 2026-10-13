@@ -100,7 +100,7 @@ test('all queued entity and device remove controls have translated accessible na
 });
 
 test('resolved household keeps authorized read-only browsing while rename history stays private', async () => {
- const f=setup('en',false);
+ const f=await fixture('en',false);
  try {
   await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(f.requests.map(x=>x.type).sort(),['config/device_registry/list','config/entity_registry/list']);
