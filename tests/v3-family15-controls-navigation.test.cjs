@@ -77,3 +77,12 @@ test('every visible form field has a native label or accessible name, and editor
   assert.equal(changed.title,'Revised');assert.equal(changed.unknown_setting.keep,true);
  }finally{f.card.remove();f.dom.window.close();}
 });
+
+test('detaching stops actual registered browser and connection event callbacks',()=>{
+ const f=fixture();try {
+  const connection=new f.dom.window.EventTarget();connection.connected=true;f.card._hass.connection=connection;f.card._bindRenameExportEvents();
+  f.card.remove();const revision=f.card._exportRevision,epoch=f.card._readEpoch;
+  f.dom.window.dispatchEvent(new f.dom.window.Event('offline'));connection.dispatchEvent(new f.dom.window.Event('disconnected'));
+  assert.equal(f.card._exportRevision,revision,'detached export must not react to browser or old connection');assert.equal(f.card._readEpoch,epoch);
+ }finally{f.card.remove();f.dom.window.close();}
+});
