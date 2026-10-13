@@ -94,7 +94,7 @@ for (const kind of ['account', 'role', 'connection']) test('pending apply cancel
   card._addToQueue('sensor.a', 'sensor.new_a'); const applying = confirm();
   await new Promise(resolve => setImmediate(resolve));
   card.hass = { ...hass, user: kind === 'account' ? { id: 'admin-b', is_admin: true } : kind === 'role' ? { id: 'admin-a', is_admin: false } : hass.user, connection: kind === 'connection' ? {} : hass.connection };
-  wait.release({}); await applying; assert.equal(writes.length, 0); assert.equal(card._renameQueue.length, 1);
+  wait.release({}); await applying; assert.equal(writes.length, 0); assert.equal(card._renameQueue.length, kind === 'connection' ? 1 : 0);
 });
 
 test('confirmed queue cannot acquire unconfirmed edits during impact await', async t => {
@@ -223,4 +223,70 @@ test('confirmation keyboard stays on its two actions while the proposal is pendi
   assert.equal(card.shadowRoot.activeElement.id,'confirmRenameApply');
   card.shadowRoot.getElementById('confirmRenameApply').dispatchEvent(new dom.window.KeyboardEvent('keydown', {key:'Tab',bubbles:true,cancelable:true}));
   assert.equal(card.shadowRoot.activeElement.id,'cancelRenameDialog'); assert.equal(writes.length,0);
+});
+
+// Regression: availability restoration cannot restore consent captured before loss.
+for (const disruption of ['connection', 'browser', 'detach']) {
+  function disrupt(f) {
+    if (disruption === 'connection') {
+      f.hass.connection.dispatchEvent(new f.dom.window.Event('disconnected'));
+      f.hass.connection.dispatchEvent(new f.dom.window.Event('ready'));
+    } else if (disruption === 'browser') {
+      f.dom.window.dispatchEvent(new f.dom.window.Event('offline'));
+      f.dom.window.dispatchEvent(new f.dom.window.Event('online'));
+    } else { f.card.remove(); f.dom.window.document.body.append(f.card); }
+  }
+  test(disruption + ' recovery requires fresh confirmation', async t => {
+    const f = fixture(t); f.card._addToQueue('sensor.a', 'sensor.new_a');
+    f.card._showRenameConfirmation(); disrupt(f); await f.card._executeRenames(true);
+    assert.equal(f.writes.length, 0);
+    await f.confirm(); assert.equal(f.writes.length, 1);
+  });
+  test(disruption + ' recovery during impact cancels captured batch', async t => {
+    const f = fixture(t), wait = gate(), call = f.hass.callWS;
+    f.hass.callWS = msg => msg.type === 'search/related' ? wait.promise : call(msg);
+    f.card._addToQueue('sensor.a', 'sensor.new_a'); const applying = f.confirm();
+    await new Promise(resolve => setImmediate(resolve)); disrupt(f); wait.release({}); await applying;
+    assert.equal(f.writes.length, 0); assert.equal(f.card._lastApplyResult, null);
+    assert.equal(f.card._confirmation, null); assert.equal(f.card._loading, false);
+  });
+}
+
+// Regression: a sent request stays uncertain in its original account only.
+for (const entity of [true, false]) for (const change of ['account', 'role', 'unresolved']) for (const reject of [false, true]) {
+  test((entity ? 'entity' : 'device') + ' late ' + (reject ? 'rejection' : 'ACK') + ' after ' + change + ' stays private and unknown', async t => {
+    const f = fixture(t), sent = gate(), reply = gate(), call = f.hass.callWS;
+    f.hass.callWS = async msg => {
+      if (msg.type.endsWith('/update')) { sent.release(); await reply.promise; if (reject) throw new Error('PRIVATE old authority'); return call(msg); }
+      return call(msg);
+    };
+    if (entity) { f.card._addToQueue('sensor.a', 'sensor.new_a', 'PRIVATE friendly'); f.card._addToQueue('sensor.b','sensor.new_b'); }
+    else { f.card._deviceRenameQueue = {dev:'PRIVATE device'}; f.card._addToQueue('sensor.a','sensor.new_a'); }
+    const applying = f.confirm(); await sent.promise;
+    f.card.hass = {...f.hass, user: change === 'account' ? {id:'admin-b',is_admin:true} : change === 'role' ? {id:'admin-a',is_admin:false} : {id:'admin-a'}};
+    reply.release(); await applying;
+    assert.equal(f.card._entities.length,0); assert.equal(f.card._devices.length,0);
+    assert.equal(f.card._renameQueue.length,0); assert.equal(Object.keys(f.card._deviceRenameQueue).length,0);
+    assert.equal(f.card._renameLog.length,0); assert.equal(f.card._lastApplyResult,null);
+    assert.doesNotMatch(f.card.shadowRoot.textContent,/PRIVATE|sensor\.new_a/);
+    f.card.hass = {...f.hass,user:{id:'admin-a',is_admin:true}};
+    assert.equal(f.card._renameLog.length,1);
+    assert.equal(f.card._renameLog[0].writePhase,'attempted');
+    const report=JSON.parse(f.card._buildRenameReport({draft:{format:'json',includePrivate:true}}).serialized);
+    assert.equal(report.counts.unknown,1); assert.equal(report.counts.applied,0);
+    assert.equal(f.writes.length,reject ? 0 : 1);
+  });
+}
+
+for (const entity of [true,false]) for (const reject of [false,true]) for (const change of ['account','role','disconnect']) test((entity?'entity':'device') + ' ' + change + ' during final readback ' + (reject?'rejection':'resolve') + ' cannot publish final results', async t => {
+  const f=fixture(t), started=gate(), reply=gate(), call=f.hass.callWS;
+  f.hass.callWS=async msg=>{if(msg.type==='config/entity_registry/list' && f.writes.length){started.release();const rows=await reply.promise;if(reject)throw new Error('PRIVATE readback failure');return rows;}return call(msg);};
+  if(entity)f.card._addToQueue('sensor.a','sensor.new_a');else f.card._deviceRenameQueue={dev:'PRIVATE new device'};const applying=f.confirm();await started.promise;
+  if(change==='disconnect') { f.hass.connection.dispatchEvent(new f.dom.window.Event('disconnected')); f.hass.connection.dispatchEvent(new f.dom.window.Event('ready')); }
+  else f.card.hass={...f.hass,user:change==='account'?{id:'admin-b',is_admin:true}:{id:'admin-a',is_admin:false}};
+  reply.release(f.entries.map(row=>({...row})));await applying;
+  assert.equal(f.card._lastApplyResult,null);assert.equal(f.card._applyOperation,null);assert.equal(f.card._loading,false);
+  assert.doesNotMatch(f.card._message?.text || '',/Confirmed changes:/);
+  if(change!=='disconnect') assert.equal(f.card._renameLog.length,0);
+  else assert.equal(f.card._renameLog[0].writePhase,'acknowledged');
 });

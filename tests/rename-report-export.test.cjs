@@ -18,7 +18,7 @@ function fixture(t, language = 'en') {
     requests.push(msg); if (msg.type.endsWith('/list')) return [];
     return {};
   } };
-  card._hass = hass; card._lang = language; card._activeTab = 'log';
+  card._hass = hass; card._bindRenameExportEvents(); card._lang = language; card._activeTab = 'log';
   card._renameLog = [{ time: '12:34:56', oldId: 'sensor.old', newId: 'sensor.new', status: 'ok', impact: {automations: ['private name'], scripts: [], scenes: [], dashboards: []} }];
   card._downloadRenameReport = async request => { downloads.push(request); return {outcome: 'initiated'}; };
   card.render();
@@ -114,4 +114,43 @@ for(const persisted of [true,false,'identity_mismatch','name_mismatch','read_fai
 
 test('offline event remains authoritative after replacing a connection with a cached true flag',async t=>{
  const f=fixture(t);let d=await f.open();f.dom.window.dispatchEvent(new f.dom.window.Event('offline'));const connection=new f.dom.window.EventTarget();connection.connected=true;f.card.hass={...f.hass,connection};d=await f.open();assert.equal(f.node(d,'save').disabled,true);assert.equal(f.requests.length,0);
+});
+
+for(const authority of ['member','unresolved','another-admin']) test(authority+' cannot view or export retained private history',t=>{
+ const f=fixture(t); f.card._renameLog[0].error='PRIVATE previous error';f.card._saveHistoryToStorage();
+ f.card._entities=[{entity_id:'sensor.PRIVATE'}];f.card._devices=[{id:'PRIVATE',name:'PRIVATE'}];
+ f.card._renameQueue=[{oldId:'sensor.PRIVATE',newId:'sensor.next'}];f.card._lastApplyResult={failures:[{error:'PRIVATE'}]};
+ f.card.hass={...f.hass,user:authority==='another-admin'?{id:'admin-b',is_admin:true}:authority==='member'?{id:'admin-a',is_admin:false}:{id:'admin-a'}};
+ assert.equal(f.card._renameLog.length,0);assert.equal(f.card._lastApplyResult,null);assert.equal(f.card._entities.length,0);assert.equal(f.card._devices.length,0);assert.equal(f.card._renameQueue.length,0);
+ assert.doesNotMatch(f.card._renderLogTab(),/sensor\.old|PRIVATE|private name/);
+ assert.ok(!payload(f.card,'json',true).serialized.includes('sensor.old'));
+ f.card.hass={...f.hass,user:{id:'admin-a',is_admin:true}};
+ assert.equal(f.card._renameLog.length,1);assert.equal(f.card._renameLog[0].oldId,'sensor.old');
+});
+test('scoped history reloads for its owner and leaves legacy origin unknown',t=>{
+ const f=fixture(t); f.card._saveHistoryToStorage();
+ f.dom.window.localStorage.setItem('ha-tools-entity-renamer-history',JSON.stringify([{oldId:'sensor.LEGACY',newId:'sensor.unknown',status:'ok'}]));
+ const reload=f.dom.window.document.createElement('ha-entity-renamer'); f.dom.window.document.body.append(reload);
+ reload._init=()=>{};reload.hass=f.hass;
+ assert.equal(reload._renameLog.length,1);assert.equal(reload._renameLog[0].oldId,'sensor.old');
+ assert.doesNotMatch(reload._renderLogTab(),/sensor\.LEGACY/);assert.match(reload._renderLogTab(),/unknown origin/i);
+ reload.hass={...f.hass,user:{id:'admin-b',is_admin:true}};assert.equal(reload._renameLog.length,0);
+ assert.ok(f.dom.window.localStorage.getItem('ha-tools-entity-renamer-history').includes('sensor.LEGACY'));
+});
+
+test('legacy history stays useful through explicit local review without account reassignment',async t=>{
+ const f=fixture(t);const legacy=[{oldId:'sensor.legacy_old',newId:'sensor.legacy_new',status:'ok',time:'12:00:00'}];
+ const encoded=JSON.stringify(legacy);f.dom.window.localStorage.setItem('ha-tools-entity-renamer-history',encoded);
+ const card=f.dom.window.document.createElement('ha-entity-renamer');f.dom.window.document.body.append(card);card._init=()=>{};card.hass=f.hass;card._activeTab='log';card.render();
+ assert.doesNotMatch(card.shadowRoot.textContent,/sensor\.legacy_old/);
+ const review=card.shadowRoot.getElementById('reviewLegacyHistory');assert.ok(review,'administrator can explicitly review preserved history');review.click();
+ assert.match(card.shadowRoot.textContent,/sensor\.legacy_old/);assert.equal(card._renameLog.length,0,'review does not adopt unowned history');
+ const result=JSON.parse(card._buildRenameReport({draft:{format:'json',includePrivate:false}}).serialized);assert.equal(result.counts.unknown,1);assert.equal(result.counts.applied,0);assert.ok(!JSON.stringify(result).includes('sensor.legacy_old'));
+ assert.equal(f.dom.window.localStorage.getItem('ha-tools-entity-renamer-history'),encoded);assert.equal(f.requests.length,0);
+ card.hass={...f.hass,user:{id:'admin-b',is_admin:true}};assert.doesNotMatch(card._renderLogTab(),/sensor\.legacy_old/);assert.equal(card._renameLog.length,0);
+ card.hass={...f.hass,user:{id:'member-a',is_admin:false}};assert.doesNotMatch(card._renderLogTab(),/reviewLegacyHistory|sensor\.legacy_old/);
+});
+test('an already-sent interrupted attempt does not claim an acknowledgement it never received',t=>{
+ const f=fixture(t);f.card._renameLog=[{oldId:'sensor.a',newId:'sensor.b',status:'ok',writePhase:'attempted',completedAt:'2026-10-13T17:00:00.000Z'}];
+ const r=JSON.parse(payload(f.card).serialized);assert.equal(r.rows[0].status,'unknown');assert.equal(r.rows[0].reason,'write_outcome_unconfirmed');
 });

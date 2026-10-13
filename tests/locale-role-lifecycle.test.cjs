@@ -7,7 +7,8 @@ async function fixture(language = 'en', admin = true) {
  dom.window.eval(readFileSync('ha-entity-renamer.js', 'utf8'));
  const card = dom.window.document.createElement('ha-entity-renamer'); card.setConfig({ show_support: false }); dom.window.document.body.append(card);
  const requests = [], devices = [{ id: 'qa-device', name: 'QA device' }], entities = [{ entity_id: 'sensor.qa_old', device_id: 'qa-device', unique_id: 'qa' }];
- const hass = { language, user: { is_admin: admin }, themes: {}, states: {}, callWS: async message => {
+ const connection = new dom.window.EventTarget(); connection.connected = true;
+ const hass = { language, connection, user: { id: 'admin-a', is_admin: admin }, themes: {}, states: {}, callWS: async message => {
   requests.push(message); if (message.type === 'config/device_registry/list') return devices;
   if (message.type === 'config/entity_registry/list') return entities;
   throw new Error('Fixture rejects '+message.type);
@@ -46,8 +47,8 @@ test('ordinary role loss closes confirmation and disables registry apply without
   f.card._renameQueue = [{ oldId: 'sensor.qa_old', newId: 'sensor.qa_new' }]; f.card._showRenameConfirmation(); assert.ok(f.card.shadowRoot.getElementById('confirmRenameApply'));
   f.card.hass = { ...f.hass, language: 'pl', user: { is_admin: false } };
   assert.equal(f.card.shadowRoot.getElementById('confirmRenameApply'), null);
-  assert.equal(f.card.shadowRoot.getElementById('executeRenames').disabled, true); assert.match(f.card.shadowRoot.textContent, /administratora/);
-  assert.equal(f.card._confirmDialogOpen, false); assert.equal(f.card._renameQueue.length, 1); assert.equal(f.requests.length, 2);
+  assert.equal(f.card.shadowRoot.getElementById('executeRenames'), null); assert.match(f.card._renderLogTab(), /administratora/);
+  assert.equal(f.card._confirmDialogOpen, false); assert.equal(f.card._renameQueue.length, 0); assert.equal(f.requests.length, 2);
  } finally { f.dom.window.close(); }
 });
 test('unresolved role cannot confirm or send registry updates', async () => {
@@ -55,8 +56,8 @@ test('unresolved role cannot confirm or send registry updates', async () => {
  try {
   f.card._renameQueue = [{ oldId: 'sensor.qa_old', newId: 'sensor.qa_new' }]; f.card._activeTab = 'queue'; f.card.hass = { ...f.hass, user: {} };
   f.card._showRenameConfirmation(); assert.equal(f.card._confirmDialogOpen, false);
-  await f.card._executeRenames(true); assert.equal(f.requests.length, 2); assert.equal(f.card._renameQueue.length, 1);
-  assert.equal(f.card.shadowRoot.getElementById('executeRenames').disabled, true);
+  await f.card._executeRenames(true); assert.equal(f.requests.length, 2); assert.equal(f.card._renameQueue.length, 0);
+  assert.equal(f.card.shadowRoot.getElementById('executeRenames'), null);
  } finally { f.dom.window.close(); }
 });
 test('same-language and same-role state updates keep the live form DOM', async () => {

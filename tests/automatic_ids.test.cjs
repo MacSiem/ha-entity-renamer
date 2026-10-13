@@ -9,6 +9,8 @@ test('automatic ID preview separates null and collision, queues safe rows, rejec
   try {
     dom.window.eval(readFileSync(join(__dirname, '..', 'ha-entity-renamer.js'), 'utf8'));
     const card = dom.window.document.createElement('ha-entity-renamer');
+    dom.window.document.body.append(card);
+    const connection = new dom.window.EventTarget(); connection.connected = true;
     card._devices = [{ id: 'device1', name: 'Room' }];
     card._entities = [
       { entity_id: 'sensor.a', device_id: 'device1', unique_id: 'a' },
@@ -18,7 +20,7 @@ test('automatic ID preview separates null and collision, queues safe rows, rejec
     ];
     card._deviceEntities = { device1: card._entities };
     let currentTarget = 'sensor.new_a';
-    card._hass = { language: 'en', states: {}, user: { is_admin: true }, callWS: async msg => {
+    card._hass = { language: 'en', connection, states: {}, user: { id: 'admin-a', is_admin: true }, callWS: async msg => {
       if (msg.type === 'config/entity_registry/list') return card._entities;
       if (msg.type === 'config/device_registry/list') return card._devices;
       if (msg.type === 'lovelace/dashboards/list') return [];
@@ -31,6 +33,7 @@ test('automatic ID preview separates null and collision, queues safe rows, rejec
       }
       throw new Error(msg.type);
     } };
+    card._bindRenameExportEvents();
     await card._loadAutomaticIds();
     assert.equal(card._automaticRows.length, 2);
     assert.deepEqual(Array.from(card._automaticNull, row => row.entity_id), ['sensor.b']);
@@ -53,6 +56,8 @@ test('large automatic preview batches HA requests and queues one device', async 
   try {
     dom.window.eval(readFileSync(join(__dirname, '..', 'ha-entity-renamer.js'), 'utf8'));
     const card = dom.window.document.createElement('ha-entity-renamer');
+    dom.window.document.body.append(card);
+    const connection = new dom.window.EventTarget(); connection.connected = true;
     card._devices = [{ id: 'one', name: 'One' }, { id: 'two', name: 'Two' }];
     card._entities = Array.from({ length: 250 }, (_, i) => ({ entity_id: `sensor.old_${i}`, device_id: i < 125 ? 'one' : 'two', unique_id: String(i) }));
     card._deviceEntities = { one: card._entities.slice(0, 125), two: card._entities.slice(125) };
@@ -62,6 +67,7 @@ test('large automatic preview batches HA requests and queues one device', async 
       sizes.push(msg.entity_ids.length);
       return Object.fromEntries(msg.entity_ids.map(id => [id, id.replace('old_', 'new_')]));
     } };
+    card._bindRenameExportEvents();
     await card._loadAutomaticIds();
     assert.deepEqual(sizes, [100, 100, 50]);
     assert.equal(card._automaticRows.length, 250);
@@ -77,7 +83,9 @@ test('large queue can be abandoned before keyboard traversal of hundreds of per-
   try {
     dom.window.eval(readFileSync(join(__dirname, '..', 'ha-entity-renamer.js'), 'utf8'));
     const card = dom.window.document.createElement('ha-entity-renamer');
-    card._hass = { language: 'en', states: {}, user: { is_admin: true }, callWS: () => {
+    dom.window.document.body.append(card);
+    const connection = new dom.window.EventTarget(); connection.connected = true;
+    card._hass = { language: 'en', connection, states: {}, user: { id: 'admin-a', is_admin: true }, callWS: () => {
       throw new Error('Clearing a preview must not write to Home Assistant');
     } };
     card._activeTab = 'queue';
