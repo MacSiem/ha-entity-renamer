@@ -1381,8 +1381,33 @@ class HAEntityRenamer extends HTMLElement {
     return renameReports.build({log: this._visibleRenameHistory(), format: draft.format, includePrivate: draft.includePrivate === true, language: this._lang});
   }
 
-  _downloadRenameReport({blob, filename, signal}) {
+  async _downloadRenameReport({blob, filename, signal, format}) {
     if (signal.aborted) return {outcome: 'unknown'};
+    if (typeof window.showSaveFilePicker === 'function') {
+      let writable;
+      try {
+        // Invoke within the Save gesture, before any asynchronous processing.
+        const mime = {json: 'application/json', csv: 'text/csv', txt: 'text/plain'};
+        const handle = await window.showSaveFilePicker({suggestedName: filename,
+          types: [{description: format.toUpperCase(), accept: {[mime[format]]: ['.' + format]}}]});
+        if (signal.aborted || handle.name.normalize('NFC') !== filename.normalize('NFC')) return {outcome: 'unknown'};
+        writable = await handle.createWritable();
+        if (signal.aborted) { await writable.abort(); writable = null; return {outcome: 'unknown'}; }
+        await writable.write(blob);
+        if (signal.aborted) { await writable.abort(); writable = null; return {outcome: 'unknown'}; }
+        await writable.close(); writable = null;
+        if (signal.aborted) return {outcome: 'unknown'};
+        const file = await handle.getFile();
+        const [expected, actual] = await Promise.all([blob.arrayBuffer(), file.arrayBuffer()]);
+        const left = new Uint8Array(expected), right = new Uint8Array(actual);
+        if (signal.aborted || left.length !== right.length || !left.every((byte, i) => byte === right[i])) return {outcome: 'unknown'};
+        return {outcome: 'saved'};
+      } catch {
+        if (writable) { try { await writable.abort(); } catch {} }
+        // A cancelled or uncertain save must never trigger a second download.
+        return {outcome: 'unknown'};
+      }
+    }
     const url = URL.createObjectURL(blob), anchor = document.createElement('a');
     anchor.href = url; anchor.download = filename; anchor.hidden = true;
     try {
@@ -1554,7 +1579,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   async _loadAutomaticIds() {
-    if (this._loading || this._hass?.user?.is_admin !== true) return;
+    if (this._loading || ![true, false].includes(this._hass?.user?.is_admin)) return;
     const { hass, current } = this._captureRead();
     const entities = this._entities.map(entry => ({ ...entry }));
     this._loading = true;
@@ -1711,7 +1736,7 @@ class HAEntityRenamer extends HTMLElement {
 
 
   async _analyzeImpact() {
-    if (this._hass?.user?.is_admin !== true) return;
+    if (![true, false].includes(this._hass?.user?.is_admin)) return;
     if (this._loading || !this._renameQueue.length) return;
     const { hass, current } = this._captureRead();
     const queue = this._renameQueue.map(row => ({ ...row }));
