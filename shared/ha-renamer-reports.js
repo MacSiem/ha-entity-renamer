@@ -25,7 +25,7 @@ function createRenameReports() {
       // ACK is never a readback. Legacy error text cannot prove rejection before a write.
       const verified = entry.status === 'ok' && phase === 'readback_confirmed' && entry.verification === 'independent_registry_list_exact_fields';
       const status = verified ? 'applied' : entry.status === 'error' && phase === 'not_started' ? 'failed' : 'unknown';
-      const reason = verified ? 'registry_readback_confirmed' : status === 'failed' ? 'preflight_rejected' : entry.status === 'ok' ? 'ack_without_readback' : phase === 'attempted' ? 'write_outcome_unconfirmed' : 'legacy_error_without_phase';
+      const reason = verified ? 'registry_readback_confirmed' : status === 'failed' ? 'preflight_rejected' : phase === 'attempted' ? 'write_outcome_unconfirmed' : entry.status === 'ok' ? 'ack_without_readback' : 'legacy_error_without_phase';
       const references = Object.fromEntries(referenceTypes.map(type => [type, Array.isArray(entry.impact?.[type]) ? entry.impact[type].length : null]));
       const dashboardCoverage = ['complete', 'partial', 'unavailable'].includes(entry.impact?.dashboardCoverage) ? entry.impact.dashboardCoverage : 'unknown';
       if (dashboardCoverage === 'unavailable' || dashboardCoverage === 'partial' && references.dashboards === 0) references.dashboards = null;
