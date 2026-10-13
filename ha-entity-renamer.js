@@ -1503,7 +1503,7 @@ class HAEntityRenamer extends HTMLElement {
     if (hass?.language) this._lang = hass.language.startsWith('pl') ? 'pl' : 'en';
     if (previousLanguage !== this._lang) { this._invalidateRenameExport(); this._exportDialog?.cancel(); }
     if (!hass) return;
-    if (first) this._init();
+    if (first || (sessionChanged && ![true, false].includes(previousSession.admin) && [true, false].includes(nextSession.admin) && !this._applyOperation)) this._init();
     else if (sessionChanged || previousAdmin !== (hass.user?.is_admin === true)) {
       this._confirmDialogOpen = false;
       this.render();

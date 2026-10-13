@@ -161,7 +161,10 @@ and reviewing/exporting it does not assign it to the current account or overwrit
 the original storage. This choice clears when authority changes. Preferences
 remain shared by cards on this origin. History is not synchronized to other devices;
 use separate browser profiles on a shared computer. Queued proposals stay in memory
-and are lost on a page reload. A browser download initiation does not confirm that
-a file was written to disk; check your Downloads before starting another attempt.
+and are lost on a page reload. Where the browser supports Save As, choose a location
+and keep the reviewed filename. Saved appears only after closing the file and
+reading back identical bytes. Cancelling or changing that filename leaves the
+outcome unconfirmed. Other browsers use the existing download, whose initiation
+does not confirm a disk write; check the downloaded file before trying again.
 
 See [SECURITY.md](SECURITY.md) for safe vulnerability reporting and [NOTICE](NOTICE) for licensing notices.
