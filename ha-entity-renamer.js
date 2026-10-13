@@ -1081,6 +1081,26 @@ const _FAMILY_CONTROL_CSS = `
 :host .tabs button,:host .det-tabs button { min-height:44px !important;min-width:44px !important;white-space:normal !important;overflow-wrap:anywhere; }
 `;
 
+
+// These rows contain other controls: give only the focused row button semantics.
+function _bindFamilyRowKeys(root, selector) {
+  root.querySelectorAll(selector).forEach(row => row.addEventListener('keydown', event => {
+    if (event.target !== row || !['Enter', ' '].includes(event.key) || event.altKey || event.ctrlKey || event.metaKey) return;
+    event.preventDefault();
+    if (!event.repeat) row.click();
+  }));
+}
+function _rememberFamilyRowFocus(card, kinds) {
+  const active = card.shadowRoot.activeElement;
+  const kind = active && kinds.find(([selector]) => active.matches(selector));
+  return kind ? { selector:kind[0], attr:kind[1], key:active.getAttribute(kind[1]) } : null;
+}
+function _restoreFamilyRowFocus(card, saved) {
+  if (!saved) return;
+  Array.from(card.shadowRoot.querySelectorAll(saved.selector))
+    .find(row => row.getAttribute(saved.attr) === saved.key)?.focus({preventScroll:true});
+}
+
 class HAEntityRenamer extends HTMLElement {
   static getConfigElement() { return document.createElement('ha-entity-renamer-editor'); }
   getCardSize() { return 8; }
@@ -2035,6 +2055,7 @@ class HAEntityRenamer extends HTMLElement {
   render() {
     if (!this._hass) return;
     const familyFocus=_rememberFamilyFocus(this), familyDrafts=_rememberFamilyDrafts(this);
+    const familyRowFocus=_rememberFamilyRowFocus(this, [['.device-header','data-device-id']]);
     this._exportDialog?.cancel();
     const devices = this._getFilteredDevices();
     const queueCount = this._renameQueue.length + Object.keys(this._deviceRenameQueue).length;
@@ -2380,6 +2401,7 @@ class HAEntityRenamer extends HTMLElement {
     this._attachEvents();
     _restoreFamilyDrafts(this,familyDrafts);
     _bindFamilyNavigation(this,familyFocus);
+    _restoreFamilyRowFocus(this,familyRowFocus);
   }
 
 
@@ -2508,7 +2530,7 @@ class HAEntityRenamer extends HTMLElement {
             const isSelected = this._selectedDevice === d.id;
             return `
             <div class="device-item ${isSelected ? 'selected' : ''}">
-              <div class="device-header" data-device-id="${_esc(d.id)}">
+              <div class="device-header" data-device-id="${_esc(d.id)}" role="button" tabindex="0" aria-expanded="${isExpanded}" aria-label="${_esc((this._lang === 'pl' ? 'Szczegóły urządzenia: ' : 'Device details: ') + this._getDeviceName(d))}">
                 <span class="device-expand ${isExpanded ? 'open' : ''}">▶</span>
                 <span class="device-name">${_esc(this._getDeviceName(d))}</span>
                 <span class="device-meta">${ents.length} ${t.entities.toLowerCase()}</span>
@@ -2682,6 +2704,8 @@ class HAEntityRenamer extends HTMLElement {
         this.render();
       });
     });
+
+    _bindFamilyRowKeys(root, '.device-header');
 
     // Device rename
     const applyDeviceName = root.getElementById('applyDeviceName');
