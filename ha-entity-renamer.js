@@ -973,6 +973,114 @@ function _bindLocalIntroDismiss(root) {
 }
 /* ============================================================ */
 
+
+const FAMILY_NAV='.tabs',FAMILY_ATTR='data-tab',FAMILY_ACTIVE='active';
+
+// Adapted from Config/YAML family15: options come only from current native buttons.
+// Observe the actual navigation parent's content box, not the global viewport.
+function _rememberFamilyFocus(card) {
+  const active = card.shadowRoot?.activeElement;
+  const nav = card.shadowRoot?.querySelector(FAMILY_NAV);
+  if (active?.id === 'ha-tools-tab-picker') return { picker:true };
+  if (nav?.contains(active)) return { tab:active.getAttribute(FAMILY_ATTR) };
+  return null;
+}
+function _disconnectFamilyNavigation(card) {
+  card._familyNavObserver?.disconnect();card._familyNavObserver=null;card._familyNavTarget=null;
+}
+function _bindFamilyNavigation(card, restoreFocus=null) {
+  const root=card.shadowRoot, nav=root?.querySelector(FAMILY_NAV);
+  if (!nav) { _disconnectFamilyNavigation(card);return; }
+  let label=root.querySelector('.ht-tab-picker');
+  if (!label) {
+    label=card.ownerDocument.createElement('div');label.className='ht-tab-picker';
+    const text=card.ownerDocument.createElement('label');text.htmlFor='ha-tools-tab-picker';label.append(text);
+    const select=card.ownerDocument.createElement('select');select.id='ha-tools-tab-picker';label.append(select);nav.before(label);
+    select.addEventListener('change',()=>{
+      const button=Array.from(root.querySelectorAll(FAMILY_NAV+' button['+FAMILY_ATTR+']')).find(item=>item.getAttribute(FAMILY_ATTR)===select.value&&!item.disabled&&!item.hidden);
+      if(button)button.click(); // The original handler owns navigation, history and guards.
+      _bindFamilyNavigation(card);
+    });
+  }
+  label.firstElementChild.textContent=card._lang==='pl'?'Zakładka':'Tab';
+  const select=label.querySelector('select');
+  const buttons=Array.from(nav.querySelectorAll('button['+FAMILY_ATTR+']')).filter(button=>!button.hidden&&!button.disabled);
+  const options=Array.from(select.options);
+  if(options.length!==buttons.length||buttons.some((button,index)=>options[index]?.value!==button.getAttribute(FAMILY_ATTR))) {
+    select.replaceChildren(...buttons.map(button=>{const option=card.ownerDocument.createElement('option');option.value=button.getAttribute(FAMILY_ATTR);return option;}));
+  }
+  buttons.forEach((button,index)=>{select.options[index].textContent=button.getAttribute('aria-label')||button.textContent.trim();});
+  const selected=buttons.find(button=>button.classList.contains(FAMILY_ACTIVE));select.value=selected?.getAttribute(FAMILY_ATTR)||'';
+  const target=nav.parentElement;
+  const applyWidth=width=>{
+    const currentNav=root.querySelector(FAMILY_NAV),currentLabel=root.querySelector('.ht-tab-picker');if(!currentNav||!currentLabel)return;
+    const input=currentLabel.querySelector('select'),active=root.activeElement;
+    const style=getComputedStyle(currentNav);
+    const available=width-(parseFloat(style.paddingLeft)||0)-(parseFloat(style.paddingRight)||0);
+    const narrow=available>0&&available<280,fromTab=currentNav.contains(active),fromPicker=active===input;
+    currentNav.hidden=narrow;currentLabel.hidden=!narrow;
+    if(narrow&&fromTab)input.focus({preventScroll:true});
+    else if(!narrow&&fromPicker)currentNav.querySelector('button.'+FAMILY_ACTIVE)?.focus({preventScroll:true});
+  };
+  if(card._familyNavTarget!==target) {
+    _disconnectFamilyNavigation(card);
+    const style=getComputedStyle(target);
+    const measured=target.getBoundingClientRect().width-(parseFloat(style.paddingLeft)||0)-(parseFloat(style.paddingRight)||0)-(parseFloat(style.borderLeftWidth)||0)-(parseFloat(style.borderRightWidth)||0);
+    if(measured>0)card._familyNavWidth=measured;
+    if(typeof ResizeObserver==='function'&&card.isConnected) {
+      card._familyNavTarget=target;
+      card._familyNavObserver=new ResizeObserver(entries=>{
+        if(!card.isConnected||card._familyNavTarget!==target)return;
+        const entry=entries.find(item=>item.target===target);if(!entry)return;
+        card._familyNavWidth=entry.contentRect.width;applyWidth(card._familyNavWidth);
+      });
+      card._familyNavObserver.observe(target);
+    }
+  }
+  applyWidth(card._familyNavWidth||900);
+  // If ResizeObserver is unavailable, all native tabs and the complete picker stay usable.
+  if(typeof ResizeObserver!=='function') { nav.hidden=false;label.hidden=false; }
+  if(restoreFocus) {
+    const button=buttons.find(item=>item.getAttribute(FAMILY_ATTR)===restoreFocus.tab)||selected;
+    if(nav.hidden)select.focus({preventScroll:true});else button?.focus({preventScroll:true});
+  }
+}
+
+function _rememberFamilyDrafts(card) {
+  const root=card.shadowRoot, active=root?.activeElement;
+  return Array.from(root?.querySelectorAll('input[id]:not([type=checkbox]):not([type=radio]),textarea[id]')||[],field=>({
+    id:field.id,context:field.getAttribute('data-family-draft-context'),value:field.value,focused:field===active,start:field.selectionStart,end:field.selectionEnd,direction:field.selectionDirection,scrollTop:field.scrollTop,
+  }));
+}
+function _restoreFamilyDrafts(card, fields) {
+  for(const saved of fields) {
+    const field=card.shadowRoot.getElementById(saved.id);if(!field||field.disabled||field.getAttribute('data-family-draft-context')!==saved.context)continue;
+    field.value=saved.value;field.scrollTop=saved.scrollTop;
+    if(saved.focused){field.focus({preventScroll:true});if(typeof saved.start==='number'&&typeof field.setSelectionRange==='function')field.setSelectionRange(saved.start,saved.end,saved.direction||'none');}
+  }
+}
+
+const _FAMILY_CONTROL_CSS = `
+/* Family15: native touch targets; checkbox indicators remain small inside labels. */
+:host button,:host summary,:host a[href],:host [role=button],
+:host input:not([type=checkbox]):not([type=radio]),:host select,:host textarea {
+  box-sizing:border-box;min-height:44px !important;min-width:44px !important;max-width:100%;
+}
+:host button,:host summary,:host a[href] { white-space:normal !important;overflow-wrap:anywhere; }
+:host a[href] { display:inline-flex;align-items:center; }
+:host label:has(input[type=checkbox]) { min-height:44px !important;min-width:44px;display:flex;align-items:center;gap:8px;cursor:pointer; }
+:host input[type=checkbox] { width:18px;height:18px;flex:none; }
+:host button:focus-visible,:host summary:focus-visible,:host a:focus-visible,:host input:focus-visible,:host select:focus-visible,:host textarea:focus-visible,:host [role=button]:focus-visible {
+  outline:3px solid var(--primary-color,#1769aa) !important;outline-offset:2px;
+}
+.intro-banner { padding-right:64px !important; }
+.ht-tab-picker { min-width:0;display:flex;flex-direction:column;gap:6px;padding:8px;margin:0 0 8px; }
+.ht-tab-picker select { width:100%;font:inherit;color:var(--primary-text-color,inherit);background:var(--card-background-color,transparent);padding:8px;border:1px solid var(--divider-color,#aaa);border-radius:8px; }
+.ht-tab-picker[hidden],.tabs[hidden],.det-tabs[hidden] { display:none !important; }
+.tabs,.det-tabs { display:flex;flex-wrap:wrap !important;overflow:visible !important;min-width:0;max-width:100%; }
+:host .tabs button,:host .det-tabs button { min-height:44px !important;min-width:44px !important;white-space:normal !important;overflow-wrap:anywhere; }
+`;
+
 class HAEntityRenamer extends HTMLElement {
   static getConfigElement() { return document.createElement('ha-entity-renamer-editor'); }
   getCardSize() { return 8; }
@@ -1154,9 +1262,11 @@ class HAEntityRenamer extends HTMLElement {
   connectedCallback() {
     this._bindRenameExportEvents();
     this._lang = (navigator.language || '').startsWith('pl') ? 'pl' : 'en';
+    _bindFamilyNavigation(this);
   }
 
   disconnectedCallback() {
+    _disconnectFamilyNavigation(this);this._familyNavWidth=null;
     this._exportDialog?.cancel();
     this._exportEventCleanups.splice(0).forEach(off => off());
     this._exportBoundConnection = null;
@@ -1932,6 +2042,7 @@ class HAEntityRenamer extends HTMLElement {
 
   render() {
     if (!this._hass) return;
+    const familyFocus=_rememberFamilyFocus(this), familyDrafts=_rememberFamilyDrafts(this);
     this._exportDialog?.cancel();
     const devices = this._getFilteredDevices();
     const queueCount = this._renameQueue.length + Object.keys(this._deviceRenameQueue).length;
@@ -2241,6 +2352,11 @@ class HAEntityRenamer extends HTMLElement {
           .queue-actions { flex-wrap: wrap; justify-content: center; }
           .log-entry { font-size: 11px; padding: 4px 0; }
         }
+        ${_FAMILY_CONTROL_CSS}
+        .card { min-width:0;container-type:inline-size; }
+        .prefix-row,.queue-actions { flex-wrap:wrap; }
+        .device-header { min-height:44px;min-width:44px; }
+        .prefix-row input,.device-detail input { min-width:44px;max-width:100%; }
         </style>
     ${_renderLocalIntro(this._lang)}
     <div class="card">
@@ -2270,6 +2386,8 @@ class HAEntityRenamer extends HTMLElement {
     _bindLocalIntroDismiss(this.shadowRoot);
     _bindLocalSupportDismiss(this.shadowRoot);
     this._attachEvents();
+    _restoreFamilyDrafts(this,familyDrafts);
+    _bindFamilyNavigation(this,familyFocus);
   }
 
 
@@ -2293,9 +2411,9 @@ class HAEntityRenamer extends HTMLElement {
       <h2 id="entityEditHeading" style="font-size:16px;margin:0 0 8px;">${t.editEntity}</h2>
       <p style="overflow-wrap:anywhere;margin:0 0 12px;">${_esc(draft.oldId)}</p>
       <label for="entityEditObjectId" style="display:block;">${t.newEntity}</label>
-      <input id="entityEditObjectId" type="text" value="${_esc(draft.objectIdDraft)}" style="display:block;width:100%;min-width:0;box-sizing:border-box;margin:6px 0 12px;" ${this._loading ? 'disabled' : ''}>
+      <input id="entityEditObjectId" data-family-draft-context="${_esc(draft.oldId)}" type="text" value="${_esc(draft.objectIdDraft)}" style="display:block;width:100%;min-width:0;box-sizing:border-box;margin:6px 0 12px;" ${this._loading ? 'disabled' : ''}>
       <label for="entityEditName" style="display:block;">${t.newFriendly}</label>
-      <input id="entityEditName" type="text" value="${_esc(draft.nameDraft)}" style="display:block;width:100%;min-width:0;box-sizing:border-box;margin:6px 0 12px;" ${this._loading ? 'disabled' : ''}>
+      <input id="entityEditName" data-family-draft-context="${_esc(draft.oldId)}" type="text" value="${_esc(draft.nameDraft)}" style="display:block;width:100%;min-width:0;box-sizing:border-box;margin:6px 0 12px;" ${this._loading ? 'disabled' : ''}>
       <div style="display:flex;flex-wrap:wrap;gap:8px;">
         <button id="queueEntityEdit" type="submit" class="btn btn-primary" ${this._loading ? 'disabled' : ''}>${t.queueEdit}</button>
         <button id="cancelEntityEdit" type="button" class="btn btn-outline">${t.cancel}</button>
@@ -2383,7 +2501,7 @@ class HAEntityRenamer extends HTMLElement {
     const t = this._t;
     return `
       <div class="search-bar">
-        <input type="text" id="searchInput" placeholder="🔍 ${t.searchPlaceholder}" value="${_esc(this._searchQuery)}">
+        <input type="text" id="searchInput" aria-label="${_esc(t.searchPlaceholder)}" placeholder="🔍 ${t.searchPlaceholder}" value="${_esc(this._searchQuery)}">
       </div>
       <div class="stats-row">
         <div class="stat-card"><div class="num">${this._devices.length}</div><div class="label">${t.devices}</div></div>
@@ -2424,14 +2542,14 @@ class HAEntityRenamer extends HTMLElement {
               <div class="prefix-section">
                 <h3>📱 ${t.newDeviceName}</h3>
                 <div class="prefix-row" style="margin-bottom:12px">
-                  <input type="text" id="deviceName" value="${_esc(this._deviceRenameQueue[d.id] || this._getDeviceName(d))}" placeholder="${t.newDeviceName}" style="width:300px;font-family:inherit">
+                  <input type="text" id="deviceName" data-family-draft-context="${_esc(d.id)}" aria-label="${_esc(t.newDeviceName)}" value="${_esc(this._deviceRenameQueue[d.id] || this._getDeviceName(d))}" placeholder="${t.newDeviceName}" style="width:300px;font-family:inherit">
                   <button class="btn btn-primary btn-sm" id="applyDeviceName" data-device-id="${_esc(d.id)}">${t.changeName}</button>
                 </div>
                 <h3>📄 ${t.prefixChange}</h3>
                 <div class="prefix-row">
-                  <input type="text" id="prefixOld" value="${_esc(this._prefixOld || '')}" placeholder="${t.oldPrefix}">
+                  <input type="text" id="prefixOld" data-family-draft-context="${_esc(d.id)}" aria-label="${_esc(t.oldPrefix)}" value="${_esc(this._prefixOld || '')}" placeholder="${t.oldPrefix}">
                   <span class="arrow">→</span>
-                  <input type="text" id="prefixNew" value="${_esc(this._prefixNew || '')}" placeholder="${t.newPrefix}">
+                  <input type="text" id="prefixNew" data-family-draft-context="${_esc(d.id)}" aria-label="${_esc(t.newPrefix)}" value="${_esc(this._prefixNew || '')}" placeholder="${t.newPrefix}">
                   <button class="btn btn-primary btn-sm" id="applyPrefix">${t.apply}</button>
                 </div>
               </div>` : ''}
@@ -2725,12 +2843,13 @@ class HaEntityRenamerEditor extends HTMLElement {
       <style>
         :host { display:block; padding:16px; }
         h3 { margin:0 0 16px; font-size:15px; font-weight:600; color:var(--bento-text, var(--primary-text-color,#1e293b)); }
-        input { outline:none; transition:border-color .2s; }
+        input { box-sizing:border-box;min-height:44px;min-width:44px;max-width:100%;transition:border-color .2s; }
+            input:focus-visible { outline:3px solid var(--primary-color,#1769aa);outline-offset:2px; }
         input:focus { border-color:var(--bento-primary, var(--primary-color,#3b82f6)); }
       </style>
       <h3>Entity Renamer</h3>
             <div style="margin-bottom:12px;">
-              <label style="display:block;font-weight:500;margin-bottom:4px;font-size:13px;">Title</label>
+              <label for="cf_title" style="display:block;font-weight:500;margin-bottom:4px;font-size:13px;">${(typeof this._config?.language === 'string' ? this._config.language : navigator.language || 'en').startsWith('pl') ? 'Tytuł' : 'Title'}</label>
               <input type="text" id="cf_title" value="${_esc(this._config?.title || 'Entity Renamer')}"
                 style="width:100%;padding:8px 12px;border:1px solid var(--divider-color,#e2e8f0);border-radius:8px;background:var(--card-background-color,#fff);color:var(--primary-text-color,#1e293b);font-size:14px;box-sizing:border-box;">
             </div>
