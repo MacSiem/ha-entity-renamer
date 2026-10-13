@@ -162,3 +162,52 @@ test('HA card reattachment retries a registry read cancelled during initial moun
   assert.equal(card._loading,false);assert.equal(reads.filter(x=>x.type.endsWith('/update')).length,0);
  } finally {f.dom.window.close();}
 });
+
+test('resolved role loss reloads permitted registries and never restores private proposals', async () => {
+ const f=await fixture();
+ try {
+  f.card._renameQueue=[{oldId:'sensor.qa_old',newId:'sensor.private_old_proposal'}];
+  f.card.hass={...f.hass,user:{id:'admin-a',is_admin:false}};
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.card._entities.length,1);assert.equal(f.card._devices.length,1);
+  assert.equal(f.card._renameQueue.length,0);assert.equal(f.requests.length,4);
+  assert.equal(f.requests.filter(x=>x.type.endsWith('/update')).length,0);
+  assert.match(f.card._renderLogTab(),/administrator/);
+ } finally {f.dom.window.close();}
+});
+
+test('another resolved account receives freshly read registry rows instead of an empty or old projection', async () => {
+ const f=await fixture();
+ try {
+  const reads=[];
+  f.card.hass={...f.hass,user:{id:'admin-b',is_admin:true},callWS:async message=>{reads.push(message);return message.type==='config/device_registry/list'?[{id:'new-account-device',name:'New account device'}]:[{entity_id:'sensor.new_account',device_id:'new-account-device'}];}};
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.card._entities[0].entity_id,'sensor.new_account');assert.equal(f.card._devices[0].id,'new-account-device');
+  assert.equal(reads.length,2);assert.equal(f.card._renameQueue.length,0);assert.equal(f.card._renameLog.length,0);
+ } finally {f.dom.window.close();}
+});
+
+test('recovery retries a cancelled initial read and its late response cannot close a new export dialog', async () => {
+ const f=await fixture();
+ try {
+  const card=f.dom.window.document.createElement('ha-entity-renamer');card.setConfig({show_support:false});f.dom.window.document.body.append(card);
+  let resolveOld;const old=new Promise(resolve=>{resolveOld=resolve;});const connection=new f.dom.window.EventTarget();connection.connected=true;
+  const hass={...f.hass,connection,callWS:async message=>{await old;return message.type==='config/device_registry/list'?[{id:'old-device'}]:[{entity_id:'sensor.old_cancelled'}];}};
+  card.hass=hass;connection.connected=false;connection.dispatchEvent(new f.dom.window.Event('disconnected'));
+  hass.callWS=async message=>message.type==='config/device_registry/list'?[{id:'recovered-device'}]:[{entity_id:'sensor.recovered',device_id:'recovered-device'}];
+  connection.connected=true;connection.dispatchEvent(new f.dom.window.Event('ready'));
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(card._entities[0]?.entity_id,'sensor.recovered');assert.equal(card._loading,false);
+  card._activeTab='log';card.render();card._openRenameExport(card.shadowRoot.querySelector('button'));
+  const dialog=card.shadowRoot.querySelector('[role="dialog"]');assert.ok(dialog);
+  resolveOld();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(card._entities[0].entity_id,'sensor.recovered');assert.equal(card.shadowRoot.querySelector('[role="dialog"]'),dialog);
+ } finally {f.dom.window.close();}
+});
+
+test('mounting a card with an existing Polish HA context retains the HA locale', async () => {
+ const f=await fixture('pl');
+ try {
+  const cold=f.dom.window.document.createElement('ha-entity-renamer');cold.setConfig({show_support:false});cold.hass=f.hass;f.dom.window.document.body.append(cold);
+  await new Promise(resolve=>setImmediate(resolve));assert.match(cold.shadowRoot.getElementById('searchInput').placeholder,/Szukaj/);
+ } finally {f.dom.window.close();}
+});

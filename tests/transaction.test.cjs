@@ -308,3 +308,16 @@ test('a sent request records attempt intent before transport and completion only
  const after=JSON.parse(f.card._buildRenameReport({draft:{format:'json',includePrivate:false}}).serialized);
  assert.equal(after.rows[0].timestampScope,'utc_completion');assert.equal(after.counts.applied,1);
 });
+
+test('a new resolved account gets permitted registries after the cancelled old write releases its lock', async t => {
+ const f=fixture(t),writeGate=gate(),original=f.hass.callWS;let started=false;
+ f.hass.callWS=async message=>{if(message.type==='config/entity_registry/update'){started=true;f.writes.push(message);await writeGate.promise;return {};}return original(message);};
+ f.card._renameQueue=[{oldId:'sensor.a',newId:'sensor.qa_cancelled_old'}];const pending=f.confirm();
+ for(let i=0;i<20&&!started;i++)await new Promise(resolve=>setImmediate(resolve));assert.equal(started,true);
+ const nextReads=[];
+ f.card.hass={...f.hass,user:{id:'admin-b',is_admin:true},callWS:async message=>{nextReads.push(message);return message.type==='config/device_registry/list'?[{id:'fresh-device',name:'Fresh device'}]:[{entity_id:'sensor.fresh_account',device_id:'fresh-device'}];}};
+ assert.equal(nextReads.length,0,'old unresolved write must retain its lock');writeGate.release();await pending;await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.card._entities[0]?.entity_id,'sensor.fresh_account');assert.equal(f.card._devices[0]?.id,'fresh-device');
+ assert.equal(nextReads.length,2);assert.equal(nextReads.filter(x=>x.type.endsWith('/update')).length,0);assert.equal(f.writes.length,1);
+ assert.equal(f.card._renameLog.length,0);assert.equal(f.card._confirmDialogOpen,false);assert.equal(f.card._applyOperation,null);
+});
