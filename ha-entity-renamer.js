@@ -1079,10 +1079,11 @@ const _FAMILY_CONTROL_CSS = `
 .ht-tab-picker[hidden],.tabs[hidden],.det-tabs[hidden] { display:none !important; }
 .tabs,.det-tabs { display:flex;flex-wrap:wrap !important;overflow:visible !important;min-width:0;max-width:100%; }
 :host .tabs button,:host .det-tabs button { min-height:44px !important;min-width:44px !important;white-space:normal !important;overflow-wrap:anywhere; }
+.device-header { width:100%; border:0; background:transparent; color:inherit; font:inherit; text-align:left; }
 `;
 
 
-// These rows contain other controls: give only the focused row button semantics.
+// Forward native key activation to the original action, without repeat or shortcut clicks.
 function _bindFamilyRowKeys(root, selector) {
   root.querySelectorAll(selector).forEach(row => row.addEventListener('keydown', event => {
     if (event.target !== row || !['Enter', ' '].includes(event.key) || event.altKey || event.ctrlKey || event.metaKey) return;
@@ -2530,11 +2531,11 @@ class HAEntityRenamer extends HTMLElement {
             const isSelected = this._selectedDevice === d.id;
             return `
             <div class="device-item ${isSelected ? 'selected' : ''}">
-              <div class="device-header" data-device-id="${_esc(d.id)}" role="button" tabindex="0" aria-expanded="${isExpanded}" aria-label="${_esc((this._lang === 'pl' ? 'Szczegóły urządzenia: ' : 'Device details: ') + this._getDeviceName(d))}">
+              <button type="button" class="device-header" data-device-id="${_esc(d.id)}" role="button" tabindex="0" aria-expanded="${isExpanded}" aria-label="${_esc((this._lang === 'pl' ? 'Szczegóły urządzenia: ' : 'Device details: ') + this._getDeviceName(d))}">
                 <span class="device-expand ${isExpanded ? 'open' : ''}">▶</span>
                 <span class="device-name">${_esc(this._getDeviceName(d))}</span>
                 <span class="device-meta">${ents.length} ${t.entities.toLowerCase()}</span>
-              </div>
+              </button>
               ${isExpanded ? `
               <div class="entity-list">
                 ${ents.map(e => {
