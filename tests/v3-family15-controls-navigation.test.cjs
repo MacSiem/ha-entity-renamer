@@ -86,3 +86,13 @@ test('detaching stops actual registered browser and connection event callbacks',
   assert.equal(f.card._exportRevision,revision,'detached export must not react to browser or old connection');assert.equal(f.card._readEpoch,epoch);
  }finally{f.card.remove();f.dom.window.close();}
 });
+
+
+test('device headers support Enter and Space through original expand/select behavior and retain focus',()=>{
+ const f=fixture();try{const header=()=>f.card.shadowRoot.querySelector('.device-header');header().focus();header().dispatchEvent(new f.dom.window.KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+  assert.equal(f.card._selectedDevice,'synthetic-device');assert.equal(f.card._expandedDevices.has('synthetic-device'),true);assert.equal(header().getAttribute('role'),'button');assert.equal(header().tabIndex,0);assert.equal(header().getAttribute('aria-expanded'),'true');assert.equal(f.card.shadowRoot.activeElement,header());
+  header().dispatchEvent(new f.dom.window.KeyboardEvent('keydown',{key:' ',bubbles:true,cancelable:true,repeat:true}));assert.equal(f.card._expandedDevices.has('synthetic-device'),true);
+  f.card._lang='pl';f.card.render();assert.equal(f.card.shadowRoot.activeElement,header());assert.match(header().getAttribute('aria-label'),/Synthetic device/);
+  header().dispatchEvent(new f.dom.window.KeyboardEvent('keydown',{key:' ',bubbles:true,cancelable:true}));assert.equal(f.card._selectedDevice,null);assert.equal(header().getAttribute('aria-expanded'),'false');assert.equal(f.card.shadowRoot.activeElement,header());assert.equal(f.calls.length,0);
+ }finally{f.card.remove();f.dom.window.close()}
+});
