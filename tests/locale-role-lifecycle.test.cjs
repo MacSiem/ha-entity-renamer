@@ -98,3 +98,17 @@ test('all queued entity and device remove controls have translated accessible na
   assert.equal(f.requests.length, 2);
  } finally { f.dom.window.close(); }
 });
+
+test('resolved household keeps authorized read-only browsing while rename history stays private', async () => {
+ const f=setup('en',false);
+ try {
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(f.requests.map(x=>x.type).sort(),['config/device_registry/list','config/entity_registry/list']);
+  assert.equal(f.card._devices.length,1);
+  assert.match(f.card.shadowRoot.textContent,/QA device/);
+  assert.match(f.card._renderLogTab(),/administrator/i);
+  f.card._renameQueue=[{oldId:'sensor.qa_old',newId:'sensor.forbidden'}];
+  await f.card._executeRenames(true);
+  assert.equal(f.requests.filter(x=>x.type.endsWith('/update')).length,0);
+ } finally { f.dom.window.close(); }
+});
