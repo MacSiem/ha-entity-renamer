@@ -346,14 +346,15 @@ function createExportDialog(options) {
 }
 // END HA TOOLS EXPORT V3
 
-// BEGIN HA RENAMER REPORTS V1 source-sha256=3605e9e7919c06c8cf1963d9567890fb87d25efe8be59de4fbc418e9a28df703
+// BEGIN HA RENAMER REPORTS V1 source-sha256=8eb67bff7938388cd42213168e8ae56b91a355f647f5becb2d5e972fb424d7e6
 // Reviewed completed-history projection. Never serialize arbitrary log/state/config.
 function createRenameReports() {
   const entityId = value => typeof value === 'string' && value.length <= 255 && /^[a-z][a-z0-9_]*\.[a-z0-9_]+$/.test(value) ? value : null;
   const timestamp = row => {
-    if (typeof row.completedAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(row.completedAt)) {
-      const date = new Date(row.completedAt);
-      if (Number.isFinite(date.getTime()) && date.toISOString() === row.completedAt) return row.completedAt;
+    for (const key of ['completedAt', 'attemptedAt']) {
+      if (typeof row[key] !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(row[key])) continue;
+      const date = new Date(row[key]);
+      if (Number.isFinite(date.getTime()) && date.toISOString() === row[key]) return row[key];
     }
     return typeof row.time === 'string' && /^(?:[01]?\d|2[0-3]):[0-5]\d:[0-5]\d(?: (?:AM|PM))?$/.test(row.time) ? row.time : null;
   };
@@ -379,7 +380,7 @@ function createRenameReports() {
       const dashboardCoverage = ['complete', 'partial', 'unavailable'].includes(entry.impact?.dashboardCoverage) ? entry.impact.dashboardCoverage : 'unknown';
       if (dashboardCoverage === 'unavailable' || dashboardCoverage === 'partial' && references.dashboards === 0) references.dashboards = null;
       const hasKnownReferences = Object.values(references).some(count => typeof count === 'number' && count > 0);
-      rows.push({index: rows.length + 1, timestamp: timestamp(entry), timestampScope: typeof entry.completedAt === 'string' && timestamp(entry) === entry.completedAt ? 'utc_completion' : timestamp(entry) ? 'local_time_date_unknown' : 'unknown',
+      rows.push({index: rows.length + 1, timestamp: timestamp(entry), timestampScope: typeof entry.completedAt === 'string' && timestamp(entry) === entry.completedAt ? 'utc_completion' : typeof entry.attemptedAt === 'string' && timestamp(entry) === entry.attemptedAt ? 'utc_attempt_intent' : timestamp(entry) ? 'local_time_date_unknown' : 'unknown',
         kind: entry.operationKind === 'device' ? 'device' : old && next ? 'entity' : 'unreviewed_identifier',
         old: includePrivate ? old : alias(old, `record-${rows.length + 1}-source`),
         new: includePrivate ? next : alias(next, `record-${rows.length + 1}-target`), status, reason,
@@ -392,8 +393,8 @@ function createRenameReports() {
     const {rows, omitted} = snapshot(log, includePrivate), pl = language === 'pl';
     if (!rows.length) return {serialized: '', status: 'no_data', confirmed: true, sourceConfirmed: true};
     const limits = pl
-      ? 'Tylko ukończone wpisy lokalnej historii. ACK nie potwierdza zmiany. Applied wymaga zapisanego, niezależnego odczytu rejestru ze zgodną stałą tożsamością i wszystkimi żądanymi polami. Starsze błędy bez fazy zapisu są unknown. Pochodzenie konta, pełna data starszych wpisów i kompletność odwołań nie są potwierdzone. Liczby obejmują tylko zapisane trafienia z search/related i czytelnych dashboardów Lovelace; null oznacza brak danych, 0 zapisany brak trafień. Eksport nie wykonuje odczytów ani zmian HA.'
-      : 'Completed entries in local history only. ACK alone does not confirm a change. Applied requires recorded independent registry readback with matching stable identity and all requested fields. Legacy errors without a write phase are unknown. Account origin, full dates of legacy entries and reference completeness are unconfirmed. Counts cover recorded search/related and readable Lovelace hits only; null means unavailable, 0 recorded no hits. Export performs no HA reads or changes.';
+      ? 'Tylko ukończone wpisy lokalnej historii. ACK nie potwierdza zmiany. Czas UTC oznacza obserwowany koniec próby albo jej początkową intencję; brak obserwowanego końca pozostaje nieznany. Applied wymaga zapisanego, niezależnego odczytu rejestru ze zgodną stałą tożsamością i wszystkimi żądanymi polami. Starsze błędy bez fazy zapisu są unknown. Pochodzenie konta, pełna data starszych wpisów i kompletność odwołań nie są potwierdzone. Liczby obejmują tylko zapisane trafienia z search/related i czytelnych dashboardów Lovelace; null oznacza brak danych, 0 zapisany brak trafień. Eksport nie wykonuje odczytów ani zmian HA.'
+      : 'Completed entries in local history only. ACK alone does not confirm a change. UTC time identifies observed attempt completion or attempt intent; an unobserved completion remains unknown. Applied requires recorded independent registry readback with matching stable identity and all requested fields. Legacy errors without a write phase are unknown. Account origin, full dates of legacy entries and reference completeness are unconfirmed. Counts cover recorded search/related and readable Lovelace hits only; null means unavailable, 0 recorded no hits. Export performs no HA reads or changes.';
     const instructions = pl
       ? 'Dla unknown sprawdź aktualny rejestr przed kolejną zmianą. Dla zapisanych trafień po potwierdzeniu zmiany ID ręcznie sprawdź automatyzacje, skrypty, sceny i dashboardy w HA; popraw stare odwołania i przetestuj. Failed dotyczy wyłącznie odrzuconej próby przed zapisem. Raport nie uruchamia naprawy, undo ani kolejnej zmiany nazw.'
       : 'For unknown, verify the current registry before another change. For recorded hits, after confirming an ID change manually inspect automations, scripts, scenes and dashboards in HA, update old references and test. Failed covers only rejection before a write. This report performs no repair, undo or repeat rename.';
@@ -2027,7 +2028,7 @@ class HAEntityRenamer extends HTMLElement {
           if (!isCurrent()) throw new Error('Account, role or connection changed; remaining changes cancelled');
           writePhase = 'attempted';
           const pendingEntry = {time: ts, oldId: '📱 ' + devId.substring(0, 8) + '...', newId: '📱 ' + newName,
-            status: 'ok', impact: null, operationKind: 'device', writePhase, completedAt: new Date().toISOString()};
+            status: 'ok', impact: null, operationKind: 'device', writePhase, attemptedAt: new Date().toISOString()};
           operation.log.unshift(pendingEntry);
           this._saveHistoryToStorage(operation.scope, operation.log);
           await hass.callWS({ type: 'config/device_registry/update', device_id: devId, name_by_user: newName });
@@ -2070,7 +2071,7 @@ class HAEntityRenamer extends HTMLElement {
           writePhase = 'attempted';
           const pendingEntry = {time: ts, oldId: rename.oldId, newId: rename.newId || rename.oldId,
             targetEntityId: rename.newId || rename.oldId, status: 'ok', impact: imp,
-            operationKind: 'entity', writePhase, completedAt: new Date().toISOString()};
+            operationKind: 'entity', writePhase, attemptedAt: new Date().toISOString()};
           operation.log.unshift(pendingEntry);
           this._saveHistoryToStorage(operation.scope, operation.log);
           await this._applyEntityRename(rename, hass);
