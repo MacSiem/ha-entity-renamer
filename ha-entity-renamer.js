@@ -1319,7 +1319,7 @@ class HAEntityRenamer extends HTMLElement {
     _bindFamilyNavigation(this);
     // HA may detach/reparent a card while its initial registry read is pending.
     // Retry only reads; a cancelled rename or export never resumes here.
-    if (this._hass && !this._applyOperation) this._init();
+    if (this._hass && !this._applyOperation && (this._loading || (!this._entities.length && !this._devices.length))) this._init();
   }
 
   _invalidateRenameExport() {
