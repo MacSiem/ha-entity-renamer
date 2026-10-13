@@ -1514,7 +1514,8 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   async _loadData() {
-    if (this._hass?.user?.is_admin !== true) return null;
+    // Keep authorized read-only browsing; unresolved authority cannot fetch.
+    if (![true, false].includes(this._hass?.user?.is_admin)) return null;
     const { hass, current } = this._captureRead();
     let receipt = null;
     this._loading = true;
