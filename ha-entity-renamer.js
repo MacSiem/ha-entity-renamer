@@ -346,7 +346,7 @@ function createExportDialog(options) {
 }
 // END HA TOOLS EXPORT V3
 
-// BEGIN HA RENAMER REPORTS V1 source-sha256=19fba84883d01bc6db5c09acbe6b407e7c6bfee69e6ecaf2f3a4b4d8cb622f73
+// BEGIN HA RENAMER REPORTS V1 source-sha256=2797dac918ac782874980fc535aea0b15f1b4d20c8776648bf422d38794c63a0
 // Reviewed completed-history projection. Never serialize arbitrary log/state/config.
 function createRenameReports() {
   const entityId = value => typeof value === 'string' && value.length <= 255 && /^[a-z][a-z0-9_]*\.[a-z0-9_]+$/.test(value) ? value : null;
@@ -376,12 +376,14 @@ function createRenameReports() {
       const status = verified ? 'applied' : entry.status === 'error' && phase === 'not_started' ? 'failed' : 'unknown';
       const reason = verified ? 'registry_readback_confirmed' : status === 'failed' ? 'preflight_rejected' : entry.status === 'ok' ? 'ack_without_readback' : phase === 'attempted' ? 'write_outcome_unconfirmed' : 'legacy_error_without_phase';
       const references = Object.fromEntries(referenceTypes.map(type => [type, Array.isArray(entry.impact?.[type]) ? entry.impact[type].length : null]));
+      const dashboardCoverage = ['complete', 'partial', 'unavailable'].includes(entry.impact?.dashboardCoverage) ? entry.impact.dashboardCoverage : 'unknown';
+      if (dashboardCoverage === 'unavailable' || dashboardCoverage === 'partial' && references.dashboards === 0) references.dashboards = null;
       const hasKnownReferences = Object.values(references).some(count => typeof count === 'number' && count > 0);
       rows.push({index: rows.length + 1, timestamp: timestamp(entry), timestampScope: typeof entry.completedAt === 'string' && timestamp(entry) === entry.completedAt ? 'utc_completion' : timestamp(entry) ? 'local_time_date_unknown' : 'unknown',
         kind: entry.operationKind === 'device' ? 'device' : old && next ? 'entity' : 'unreviewed_identifier',
         old: includePrivate ? old : alias(old, `record-${rows.length + 1}-source`),
         new: includePrivate ? next : alias(next, `record-${rows.length + 1}-target`), status, reason,
-        references, referenceCoverage: 'known_readable_hits_only_completeness_unknown',
+        references, dashboardCoverage, referenceCoverage: 'known_readable_hits_only_completeness_unknown',
         manualRepair: status === 'failed' ? 'no_change_confirmed_no_repair_claim' : old && next && old !== next && hasKnownReferences ? 'verify_registry_then_review_known_references' : 'verify_registry_no_reference_coverage_claim'});
     }
     return {rows, omitted};
@@ -408,11 +410,11 @@ function createRenameReports() {
         if (/^[\s]*[=+\-@]/.test(text) || /^[\t\r\n]/.test(text)) text = "'" + text;
         return '"' + text.replace(/"/g, '""') + '"';
       };
-      const records = [['record', 'index', 'timestamp', 'timestamp_scope', 'kind', 'old', 'new', 'status', 'reason', ...referenceTypes, 'reference_coverage', 'manual_repair']];
+      const records = [['record', 'index', 'timestamp', 'timestamp_scope', 'kind', 'old', 'new', 'status', 'reason', ...referenceTypes, 'dashboard_coverage', 'reference_coverage', 'manual_repair']];
       for (const key of ['schema', 'status', 'source', 'method', 'privateIds', 'limits', 'instructions']) records.push(['meta', key, report[key]]);
       for (const [key, value] of Object.entries(report.counts)) records.push(['count', key, value]);
       for (const key of ['included', 'excluded']) report[key].forEach(value => records.push([key, value]));
-      rows.forEach(row => records.push(['row', row.index, row.timestamp, row.timestampScope, row.kind, row.old, row.new, row.status, row.reason, ...referenceTypes.map(type => row.references[type]), row.referenceCoverage, row.manualRepair]));
+      rows.forEach(row => records.push(['row', row.index, row.timestamp, row.timestampScope, row.kind, row.old, row.new, row.status, row.reason, ...referenceTypes.map(type => row.references[type]), row.dashboardCoverage, row.referenceCoverage, row.manualRepair]));
       serialized = records.map(values => values.map(cell).join(',')).join('\r\n') + '\r\n';
     } else if (format === 'txt') {
       serialized = [report.schema, `status: ${report.status}`, `source: ${report.source}`, `method: ${report.method}`, `privateIds: ${report.privateIds}`, `counts: ${JSON.stringify(report.counts)}`, ...included.map(text => 'included: ' + text), ...excluded.map(text => 'excluded: ' + text), `limits: ${limits}`, `instructions: ${instructions}`,
@@ -1702,6 +1704,7 @@ class HAEntityRenamer extends HTMLElement {
       if (!current()) return;
       for (const rename of queue) {
         if (!impact[rename.oldId]) continue;
+        impact[rename.oldId].dashboardCoverage = lovelaceConfig.dashboardCoverage || 'unknown';
         for (const dash of dashboardText) {
           if (dash.text.includes(rename.oldId)) {
             impact[rename.oldId].dashboards.push(dash.title);
@@ -1732,23 +1735,36 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   async _loadLovelaceConfigs(hass = this._hass) {
+    const configs = [];
+    configs.dashboardCoverage = 'unavailable';
+    let dashboards;
     try {
-      const dashboards = await hass.callWS({ type: 'lovelace/dashboards/list' });
-      const configs = [];
-      // Default dashboard
+      dashboards = await hass.callWS({ type: 'lovelace/dashboards/list' });
+      if (!Array.isArray(dashboards)) return configs;
+    } catch (_) { return configs; }
+    let failed = 0;
+    const read = async (request, meta) => {
       try {
-        const defCfg = await hass.callWS({ type: 'lovelace/config', force: false });
-        configs.push({ url_path: 'default', title: 'Default', config: defCfg });
-      } catch(e) { console.debug('[ha-entity-renamer] caught:', e); }
-      // Other dashboards
-      for (const dash of dashboards) {
-        try {
-          const cfg = await hass.callWS({ type: 'lovelace/config', url_path: dash.url_path });
-          configs.push({ url_path: dash.url_path, title: dash.title || dash.url_path, config: cfg });
-        } catch(e) { console.debug('[ha-entity-renamer] caught:', e); }
-      }
-      return configs;
-    } catch(e) { return []; }
+        const config = await hass.callWS(request);
+        if (!config || typeof config !== 'object' || !Array.isArray(config.views)) { failed++; return; }
+        configs.push({ ...meta, config });
+      } catch (_) { failed++; }
+    };
+    await read({ type: 'lovelace/config', force: false }, { url_path: 'default', title: 'Default' });
+    for (const dash of dashboards) {
+      if (!dash || typeof dash.url_path !== 'string') { failed++; continue; }
+      await read({ type: 'lovelace/config', url_path: dash.url_path }, { url_path: dash.url_path, title: dash.title || dash.url_path });
+    }
+    configs.dashboardCoverage = configs.length === 0 ? 'unavailable' : failed > 0 ? 'partial' : 'complete';
+    return configs;
+  }
+
+  _dashboardCoverageHtml(impact) {
+    if (!impact || !['partial', 'unavailable'].includes(impact.dashboardCoverage)) return '';
+    const partial = impact.dashboardCoverage === 'partial', pl = this._lang === 'pl';
+    const text = partial ? (pl ? 'Dashboardy: częściowy odczyt. Zapisano tylko trafienia w dostępnych widokach.' : 'Dashboards: partial read. Only hits in readable views are recorded.')
+      : (pl ? 'Dashboardy: odczyt niedostępny. Liczba odwołań nie jest znana.' : 'Dashboards: read unavailable. Reference count is unknown.');
+    return `<p class="dashboard-coverage" style="font-size:14px;line-height:1.5;overflow-wrap:anywhere;">${_esc(text)}</p>`;
   }
 
   _formatError(e) {
@@ -1908,6 +1924,7 @@ class HAEntityRenamer extends HTMLElement {
       const dashboardText = lovelaceConfig.map(dash => ({ title: dash.title || dash.url_path || 'default', text: JSON.stringify(dash.config || {}) }));
       for (const rename of queue) {
         if (!impact[rename.oldId]) continue;
+        impact[rename.oldId].dashboardCoverage = lovelaceConfig.dashboardCoverage || 'unknown';
         for (const dash of dashboardText) {
           if (dash.text.includes(rename.oldId)) {
             impact[rename.oldId].dashboards.push(dash.title);
@@ -2614,7 +2631,8 @@ class HAEntityRenamer extends HTMLElement {
                 ${imp.scripts.map(s => '<span class="impact-badge script">📜 ' + _esc(s) + '</span>').join('')}
                 ${imp.dashboards.map(d => '<span class="impact-badge dashboard">📊 ' + _esc(d) + '</span>').join('')}
                 ${(imp.scenes||[]).map(s => '<span class="impact-badge scene">🎬 ' + _esc(s) + '</span>').join('')}
-              </div>` : (imp ? `<div style="margin-top:4px;font-size:10px;color:var(--bento-text-secondary,#94A3B8);">✓ ${t.notUsed}</div>` : '')}
+              </div>` : (imp && imp.dashboardCoverage !== 'unavailable' ? `<div style="margin-top:4px;font-size:14px;color:var(--bento-text-secondary,#94A3B8);">${t.notUsed}</div>` : '')}
+              ${this._dashboardCoverageHtml(imp)}
             </div>`;
           }).join('')}
       </div>
@@ -2645,6 +2663,7 @@ class HAEntityRenamer extends HTMLElement {
               ${ui.statusHtml(resultState)} ${_esc(l.oldId)} → ${_esc(l.newId)}
             </span>
             ${l.error ? `<br><small style="color:#FCA5A5">${_esc(l.error)}</small>` : ''}
+            ${this._dashboardCoverageHtml(imp)}
             ${hasImpact ? `<div style="margin-top:4px;padding-left:24px;">
               <span style="font-size:10px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
               ${automations.map(a => '<span class="impact-badge automation">⚙ ' + _esc(a) + '</span>').join('')}

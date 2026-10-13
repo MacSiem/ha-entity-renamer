@@ -27,12 +27,14 @@ function createRenameReports() {
       const status = verified ? 'applied' : entry.status === 'error' && phase === 'not_started' ? 'failed' : 'unknown';
       const reason = verified ? 'registry_readback_confirmed' : status === 'failed' ? 'preflight_rejected' : entry.status === 'ok' ? 'ack_without_readback' : phase === 'attempted' ? 'write_outcome_unconfirmed' : 'legacy_error_without_phase';
       const references = Object.fromEntries(referenceTypes.map(type => [type, Array.isArray(entry.impact?.[type]) ? entry.impact[type].length : null]));
+      const dashboardCoverage = ['complete', 'partial', 'unavailable'].includes(entry.impact?.dashboardCoverage) ? entry.impact.dashboardCoverage : 'unknown';
+      if (dashboardCoverage === 'unavailable' || dashboardCoverage === 'partial' && references.dashboards === 0) references.dashboards = null;
       const hasKnownReferences = Object.values(references).some(count => typeof count === 'number' && count > 0);
       rows.push({index: rows.length + 1, timestamp: timestamp(entry), timestampScope: typeof entry.completedAt === 'string' && timestamp(entry) === entry.completedAt ? 'utc_completion' : timestamp(entry) ? 'local_time_date_unknown' : 'unknown',
         kind: entry.operationKind === 'device' ? 'device' : old && next ? 'entity' : 'unreviewed_identifier',
         old: includePrivate ? old : alias(old, `record-${rows.length + 1}-source`),
         new: includePrivate ? next : alias(next, `record-${rows.length + 1}-target`), status, reason,
-        references, referenceCoverage: 'known_readable_hits_only_completeness_unknown',
+        references, dashboardCoverage, referenceCoverage: 'known_readable_hits_only_completeness_unknown',
         manualRepair: status === 'failed' ? 'no_change_confirmed_no_repair_claim' : old && next && old !== next && hasKnownReferences ? 'verify_registry_then_review_known_references' : 'verify_registry_no_reference_coverage_claim'});
     }
     return {rows, omitted};
@@ -59,11 +61,11 @@ function createRenameReports() {
         if (/^[\s]*[=+\-@]/.test(text) || /^[\t\r\n]/.test(text)) text = "'" + text;
         return '"' + text.replace(/"/g, '""') + '"';
       };
-      const records = [['record', 'index', 'timestamp', 'timestamp_scope', 'kind', 'old', 'new', 'status', 'reason', ...referenceTypes, 'reference_coverage', 'manual_repair']];
+      const records = [['record', 'index', 'timestamp', 'timestamp_scope', 'kind', 'old', 'new', 'status', 'reason', ...referenceTypes, 'dashboard_coverage', 'reference_coverage', 'manual_repair']];
       for (const key of ['schema', 'status', 'source', 'method', 'privateIds', 'limits', 'instructions']) records.push(['meta', key, report[key]]);
       for (const [key, value] of Object.entries(report.counts)) records.push(['count', key, value]);
       for (const key of ['included', 'excluded']) report[key].forEach(value => records.push([key, value]));
-      rows.forEach(row => records.push(['row', row.index, row.timestamp, row.timestampScope, row.kind, row.old, row.new, row.status, row.reason, ...referenceTypes.map(type => row.references[type]), row.referenceCoverage, row.manualRepair]));
+      rows.forEach(row => records.push(['row', row.index, row.timestamp, row.timestampScope, row.kind, row.old, row.new, row.status, row.reason, ...referenceTypes.map(type => row.references[type]), row.dashboardCoverage, row.referenceCoverage, row.manualRepair]));
       serialized = records.map(values => values.map(cell).join(',')).join('\r\n') + '\r\n';
     } else if (format === 'txt') {
       serialized = [report.schema, `status: ${report.status}`, `source: ${report.source}`, `method: ${report.method}`, `privateIds: ${report.privateIds}`, `counts: ${JSON.stringify(report.counts)}`, ...included.map(text => 'included: ' + text), ...excluded.map(text => 'excluded: ' + text), `limits: ${limits}`, `instructions: ${instructions}`,
