@@ -1265,14 +1265,6 @@ class HAEntityRenamer extends HTMLElement {
     _bindFamilyNavigation(this);
   }
 
-  disconnectedCallback() {
-    _disconnectFamilyNavigation(this);this._familyNavWidth=null;
-    this._exportDialog?.cancel();
-    this._exportEventCleanups.splice(0).forEach(off => off());
-    this._exportBoundConnection = null;
-    this._exportRevision++;
-  }
-
   _invalidateRenameExport() {
     this._exportRevision++;
     this._exportDialog?.contextChanged();
@@ -2809,6 +2801,11 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   disconnectedCallback() {
+    _disconnectFamilyNavigation(this);this._familyNavWidth=null;
+    this._exportDialog?.cancel();
+    this._exportEventCleanups.splice(0).forEach(off => off());
+    this._exportBoundConnection = null;
+    this._exportRevision++;
     this._entityEditor = null;
     this._readEpoch++;
     if (this._applyOperation) this._applyOperation.cancelled = true;
