@@ -3,7 +3,7 @@
 ## 4.3.0 (2026-10-13)
 
 - Offer native Save As where supported; confirm a save only after reading back identical file bytes. Keep download initiation unconfirmed in other browsers.
-- Recover initial registry reads interrupted by HA card mounting or delayed account resolution.
+- Recover initial registry reads interrupted by HA card mounting, delayed account resolution or reconnecting. Reload permitted browsing after a recognized account or role changes without resuming old writes or consent.
 - Make custom titles visible, preserve input/caret through editor configuration echoes and follow the HA editor language.
 - Export completed rename history as JSON, CSV or TXT with an exact preview, filename choice and optional private entity-ID mapping. Acknowledgements without independent registry readback remain unconfirmed.
 - Keep private rename history separate for each administrator on this browser origin. Preserve older history and offer an explicit local review with unknown account origin.

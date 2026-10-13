@@ -41,7 +41,8 @@ references visible through Home Assistant's APIs.
    connection or browser availability cancels any remaining writes and requires
    a fresh confirmation. A sent request with no verified readback remains unknown
    in its originating administrator’s local history. Reconnecting does not restore
-   an earlier confirmation.
+   an earlier confirmation. Permitted registry browsing reloads for the newly
+   recognized account or role after any old operation has finished.
    Automatic proposals are checked against the current registry and
    regenerated IDs again immediately before applying. Stale proposals fail
    without a registry write and remain in the queue for review.
@@ -60,11 +61,11 @@ references visible through Home Assistant's APIs.
 
 | Light | Dark |
 |---|---|
-| ![Devices tab, light theme](docs/screenshots/card-devices-light.png) | ![Devices tab, dark theme](docs/screenshots/card-devices-dark.png) |
+| ![Rename queue, light theme](docs/screenshots/card-queue-light.png) | ![Rename queue, dark theme](docs/screenshots/card-queue-dark.png) |
 
-*The Devices tab with synthetic entity IDs: expand a device to see its
-entities, queue a rename, or rename by prefix. Dark mode follows your Home
-Assistant theme.*
+*A queued synthetic entity-ID and friendly-name change, before confirmation
+or any registry write. Use Analyze Impact to review readable references.
+Dark mode follows your Home Assistant theme.*
 
 ## Installation
 

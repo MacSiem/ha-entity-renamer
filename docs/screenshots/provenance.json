@@ -1,0 +1,27 @@
+{
+  "captured_at": "2026-10-13",
+  "runtime_source_head": "7dbdc425292c0d520e7f6302c4f6ef37d51f7256",
+  "runtime_sha256": "e056012efe8eae6e1e0b619809a0dded34503c2004722b12daaae2968d7861b6",
+  "home_assistant": "2025.6.0",
+  "browser": "Google Chrome",
+  "zoom": "100%",
+  "language": "en",
+  "data": "Owned synthetic fixture only; one uncommitted rename proposal, no registry writes.",
+  "processing": "Crop of actual native browser screenshots to the card bounds; no generated or substituted UI.",
+  "screenshots": [
+    {
+      "file": "docs/screenshots/card-queue-light.png",
+      "theme": "light",
+      "sha256": "ad5a92f7a808770f355ceb7e1fbb6f3965bba860fec724c5936844fef3e6e722",
+      "width": 492,
+      "height": 382
+    },
+    {
+      "file": "docs/screenshots/card-queue-dark.png",
+      "theme": "dark",
+      "sha256": "977dc7a85b520022eb25667fbabe50f56d05930a69aea32972ca2c1f596e427a",
+      "width": 492,
+      "height": 382
+    }
+  ]
+}
