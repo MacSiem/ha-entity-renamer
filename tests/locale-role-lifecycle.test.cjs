@@ -147,3 +147,18 @@ test('initial unresolved HA user loads permitted registries when identity arrive
   assert.equal(f.requests.filter(x => x.type.endsWith('/update')).length, 0);
  } finally { f.dom.window.close(); }
 });
+
+test('HA card reattachment retries a registry read cancelled during initial mounting', async () => {
+ const f = await fixture();
+ try {
+  const card = f.dom.window.document.createElement('ha-entity-renamer');
+  card.setConfig({show_support:false}); f.dom.window.document.body.append(card);
+  let resolveRead; const ready = new Promise(resolve => {resolveRead = resolve;});
+  const reads=[];
+  card.hass = {...f.hass, callWS:async message => {reads.push(message);await ready;return message.type==='config/device_registry/list'?[{id:'mounted-device',name:'Mounted device'}]:[{entity_id:'sensor.mounted',device_id:'mounted-device'}];}};
+  card.remove();f.dom.window.document.body.append(card);
+  resolveRead();await new Promise(resolve => setImmediate(resolve));
+  assert.equal(card._entities.length,1);assert.equal(card._devices.length,1);
+  assert.equal(card._loading,false);assert.equal(reads.filter(x=>x.type.endsWith('/update')).length,0);
+ } finally {f.dom.window.close();}
+});
