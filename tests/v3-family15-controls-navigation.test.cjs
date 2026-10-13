@@ -17,7 +17,7 @@ function fixture(){
  const card=dom.window.document.createElement(TAG);dom.window.document.body.append(card);
  const calls=[];
  card._hass={language:'en',user:{id:'synthetic-admin',is_admin:true},states:{},themes:{},callWS:async message=>{calls.push(message);return [];}};card._lang='en';
- card._config={show_support:false};card._devices=[{id:'synthetic-device',name:'Synthetic device'}];card._entities=[{entity_id:'sensor.synthetic',device_id:'synthetic-device',unique_id:'synthetic'}];
+ card._config={show_support:false};card._devices=[{id:'synthetic-device',name:'Synthetic device'}];card._entities=[{entity_id:'sensor.synthetic',device_id:'synthetic-device',unique_id:'synthetic'}];card._deviceEntities={'synthetic-device':card._entities};
  card.render();
  const native=()=>[...card.shadowRoot.querySelectorAll(NAV+' button['+ATTR+']')];
  const picker=()=>card.shadowRoot.getElementById('ha-tools-tab-picker');
