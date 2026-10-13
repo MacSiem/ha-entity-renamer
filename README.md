@@ -159,7 +159,9 @@ Older unscoped history remains untouched. An administrator can explicitly choose
 **Review legacy history from this browser**. Its account origin remains unknown,
 and reviewing/exporting it does not assign it to the current account or overwrite
 the original storage. This choice clears when authority changes. Preferences
-remain shared by cards on this origin. History is not synchronized to other devices;
+remain shared by cards on this origin. Signing out of Home Assistant clears this
+origin’s browser storage, including locally kept Renamer history and legacy entries.
+Export a copy before signing out. History is not synchronized to other devices;
 use separate browser profiles on a shared computer. Queued proposals stay in memory
 and are lost on a page reload. Where the browser supports Save As, choose a location
 and keep the reviewed filename. Saved appears only after closing the file and
