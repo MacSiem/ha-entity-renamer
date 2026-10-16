@@ -1733,6 +1733,17 @@ class HAEntityRenamer extends HTMLElement {
     });
   }
 
+  _visibleAutomaticNull() {
+    const filter=this._listFilters.automatic;
+    if (filter==='available'||filter==='conflicts') return [];
+    const query=this._automaticSearch.trim().toLocaleLowerCase(this._hass?.language||this._lang);
+    return this._automaticNull.filter(entity=>{
+      const device=this._devices.find(d=>d.id===entity.device_id)||{id:entity.device_id||''};
+      return [entity.entity_id,entity.name,this._getDeviceName(device)].some(value=>String(value||'').toLocaleLowerCase(this._hass?.language||this._lang).includes(query)) &&
+        (filter==='new'&&this._listUi.isNew(device.created_at)||this._entityMatches(entity,filter));
+    });
+  }
+
   _newBadge(value) {
     return this._listUi.isNew(value) ? `<span class="new-badge">${this._lang==='pl'?'Nowe':'New'}</span>` : '';
   }
@@ -1827,7 +1838,7 @@ class HAEntityRenamer extends HTMLElement {
     if(index>=0) {
       this._clearQueueUndo();
       this._queueUndo={row:this._renameQueue[index],index,until:Date.now()+8000};
-      this._queueUndoTimer=setTimeout(()=>{this._clearQueueUndo();if(this.isConnected)this.render();},8000);
+      this._queueUndoTimer=setTimeout(()=>{this._clearQueueUndo();this.shadowRoot.querySelector('.queue-undo')?.remove();},8000);
       this._renameQueue.splice(index,1);
       this._impactResults=null;
     }
@@ -2646,6 +2657,13 @@ class HAEntityRenamer extends HTMLElement {
           .queue-actions { flex-wrap: wrap; justify-content: center; }
           .log-entry { font-size: 11px; padding: 4px 0; }
         }
+        .rename-preview-row { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--bento-border,var(--divider-color)); }
+        .automatic-row-ids { min-width:0;overflow-wrap:anywhere;font-size:12px;line-height:1.6; }
+        .automatic-row-ids code { padding:0;border:0;background:transparent !important;white-space:normal;overflow-wrap:anywhere;font-size:12px; }
+        .automatic-target { color:var(--bento-text-secondary); }
+        .automatic-row-actions { display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;max-width:130px; }
+        .automatic-row-actions .btn { margin:0; }
+        .queue-bar { position:sticky;bottom:8px;z-index:1;background:var(--bento-card,var(--card-background-color));box-shadow:var(--bento-shadow-md); }
         .list-toolbar,.list-chips,.list-expand,.queue-bar,.queue-undo { display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0;min-width:0; }
         .list-toolbar input { flex:1;min-width:120px;max-width:100%;box-sizing:border-box; }
         .list-toolbar select { max-width:100%;min-height:44px;color:inherit;background:var(--bento-card,var(--card-background-color));border:1px solid var(--bento-border,var(--divider-color));border-radius:8px;padding:8px; }
@@ -2792,10 +2810,12 @@ class HAEntityRenamer extends HTMLElement {
       const deviceQueued = rows.some(row => !row.conflict) && rows.filter(row => !row.conflict).every(row => queued.has(row.oldId));
       return `<details data-auto-group="${_esc(deviceId)}" style="border:1px solid var(--bento-border,#ddd);border-radius:8px;padding:8px;margin:8px 0">
         <summary>${_esc(device ? this._getDeviceName(device) : deviceId)} (${rows.length}) · ${rows.filter(row=>queued.has(row.oldId)).length} ${t.inQueue.toLowerCase()} ${this._newBadge(device?.created_at)}</summary>
-        ${[...rows].sort((a,b)=>this._listUi.compare(a.oldId,b.oldId)).map(row => `<div class="rename-preview-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <code>${_esc(row.oldId)}</code>${this._newBadge(this._entities.find(e=>e.entity_id===row.oldId)?.created_at)} → <code>${_esc(row.newId)}</code>
+        ${[...rows].sort((a,b)=>this._listUi.compare(a.oldId,b.oldId)).map(row => `<div class="rename-preview-row">
+          <div class="automatic-row-ids"><div><code>${_esc(row.oldId)}</code>${this._newBadge(this._entities.find(e=>e.entity_id===row.oldId)?.created_at)}</div><div class="automatic-target">→ <code>${_esc(row.newId)}</code></div></div>
+          <div class="automatic-row-actions">
           ${queued.has(row.oldId)?`<button class="btn btn-sm btn-outline" data-remove-queue="${_esc(row.oldId)}">${this._lang==='pl'?'Usuń':'Remove'}</button>`:''}
           ${row.conflict ? `<span>${t.automaticConflict}</span>` : `<button class="btn btn-sm btn-outline" data-auto-entity="${_esc(row.oldId)}" ${queued.has(row.oldId) || this._loading ? 'disabled' : ''}>${queued.has(row.oldId) ? '✓ ' + t.inQueue : '+ ' + t.queue}</button>`}
+          </div>
         </div>`).join('')}
         <button class="btn btn-sm btn-outline" data-auto-device="${_esc(deviceId)}" ${rows.some(eligible) && !this._loading ? '' : 'disabled'}>${deviceQueued ? '✓ ' + t.inQueue : t.addDeviceAutomatic}</button>
       </details>`;
@@ -2807,7 +2827,7 @@ class HAEntityRenamer extends HTMLElement {
       ${this._automaticLoaded ? `<p>${this._automaticRows.length} ${t.automatic}; ${this._automaticNull.length} ${t.automaticUnknown}</p>
         ${this._automaticRows.some(row => !row.conflict) ? `<button class="btn btn-primary" id="queueAllAutomatic" ${canQueue && !this._loading ? '' : 'disabled'}>${canQueue ? (this._lang==='pl'?'Dodaj widoczne':'Queue visible')+' ('+visibleRows.filter(eligible).length+')' : '✓ ' + t.inQueue}</button>` : `<p>${t.automaticEmpty}</p>`}
         ${deviceHtml}
-        ${this._automaticNull.length ? `<details><summary>${t.automaticUnknown} (${this._automaticNull.length})</summary>${this._automaticNull.map(ent => `<div><code>${_esc(ent.entity_id)}</code></div>`).join('')}</details>` : ''}` : ''}
+        ${this._visibleAutomaticNull().length ? `<details><summary>${t.automaticUnknown} (${this._visibleAutomaticNull().length})</summary>${this._visibleAutomaticNull().map(ent => `<div><code>${_esc(ent.entity_id)}</code></div>`).join('')}</details>` : ''}` : ''}
     </div>`;
   }
 
