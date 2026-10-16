@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.4.0 (2026-10-16)
+
+- Use one natural sort in the Home Assistant language for Devices, Automatic IDs and grouped Queue views.
+- Search and filter Devices and Automatic IDs by all, to queue, queued, conflicts and new entries; queue-all actions include only visible matching proposals and show the count.
+- Mark registry entries created within seven days; unknown creation times remain unmarked. Sort by name or newest and expand/collapse groups.
+- Show queued status and per-device queue counts immediately. Keep the queue accessible from other tabs.
+- Group proposals by device and label Automatic IDs, Manual or Prefix sources. Undo a removed proposal for eight seconds, preserving its exact contents and position; clearing, confirmation and authority changes invalidate undo.
+- Manually replacing an automatic proposal removes its automatic validation flag. Home Assistant writes still require the existing review and confirmation.
+
 ## 4.3.1 (2026-10-16)
 
 - Sort Automatic IDs device groups alphabetically by their displayed name.

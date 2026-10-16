@@ -174,3 +174,11 @@ outcome unconfirmed. Other browsers use the existing download, whose initiation
 does not confirm a disk write; check the downloaded file before trying again.
 
 See [SECURITY.md](SECURITY.md) for safe vulnerability reporting and [NOTICE](NOTICE) for licensing notices.
+
+### Finding proposals in large registries
+
+Devices and Automatic IDs share natural name sorting in the Home Assistant language. Use the search and counted filters **All**, **To queue**, **In queue**, **Conflicts** and **New**. Conflicts refer to the current Automatic IDs comparison; run the comparison to discover them. Changing a filter does not change the queue. **Queue visible (N)** and per-device actions add only the visible matching eligible proposals.
+
+**New** means created in the Home Assistant registry within the last seven days; migrated entries with an unknown creation time are not marked. Choose **Newest** or **Name A–Z / Z–A** and expand or collapse groups.
+
+The queue groups proposals by device and shows their source: Automatic IDs, Manual or Prefix. Removing one proposal offers **Undo** for eight seconds and restores the same proposal at its original position. Clear, opening confirmation, disconnecting or changing accounts cancels undo. The queue bar also includes queued device-name changes. Applying changes retains the existing administrator permission, impact review and explicit confirmation.

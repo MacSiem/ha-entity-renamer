@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v4.3.1 (2026-10-16) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v4.4.0 (2026-10-16) — single-tool standalone repo */
 (function() {
 'use strict';
 
@@ -1716,7 +1716,7 @@ class HAEntityRenamer extends HTMLElement {
     return (this._deviceEntities[device.id] || []).filter(entity =>
       (matchesDevice || [entity.entity_id,entity.name,entity.original_name].some(value=>String(value||'').toLocaleLowerCase(this._hass?.language || this._lang).includes(query))) &&
       (filter === 'new' && this._listUi.isNew(device.created_at) || this._entityMatches(entity,filter))
-    );
+    ).sort((a,b)=>this._listUi.compare(a.entity_id,b.entity_id));
   }
 
   _getFilteredDevices() {
