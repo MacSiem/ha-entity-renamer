@@ -1790,22 +1790,46 @@ class HAEntityRenamer extends HTMLElement {
     this._queueUndo = null;
   }
 
+  _rememberQueueRemoval(value) {
+    this._clearQueueUndo();
+    this._queueUndo={...value,until:Date.now()+8000};
+    this._queueUndoTimer=setTimeout(()=>{this._clearQueueUndo();this.shadowRoot.querySelector('.queue-undo')?.remove();},8000);
+  }
+
   _undoQueueRemoval() {
     const undo = this._queueUndo;
     if (this._loading || !undo) return;
-    if (Date.now() < undo.until && !this._renameQueue.some(row=>row.oldId===undo.row.oldId)) {
-      this._renameQueue.splice(Math.min(undo.index,this._renameQueue.length),0,undo.row);
+    if (Date.now() < undo.until) {
+      if (undo.kind==='device') {
+        if(!Object.hasOwn(this._deviceRenameQueue,undo.row.oldId)) {
+          const entries=Object.entries(this._deviceRenameQueue);
+          entries.splice(Math.min(undo.index,entries.length),0,[undo.row.oldId,undo.row.newId]);
+          this._deviceRenameQueue=Object.fromEntries(entries);
+        }
+      } else if (!this._renameQueue.some(row=>row.oldId===undo.row.oldId)) this._renameQueue.splice(Math.min(undo.index,this._renameQueue.length),0,undo.row);
       this._confirmation=null; this._confirmDialogOpen=false; this._impactResults=null;
     }
     this._clearQueueUndo(); this.render();
   }
 
+  _removeDeviceFromQueue(id) {
+    if(this._loading || !Object.hasOwn(this._deviceRenameQueue,id)) return;
+    this._rememberQueueRemoval({kind:'device',row:{oldId:id,newId:this._deviceRenameQueue[id]},index:Object.keys(this._deviceRenameQueue).indexOf(id)});
+    delete this._deviceRenameQueue[id];
+    this._confirmation=null;this._confirmDialogOpen=false;this._lastApplyResult=null;this._impactResults=null;
+    this.render();
+  }
+
   _queueGroups() {
     const groups=new Map();
+    const group=id=>{
+      if(!groups.has(id)) groups.set(id,{device:this._devices.find(d=>d.id===id)||{id,name:id|| (this._lang==='pl'?'Bez urządzenia':'No device')},rows:[]});
+      return groups.get(id);
+    };
+    for(const [id,name] of Object.entries(this._deviceRenameQueue)) group(id).nameChange=name;
     for (const row of this._renameQueue) {
       const id=row.deviceId || row.entity?.device_id || this._entities.find(e=>e.entity_id===row.oldId)?.device_id || '';
-      if (!groups.has(id)) groups.set(id,{device:this._devices.find(d=>d.id===id)||{id,name:id|| (this._lang==='pl'?'Bez urządzenia':'No device')},rows:[]});
-      groups.get(id).rows.push(row);
+      group(id).rows.push(row);
     }
     return [...groups.values()].sort((a,b)=>this._listUi.compare(this._getDeviceName(a.device),this._getDeviceName(b.device))||this._listUi.compare(a.device.id,b.device.id));
   }
@@ -1861,9 +1885,7 @@ class HAEntityRenamer extends HTMLElement {
     this._lastApplyResult = null;
     const index=this._renameQueue.findIndex(row=>row.oldId===oldId);
     if(index>=0) {
-      this._clearQueueUndo();
-      this._queueUndo={row:this._renameQueue[index],index,until:Date.now()+8000};
-      this._queueUndoTimer=setTimeout(()=>{this._clearQueueUndo();this.shadowRoot.querySelector('.queue-undo')?.remove();},8000);
+      this._rememberQueueRemoval({row:this._renameQueue[index],index});
       this._renameQueue.splice(index,1);
       this._impactResults=null;
     }
@@ -2931,15 +2953,8 @@ class HAEntityRenamer extends HTMLElement {
         <button class="btn btn-danger" id="executeRenames" ${this._loading || this._hass?.user?.is_admin !== true ? 'disabled' : ''} ${this._loading ? 'aria-busy="true"' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length + devEntries.length})</button>
         ${this._hass?.user?.is_admin !== true ? `<span>${t.adminRequired}</span>` : ''}
       </div>
-      ${devEntries.length ? `<div style="margin-bottom:12px;padding:10px 14px;border-radius:8px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.2);">
-        <strong style="font-size:12px;">📱 ${t.devicesToRename}</strong>
-        ${devEntries.map(([did, name]) => {
-          const dev = this._devices.find(d => d.id === did);
-          return `<div style="font-size:12px;margin-top:4px;"><span class="old">${_esc(dev ? this._getDeviceName(dev) : did)}</span> → <span class="new">${_esc(name)}</span> <button class="btn btn-sm btn-danger" data-remove-dev-queue="${_esc(did)}" aria-label="${_esc(t.removeFromQueue)}">✕</button></div>`;
-        }).join('')}
-      </div>` : ''}
       <div class="queue-list">
-          ${this._queueGroups().map(group => `<section data-queue-group="${_esc(group.device.id)}"><h3 class="queue-group-heading"><span>${_esc(this._getDeviceName(group.device))}</span><span>${group.rows.length}</span></h3>${group.rows.map(r => {
+          ${this._queueGroups().map(group => `<section data-queue-group="${_esc(group.device.id)}"><h3 class="queue-group-heading"><span>${_esc(this._getDeviceName(group.device))}</span><span>${group.rows.length+(group.nameChange!==undefined?1:0)}</span></h3>${group.nameChange!==undefined?`<div class="queue-device-name"><strong>${t.newDeviceName}</strong>: ${_esc(this._getDeviceName(group.device))} → ${_esc(group.nameChange)} <span class="proposal-source">${this._lang==='pl'?'Ręcznie':'Manual'}</span> <button type="button" class="btn btn-sm btn-outline" data-remove-dev-queue="${_esc(group.device.id)}" aria-label="${_esc(t.removeFromQueue)}">${this._lang==='pl'?'Usuń':'Remove'}</button></div>`:''}${group.rows.map(r => {
             const imp = this._impactResults ? this._impactResults[r.oldId] : null;
             const hasImpact = imp && (imp.automations.length || imp.scripts.length || imp.dashboards.length || (imp.scenes||[]).length);
             return `<div style="border:1px solid var(--bento-border,#334155);border-radius:8px;padding:12px;margin-bottom:8px;">
@@ -3140,12 +3155,7 @@ class HAEntityRenamer extends HTMLElement {
     root.querySelectorAll('[data-remove-dev-queue]').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (this._loading) return;
-        this._confirmation = null;
-        this._confirmDialogOpen = false;
-        this._lastApplyResult = null;
-        delete this._deviceRenameQueue[btn.dataset.removeDevQueue];
-        this.render();
+        this._removeDeviceFromQueue(btn.dataset.removeDevQueue);
       });
     });
 
