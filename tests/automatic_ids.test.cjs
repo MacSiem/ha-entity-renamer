@@ -4,6 +4,85 @@ const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { JSDOM } = require('jsdom');
 
+// Catch registry-order rendering, surprise navigation and stale queue affordances.
+function automaticView() {
+  const dom = new JSDOM('', { runScripts: 'dangerously', url: 'http://localhost/' });
+  dom.window.eval(readFileSync(join(__dirname, '..', 'ha-entity-renamer.js'), 'utf8'));
+  const card = dom.window.document.createElement('ha-entity-renamer');
+  dom.window.document.body.append(card);
+  card._hass = { language: 'en', user: { id: 'admin', is_admin: true }, states: {} };
+  card._devices = [{ id: 'z', name: 'Alpha', name_by_user: 'Zulu' }, { id: 'a', name: 'Alpha' }];
+  card._automaticRows = [
+    { oldId: 'sensor.z1', newId: 'sensor.new_z1', deviceId: 'z' },
+    { oldId: 'sensor.a1', newId: 'sensor.new_a1', deviceId: 'a' },
+    { oldId: 'sensor.a2', newId: 'sensor.new_a2', deviceId: 'a' },
+    { oldId: 'sensor.conflict', newId: 'sensor.occupied', deviceId: 'a', conflict: true },
+  ];
+  card._automaticLoaded = true;
+  card._activeTab = 'automatic';
+  card.render();
+  return { dom, card, root: card.shadowRoot };
+}
+
+test('automatic devices follow displayed names rather than registry entity order', () => {
+  const {dom, root} = automaticView();
+  try {
+    assert.deepEqual(Array.from(root.querySelectorAll('.automatic-tab details > summary'), el => el.textContent.trim()), ['Alpha (3)', 'Zulu (1)']);
+  } finally { dom.window.close(); }
+});
+
+for (const action of ['entity', 'device', 'all']) test(`automatic ${action} queue keeps the current tab and expanded device`, () => {
+  const {dom, card, root} = automaticView();
+  try {
+    const group = Array.from(root.querySelectorAll('.automatic-tab details')).find(el => el.textContent.includes('sensor.a1'));
+    group.open = true;
+    const selector = action === 'entity' ? '[data-auto-entity="sensor.a1"]' : action === 'device' ? '[data-auto-device="a"]' : '#queueAllAutomatic';
+    root.querySelector(selector).click();
+    assert.equal(card._activeTab, 'automatic');
+    assert.ok(root.querySelector('.automatic-tab'));
+    assert.equal(Array.from(root.querySelectorAll('.automatic-tab details')).find(el => el.textContent.includes('sensor.a1')).open, true);
+    assert.equal(card._renameQueue.length, {entity: 1, device: 2, all: 3}[action]);
+  } finally { dom.window.close(); }
+});
+
+test('queued entities and devices show status, avoid duplicates and become available after removal', () => {
+  const {dom, card, root} = automaticView();
+  try {
+    root.querySelector('[data-auto-entity="sensor.a1"]').click();
+    let button = root.querySelector('[data-auto-entity="sensor.a1"]');
+    assert.equal(button.disabled, true);
+    assert.match(button.textContent, /In Queue/i);
+    assert.equal(root.querySelector('[data-auto-device="a"]').disabled, false, 'one eligible entity remains');
+    root.querySelector('[data-auto-device="a"]').click();
+    assert.equal(card._renameQueue.length, 2);
+    assert.equal(root.querySelector('[data-auto-device="a"]').disabled, true);
+    assert.match(root.querySelector('[data-auto-device="a"]').textContent, /In Queue/i);
+    card._queueAutomaticIds('a');
+    assert.equal(card._renameQueue.length, 2);
+    card._removeFromQueue('sensor.a1');
+    assert.equal(root.querySelector('[data-auto-entity="sensor.a1"]').disabled, false);
+    assert.equal(root.querySelector('[data-auto-device="a"]').disabled, false);
+    root.querySelector('#queueAllAutomatic').click();
+    assert.equal(card._renameQueue.length, 3);
+    assert.equal(root.querySelector('#queueAllAutomatic').disabled, true);
+    card._clearQueue();
+    assert.equal(root.querySelector('#queueAllAutomatic').disabled, false);
+    assert.equal(root.querySelectorAll('[data-auto-entity]:disabled').length, 0);
+    assert.equal(card._renameQueue.length, 0);
+  } finally { dom.window.close(); }
+});
+
+test('queued automatic status follows Polish labels and never enables conflicts', () => {
+  const {dom, card, root} = automaticView();
+  try {
+    card._lang = 'pl';
+    card._queueAutomaticIds();
+    assert.match(root.querySelector('[data-auto-entity="sensor.a1"]').textContent, /W kolejce/);
+    assert.equal(root.querySelector('[data-auto-entity="sensor.conflict"]'), null);
+    assert.equal(card._renameQueue.length, 3);
+  } finally { dom.window.close(); }
+});
+
 test('automatic ID preview separates null and collision, queues safe rows, rejects stale apply', async () => {
   const dom = new JSDOM('', { runScripts: 'dangerously', url: 'http://localhost/' });
   try {
