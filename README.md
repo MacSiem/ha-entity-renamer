@@ -25,6 +25,9 @@ references visible through Home Assistant's APIs.
    lets you queue one entity, one device or all eligible rows. HA chooses the
    names using its current language and entity ID format. Rows with no
    automatic ID or a target collision are shown but cannot be queued.
+   Devices are sorted by their displayed name. Queuing keeps this tab and
+   expanded device groups open; queued entries are marked **In Queue**.
+   Remove a proposal in **Queue** to make it available for queuing again.
 3. **Analyze impact before applying.** The Queue tab's **Analyze Impact**
    button calls `search/related` for each queued entity to list the
    automations, scripts, and scenes that reference it, then scans every

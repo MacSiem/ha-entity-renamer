@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v4.3.0 (2026-10-13) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v4.3.1 (2026-10-16) — single-tool standalone repo */
 (function() {
 'use strict';
 
@@ -1643,6 +1643,7 @@ class HAEntityRenamer extends HTMLElement {
 
   _queueAutomaticIds(deviceId = null, oldId = null) {
     if (this._loading) return;
+    const focusedDevice = this.shadowRoot.activeElement?.closest('[data-auto-group]')?.dataset.autoGroup;
     const queued = new Set(this._renameQueue.map(row => row.oldId));
     for (const row of this._automaticRows) {
       if (row.conflict || queued.has(row.oldId)) continue;
@@ -1653,9 +1654,10 @@ class HAEntityRenamer extends HTMLElement {
     }
     this._confirmation = null;
     this._confirmDialogOpen = false;
-    this._activeTab = 'queue';
     this._impactResults = null;
     this.render();
+    if (focusedDevice) Array.from(this.shadowRoot.querySelectorAll('[data-auto-group]'))
+      .find(group => group.dataset.autoGroup === focusedDevice)?.querySelector('summary')?.focus({preventScroll: true});
   }
 
 
@@ -2222,6 +2224,7 @@ class HAEntityRenamer extends HTMLElement {
 
   render() {
     if (!this._hass) return;
+    const openAutomaticDevices = new Set(Array.from(this.shadowRoot.querySelectorAll('[data-auto-group][open]'), group => group.dataset.autoGroup));
     const familyFocus=_rememberFamilyFocus(this), familyDrafts=_rememberFamilyDrafts(this);
     const familyRowFocus=_rememberFamilyRowFocus(this, [['.device-header','data-device-id']]);
     this._exportDialog?.cancel();
@@ -2567,6 +2570,7 @@ class HAEntityRenamer extends HTMLElement {
     _bindLocalIntroDismiss(this.shadowRoot);
     _bindLocalSupportDismiss(this.shadowRoot);
     this._attachEvents();
+    for (const group of this.shadowRoot.querySelectorAll('[data-auto-group]')) group.open = openAutomaticDevices.has(group.dataset.autoGroup);
     _restoreFamilyDrafts(this,familyDrafts);
     _bindFamilyNavigation(this,familyFocus);
     _restoreFamilyRowFocus(this,familyRowFocus);
@@ -2652,28 +2656,32 @@ class HAEntityRenamer extends HTMLElement {
 
   _renderAutomaticTab() {
     const t = this._t;
+    const queued = new Set(this._renameQueue.map(row => row.oldId));
     const groups = new Map();
     for (const row of this._automaticRows) {
       if (!groups.has(row.deviceId)) groups.set(row.deviceId, []);
       groups.get(row.deviceId).push(row);
     }
-    const canQueue = this._automaticRows.some(row => !row.conflict);
-    const deviceHtml = [...groups].map(([deviceId, rows]) => {
+    const eligible = row => !row.conflict && !queued.has(row.oldId);
+    const canQueue = this._automaticRows.some(eligible);
+    const deviceName = id => this._getDeviceName(this._devices.find(item => item.id === id) || {id});
+    const deviceHtml = [...groups].sort(([a], [b]) => deviceName(a).localeCompare(deviceName(b), this._lang, {sensitivity: 'base', numeric: true}) || a.localeCompare(b)).map(([deviceId, rows]) => {
       const device = this._devices.find(item => item.id === deviceId);
-      return `<details style="border:1px solid var(--bento-border,#ddd);border-radius:8px;padding:8px;margin:8px 0">
+      const deviceQueued = rows.some(row => !row.conflict) && rows.filter(row => !row.conflict).every(row => queued.has(row.oldId));
+      return `<details data-auto-group="${_esc(deviceId)}" style="border:1px solid var(--bento-border,#ddd);border-radius:8px;padding:8px;margin:8px 0">
         <summary>${_esc(device ? this._getDeviceName(device) : deviceId)} (${rows.length})</summary>
         ${rows.map(row => `<div class="rename-preview-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <code>${_esc(row.oldId)}</code> → <code>${_esc(row.newId)}</code>
-          ${row.conflict ? `<span>${t.automaticConflict}</span>` : `<button class="btn btn-sm btn-outline" data-auto-entity="${_esc(row.oldId)}">+ ${t.queue}</button>`}
+          ${row.conflict ? `<span>${t.automaticConflict}</span>` : `<button class="btn btn-sm btn-outline" data-auto-entity="${_esc(row.oldId)}" ${queued.has(row.oldId) || this._loading ? 'disabled' : ''}>${queued.has(row.oldId) ? '✓ ' + t.inQueue : '+ ' + t.queue}</button>`}
         </div>`).join('')}
-        <button class="btn btn-sm btn-outline" data-auto-device="${_esc(deviceId)}" ${rows.some(row => !row.conflict) ? '' : 'disabled'}>${t.addDeviceAutomatic}</button>
+        <button class="btn btn-sm btn-outline" data-auto-device="${_esc(deviceId)}" ${rows.some(eligible) && !this._loading ? '' : 'disabled'}>${deviceQueued ? '✓ ' + t.inQueue : t.addDeviceAutomatic}</button>
       </details>`;
     }).join('');
     return `<div class="automatic-tab">
       <p>${t.automaticInfo}</p>
       <button class="btn btn-outline" id="loadAutomatic" ${this._loading ? 'disabled' : ''}>${this._loading ? '…' : t.loadAutomatic}</button>
       ${this._automaticLoaded ? `<p>${this._automaticRows.length} ${t.automatic}; ${this._automaticNull.length} ${t.automaticUnknown}</p>
-        ${canQueue ? `<button class="btn btn-primary" id="queueAllAutomatic">${t.addAllAutomatic}</button>` : `<p>${t.automaticEmpty}</p>`}
+        ${this._automaticRows.some(row => !row.conflict) ? `<button class="btn btn-primary" id="queueAllAutomatic" ${canQueue && !this._loading ? '' : 'disabled'}>${canQueue ? t.addAllAutomatic : '✓ ' + t.inQueue}</button>` : `<p>${t.automaticEmpty}</p>`}
         ${deviceHtml}
         ${this._automaticNull.length ? `<details><summary>${t.automaticUnknown} (${this._automaticNull.length})</summary>${this._automaticNull.map(ent => `<div><code>${_esc(ent.entity_id)}</code></div>`).join('')}</details>` : ''}` : ''}
     </div>`;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.3.1 (2026-10-16)
+
+- Sort Automatic IDs device groups alphabetically by their displayed name.
+- Keep Automatic IDs visible and device groups expanded after queuing an entity, device or all eligible changes.
+- Mark queued entities and fully queued devices, prevent duplicate additions and restore available actions after removing proposals from the queue.
+
 ## 4.3.0 (2026-10-13)
 
 - Offer native Save As where supported; confirm a save only after reading back identical file bytes. Keep download initiation unconfirmed in other browsers.
