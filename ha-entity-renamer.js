@@ -2461,6 +2461,7 @@ class HAEntityRenamer extends HTMLElement {
       }
       .btn-outline:hover { border-color: var(--bento-primary, #3B82F6); color: var(--bento-primary, #3B82F6); }
       .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+      .automatic-tab .btn:disabled { opacity: 1; }
 
       .prefix-section {
         background: rgba(59,130,246,0.06); border: 1px solid rgba(59,130,246,0.15);
