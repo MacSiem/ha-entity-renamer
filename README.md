@@ -182,3 +182,14 @@ Devices and Automatic IDs share natural name sorting in the Home Assistant langu
 **New** means created in the Home Assistant registry within the last seven days; migrated entries with an unknown creation time are not marked. Choose **Newest** or **Name A–Z / Z–A** and expand or collapse groups.
 
 The queue groups proposals by device and shows their source: Automatic IDs, Manual or Prefix. Removing one proposal offers **Undo** for eight seconds and restores the same proposal at its original position. Clear, opening confirmation, disconnecting or changing accounts cancels undo. The queue bar also includes queued device-name changes. Applying changes retains the existing administrator permission, impact review and explicit confirmation.
+
+#### Automatic IDs preview
+
+The screenshots below show synthetic devices on Home Assistant, with four local proposals and no registry writes. The search matches two devices; queued counts remain visible when a group is collapsed.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/card-automatic-dark.png">
+  <img src="docs/screenshots/card-automatic-light.png" alt="Automatic IDs with counted filters, naturally sorted devices, queued markers and the queue bar" width="644">
+</picture>
+
+History dates use the Home Assistant language and time zone. Full ISO timestamps remain under **Time details**; legacy entries that only stored a time are explicitly marked **date unknown**. **Source and limits** retains the complete explanation and can be opened with the keyboard.

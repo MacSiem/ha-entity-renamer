@@ -23,5 +23,37 @@
       "width": 492,
       "height": 382
     }
-  ]
+  ],
+  "automatic_ids_v4": {
+    "captured_at": "2026-10-16",
+    "runtime_source_head": "67e0833d9a2e2c944b977e3f0678834e82442926",
+    "runtime_sha256": "237dfcd5f3d289815a599a93a653fbde3b69aa5a170af52ed7662aa262df48ad",
+    "home_assistant": "2026.10.1",
+    "browser": "Codex in-app browser (Chromium)",
+    "zoom": "100%",
+    "viewport": {
+      "width": 900,
+      "height": 1080
+    },
+    "data": "Four uncommitted proposals from four owned synthetic sensors on two QA devices; actual HA registries and native HACS candidate install; no registry writes from the card.",
+    "processing": "Native browser screenshot clipped to document coordinates of this card; no generated or substituted UI.",
+    "screenshots": [
+      {
+        "file": "docs/screenshots/card-automatic-dark.png",
+        "theme": "dark",
+        "language": "pl",
+        "sha256": "d460028e6b0c256c2232db73d7a9f68b2cad2da9089c35ff03760ceae54569c6",
+        "width": 65536,
+        "height": 4292542531
+      },
+      {
+        "file": "docs/screenshots/card-automatic-light.png",
+        "theme": "light",
+        "language": "en",
+        "sha256": "0da5f0bf51d18370cb357b5ea787a2ecd05fba9cbca11979c1fc3d1fb9241703",
+        "width": 65536,
+        "height": 4292542531
+      }
+    ]
+  }
 }
