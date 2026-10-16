@@ -150,3 +150,15 @@ test('Polish registry counts use the right plural forms',async()=>{
     assert.match(root.querySelector('.subtitle').textContent,/5 urządzeń.*5 encji/);
   } finally {dom.window.close();}
 });
+
+test('history displays completion time in the HA zone and retains ISO only in details',()=>{
+  const {dom,card,root}=fixture();
+  try {
+    card._hass.config={time_zone:'Pacific/Auckland'};
+    const completedAt='2026-01-01T00:30:00Z';
+    card._renameLog=[{time:'00:30',completedAt,oldId:'sensor.a',newId:'sensor.b',status:'ok',writePhase:'readback'}];
+    card._activeTab='log';card.render();
+    assert.equal(root.querySelector('.log-time').textContent,new Intl.DateTimeFormat('pl',{timeZone:'Pacific/Auckland',dateStyle:'medium',timeStyle:'short'}).format(new Date(completedAt)));
+    assert.match(root.querySelector('.log-entry details').textContent,/2026-01-01T00:30:00Z/);
+  } finally {dom.window.close();}
+});
