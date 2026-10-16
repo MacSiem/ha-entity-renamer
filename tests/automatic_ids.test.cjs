@@ -12,6 +12,7 @@ function automaticView() {
   dom.window.document.body.append(card);
   card._hass = { language: 'en', user: { id: 'admin', is_admin: true }, states: {} };
   card._devices = [{ id: 'z', name: 'Alpha', name_by_user: 'Zulu' }, { id: 'a', name: 'Alpha' }];
+  card._deviceEntities = {};
   card._automaticRows = [
     { oldId: 'sensor.z1', newId: 'sensor.new_z1', deviceId: 'z' },
     { oldId: 'sensor.a1', newId: 'sensor.new_a1', deviceId: 'a' },
