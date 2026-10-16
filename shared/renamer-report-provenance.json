@@ -22,6 +22,10 @@
     "shared/ha-tools-lists.js": {
       "sourceSha256": "f669abcd1c151f99ff2bee1ba93ba508aef1ce93b1fcb7b1cb3a91cf7973296d",
       "runtimeSha256": "814f2f7dc45c700c9b9d879bf8a0bc4fa886b2ccc1b0b846345fe564929ae96c"
+    },
+    "shared/ha-tools-format.js": {
+      "sourceSha256": "a2f51d3a0dde1a000934d8d1c4f115a40dec00c0726e2ae35bdfd3bcd240f71c",
+      "runtimeSha256": "7d42ad46dbabd2d4d603360b1fcb758c534ee4b5d0be400bd5c58342b3c7044a"
     }
   }
 }

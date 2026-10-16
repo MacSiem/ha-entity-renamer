@@ -977,6 +977,23 @@ function _bindLocalIntroDismiss(root) {
 /* ============================================================ */
 
 
+// BEGIN HA TOOLS FORMAT V4 source-sha256=a2f51d3a0dde1a000934d8d1c4f115a40dec00c0726e2ae35bdfd3bcd240f71c
+// Localized presentation; raw values remain available to callers for details/export.
+function createFormatUi(language = 'en', timeZone = 'UTC') {
+  const numbers = new Intl.NumberFormat(language);
+  const plurals = new Intl.PluralRules(language);
+  const count = (value, forms) => `${numbers.format(value)} ${forms[plurals.select(value)] || forms.other}`;
+  const dateTime = value => {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(value)) return null;
+    const time = Date.parse(value);
+    if (!Number.isFinite(time)) return null;
+    try { return new Intl.DateTimeFormat(language, {timeZone, dateStyle:'medium', timeStyle:'short'}).format(new Date(time)); }
+    catch (_) { return null; }
+  };
+  return {number:value=>numbers.format(value), count, dateTime};
+}
+// END HA TOOLS FORMAT V4
+
 // BEGIN HA TOOLS LISTS V4 source-sha256=f669abcd1c151f99ff2bee1ba93ba508aef1ce93b1fcb7b1cb3a91cf7973296d
 // Shared list presentation. No registry writes, storage or global state.
 function createListUi(language = 'en') {
@@ -1692,6 +1709,14 @@ class HAEntityRenamer extends HTMLElement {
       this._cachedListUi = createListUi(language);
     }
     return this._cachedListUi;
+  }
+
+  get _formatUi() { return createFormatUi(this._hass?.language||this._lang,this._hass?.config?.time_zone||'UTC'); }
+
+  _registryCount(value,kind) {
+    const pl=this._lang==='pl';
+    const forms=kind==='device' ? (pl?{one:'urządzenie',few:'urządzenia',many:'urządzeń',other:'urządzenia'}:{one:'device',other:'devices'}) : (pl?{one:'encja',few:'encje',many:'encji',other:'encji'}:{one:'entity',other:'entities'});
+    return this._formatUi.count(value,forms);
   }
 
   _compareDevices(a,b) {
@@ -2670,7 +2695,7 @@ class HAEntityRenamer extends HTMLElement {
         .list-chips button[aria-pressed="true"] { color:var(--primary-color,#3b82f6);border-color:currentColor; }
         .queue-bar,.queue-undo { padding:12px;border:1px solid var(--bento-border,var(--divider-color));border-radius:10px;justify-content:space-between;overflow-wrap:anywhere; }
         .new-badge,.queued-badge,.proposal-source { font-size:12px;border-radius:6px;padding:3px 6px;border:1px solid currentColor; }
-        .new-badge { color:var(--primary-color,#3b82f6);margin-left:6px; }
+        .new-badge { display:inline-block;white-space:nowrap;color:var(--primary-color,#3b82f6);margin-left:6px; }
         .queued-badge { color:var(--success-color,#16a34a); }
         .queue-group-heading { display:flex;justify-content:space-between;gap:8px;overflow-wrap:anywhere;font-size:14px; }
         ${_FAMILY_CONTROL_CSS}
@@ -2682,7 +2707,7 @@ class HAEntityRenamer extends HTMLElement {
     ${_renderLocalIntro(this._lang)}
     <div class="card">
       <h1>📱️ ${_esc(typeof this._config?.title === 'string' && this._config.title.trim() ? this._config.title : t.deviceEntityRenamer)}</h1>
-      <div class="subtitle">${this._devices.length} ${t.devices.toLowerCase()} • ${this._entities.length} ${t.entities.toLowerCase()}
+      <div class="subtitle">${this._registryCount(this._devices.length,'device')} • ${this._registryCount(this._entities.length,'entity')}
         </div>
 
       ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${this._message.outcome ? createUiV3({language:this._lang}).statusHtml(this._message.outcome) : ''} ${_esc(this._message.text || '')}</div>` : ''}
@@ -2822,7 +2847,8 @@ class HAEntityRenamer extends HTMLElement {
     }).join('');
     return `<div class="automatic-tab">
       ${this._renderListControls(true)}
-      <p>${t.automaticInfo}</p>
+      <p>${this._lang==='pl'?'Rejestry HA · bieżący odczyt · propozycje identyfikatorów':'HA registries · current read · ID proposals'}</p>
+      <details class="source-limits"><summary>${this._lang==='pl'?'Źródło i ograniczenia':'Source and limits'}</summary><p>${t.automaticInfo}</p></details>
       <button class="btn btn-outline" id="loadAutomatic" ${this._loading ? 'disabled' : ''}>${this._loading ? '…' : t.loadAutomatic}</button>
       ${this._automaticLoaded ? `<p>${this._automaticRows.length} ${t.automatic}; ${this._automaticNull.length} ${t.automaticUnknown}</p>
         ${this._automaticRows.some(row => !row.conflict) ? `<button class="btn btn-primary" id="queueAllAutomatic" ${canQueue && !this._loading ? '' : 'disabled'}>${canQueue ? (this._lang==='pl'?'Dodaj widoczne':'Queue visible')+' ('+visibleRows.filter(eligible).length+')' : '✓ ' + t.inQueue}</button>` : `<p>${t.automaticEmpty}</p>`}
@@ -2852,7 +2878,7 @@ class HAEntityRenamer extends HTMLElement {
               <button type="button" class="device-header" data-device-id="${_esc(d.id)}" role="button" tabindex="0" aria-expanded="${isExpanded}" aria-label="${_esc((this._lang === 'pl' ? 'Szczegóły urządzenia: ' : 'Device details: ') + this._getDeviceName(d))}">
                 <span class="device-expand ${isExpanded ? 'open' : ''}">▶</span>
                 <span class="device-name">${_esc(this._getDeviceName(d))}</span>${this._newBadge(d.created_at)}
-                <span class="device-meta">${ents.length} ${t.entities.toLowerCase()} · ${(this._deviceEntities[d.id]||[]).filter(e=>this._renameQueue.some(r=>r.oldId===e.entity_id)).length} ${t.inQueue.toLowerCase()}</span>
+                <span class="device-meta">${this._registryCount(ents.length,'entity')} · ${(this._deviceEntities[d.id]||[]).filter(e=>this._renameQueue.some(r=>r.oldId===e.entity_id)).length} ${t.inQueue.toLowerCase()}</span>
               </button>
               ${isExpanded ? `
               <div class="entity-list">
@@ -2965,7 +2991,8 @@ class HAEntityRenamer extends HTMLElement {
           const hasImpact = automations.length || scripts.length || dashboards.length || scenes.length;
           return `
           <div class="log-entry" style="padding:8px 0;${hasImpact ? 'padding-bottom:12px;' : ''}">
-            <span class="log-time">${_esc(l.time)}</span>
+            <span class="log-time">${_esc(this._formatUi.dateTime(l.completedAt || l.attemptedAt) || String(l.time || '—') + (this._lang==='pl'?' · data nieznana':' · date unknown'))}</span>
+            ${this._formatUi.dateTime(l.completedAt || l.attemptedAt) ? `<details><summary>${this._lang==='pl'?'Szczegóły czasu':'Time details'}</summary><code>${_esc(l.completedAt || l.attemptedAt)}</code> · ${_esc(this._hass?.config?.time_zone||'UTC')}</details>`:''}
             <span class="${resultState === 'success' ? 'log-ok' : resultState === 'error' ? 'log-err' : ''}">
               ${ui.statusHtml(resultState)} ${_esc(l.oldId)} → ${_esc(l.newId)}
             </span>
