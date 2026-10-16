@@ -28,7 +28,7 @@ function automaticView() {
 test('automatic devices follow displayed names rather than registry entity order', () => {
   const {dom, root} = automaticView();
   try {
-    assert.deepEqual(Array.from(root.querySelectorAll('.automatic-tab details > summary'), el => el.textContent.trim()), ['Alpha (3) · 0 in queue', 'Zulu (1) · 0 in queue']);
+    assert.deepEqual(Array.from(root.querySelectorAll('[data-auto-group] > summary'), el => el.textContent.trim()), ['Alpha (3) · 0 in queue', 'Zulu (1) · 0 in queue']);
   } finally { dom.window.close(); }
 });
 

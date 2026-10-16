@@ -162,3 +162,17 @@ test('history displays completion time in the HA zone and retains ISO only in de
     assert.match(root.querySelector('.log-entry details').textContent,/2026-01-01T00:30:00Z/);
   } finally {dom.window.close();}
 });
+
+test('device-name proposals share their device group and support exact-position undo',async()=>{
+  const {dom,card,root}=fixture();
+  try {
+    await card._loadData();card._deviceRenameQueue={ten:'Ten changed',two:'Two changed'};
+    card._addToQueue('sensor.old_1','sensor.new_1');card._activeTab='queue';card.render();
+    const group=root.querySelector('[data-queue-group="two"]');assert.ok(group);
+    assert.match(group.textContent,/Two changed/);assert.match(group.textContent,/sensor.old_1/);
+    root.querySelector('[data-remove-dev-queue="ten"]').click();
+    assert.deepEqual(Object.keys(card._deviceRenameQueue),['two']);
+    root.querySelector('#undoQueueRemoval').click();
+    assert.deepEqual(Object.entries(card._deviceRenameQueue),[['ten','Ten changed'],['two','Two changed']]);
+  } finally {dom.window.close();}
+});
