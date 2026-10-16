@@ -139,3 +139,14 @@ test('unknown automatic IDs respect search and conflict filters',async()=>{
     assert.doesNotMatch(root.textContent,/sensor.old_0/);
   } finally {dom.window.close();}
 });
+
+test('Polish registry counts use the right plural forms',async()=>{
+  const {dom,card,root}=fixture();
+  try {
+    await card._loadData();card.render();
+    assert.match(root.querySelector('.subtitle').textContent,/4 urządzenia.*4 encje/);
+    assert.match(root.querySelector('[data-device-id="two"]').textContent,/1 encja/);
+    card._devices.push({id:'extra',name:'Extra'});card._entities.push({entity_id:'sensor.extra',device_id:'extra'});card.render();
+    assert.match(root.querySelector('.subtitle').textContent,/5 urządzeń.*5 encji/);
+  } finally {dom.window.close();}
+});
