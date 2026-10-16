@@ -109,3 +109,33 @@ test('queue bar includes device renames and navigates without applying',async()=
     button.click();assert.equal(card._activeTab,'queue');assert.equal(card._confirmDialogOpen,false);
   } finally {dom.window.close();}
 });
+
+test('undo expiry removes only its notice and preserves the current card and focused draft',async()=>{
+  const {dom,card,root}=fixture();
+  try {
+    await card._loadData();let expire;
+    dom.window.setTimeout=callback=>{expire=callback;return 1;};
+    card._addToQueue('sensor.old_0','sensor.new_0');card._removeFromQueue('sensor.old_0');
+    const surface=root.querySelector('.card'),search=root.querySelector('#searchInput');search.focus();
+    expire();
+    assert.equal(root.querySelector('.card'),surface,'expiry must not replace the surface or cancel a separate export');
+    assert.equal(root.activeElement,search);
+    assert.equal(root.querySelector('#undoQueueRemoval'),null);
+  } finally {dom.window.close();}
+});
+
+test('unknown automatic IDs respect search and conflict filters',async()=>{
+  const {dom,card,root,entities}=fixture();
+  try {
+    await card._loadData();card._automaticLoaded=true;card._activeTab='automatic';
+    card._automaticNull=[entities[0]];card.render();
+    assert.match(root.textContent,/sensor.old_0/);
+    root.querySelector('#automaticSearch').value='no matching device';
+    root.querySelector('#automaticSearch').dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+    assert.doesNotMatch(root.textContent,/sensor.old_0/);
+    root.querySelector('#automaticSearch').value='';
+    root.querySelector('#automaticSearch').dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+    root.querySelector('[data-list-filter="conflicts"]').click();
+    assert.doesNotMatch(root.textContent,/sensor.old_0/);
+  } finally {dom.window.close();}
+});
