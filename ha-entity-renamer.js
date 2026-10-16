@@ -977,6 +977,25 @@ function _bindLocalIntroDismiss(root) {
 /* ============================================================ */
 
 
+// BEGIN HA TOOLS LISTS V4 source-sha256=f669abcd1c151f99ff2bee1ba93ba508aef1ce93b1fcb7b1cb3a91cf7973296d
+// Shared list presentation. No registry writes, storage or global state.
+function createListUi(language = 'en') {
+  const collator = new Intl.Collator(language, {numeric:true, sensitivity:'base'});
+  const compare = (a,b) => collator.compare(String(a ?? ''), String(b ?? ''));
+  const createdAt = value => {
+    if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? value * 1000 : 0;
+    if (typeof value !== 'string' || !value.trim() || /^0(?:\.0+)?$/.test(value.trim())) return 0;
+    const time = Date.parse(value);
+    return Number.isFinite(time) && time > 0 ? time : 0;
+  };
+  const isNew = (value, now = Date.now()) => {
+    const time = createdAt(value);
+    return time > 0 && time <= now && now - time < 7 * 86400000;
+  };
+  return {compare, createdAt, isNew};
+}
+// END HA TOOLS LISTS V4
+
 const FAMILY_NAV='.tabs',FAMILY_ATTR='data-tab',FAMILY_ACTIVE='active';
 
 // Adapted from Config/YAML family15: options come only from current native buttons.
@@ -1123,6 +1142,10 @@ class HAEntityRenamer extends HTMLElement {
     this._entities = [];
     this._selectedDevice = null;
     this._searchQuery = '';
+    this._automaticSearch = '';
+    this._listFilters = {devices:'all', automatic:'all'};
+    this._listSort = 'name';
+    this._queueUndo = null;
     this._renameQueue = []; // {oldId, newId, newName?, entityObj}
     this._previewMode = false;
     this._deviceRenameQueue = {}; // deviceId -> newName
@@ -1195,6 +1218,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _cancelRenameAuthority() {
+    this._clearQueueUndo();
     if (this._loading && !this._applyOperation) this._registryRefreshPending = true;
     this._legacyReviewLog = [];
     this._authorityEpoch++;
@@ -1485,7 +1509,7 @@ class HAEntityRenamer extends HTMLElement {
         this._renameQueue = []; this._deviceRenameQueue = {};
         this._renameLog = []; this._historyScope = null;
         this._expandedDevices.clear(); this._selectedDevice = null;
-        this._searchQuery = ''; this._prefixOld = ''; this._prefixNew = '';
+        this._searchQuery = ''; this._automaticSearch = ''; this._listFilters = {devices:'all',automatic:'all'}; this._prefixOld = ''; this._prefixNew = '';
         this._exportDialog?.cancel();
         this.shadowRoot.replaceChildren(); // do not carry private form drafts into the next authority
       }
@@ -1571,12 +1595,10 @@ class HAEntityRenamer extends HTMLElement {
       ]);
       if (!current()) return;
       if (!Array.isArray(devResult) || !Array.isArray(entResult)) throw new Error('Malformed registry read');
-      this._devices = devResult.sort((a, b) =>
-        (a.name_by_user || a.name || '').localeCompare(b.name_by_user || b.name || '')
-      );
+      this._devices = [...devResult].sort((a,b) => this._compareDevices(a,b));
       this._entities = entResult;
       // Build device->entities map
-      this._deviceEntities = {};
+      this._deviceEntities = Object.create(null);
       for (const ent of this._entities) {
         const did = ent.device_id;
         if (!did) continue;
@@ -1585,7 +1607,7 @@ class HAEntityRenamer extends HTMLElement {
       }
       // Sort entities within each device
       for (const did of Object.keys(this._deviceEntities)) {
-        this._deviceEntities[did].sort((a, b) => a.entity_id.localeCompare(b.entity_id));
+        this._deviceEntities[did].sort((a, b) => this._listUi.compare(a.entity_id,b.entity_id));
       }
       receipt = {devices: devResult, entities: entResult, session: this._readSession(hass)};
     } catch (e) {
@@ -1645,11 +1667,11 @@ class HAEntityRenamer extends HTMLElement {
     if (this._loading) return;
     const focusedDevice = this.shadowRoot.activeElement?.closest('[data-auto-group]')?.dataset.autoGroup;
     const queued = new Set(this._renameQueue.map(row => row.oldId));
-    for (const row of this._automaticRows) {
+    for (const row of this._visibleAutomaticRows()) {
       if (row.conflict || queued.has(row.oldId)) continue;
       if (deviceId && row.deviceId !== deviceId) continue;
       if (oldId && row.oldId !== oldId) continue;
-      this._renameQueue.push({ ...row, automatic: true, newName: null });
+      this._renameQueue.push({ ...row, automatic: true, source: 'automatic', newName: null });
       queued.add(row.oldId);
     }
     this._confirmation = null;
@@ -1663,15 +1685,93 @@ class HAEntityRenamer extends HTMLElement {
 
   _getDeviceName(d) { return d.name_by_user || d.name || d.id; }
 
+  get _listUi() {
+    const language = this._hass?.language || this._lang;
+    if (this._listUiLanguage !== language) {
+      this._listUiLanguage = language;
+      this._cachedListUi = createListUi(language);
+    }
+    return this._cachedListUi;
+  }
+
+  _compareDevices(a,b) {
+    const natural = this._listUi.compare(this._getDeviceName(a),this._getDeviceName(b)) || this._listUi.compare(a.id,b.id);
+    if (this._listSort === 'newest') return this._listUi.createdAt(b.created_at)-this._listUi.createdAt(a.created_at) || natural;
+    return this._listSort === 'reverse' ? -natural : natural;
+  }
+
+  _entityMatches(entity, filter) {
+    const queued = this._renameQueue.some(row=>row.oldId===entity.entity_id);
+    const automatic = this._automaticRows.find(row=>row.oldId===entity.entity_id);
+    if (filter === 'queued') return queued;
+    if (filter === 'available') return !queued && !automatic?.conflict;
+    if (filter === 'conflicts') return automatic?.conflict === true;
+    if (filter === 'new') return this._listUi.isNew(entity.created_at);
+    return true;
+  }
+
+  _deviceRows(device, filter=this._listFilters.devices) {
+    const query = this._searchQuery.trim().toLocaleLowerCase(this._hass?.language || this._lang);
+    const matchesDevice = this._getDeviceName(device).toLocaleLowerCase(this._hass?.language || this._lang).includes(query);
+    return (this._deviceEntities[device.id] || []).filter(entity =>
+      (matchesDevice || [entity.entity_id,entity.name,entity.original_name].some(value=>String(value||'').toLocaleLowerCase(this._hass?.language || this._lang).includes(query))) &&
+      (filter === 'new' && this._listUi.isNew(device.created_at) || this._entityMatches(entity,filter))
+    );
+  }
+
   _getFilteredDevices() {
-    const q = this._searchQuery.toLowerCase().trim();
-    if (!q) return this._devices.filter(d => (this._deviceEntities[d.id] || []).length > 0);
-    return this._devices.filter(d => {
-      const name = this._getDeviceName(d).toLowerCase();
-      if (name.includes(q)) return true;
-      const ents = this._deviceEntities[d.id] || [];
-      return ents.some(e => e.entity_id.toLowerCase().includes(q) || (e.name || '').toLowerCase().includes(q));
+    return this._devices.filter(device=>this._deviceRows(device).length).sort((a,b)=>this._compareDevices(a,b));
+  }
+
+  _visibleAutomaticRows(filter=this._listFilters.automatic) {
+    const query = this._automaticSearch.trim().toLocaleLowerCase(this._hass?.language || this._lang);
+    return this._automaticRows.filter(row=> {
+      const device = this._devices.find(device=>device.id===row.deviceId) || {id:row.deviceId};
+      const entity = this._entities.find(entity=>entity.entity_id===row.oldId) || {entity_id:row.oldId};
+      return [this._getDeviceName(device),row.oldId,row.newId].some(value=>String(value||'').toLocaleLowerCase(this._hass?.language || this._lang).includes(query)) &&
+        (filter === 'new' && this._listUi.isNew(device.created_at) || this._entityMatches(entity,filter));
     });
+  }
+
+  _newBadge(value) {
+    return this._listUi.isNew(value) ? `<span class="new-badge">${this._lang==='pl'?'Nowe':'New'}</span>` : '';
+  }
+
+  _renderListControls(automatic=false) {
+    const pl=this._lang==='pl',scope=automatic?'automatic':'devices';
+    const keys=['all','available','queued','conflicts','new'];
+    const labels=pl?['Wszystkie','Do dodania','W kolejce','Konflikty','Nowe']:['All','To queue','In queue','Conflicts','New'];
+    const count=filter=>automatic?this._visibleAutomaticRows(filter).length:this._devices.reduce((n,d)=>n+this._deviceRows(d,filter).length,0);
+    return `<div class="list-toolbar"><input type="search" id="${automatic?'automaticSearch':'searchInput'}" aria-label="${_esc(this._t.searchPlaceholder)}" placeholder="🔍 ${_esc(this._t.searchPlaceholder)}" value="${_esc(automatic?this._automaticSearch:this._searchQuery)}">
+      <label>${pl?'Sortowanie':'Sort'} <select id="listSort">${[['name',pl?'Nazwa A–Z':'Name A–Z'],['reverse',pl?'Nazwa Z–A':'Name Z–A'],['newest',pl?'Najnowsze':'Newest']].map(([key,label])=>`<option value="${key}" ${this._listSort===key?'selected':''}>${label}</option>`).join('')}</select></label></div>
+      <div class="list-chips" role="group" aria-label="${pl?'Filtry encji':'Entity filters'}">${keys.map((key,i)=>`<button type="button" class="btn btn-sm btn-outline" data-list-filter="${key}" data-list-scope="${scope}" aria-pressed="${this._listFilters[scope]===key}">${labels[i]} (${count(key)})</button>`).join('')}</div>
+      <div class="list-expand"><button class="btn btn-sm btn-outline" data-expand-list="true">${pl?'Rozwiń wszystkie':'Expand all'}</button><button class="btn btn-sm btn-outline" data-expand-list="false">${pl?'Zwiń wszystkie':'Collapse all'}</button></div>`;
+  }
+
+  _clearQueueUndo() {
+    clearTimeout(this._queueUndoTimer);
+    this._queueUndoTimer = null;
+    this._queueUndo = null;
+  }
+
+  _undoQueueRemoval() {
+    const undo = this._queueUndo;
+    if (this._loading || !undo) return;
+    if (Date.now() < undo.until && !this._renameQueue.some(row=>row.oldId===undo.row.oldId)) {
+      this._renameQueue.splice(Math.min(undo.index,this._renameQueue.length),0,undo.row);
+      this._confirmation=null; this._confirmDialogOpen=false; this._impactResults=null;
+    }
+    this._clearQueueUndo(); this.render();
+  }
+
+  _queueGroups() {
+    const groups=new Map();
+    for (const row of this._renameQueue) {
+      const id=row.deviceId || row.entity?.device_id || this._entities.find(e=>e.entity_id===row.oldId)?.device_id || '';
+      if (!groups.has(id)) groups.set(id,{device:this._devices.find(d=>d.id===id)||{id,name:id|| (this._lang==='pl'?'Bez urządzenia':'No device')},rows:[]});
+      groups.get(id).rows.push(row);
+    }
+    return [...groups.values()].sort((a,b)=>this._listUi.compare(this._getDeviceName(a.device),this._getDeviceName(b.device))||this._listUi.compare(a.device.id,b.device.id));
   }
 
   _findCommonPrefix(entityIds) {
@@ -1702,7 +1802,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
 
-  _addToQueue(oldId, newId, newName) {
+  _addToQueue(oldId, newId, newName, source='manual') {
     if (this._loading) return;
     // Allow adding if EITHER entity_id changed OR friendly_name/alias changed
     if (oldId === newId && !newName) return;
@@ -1710,10 +1810,10 @@ class HAEntityRenamer extends HTMLElement {
     this._confirmation = null;
     this._lastApplyResult = null;
     if (this._renameQueue.some(r => r.oldId === oldId)) {
-      this._renameQueue = this._renameQueue.map(r => r.oldId === oldId ? { ...r, newId, ...(newName !== undefined ? { newName } : {}) } : r);
+      this._renameQueue = this._renameQueue.map(r => r.oldId === oldId ? { ...r, newId, automatic:false, source, ...(newName !== undefined ? { newName } : {}) } : r);
     } else {
       const ent = this._entities.find(e => e.entity_id === oldId);
-      this._renameQueue.push({ oldId, newId, newName: newName || null, entity: ent, sourceIdentity: this._sourceIdentity(ent) });
+      this._renameQueue.push({ oldId, newId, newName: newName || null, automatic:false, source, entity: ent, sourceIdentity: this._sourceIdentity(ent) });
     }
     this.render();
   }
@@ -1723,12 +1823,20 @@ class HAEntityRenamer extends HTMLElement {
     this._confirmDialogOpen = false;
     this._confirmation = null;
     this._lastApplyResult = null;
-    this._renameQueue = this._renameQueue.filter(r => r.oldId !== oldId);
+    const index=this._renameQueue.findIndex(row=>row.oldId===oldId);
+    if(index>=0) {
+      this._clearQueueUndo();
+      this._queueUndo={row:this._renameQueue[index],index,until:Date.now()+8000};
+      this._queueUndoTimer=setTimeout(()=>{this._clearQueueUndo();if(this.isConnected)this.render();},8000);
+      this._renameQueue.splice(index,1);
+      this._impactResults=null;
+    }
     this.render();
   }
 
   _clearQueue() {
     if (this._loading) return;
+    this._clearQueueUndo();
     this._confirmDialogOpen = false;
     this._confirmation = null;
     this._lastApplyResult = null;
@@ -1748,7 +1856,7 @@ class HAEntityRenamer extends HTMLElement {
         const domain = ent.entity_id.split('.')[0];
         const newObjId = this._prefixNew + objId.substring(this._prefixOld.length);
         const newId = domain + '.' + newObjId;
-        this._addToQueue(ent.entity_id, newId);
+        this._addToQueue(ent.entity_id, newId, undefined, 'prefix');
       }
     }
     this.render();
@@ -1948,6 +2056,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _showRenameConfirmation() {
+    this._clearQueueUndo();
     if (!this._renameAuthorityAvailable()) {
       this._confirmDialogOpen = false;
       this._message = { type: 'error', text: this._t.adminRequired };
@@ -2537,6 +2646,15 @@ class HAEntityRenamer extends HTMLElement {
           .queue-actions { flex-wrap: wrap; justify-content: center; }
           .log-entry { font-size: 11px; padding: 4px 0; }
         }
+        .list-toolbar,.list-chips,.list-expand,.queue-bar,.queue-undo { display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0;min-width:0; }
+        .list-toolbar input { flex:1;min-width:120px;max-width:100%;box-sizing:border-box; }
+        .list-toolbar select { max-width:100%;min-height:44px;color:inherit;background:var(--bento-card,var(--card-background-color));border:1px solid var(--bento-border,var(--divider-color));border-radius:8px;padding:8px; }
+        .list-chips button[aria-pressed="true"] { color:var(--primary-color,#3b82f6);border-color:currentColor; }
+        .queue-bar,.queue-undo { padding:12px;border:1px solid var(--bento-border,var(--divider-color));border-radius:10px;justify-content:space-between;overflow-wrap:anywhere; }
+        .new-badge,.queued-badge,.proposal-source { font-size:12px;border-radius:6px;padding:3px 6px;border:1px solid currentColor; }
+        .new-badge { color:var(--primary-color,#3b82f6);margin-left:6px; }
+        .queued-badge { color:var(--success-color,#16a34a); }
+        .queue-group-heading { display:flex;justify-content:space-between;gap:8px;overflow-wrap:anywhere;font-size:14px; }
         ${_FAMILY_CONTROL_CSS}
         .card { min-width:0;container-type:inline-size; }
         .prefix-row,.queue-actions { flex-wrap:wrap; }
@@ -2565,6 +2683,8 @@ class HAEntityRenamer extends HTMLElement {
       ${this._activeTab === 'automatic' ? this._renderAutomaticTab() : ''}
       ${this._activeTab === 'queue' ? this._renderQueueTab() : ''}
       ${this._activeTab === 'log' ? this._renderLogTab() : ''}
+      ${this._activeTab!=='queue' && queueCount ? `<div class="queue-bar"><span>${t.inQueue}: ${queueCount}</span><button type="button" class="btn btn-primary" id="openQueue">${this._lang==='pl'?'Przejdź do kolejki →':'Go to queue →'}</button></div>`:''}
+      ${this._queueUndo && Date.now()<this._queueUndo.until ? `<div class="queue-undo" role="status"><span>${this._lang==='pl'?'Usunięto z kolejki:':'Removed from queue:'} ${_esc(this._queueUndo.row.oldId)}</span><button type="button" class="btn btn-outline" id="undoQueueRemoval">${this._lang==='pl'?'Cofnij':'Undo'}</button></div>`:''}
     </div>
     ${this._hass?.user?.is_admin && this._config?.show_support !== false && !_localSupportDismissed() ? _LOCAL_DONATE_HTML : ''}`;
 
@@ -2659,30 +2779,33 @@ class HAEntityRenamer extends HTMLElement {
     const t = this._t;
     const queued = new Set(this._renameQueue.map(row => row.oldId));
     const groups = new Map();
-    for (const row of this._automaticRows) {
+    for (const row of this._visibleAutomaticRows()) {
       if (!groups.has(row.deviceId)) groups.set(row.deviceId, []);
       groups.get(row.deviceId).push(row);
     }
     const eligible = row => !row.conflict && !queued.has(row.oldId);
-    const canQueue = this._automaticRows.some(eligible);
+    const visibleRows=this._visibleAutomaticRows();
+    const canQueue = visibleRows.some(eligible);
     const deviceName = id => this._getDeviceName(this._devices.find(item => item.id === id) || {id});
-    const deviceHtml = [...groups].sort(([a], [b]) => deviceName(a).localeCompare(deviceName(b), this._lang, {sensitivity: 'base', numeric: true}) || a.localeCompare(b)).map(([deviceId, rows]) => {
+    const deviceHtml = [...groups].sort(([a], [b]) => this._compareDevices(this._devices.find(d=>d.id===a)||{id:a},this._devices.find(d=>d.id===b)||{id:b})).map(([deviceId, rows]) => {
       const device = this._devices.find(item => item.id === deviceId);
       const deviceQueued = rows.some(row => !row.conflict) && rows.filter(row => !row.conflict).every(row => queued.has(row.oldId));
       return `<details data-auto-group="${_esc(deviceId)}" style="border:1px solid var(--bento-border,#ddd);border-radius:8px;padding:8px;margin:8px 0">
-        <summary>${_esc(device ? this._getDeviceName(device) : deviceId)} (${rows.length})</summary>
-        ${rows.map(row => `<div class="rename-preview-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <code>${_esc(row.oldId)}</code> → <code>${_esc(row.newId)}</code>
+        <summary>${_esc(device ? this._getDeviceName(device) : deviceId)} (${rows.length}) · ${rows.filter(row=>queued.has(row.oldId)).length} ${t.inQueue.toLowerCase()} ${this._newBadge(device?.created_at)}</summary>
+        ${[...rows].sort((a,b)=>this._listUi.compare(a.oldId,b.oldId)).map(row => `<div class="rename-preview-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <code>${_esc(row.oldId)}</code>${this._newBadge(this._entities.find(e=>e.entity_id===row.oldId)?.created_at)} → <code>${_esc(row.newId)}</code>
+          ${queued.has(row.oldId)?`<button class="btn btn-sm btn-outline" data-remove-queue="${_esc(row.oldId)}">${this._lang==='pl'?'Usuń':'Remove'}</button>`:''}
           ${row.conflict ? `<span>${t.automaticConflict}</span>` : `<button class="btn btn-sm btn-outline" data-auto-entity="${_esc(row.oldId)}" ${queued.has(row.oldId) || this._loading ? 'disabled' : ''}>${queued.has(row.oldId) ? '✓ ' + t.inQueue : '+ ' + t.queue}</button>`}
         </div>`).join('')}
         <button class="btn btn-sm btn-outline" data-auto-device="${_esc(deviceId)}" ${rows.some(eligible) && !this._loading ? '' : 'disabled'}>${deviceQueued ? '✓ ' + t.inQueue : t.addDeviceAutomatic}</button>
       </details>`;
     }).join('');
     return `<div class="automatic-tab">
+      ${this._renderListControls(true)}
       <p>${t.automaticInfo}</p>
       <button class="btn btn-outline" id="loadAutomatic" ${this._loading ? 'disabled' : ''}>${this._loading ? '…' : t.loadAutomatic}</button>
       ${this._automaticLoaded ? `<p>${this._automaticRows.length} ${t.automatic}; ${this._automaticNull.length} ${t.automaticUnknown}</p>
-        ${this._automaticRows.some(row => !row.conflict) ? `<button class="btn btn-primary" id="queueAllAutomatic" ${canQueue && !this._loading ? '' : 'disabled'}>${canQueue ? t.addAllAutomatic : '✓ ' + t.inQueue}</button>` : `<p>${t.automaticEmpty}</p>`}
+        ${this._automaticRows.some(row => !row.conflict) ? `<button class="btn btn-primary" id="queueAllAutomatic" ${canQueue && !this._loading ? '' : 'disabled'}>${canQueue ? (this._lang==='pl'?'Dodaj widoczne':'Queue visible')+' ('+visibleRows.filter(eligible).length+')' : '✓ ' + t.inQueue}</button>` : `<p>${t.automaticEmpty}</p>`}
         ${deviceHtml}
         ${this._automaticNull.length ? `<details><summary>${t.automaticUnknown} (${this._automaticNull.length})</summary>${this._automaticNull.map(ent => `<div><code>${_esc(ent.entity_id)}</code></div>`).join('')}</details>` : ''}` : ''}
     </div>`;
@@ -2691,26 +2814,25 @@ class HAEntityRenamer extends HTMLElement {
   _renderDevicesTab(devices) {
     const t = this._t;
     return `
-      <div class="search-bar">
-        <input type="text" id="searchInput" aria-label="${_esc(t.searchPlaceholder)}" placeholder="🔍 ${t.searchPlaceholder}" value="${_esc(this._searchQuery)}">
-      </div>
+      ${this._renderListControls()}
       <div class="stats-row">
         <div class="stat-card"><div class="num">${this._devices.length}</div><div class="label">${t.devices}</div></div>
         <div class="stat-card"><div class="num">${this._entities.length}</div><div class="label">${t.entities}</div></div>
         <div class="stat-card"><div class="num">${this._renameQueue.length}</div><div class="label">${t.inQueue}</div></div>
+        <button type="button" class="stat-card btn btn-outline" data-list-filter="new" data-list-scope="devices"><span class="num">${this._devices.filter(d=>this._listUi.isNew(d.created_at)).length}</span><span class="label">${this._lang==='pl'?'Nowe (7 dni)':'New (7 days)'}</span></button>
       </div>
       <div class="device-list">
         ${devices.length === 0 ? `<div class="empty-state"><div class="icon">🔍</div>${t.noResults}</div>` :
           devices.map(d => {
-            const ents = this._deviceEntities[d.id] || [];
+            const ents = this._deviceRows(d);
             const isExpanded = this._expandedDevices.has(d.id);
             const isSelected = this._selectedDevice === d.id;
             return `
             <div class="device-item ${isSelected ? 'selected' : ''}">
               <button type="button" class="device-header" data-device-id="${_esc(d.id)}" role="button" tabindex="0" aria-expanded="${isExpanded}" aria-label="${_esc((this._lang === 'pl' ? 'Szczegóły urządzenia: ' : 'Device details: ') + this._getDeviceName(d))}">
                 <span class="device-expand ${isExpanded ? 'open' : ''}">▶</span>
-                <span class="device-name">${_esc(this._getDeviceName(d))}</span>
-                <span class="device-meta">${ents.length} ${t.entities.toLowerCase()}</span>
+                <span class="device-name">${_esc(this._getDeviceName(d))}</span>${this._newBadge(d.created_at)}
+                <span class="device-meta">${ents.length} ${t.entities.toLowerCase()} · ${(this._deviceEntities[d.id]||[]).filter(e=>this._renameQueue.some(r=>r.oldId===e.entity_id)).length} ${t.inQueue.toLowerCase()}</span>
               </button>
               ${isExpanded ? `
               <div class="entity-list">
@@ -2720,10 +2842,10 @@ class HAEntityRenamer extends HTMLElement {
                   return `
                   <div class="entity-row">
                     <span class="entity-domain">${_esc(domain)}</span>
-                    <span class="entity-id">${_esc(e.entity_id)}</span>
+                    <span class="entity-id">${_esc(e.entity_id)}${this._newBadge(e.created_at)}</span>
                     <span class="entity-name">${_esc(e.name || e.original_name || '')}</span>
                     ${inQueue
-                      ? '<button class="btn btn-sm btn-danger" data-remove-queue="' + _esc(e.entity_id) + '" aria-label="' + _esc(t.removeFromQueue) + '">✕</button>'
+                      ? '<span class="queued-badge">✓ ' + t.inQueue + '</span><button class="btn btn-sm btn-outline" data-remove-queue="' + _esc(e.entity_id) + '" aria-label="' + _esc(t.removeFromQueue) + '">' + (this._lang==='pl'?'Usuń':'Remove') + '</button>'
                       : `<button class="btn btn-sm btn-outline" data-add-single="${_esc(e.entity_id)}">+ ${t.queue}</button>`
                     }
                   </div>`;
@@ -2771,7 +2893,7 @@ class HAEntityRenamer extends HTMLElement {
         }).join('')}
       </div>` : ''}
       <div class="queue-list">
-          ${this._renameQueue.map(r => {
+          ${this._queueGroups().map(group => `<section data-queue-group="${_esc(group.device.id)}"><h3 class="queue-group-heading"><span>${_esc(this._getDeviceName(group.device))}</span><span>${group.rows.length}</span></h3>${group.rows.map(r => {
             const imp = this._impactResults ? this._impactResults[r.oldId] : null;
             const hasImpact = imp && (imp.automations.length || imp.scripts.length || imp.dashboards.length || (imp.scenes||[]).length);
             return `<div style="border:1px solid var(--bento-border,#334155);border-radius:8px;padding:12px;margin-bottom:8px;">
@@ -2783,6 +2905,7 @@ class HAEntityRenamer extends HTMLElement {
                 <span style="color:var(--bento-text-secondary,#94A3B8);">→</span>
                 <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? _esc(r.newId) : '<span>' + t.noIdChange + '</span>'}</span>
               </div>
+              <span class="proposal-source">${r.automatic ? t.automatic : r.source==='prefix' ? (this._lang==='pl'?'Prefiks':'Prefix') : (this._lang==='pl'?'Ręcznie':'Manual')}</span>
               ${r.newName ? '<div style="margin:6px 0 0 24px;min-width:0;overflow-wrap:anywhere;font-size:11px;color:var(--bento-text, var(--primary-text-color, #E2E8F0));">📝 ' + _esc(r.newName) + '</div>' : ''}
               ${hasImpact ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05);">
                 <span style="font-size:10px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
@@ -2793,7 +2916,7 @@ class HAEntityRenamer extends HTMLElement {
               </div>` : (imp && imp.dashboardCoverage !== 'unavailable' ? `<div style="margin-top:4px;font-size:14px;color:var(--bento-text-secondary,#94A3B8);">${t.notUsed}</div>` : '')}
               ${this._dashboardCoverageHtml(imp)}
             </div>`;
-          }).join('')}
+          }).join('')}</section>`).join('')}
       </div>
 `;
   }
@@ -2853,6 +2976,24 @@ class HAEntityRenamer extends HTMLElement {
         history.replaceState(null, '', location.pathname + '#' + this._toolId + '/' + this._activeTab);
         this.render();
       });
+    });
+
+    root.getElementById('openQueue')?.addEventListener('click',()=>root.querySelector('[data-tab="queue"]').click());
+    root.getElementById('undoQueueRemoval')?.addEventListener('click',()=>this._undoQueueRemoval());
+    root.getElementById('listSort')?.addEventListener('change',event=>{this._listSort=event.target.value;this.render();this.shadowRoot.getElementById('listSort')?.focus();});
+    root.querySelectorAll('[data-list-filter]').forEach(button=>button.addEventListener('click',()=>{
+      this._listFilters[button.dataset.listScope]=button.dataset.listFilter;
+      this.render();
+      Array.from(this.shadowRoot.querySelectorAll('[data-list-filter]')).find(el=>el.dataset.listFilter===button.dataset.listFilter)?.focus();
+    }));
+    root.querySelectorAll('[data-expand-list]').forEach(button=>button.addEventListener('click',()=>{
+      const expand=button.dataset.expandList==='true';
+      if(this._activeTab==='automatic') root.querySelectorAll('[data-auto-group]').forEach(group=>{group.open=expand;});
+      else {this._getFilteredDevices().forEach(device=>expand?this._expandedDevices.add(device.id):this._expandedDevices.delete(device.id));this.render();}
+    }));
+    root.getElementById('automaticSearch')?.addEventListener('input',event=>{
+      const caret=event.target.selectionStart;this._automaticSearch=event.target.value;this.render();
+      const field=this.shadowRoot.getElementById('automaticSearch');field?.focus();if(field)field.setSelectionRange(caret,caret);
     });
 
     const loadAutomatic = root.getElementById('loadAutomatic');

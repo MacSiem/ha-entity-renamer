@@ -18,6 +18,10 @@
       "sourceSha256": "8eb67bff7938388cd42213168e8ae56b91a355f647f5becb2d5e972fb424d7e6",
       "runtimeSha256": "2af7d8a611bf2ea5355470e98f0de0492bed18642f00dd0235c6108ee5fb1627",
       "transform": "omit Node test export footer"
+    },
+    "shared/ha-tools-lists.js": {
+      "sourceSha256": "f669abcd1c151f99ff2bee1ba93ba508aef1ce93b1fcb7b1cb3a91cf7973296d",
+      "runtimeSha256": "814f2f7dc45c700c9b9d879bf8a0bc4fa886b2ccc1b0b846345fe564929ae96c"
     }
   }
 }

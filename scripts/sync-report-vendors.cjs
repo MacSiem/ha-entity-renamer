@@ -7,6 +7,7 @@ const root = path.resolve(__dirname, '..');
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const provenance = JSON.parse(fs.readFileSync(path.join(root,'shared/renamer-report-provenance.json'),'utf8'));
 const units = [
+ ['HA TOOLS LISTS V4','shared/ha-tools-lists.js',s=>s.split('// Node tests use the canonical factory;')[0].trimEnd()],
  ['HA TOOLS UI V3','shared/ha-tools-ui.js',s=>s.split('// Node tests use the canonical factory;')[0].trimEnd()],
  ['HA TOOLS EXPORT V3','shared/ha-tools-export.js',s=>s.replace('export function createExportDialog','function createExportDialog').trimEnd()],
  ['HA RENAMER REPORTS V1','shared/ha-renamer-reports.js',s=>s.split('// Node tests use the canonical factory;')[0].trimEnd()],
