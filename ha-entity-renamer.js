@@ -1230,6 +1230,7 @@ function _rememberListViewport(card) {
   }
   return {listTop:list?.scrollTop, parents, entity, device,
     group:active?.closest('[data-auto-group]')?.getAttribute('data-auto-group'),
+    anchorKind:anchor?.matches('.rename-preview-row') ? 'entity' : 'header',
     anchorTop:anchor?.getBoundingClientRect().top};
 }
 
@@ -1251,7 +1252,10 @@ function _restoreListViewport(card, saved) {
   for (const {element, top} of saved.parents) if (element.isConnected) element.scrollTop = top;
   const anchor = action?.closest('.rename-preview-row') || action?.closest('.device-header');
   const scroller = list && saved.listTop ? list : saved.parents.find(item => item.element.isConnected)?.element;
-  if (anchor && scroller && Number.isFinite(saved.anchorTop)) {
+  const anchorKind = anchor?.matches('.rename-preview-row') ? 'entity' : 'header';
+  // A vanished entity may hand focus to its group, but the header is not the
+  // same viewport anchor. Preserve the restored scroll without a row delta.
+  if (anchor && anchorKind === saved.anchorKind && scroller && Number.isFinite(saved.anchorTop)) {
     const delta = anchor.getBoundingClientRect().top - saved.anchorTop;
     if (Math.abs(delta) > 1) scroller.scrollTop += delta;
   }
@@ -1618,6 +1622,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   set hass(hass) {
+    const previousFormatKey = this._displayFormatKey || this._formatUi.key;
     const previousLanguage = this._lang;
     const previousAdmin = this._hass?.user?.is_admin === true;
     const previousSession = this._lastSession || this._readSession();
@@ -1664,6 +1669,8 @@ class HAEntityRenamer extends HTMLElement {
     this._bindRenameExportEvents();
     if (sessionChanged) this._invalidateRenameExport();
     if (hass?.language) this._lang = hass.language.startsWith('pl') ? 'pl' : 'en';
+    const displayFormatKey = this._formatUi.key;
+    this._displayFormatKey = displayFormatKey;
     if (previousLanguage !== this._lang) { this._invalidateRenameExport(); this._exportDialog?.cancel(); }
     if (!hass) return;
     if (first) this._init();
@@ -1673,7 +1680,7 @@ class HAEntityRenamer extends HTMLElement {
       this._confirmDialogOpen = false;
       this.render();
       this._resumePermittedRegistryRead();
-    } else if (previousLanguage !== this._lang) this._renderLocalePreservingDrafts();
+    } else if (previousLanguage !== this._lang || previousFormatKey !== displayFormatKey) this._renderLocalePreservingDrafts();
   }
 
   _renderLocalePreservingDrafts() {
