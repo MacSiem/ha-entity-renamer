@@ -179,13 +179,15 @@ See [SECURITY.md](SECURITY.md) for safe vulnerability reporting and [NOTICE](NOT
 
 Devices and Automatic IDs share natural name sorting in the Home Assistant language. Use the search and counted filters **All**, **To queue**, **In queue**, **Conflicts** and **New**. Conflicts refer to the current Automatic IDs comparison; run the comparison to discover them. Changing a filter does not change the queue. **Queue visible (N)** and per-device actions add only the visible matching eligible proposals.
 
+Adding or removing proposals keeps the list position, expanded groups and keyboard focus. Queued status is text beside a single **Remove** action. Devices and Automatic IDs share the same headers and entity counts.
+
 **New** means created in the Home Assistant registry within the last seven days; migrated entries with an unknown creation time are not marked. Choose **Newest** or **Name A–Z / Z–A** and expand or collapse groups.
 
 The queue groups proposals by device and shows their source: Automatic IDs, Manual or Prefix. Removing one proposal offers **Undo** for eight seconds and restores the same proposal at its original position. Clear, opening confirmation, disconnecting or changing accounts cancels undo. The queue bar also includes queued device-name changes. Applying changes retains the existing administrator permission, impact review and explicit confirmation.
 
 #### Automatic IDs preview
 
-The screenshots below show synthetic devices on Home Assistant, with four local proposals and no registry writes. The search matches two devices; queued counts remain visible when a group is collapsed.
+The screenshots below show a synthetic Home Assistant fixture. The search matches three entities on one QA device, with one local proposal and no registry writes. Queued entities show a text status and one Remove action.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/card-automatic-dark.png">

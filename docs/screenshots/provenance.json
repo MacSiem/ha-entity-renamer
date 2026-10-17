@@ -25,34 +25,34 @@
     }
   ],
   "automatic_ids_v4": {
-    "captured_at": "2026-10-16",
-    "runtime_source_head": "67e0833d9a2e2c944b977e3f0678834e82442926",
-    "runtime_sha256": "237dfcd5f3d289815a599a93a653fbde3b69aa5a170af52ed7662aa262df48ad",
-    "home_assistant": "2026.10.1",
-    "browser": "Codex in-app browser (Chromium)",
+    "captured_at": "2026-10-17",
+    "runtime_source_head": "bc8587edde1041148994dd0882f81fd8739e2cf4",
+    "runtime_sha256": "84e3aba43b7a4e12a667528cd3ed57156a75548e4a6dce0554d58e95222679b6",
+    "home_assistant": "2026.10.2",
+    "browser": "Google Chrome (actual Chrome connection ID2)",
     "zoom": "100%",
     "viewport": {
       "width": 900,
       "height": 1080
     },
-    "data": "Four uncommitted proposals from four owned synthetic sensors on two QA devices; actual HA registries and native HACS candidate install; no registry writes from the card.",
-    "processing": "Native browser screenshot clipped to document coordinates of this card; no generated or substituted UI.",
+    "data": "Owned synthetic HA fixture with165actual SensorEntity proposals. Search shows three entities on one QA device, with one uncommitted proposal; no registry writes from the card.",
+    "processing": "Actual Chrome screenshots decoded to PNG and cropped to measured visible card bounds; no generated or substituted UI.",
     "screenshots": [
-      {
-        "file": "docs/screenshots/card-automatic-dark.png",
-        "theme": "dark",
-        "language": "pl",
-        "sha256": "d460028e6b0c256c2232db73d7a9f68b2cad2da9089c35ff03760ceae54569c6",
-        "width": 65536,
-        "height": 4292542531
-      },
       {
         "file": "docs/screenshots/card-automatic-light.png",
         "theme": "light",
         "language": "en",
-        "sha256": "0da5f0bf51d18370cb357b5ea787a2ecd05fba9cbca11979c1fc3d1fb9241703",
-        "width": 65536,
-        "height": 4292542531
+        "sha256": "568c4d69a53e9cf8a67795bc3794e19f68472f6200daa80b76a73a65461b171f",
+        "width": 644,
+        "height": 1009
+      },
+      {
+        "file": "docs/screenshots/card-automatic-dark.png",
+        "theme": "dark",
+        "language": "en",
+        "sha256": "c7b4e343227538fc6eb1b59b752fa65ba4482709dc41c54de7cb690afa361e11",
+        "width": 644,
+        "height": 1009
       }
     ]
   }

@@ -3,7 +3,7 @@
 ## 4.4.1 (2026-10-17)
 
 - Preserve list position, expanded groups and logical keyboard focus when queuing or removing Automatic ID proposals and expanding Devices. Filtered rows that disappear no longer pull the viewport toward their group header.
-- Show queued entities with a text status and one Remove action. Use consistent device headers, entity counts and separators in Devices and Automatic IDs.
+- Show queued entities with a readable, theme-aware text status and one Remove action. Use consistent device headers, entity counts and separators in Devices and Automatic IDs.
 - Display history dates in the browser/system time zone by default, respecting explicit Home Assistant local/server, date language and 12/24-hour preferences. Refresh open history when those preferences change and retain raw timestamps in Time details.
 
 ## 4.4.0 (2026-10-16)
