@@ -2847,7 +2847,7 @@ class HAEntityRenamer extends HTMLElement {
         .queue-bar,.queue-undo { padding:12px;border:1px solid var(--bento-border,var(--divider-color));border-radius:10px;justify-content:space-between;overflow-wrap:anywhere; }
         .new-badge,.queued-badge,.proposal-source { font-size:12px;border-radius:6px;padding:3px 6px;border:1px solid currentColor; }
         .new-badge { display:inline-block;white-space:nowrap;color:var(--primary-color,#3b82f6);margin-left:6px; }
-        .queued-badge { color:var(--success-color,#16a34a); }
+        .queued-badge { color:var(--primary-text-color,inherit);border-color:var(--success-color,#16a34a); }
         .queue-group-heading { display:flex;justify-content:space-between;gap:8px;overflow-wrap:anywhere;font-size:14px; }
         ${_FAMILY_CONTROL_CSS}
         .card { min-width:0;container-type:inline-size; }
