@@ -71,7 +71,7 @@ for (const filter of ['available','queued']) test(`filtered ${filter} list prese
  const {dom,card,root}=fixture();
  try {
   card._activeTab='automatic';
-  if(filter==='queued') card._renameQueue=[{oldId:'sensor.original_1',newId:'sensor.original_1_automatic',entityObj:card._entities[0]}];
+  if(filter==='queued') card._renameQueue=card._entities.slice(0,2).map(e=>({oldId:e.entity_id,newId:e.entity_id+'_automatic',entityObj:e}));
   card._listFilters.automatic=filter;card.render();root.querySelector('[data-auto-group]').open=true;
   dom.window.HTMLElement.prototype.getBoundingClientRect=function(){return {top:this.matches('.rename-preview-row')?300:50};};
   dom.window.document.documentElement.scrollTop=500;
