@@ -192,4 +192,4 @@ The screenshots below show synthetic devices on Home Assistant, with four local 
   <img src="docs/screenshots/card-automatic-light.png" alt="Automatic IDs with counted filters, naturally sorted devices, queued markers and the queue bar" width="644">
 </picture>
 
-History dates use the Home Assistant language and time zone. Full ISO timestamps remain under **Time details**; legacy entries that only stored a time are explicitly marked **date unknown**. **Source and limits** retains the complete explanation and can be opened with the keyboard.
+History dates use the browser/system time zone by default and respect explicit Home Assistant profile choices for local/server time, date language and 12/24-hour format. Open history refreshes when those preferences change. Full ISO timestamps and the displayed time zone remain under **Time details**; legacy entries that only stored a time are explicitly marked **date unknown**. **Source and limits** retains the complete explanation and can be opened with the keyboard.
