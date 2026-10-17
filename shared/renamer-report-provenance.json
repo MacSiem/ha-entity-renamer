@@ -24,8 +24,9 @@
       "runtimeSha256": "814f2f7dc45c700c9b9d879bf8a0bc4fa886b2ccc1b0b846345fe564929ae96c"
     },
     "shared/ha-tools-format.js": {
-      "sourceSha256": "a2f51d3a0dde1a000934d8d1c4f115a40dec00c0726e2ae35bdfd3bcd240f71c",
-      "runtimeSha256": "7d42ad46dbabd2d4d603360b1fcb758c534ee4b5d0be400bd5c58342b3c7044a"
+      "sourceSha256": "74439e388c76e03837890852840a3df6104c8756dfbce6cd5c0bf173903f12a2",
+      "runtimeSha256": "1cf861b72596570fd9b0fc807c76ac2221c7d3ca08a240718b39055ee25f8e4e",
+      "upstream": "ha-energy-optimizer/shared/ha-tools-format.js @ c502d64607762c7007bd81b9e7d9813eb462e633; reviewed System/local/server/date/time preferences"
     }
   }
 }

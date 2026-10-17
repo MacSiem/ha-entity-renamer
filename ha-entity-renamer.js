@@ -977,9 +977,29 @@ function _bindLocalIntroDismiss(root) {
 /* ============================================================ */
 
 
-// BEGIN HA TOOLS FORMAT V4 source-sha256=a2f51d3a0dde1a000934d8d1c4f115a40dec00c0726e2ae35bdfd3bcd240f71c
+// BEGIN HA TOOLS FORMAT V4 source-sha256=74439e388c76e03837890852840a3df6104c8756dfbce6cd5c0bf173903f12a2
 // Localized presentation; raw values remain available to callers for details/export.
-function createFormatUi(language = 'en', timeZone = 'UTC') {
+function createFormatUi(language = 'en', timeZone = 'UTC', preferences = {}) {
+  const hourCycle = preferences.hourCycle || 'h23';
+  const dateLanguage = preferences.dateLanguage || language;
+  const stamp = value => typeof value === 'number' ? (Number.isFinite(value) ? value : NaN) : typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value) ? Date.parse(value) : NaN;
+  const localized = (value, options, locale = language) => {
+    const time = stamp(value);
+    if (!Number.isFinite(time)) return null;
+    try { return new Intl.DateTimeFormat(locale, {timeZone, ...options}).format(time); } catch (_) { return null; }
+  };
+  const clock = (value, withOffset = false) => localized(value, {hour:'2-digit', minute:'2-digit', hourCycle, ...(withOffset ? {timeZoneName:'shortOffset'} : {})});
+  const date = (value, short = false) => localized(value, {day:'numeric', month:'short', ...(short ? {} : {year:'numeric'})}, dateLanguage);
+  const pointLabel = value => localized(value, {year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hourCycle, timeZoneName:'shortOffset'}, dateLanguage);
+  const chartLabels = (values, resolution = 'hour') => {
+    const showDate = resolution === 'day' || values.length > 1 && stamp(values.at(-1)) - stamp(values[0]) >= 86400000;
+    const labels = values.map(value => resolution === 'day' ? date(value, true) : `${showDate ? date(value, true) + ' ' : ''}${clock(value)}`);
+    const counts = new Map();
+    for (const label of labels) counts.set(label, (counts.get(label) || 0) + 1);
+    return labels.map((label, index) => counts.get(label) < 2 ? label : resolution === 'day' ? pointLabel(values[index])
+      : `${showDate ? date(values[index], true) + ' ' : ''}${clock(values[index], true)}`);
+  };
+  const key = JSON.stringify([language, timeZone, hourCycle, dateLanguage]);
   const numbers = new Intl.NumberFormat(language);
   const plurals = new Intl.PluralRules(language);
   const count = (value, forms) => `${numbers.format(value)} ${forms[plurals.select(value)] || forms.other}`;
@@ -987,11 +1007,63 @@ function createFormatUi(language = 'en', timeZone = 'UTC') {
     if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(value)) return null;
     const time = Date.parse(value);
     if (!Number.isFinite(time)) return null;
-    try { return new Intl.DateTimeFormat(language, {timeZone, dateStyle:'medium', timeStyle:'short'}).format(new Date(time)); }
+    try { return new Intl.DateTimeFormat(dateLanguage, {timeZone, dateStyle:'medium', timeStyle:'short', hourCycle}).format(new Date(time)); }
     catch (_) { return null; }
   };
-  return {number:value=>numbers.format(value), count, dateTime};
+  const range = (from, to) => {
+    const first = Date.parse(from), last = Date.parse(to);
+    if (!Number.isFinite(first) || !Number.isFinite(last) || last < first) return null;
+    try {
+      const day = new Intl.DateTimeFormat(dateLanguage, {timeZone, dateStyle:'medium'});
+      const clock = new Intl.DateTimeFormat(language, {timeZone, hour:'2-digit', minute:'2-digit', hourCycle});
+      return day.format(first) === day.format(last)
+        ? `${day.format(first)} (${clock.format(first)}–${clock.format(last)})`
+        : `${dateTime(from)} – ${dateTime(to)}`;
+    } catch (_) { return null; }
+  };
+  const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const periodMarkup = ({start, end, label, source, measured, expected, unit, details = '', sourceTimeZone = ''}) => {
+    const local = range(start, end);
+    if (!local) return '';
+    const coverage = typeof measured === 'number' && Number.isFinite(measured) && typeof expected === 'number' && Number.isFinite(expected)
+      ? `${numbers.format(measured)}/${numbers.format(expected)} ${unit}` : '';
+    const pl = String(language).startsWith('pl');
+    return `<div class="energy-period-v4" style="overflow-wrap:anywhere"><p data-energy-period-summary>${[source, label, local, coverage, timeZone].filter(Boolean).map(escape).join(' · ')}</p><details data-energy-period-details data-energy-period-key="${escape(start + '|' + end)}"><summary style="min-height:44px;box-sizing:border-box;padding:12px 0;display:list-item;list-style-position:inside;cursor:pointer">${pl ? 'Źródło i szczegóły czasu' : 'Source and time details'}</summary><p>${escape(details)}</p>${sourceTimeZone && sourceTimeZone !== timeZone ? `<p>${escape(pl ? 'Strefa pomiarów i granic okresu' : 'Measurement calendar time zone')}: ${escape(sourceTimeZone)}</p>` : ''}<p>UTC: ${escape(start)} — ${escape(end)}</p></details></div>`;
+  };
+  const capturePeriods = (root, previous, current) => {
+    if (!previous || ['epoch','connection','user'].some(key => previous[key] !== current[key])) return [];
+    return [...root.querySelectorAll('[data-energy-period-key]')].map(element => ({
+      key:element.dataset.energyPeriodKey, open:element.open, focused:root.activeElement === element.querySelector('summary')
+    }));
+  };
+  const restorePeriods = (root, records) => {
+    for (const element of root.querySelectorAll('[data-energy-period-key]')) {
+      const record = records.find(row => row.key === element.dataset.energyPeriodKey);
+      if (!record) continue;
+      element.open = record.open;
+      if (record.focused) element.querySelector('summary')?.focus({preventScroll:true});
+    }
+  };
+  return {timeZone, key, clock, date, pointLabel, chartLabels, number:(value, options)=>options ? new Intl.NumberFormat(language, options).format(value) : numbers.format(value), count, dateTime, range, periodMarkup, capturePeriods, restorePeriods};
 }
+// Presentation follows the HA profile; measurement and tariff calendars remain separate.
+createFormatUi.forHass = hass => {
+  const locale = hass?.locale || {};
+  const systemLanguage = typeof navigator !== 'undefined' ? navigator.language : undefined;
+  const language = locale.language || hass?.language || systemLanguage || 'en';
+  const validZone = value => {
+    if (typeof value !== 'string' || !(value === 'UTC' || value.includes('/')) || /^[+-]/.test(value)) return null;
+    try { new Intl.DateTimeFormat('en', {timeZone:value}).format(0); return value; } catch (_) { return null; }
+  };
+  let systemZone;
+  try { systemZone = validZone(Intl.DateTimeFormat().resolvedOptions().timeZone); } catch (_) {}
+  const serverZone = validZone(hass?.config?.time_zone);
+  const timeZone = (locale.time_zone === 'server' ? serverZone : systemZone) || serverZone || 'UTC';
+  const clockLanguage = locale.time_format === 'system' ? systemLanguage || language : language;
+  const hourCycle = locale.time_format === '12' ? 'h12' : locale.time_format === '24' ? 'h23'
+    : new Intl.DateTimeFormat(clockLanguage, {hour:'numeric'}).resolvedOptions().hourCycle;
+  return createFormatUi(language, timeZone, {hourCycle, dateLanguage:locale.date_format === 'system' ? systemLanguage || language : language});
+};
 // END HA TOOLS FORMAT V4
 
 // BEGIN HA TOOLS LISTS V4 source-sha256=f669abcd1c151f99ff2bee1ba93ba508aef1ce93b1fcb7b1cb3a91cf7973296d
@@ -1139,6 +1211,50 @@ function _restoreFamilyRowFocus(card, saved) {
   if (!saved) return;
   Array.from(card.shadowRoot.querySelectorAll(saved.selector))
     .find(row => row.getAttribute(saved.attr) === saved.key)?.focus({preventScroll:true});
+}
+
+// Keep the active list's viewport when its rows are replaced. Scrollable HA
+// ancestors survive the card render; the Devices list itself does not.
+function _rememberListViewport(card) {
+  const root = card.shadowRoot;
+  const list = root.querySelector('.device-list');
+  if (!(card._activeTab === 'devices' && list)
+      && !(card._activeTab === 'automatic' && root.querySelector('.automatic-tab'))) return null;
+  const active = root.activeElement;
+  const entity = active?.getAttribute('data-auto-entity') || active?.getAttribute('data-remove-queue');
+  const device = active?.getAttribute('data-auto-device') || active?.getAttribute('data-device-id');
+  const anchor = active?.closest('.rename-preview-row') || active?.closest('.device-header');
+  const parents = [];
+  for (let element = card; element; element = element.parentElement || element.getRootNode()?.host) {
+    if (element.scrollTop) parents.push({element, top:element.scrollTop});
+  }
+  return {listTop:list?.scrollTop, parents, entity, device,
+    group:active?.closest('[data-auto-group]')?.getAttribute('data-auto-group'),
+    anchorTop:anchor?.getBoundingClientRect().top};
+}
+
+function _restoreListViewport(card, saved) {
+  if (!saved) return;
+  const root = card.shadowRoot;
+  let action;
+  if (saved.entity) action = Array.from(root.querySelectorAll('[data-auto-entity],[data-remove-queue],[data-add-single]'))
+    .find(element => !element.disabled && ['data-auto-entity','data-remove-queue','data-add-single']
+      .some(attr => element.getAttribute(attr) === saved.entity));
+  else if (saved.device) action = Array.from(root.querySelectorAll('[data-auto-device],[data-device-id]'))
+    .find(element => !element.disabled && ['data-auto-device','data-device-id']
+      .some(attr => element.getAttribute(attr) === saved.device));
+  if (!action && saved.group) action = Array.from(root.querySelectorAll('[data-auto-group]'))
+    .find(group => group.getAttribute('data-auto-group') === saved.group)?.querySelector('summary');
+  action?.focus({preventScroll:true});
+  const list = root.querySelector('.device-list');
+  if (list && saved.listTop !== undefined) list.scrollTop = saved.listTop;
+  for (const {element, top} of saved.parents) if (element.isConnected) element.scrollTop = top;
+  const anchor = action?.closest('.rename-preview-row') || action?.closest('.device-header');
+  const scroller = list && saved.listTop ? list : saved.parents.find(item => item.element.isConnected)?.element;
+  if (anchor && scroller && Number.isFinite(saved.anchorTop)) {
+    const delta = anchor.getBoundingClientRect().top - saved.anchorTop;
+    if (Math.abs(delta) > 1) scroller.scrollTop += delta;
+  }
 }
 
 class HAEntityRenamer extends HTMLElement {
@@ -1682,7 +1798,6 @@ class HAEntityRenamer extends HTMLElement {
 
   _queueAutomaticIds(deviceId = null, oldId = null) {
     if (this._loading) return;
-    const focusedDevice = this.shadowRoot.activeElement?.closest('[data-auto-group]')?.dataset.autoGroup;
     const queued = new Set(this._renameQueue.map(row => row.oldId));
     for (const row of this._visibleAutomaticRows()) {
       if (row.conflict || queued.has(row.oldId)) continue;
@@ -1695,8 +1810,6 @@ class HAEntityRenamer extends HTMLElement {
     this._confirmDialogOpen = false;
     this._impactResults = null;
     this.render();
-    if (focusedDevice) Array.from(this.shadowRoot.querySelectorAll('[data-auto-group]'))
-      .find(group => group.dataset.autoGroup === focusedDevice)?.querySelector('summary')?.focus({preventScroll: true});
   }
 
 
@@ -1711,7 +1824,7 @@ class HAEntityRenamer extends HTMLElement {
     return this._cachedListUi;
   }
 
-  get _formatUi() { return createFormatUi(this._hass?.language||this._lang,this._hass?.config?.time_zone||'UTC'); }
+  get _formatUi() { return createFormatUi.forHass(this._hass || {language:this._lang}); }
 
   _registryCount(value,kind) {
     const pl=this._lang==='pl';
@@ -2391,6 +2504,7 @@ class HAEntityRenamer extends HTMLElement {
 
   render() {
     if (!this._hass) return;
+    const listViewport = _rememberListViewport(this);
     const openAutomaticDevices = new Set(Array.from(this.shadowRoot.querySelectorAll('[data-auto-group][open]'), group => group.dataset.autoGroup));
     const familyFocus=_rememberFamilyFocus(this), familyDrafts=_rememberFamilyDrafts(this);
     const familyRowFocus=_rememberFamilyRowFocus(this, [['.device-header','data-device-id']]);
@@ -2607,7 +2721,7 @@ class HAEntityRenamer extends HTMLElement {
       .entity-list { padding: 0 16px 12px; }
       .entity-row {
         display: flex; align-items: center; gap: 8px; padding: 6px 0;
-        border-top: 1px solid rgba(255,255,255,0.05); font-size: 12px;
+        border-top: 1px solid var(--bento-border,var(--divider-color)); font-size: 12px;
       }
       .entity-id { flex: 1; font-family: 'JetBrains Mono', 'Fira Code', monospace; color: var(--bento-text-secondary, #94A3B8); word-break: break-all; }
       .entity-name { flex: 1; min-width: 120px; }
@@ -2704,12 +2818,20 @@ class HAEntityRenamer extends HTMLElement {
           .queue-actions { flex-wrap: wrap; justify-content: center; }
           .log-entry { font-size: 11px; padding: 4px 0; }
         }
-        .rename-preview-row { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--bento-border,var(--divider-color)); }
+        .rename-preview-row { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center; }
         .automatic-row-ids { min-width:0;overflow-wrap:anywhere;font-size:12px;line-height:1.6; }
         .automatic-row-ids code { padding:0;border:0;background:transparent !important;white-space:normal;overflow-wrap:anywhere;font-size:12px; }
         .automatic-target { color:var(--bento-text-secondary); }
-        .automatic-row-actions { display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;max-width:130px; }
+        .automatic-row-actions { display:flex;gap:8px;align-items:center;justify-content:flex-end; }
         .automatic-row-actions .btn { margin:0; }
+        .automatic-tab .device-item > summary { list-style:none; }
+        .automatic-tab .device-item > summary::-webkit-details-marker { display:none; }
+        .automatic-tab .device-item[open] .device-expand { transform:rotate(90deg); }
+        .device-name { min-width:0;white-space:normal;overflow-wrap:anywhere; }
+        .device-meta { white-space:normal; }
+        .automatic-tab .entity-list { padding-bottom:12px; }
+        .automatic-device-action { margin-top:8px; }
+        @container (max-width:520px) { .automatic-row-actions { flex-direction:column;align-items:flex-end;gap:4px; } }
         .queue-bar { position:sticky;bottom:8px;z-index:1;background:var(--bento-card,var(--card-background-color));box-shadow:var(--bento-shadow-md); }
         .list-toolbar,.list-chips,.list-expand,.queue-bar,.queue-undo { display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0;min-width:0; }
         .list-toolbar input { flex:1;min-width:120px;max-width:100%;box-sizing:border-box; }
@@ -2760,6 +2882,7 @@ class HAEntityRenamer extends HTMLElement {
     _restoreFamilyDrafts(this,familyDrafts);
     _bindFamilyNavigation(this,familyFocus);
     _restoreFamilyRowFocus(this,familyRowFocus);
+    _restoreListViewport(this,listViewport);
   }
 
 
@@ -2855,16 +2978,15 @@ class HAEntityRenamer extends HTMLElement {
     const deviceHtml = [...groups].sort(([a], [b]) => this._compareDevices(this._devices.find(d=>d.id===a)||{id:a},this._devices.find(d=>d.id===b)||{id:b})).map(([deviceId, rows]) => {
       const device = this._devices.find(item => item.id === deviceId);
       const deviceQueued = rows.some(row => !row.conflict) && rows.filter(row => !row.conflict).every(row => queued.has(row.oldId));
-      return `<details data-auto-group="${_esc(deviceId)}" style="border:1px solid var(--bento-border,#ddd);border-radius:8px;padding:8px;margin:8px 0">
-        <summary>${_esc(device ? this._getDeviceName(device) : deviceId)} (${rows.length}) · ${rows.filter(row=>queued.has(row.oldId)).length} ${t.inQueue.toLowerCase()} ${this._newBadge(device?.created_at)}</summary>
-        ${[...rows].sort((a,b)=>this._listUi.compare(a.oldId,b.oldId)).map(row => `<div class="rename-preview-row">
+      return `<details class="device-item" data-auto-group="${_esc(deviceId)}">
+        <summary class="device-header"><span class="device-expand" aria-hidden="true">▶</span><span class="device-name">${_esc(device ? this._getDeviceName(device) : deviceId)}</span>${this._newBadge(device?.created_at)}<span class="device-meta">${this._registryCount(rows.length,'entity')} · ${rows.filter(row=>queued.has(row.oldId)).length} ${t.inQueue.toLowerCase()}</span></summary>
+        <div class="entity-list">${[...rows].sort((a,b)=>this._listUi.compare(a.oldId,b.oldId)).map(row => `<div class="rename-preview-row entity-row">
           <div class="automatic-row-ids"><div><code>${_esc(row.oldId)}</code>${this._newBadge(this._entities.find(e=>e.entity_id===row.oldId)?.created_at)}</div><div class="automatic-target">→ <code>${_esc(row.newId)}</code></div></div>
           <div class="automatic-row-actions">
-          ${queued.has(row.oldId)?`<button class="btn btn-sm btn-outline" data-remove-queue="${_esc(row.oldId)}">${this._lang==='pl'?'Usuń':'Remove'}</button>`:''}
-          ${row.conflict ? `<span>${t.automaticConflict}</span>` : `<button class="btn btn-sm btn-outline" data-auto-entity="${_esc(row.oldId)}" ${queued.has(row.oldId) || this._loading ? 'disabled' : ''}>${queued.has(row.oldId) ? '✓ ' + t.inQueue : '+ ' + t.queue}</button>`}
+          ${queued.has(row.oldId)?`<span class="queued-badge">✓ ${t.inQueue}</span><button class="btn btn-sm btn-outline" data-remove-queue="${_esc(row.oldId)}" aria-label="${_esc(t.removeFromQueue)}">${this._lang==='pl'?'Usuń':'Remove'}</button>`:row.conflict ? `<span>${t.automaticConflict}</span>` : `<button class="btn btn-sm btn-outline" data-auto-entity="${_esc(row.oldId)}" ${this._loading ? 'disabled' : ''}>+ ${t.queue}</button>`}
           </div>
         </div>`).join('')}
-        <button class="btn btn-sm btn-outline" data-auto-device="${_esc(deviceId)}" ${rows.some(eligible) && !this._loading ? '' : 'disabled'}>${deviceQueued ? '✓ ' + t.inQueue : t.addDeviceAutomatic}</button>
+        <button class="btn btn-sm btn-outline automatic-device-action" data-auto-device="${_esc(deviceId)}" ${rows.some(eligible) && !this._loading ? '' : 'disabled'}>${deviceQueued ? '✓ ' + t.inQueue : t.addDeviceAutomatic}</button></div>
       </details>`;
     }).join('');
     return `<div class="automatic-tab">
