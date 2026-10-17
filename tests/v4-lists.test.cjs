@@ -151,10 +151,11 @@ test('Polish registry counts use the right plural forms',async()=>{
   } finally {dom.window.close();}
 });
 
-test('history displays completion time in the HA zone and retains ISO only in details',()=>{
+test('history respects explicit HA server zone and retains ISO only in details',()=>{
   const {dom,card,root}=fixture();
   try {
     card._hass.config={time_zone:'Pacific/Auckland'};
+    card._hass.locale={time_zone:'server',time_format:'24'};
     const completedAt='2026-01-01T00:30:00Z';
     card._renameLog=[{time:'00:30',completedAt,oldId:'sensor.a',newId:'sensor.b',status:'ok',writePhase:'readback'}];
     card._activeTab='log';card.render();

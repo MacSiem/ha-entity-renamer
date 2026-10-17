@@ -28,7 +28,7 @@ function automaticView() {
 test('automatic devices follow displayed names rather than registry entity order', () => {
   const {dom, root} = automaticView();
   try {
-    assert.deepEqual(Array.from(root.querySelectorAll('[data-auto-group] > summary'), el => el.textContent.trim()), ['Alpha (3) · 0 in queue', 'Zulu (1) · 0 in queue']);
+    assert.deepEqual(Array.from(root.querySelectorAll('[data-auto-group] > summary .device-name'), el => el.textContent.trim()), ['Alpha', 'Zulu']);
   } finally { dom.window.close(); }
 });
 
@@ -50,9 +50,10 @@ test('queued entities and devices show status, avoid duplicates and become avail
   const {dom, card, root} = automaticView();
   try {
     root.querySelector('[data-auto-entity="sensor.a1"]').click();
-    let button = root.querySelector('[data-auto-entity="sensor.a1"]');
-    assert.equal(button.disabled, true);
-    assert.match(button.textContent, /In Queue/i);
+    assert.equal(root.querySelector('[data-auto-entity="sensor.a1"]'), null);
+    const row = root.querySelector('[data-remove-queue="sensor.a1"]').closest('.rename-preview-row');
+    assert.match(row.querySelector('.queued-badge').textContent, /In Queue/i);
+    assert.equal(row.querySelectorAll('button').length, 1);
     assert.equal(root.querySelector('[data-auto-device="a"]').disabled, false, 'one eligible entity remains');
     root.querySelector('[data-auto-device="a"]').click();
     assert.equal(card._renameQueue.length, 2);
@@ -78,7 +79,7 @@ test('queued automatic status follows Polish labels and never enables conflicts'
   try {
     card._lang = 'pl';
     card._queueAutomaticIds();
-    assert.match(root.querySelector('[data-auto-entity="sensor.a1"]').textContent, /W kolejce/);
+    assert.match(root.querySelector('[data-remove-queue="sensor.a1"]').closest('.rename-preview-row').textContent, /W kolejce/);
     assert.equal(root.querySelector('[data-auto-entity="sensor.conflict"]'), null);
     assert.equal(card._renameQueue.length, 3);
   } finally { dom.window.close(); }
