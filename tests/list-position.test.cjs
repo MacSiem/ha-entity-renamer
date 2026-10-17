@@ -66,3 +66,34 @@ for(const server of [false,true]) test(`history uses ${server?'explicit server':
   assert.ok(root.querySelector('.log-entry details').textContent.includes(zone),'details identify the displayed zone');
  } finally {dom.window.close();}
 });
+
+for (const filter of ['available','queued']) test(`filtered ${filter} list preserves scroll when its focused row disappears`,()=>{
+ const {dom,card,root}=fixture();
+ try {
+  card._activeTab='automatic';
+  if(filter==='queued') card._renameQueue=[{oldId:'sensor.original_1',newId:'sensor.original_1_automatic',entityObj:card._entities[0]}];
+  card._listFilters.automatic=filter;card.render();root.querySelector('[data-auto-group]').open=true;
+  dom.window.HTMLElement.prototype.getBoundingClientRect=function(){return {top:this.matches('.rename-preview-row')?300:50};};
+  dom.window.document.documentElement.scrollTop=500;
+  const action=root.querySelector(filter==='available'?'[data-auto-entity="sensor.original_1"]':'[data-remove-queue="sensor.original_1"]');
+  action.focus();action.click();
+  assert.equal(dom.window.document.documentElement.scrollTop,500,'a group header is not the vanished entity anchor');
+  assert.equal(root.activeElement?.tagName,'SUMMARY');
+ } finally {dom.window.close();}
+});
+for(const inPlace of [false,true]) test(`history reacts to profile time preferences without registry reads (${inPlace?'same hass object':'new hass object'})`,()=>{
+ const {dom,card,root}=fixture();
+ try {
+  Object.defineProperty(dom.window.navigator,'language',{value:'en-US',configurable:true});
+  let reads=0;card._hass.callWS=()=>{reads++;throw new Error('unexpected registry read');};
+  card._hass.locale={date_format:'system',time_format:'24',time_zone:'local'};
+  const completedAt='2026-01-01T00:30:00Z';
+  card._renameLog=[{time:'00:30',completedAt,oldId:'sensor.old',newId:'sensor.new',status:'ok',writePhase:'readback'}];
+  card._activeTab='log';card.hass=card._hass;card.render();
+  const next=inPlace?card._hass:{...card._hass,locale:{...card._hass.locale}};
+  next.locale.time_zone='server';next.locale.time_format='12';card.hass=next;
+  assert.equal(root.querySelector('.log-time').textContent,new Intl.DateTimeFormat('en-US',{timeZone:'Pacific/Auckland',dateStyle:'medium',timeStyle:'short',hourCycle:'h12'}).format(new Date(completedAt)));
+  assert.ok(root.querySelector('.log-entry details').textContent.includes('Pacific/Auckland'));
+  assert.equal(card._renameLog[0].completedAt,completedAt);assert.equal(reads,0);
+ } finally {dom.window.close();}
+});
