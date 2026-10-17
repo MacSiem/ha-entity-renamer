@@ -2507,7 +2507,7 @@ class HAEntityRenamer extends HTMLElement {
     const listViewport = _rememberListViewport(this);
     const openAutomaticDevices = new Set(Array.from(this.shadowRoot.querySelectorAll('[data-auto-group][open]'), group => group.dataset.autoGroup));
     const familyFocus=_rememberFamilyFocus(this), familyDrafts=_rememberFamilyDrafts(this);
-    const familyRowFocus=_rememberFamilyRowFocus(this, [['.device-header','data-device-id']]);
+    const familyRowFocus=_rememberFamilyRowFocus(this, [['.device-header[data-device-id]','data-device-id']]);
     this._exportDialog?.cancel();
     const devices = this._getFilteredDevices();
     const queueCount = this._renameQueue.length + Object.keys(this._deviceRenameQueue).length;
@@ -3129,7 +3129,7 @@ class HAEntityRenamer extends HTMLElement {
           return `
           <div class="log-entry" style="padding:8px 0;${hasImpact ? 'padding-bottom:12px;' : ''}">
             <span class="log-time">${_esc(this._formatUi.dateTime(l.completedAt || l.attemptedAt) || String(l.time || '—') + (this._lang==='pl'?' · data nieznana':' · date unknown'))}</span>
-            ${this._formatUi.dateTime(l.completedAt || l.attemptedAt) ? `<details><summary>${this._lang==='pl'?'Szczegóły czasu':'Time details'}</summary><code>${_esc(l.completedAt || l.attemptedAt)}</code> · ${_esc(this._hass?.config?.time_zone||'UTC')}</details>`:''}
+            ${this._formatUi.dateTime(l.completedAt || l.attemptedAt) ? `<details><summary>${this._lang==='pl'?'Szczegóły czasu':'Time details'}</summary>UTC: <code>${_esc(l.completedAt || l.attemptedAt)}</code> · ${this._lang==='pl'?'Strefa wyświetlania':'Display time zone'}: ${_esc(this._formatUi.timeZone)}</details>`:''}
             <span class="${resultState === 'success' ? 'log-ok' : resultState === 'error' ? 'log-err' : ''}">
               ${ui.statusHtml(resultState)} ${_esc(l.oldId)} → ${_esc(l.newId)}
             </span>
@@ -3200,7 +3200,7 @@ class HAEntityRenamer extends HTMLElement {
     }
 
     // Device headers – toggle expand + select
-    root.querySelectorAll('.device-header').forEach(hdr => {
+    root.querySelectorAll('.device-header[data-device-id]').forEach(hdr => {
       hdr.addEventListener('click', () => {
         const did = hdr.dataset.deviceId;
         if (this._expandedDevices.has(did)) {
@@ -3215,7 +3215,7 @@ class HAEntityRenamer extends HTMLElement {
       });
     });
 
-    _bindFamilyRowKeys(root, '.device-header');
+    _bindFamilyRowKeys(root, '.device-header[data-device-id]');
 
     // Device rename
     const applyDeviceName = root.getElementById('applyDeviceName');
