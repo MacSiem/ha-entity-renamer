@@ -5,7 +5,7 @@ from types import MappingProxyType, SimpleNamespace
 async def create_helper(hass, old, new, kind="threshold", component=None, inactive=False):
     from homeassistant.config_entries import ConfigEntry, ConfigEntryState
     from homeassistant.helpers import entity_registry as er
-    from .helper_observers import NativeHelperObservers, RegistryMappingProof
+    from .helper_observers import NativeHelperObservers, RegistryMappingProof, ObservationUnavailable
     from .helper_native import read_entry
     from .helper_persistence import NativeHelperPersistence
     from .helper_transaction import prepare_helper, HelperTransactionAdapter
@@ -53,6 +53,34 @@ async def create_helper(hass, old, new, kind="threshold", component=None, inacti
 
     observer = await NativeHelperObservers.capture(hass, (before,),
         (RegistryMappingProof(old, new, registry.async_get(old).id),))
+    if not inactive:
+        native = observer._entity(before)
+        dependency = '_entity_id' if kind == 'threshold' else '_entity_ids'
+        actual_dependencies = getattr(native, dependency)
+        setattr(native, dependency, 'sensor.stale_dependency' if kind == 'threshold' else ['sensor.stale_dependency'])
+        try:
+            try:
+                await observer.verify_activation(before)
+            except ObservationUnavailable as error:
+                assert str(error) == 'helper_native_dependencies_mismatch'
+            else:
+                raise AssertionError('stale native dependency was accepted')
+        finally:
+            setattr(native, dependency, actual_dependencies)
+        state = hass.states.get(native.entity_id)
+        hass.states.async_set(native.entity_id, '999999', dict(state.attributes))
+        try:
+            try:
+                await observer.verify_runtime(before)
+            except ObservationUnavailable as error:
+                assert 'sample_value_mismatch' in str(error)
+            else:
+                raise AssertionError('stale published output was accepted')
+        finally:
+            native.async_write_ha_state()
+            await hass.async_block_till_done()
+        await observer.verify_runtime(before)
+        print({'native_stale_dependency_rejected': True, 'native_stale_output_rejected': True})
     settle = observer.settle
     validate = observer.validate_snapshot
     activation = observer.verify_activation
