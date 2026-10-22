@@ -9,6 +9,21 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {readFileSync}=require('node:fs');
 const {JSDOM,VirtualConsole}=require('jsdom');
+
+test('tab arrows and Home/End navigate with one selected tab and retain keyboard focus',()=>{
+ const f=fixture();try{
+  const root=f.card.shadowRoot;
+  const press=key=>root.querySelector('[role=tab][aria-selected=true]').dispatchEvent(new f.dom.window.KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));
+  assert.equal(root.querySelector(NAV).getAttribute('role'),'tablist');
+  press('ArrowRight');assert.equal(f.card[STATE],'automatic');
+  assert.equal(root.activeElement.getAttribute(ATTR),'automatic');
+  press('End');assert.equal(f.card[STATE],'log');
+  press('ArrowRight');assert.equal(f.card[STATE],'devices');
+  press('ArrowLeft');assert.equal(f.card[STATE],'log');
+  press('Home');assert.equal(f.card[STATE],'devices');
+  assert.equal(root.querySelectorAll('[role=tab][aria-selected=true]').length,1);
+ }finally{f.card.remove();f.dom.window.close();}
+});
 function fixture(){
  const dom=new JSDOM('<body><button id="outside">Outside</button></body>',{runScripts:'outside-only',pretendToBeVisual:true,url:'http://synthetic.invalid/',virtualConsole:new VirtualConsole()});
  const observers=[];
