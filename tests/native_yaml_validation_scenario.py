@@ -30,7 +30,7 @@ def load_modules():
 
 
 async def run_activation(scratch, planner, validation):
-    from homeassistant import loader
+    from homeassistant import loader, auth
     from homeassistant.core import HomeAssistant, Context
     from homeassistant.config_entries import ConfigEntries
     from homeassistant.setup import async_setup_component
@@ -56,6 +56,7 @@ async def run_activation(scratch, planner, validation):
             loader.async_setup(hass)
             hass.config_entries = ConfigEntries(hass, config)
             assert (await async_load_base_functionality(hass)) is not False
+            hass.auth = await auth.auth_manager_from_config(hass, [], [])
             assert await async_setup_component(hass, 'http', config)
             from homeassistant.components.config import automation, script, scene
             for editor in (automation, script, scene):
