@@ -191,6 +191,19 @@ class _Reader:
             if ((before.st_size, before.st_mtime_ns, before.st_ctime_ns)
                     != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
                 raise YAMLPlanError("file changed during read")
+            # The held descriptor can still refer to an unlinked/replaced file.
+            # Re-open the name through the same anchored root before using its
+            # bytes and identity in a plan or a compare-and-swap decision.
+            named = self.open(path)
+            try:
+                current = os.fstat(named)
+            finally:
+                os.close(named)
+            if ((before.st_dev, before.st_ino, before.st_size,
+                 before.st_mtime_ns, before.st_ctime_ns) !=
+                    (current.st_dev, current.st_ino, current.st_size,
+                     current.st_mtime_ns, current.st_ctime_ns)):
+                raise YAMLPlanError('file name changed during read')
             return b''.join(chunks), before
         finally:
             os.close(fd)

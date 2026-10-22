@@ -8,6 +8,25 @@ from custom_components.ha_entity_renamer.yaml_plan import Limits, YAMLPlanError,
 
 
 class YAMLPlannerTests(unittest.TestCase):
+    def test_named_source_replacement_during_read_is_never_a_valid_snapshot(self):
+        import os
+        from unittest.mock import patch
+        from custom_components.ha_entity_renamer import yaml_plan
+        self.put('configuration.yaml', 'entity_id: sensor.foo\n')
+        replacement = self.root / 'replacement.yaml'
+        replacement.write_bytes((self.root / 'configuration.yaml').read_bytes())
+        original = os.read
+        swapped = []
+        def read(fd, count):
+            result = original(fd, count)
+            if not swapped:
+                swapped.append(True)
+                replacement.replace(self.root / 'configuration.yaml')
+            return result
+        with patch.object(yaml_plan.os, 'read', read):
+            with self.assertRaisesRegex(YAMLPlanError, 'file name changed during read'):
+                self.plan()
+
     def test_customize_entity_key_migrates_and_retains_display_settings(self):
         source = 'homeassistant:\n  customize:\n    sensor.foo:\n      friendly_name: Unchanged label\n      icon: mdi:flash\n'
         self.put('configuration.yaml', source)

@@ -80,6 +80,7 @@ async def run_activation(scratch, planner, validation):
                 ({'sensor.old': 'sensor.new'}, 'sensor.old', 'sensor.new', '42'),
                 ({'sensor.new': 'sensor.old'}, 'sensor.new', 'sensor.old', '43'),
             ]:
+                await hass.async_block_till_done()  # Outside editor locks; settle prior reload.
                 plan = planner.plan_yaml(root, mapping)
                 assert plan.ready and len(plan.patches) == 1, plan.issues
                 async with leases.hold(lambda: None):
