@@ -93,6 +93,29 @@ async def run():
             assert plan.ready, plan.issues
             change = await yaml_tx.prepare_yaml(hass, plan, scratch, guard=lambda: None)
             assert set(change.receipt.changed_domains) == {'homeassistant', 'script', 'automation', 'scene'}
+            # Diagnostics contain only this synthetic fixture's domain/error
+            # codes and projection hashes, never expanded configuration.
+            import sys
+            worker = importlib.import_module(package + '.yaml_validation_worker')
+            def trace(frame, event, arg):
+                if event == 'exception' and frame.f_code.co_name == '_expected_runtime':
+                    print({'expected_runtime_error': type(arg[1]).__name__,
+                           'domain': frame.f_locals.get('domain'), 'error': str(arg[1])}, flush=True)
+                return trace
+            sys.settrace(trace)
+            try:
+                await worker._expected_runtime(str(root), change.receipt.changed_domains)
+            finally:
+                sys.settrace(None)
+            for domain, before, after in change.receipt.runtime_expected:
+                try:
+                    projection, _ = observer._projection(domain)
+                    actual = worker._fingerprint(projection)
+                    print({'runtime_projection': domain, 'before_matches': actual == before,
+                           'after_matches': actual == after}, flush=True)
+                except Exception as error:
+                    print({'runtime_projection': domain, 'error': type(error).__name__,
+                           'reason': str(error)}, flush=True)
             assert all(old and new and old != new
                        for _, old, new in change.receipt.runtime_expected), change.receipt.runtime_expected
             assert await observer.position(change) == tx.Position.BEFORE
