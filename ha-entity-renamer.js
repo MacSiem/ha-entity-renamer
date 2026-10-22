@@ -2992,7 +2992,7 @@ class HAEntityRenamer extends HTMLElement {
       return `<details class="device-item" data-auto-group="${_esc(deviceId)}">
         <summary class="device-header"><span class="device-expand" aria-hidden="true">▶</span><span class="device-name">${_esc(device ? this._getDeviceName(device) : deviceId)}</span>${this._newBadge(device?.created_at)}<span class="device-meta">${this._registryCount(rows.length,'entity')} · ${rows.filter(row=>queued.has(row.oldId)).length} ${t.inQueue.toLowerCase()}</span></summary>
         <div class="entity-list">${[...rows].sort((a,b)=>this._listUi.compare(a.oldId,b.oldId)).map(row => `<div class="rename-preview-row entity-row">
-          <div class="automatic-row-ids"><div><code>${_esc(row.oldId)}</code>${this._newBadge(this._entities.find(e=>e.entity_id===row.oldId)?.created_at)}</div><div class="automatic-target">→ <code>${_esc(row.newId)}</code></div></div>
+          <div class="automatic-row-ids"><div><code>${_esc(row.oldId)}</code>${this._listUi.isNew(device?.created_at) ? '' : this._newBadge(this._entities.find(e=>e.entity_id===row.oldId)?.created_at)}</div><div class="automatic-target">→ <code>${_esc(row.newId)}</code></div></div>
           <div class="automatic-row-actions">
           ${queued.has(row.oldId)?`<span class="queued-badge">✓ ${t.inQueue}</span><button class="btn btn-sm btn-outline" data-remove-queue="${_esc(row.oldId)}" aria-label="${_esc(t.removeFromQueue)}">${this._lang==='pl'?'Usuń':'Remove'}</button>`:row.conflict ? `<span>${t.automaticConflict}</span>` : `<button class="btn btn-sm btn-outline" data-auto-entity="${_esc(row.oldId)}" ${this._loading ? 'disabled' : ''}>+ ${t.queue}</button>`}
           </div>
@@ -3006,7 +3006,7 @@ class HAEntityRenamer extends HTMLElement {
       <details class="source-limits"><summary>${this._lang==='pl'?'Źródło i ograniczenia':'Source and limits'}</summary><p>${t.automaticInfo}</p></details>
       <button class="btn btn-outline" id="loadAutomatic" ${this._loading ? 'disabled' : ''}>${this._loading ? '…' : t.loadAutomatic}</button>
       ${this._automaticLoaded ? `<p>${this._automaticRows.length} ${t.automatic}; ${this._automaticNull.length} ${t.automaticUnknown}</p>
-        ${this._automaticRows.some(row => !row.conflict) ? `<button class="btn btn-primary" id="queueAllAutomatic" ${canQueue && !this._loading ? '' : 'disabled'}>${canQueue ? (this._lang==='pl'?'Dodaj widoczne':'Queue visible')+' ('+visibleRows.filter(eligible).length+')' : '✓ ' + t.inQueue}</button>` : `<p>${t.automaticEmpty}</p>`}
+        ${this._automaticRows.some(row => !row.conflict) ? `<button class="btn ${canQueue ? 'btn-primary' : 'btn-outline'}" id="queueAllAutomatic" ${canQueue && !this._loading ? '' : 'disabled'}>${canQueue ? (this._lang==='pl'?'Dodaj widoczne':'Queue visible')+' ('+visibleRows.filter(eligible).length+')' : '✓ ' + t.inQueue}</button>` : `<p>${t.automaticEmpty}</p>`}
         ${deviceHtml}
         ${this._visibleAutomaticNull().length ? `<details><summary>${t.automaticUnknown} (${this._visibleAutomaticNull().length})</summary>${this._visibleAutomaticNull().map(ent => `<div><code>${_esc(ent.entity_id)}</code></div>`).join('')}</details>` : ''}` : ''}
     </div>`;
@@ -3043,7 +3043,7 @@ class HAEntityRenamer extends HTMLElement {
                   return `
                   <div class="entity-row">
                     <span class="entity-domain">${_esc(domain)}</span>
-                    <span class="entity-id">${_esc(e.entity_id)}${this._newBadge(e.created_at)}</span>
+                    <span class="entity-id">${_esc(e.entity_id)}${this._listUi.isNew(d.created_at) ? '' : this._newBadge(e.created_at)}</span>
                     <span class="entity-name">${_esc(e.name || e.original_name || '')}</span>
                     ${inQueue
                       ? '<span class="queued-badge">✓ ' + t.inQueue + '</span><button class="btn btn-sm btn-outline" data-remove-queue="' + _esc(e.entity_id) + '" aria-label="' + _esc(t.removeFromQueue) + '">' + (this._lang==='pl'?'Usuń':'Remove') + '</button>'
