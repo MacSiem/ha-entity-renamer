@@ -1060,29 +1060,6 @@ const _LOCAL_SUPPORT_KEY = 'ha-entity-renamer-support-dismissed';
 const _LOCAL_DONATE_HTML = '<div class="donate-section" data-source="own-card" style="margin:8px 0 0;padding:4px 0;background:none;border:0;box-shadow:none;min-height:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex-direction:row;justify-content:flex-start;text-align:left"><a href="https://buymeacoffee.com/macsiem" target="_blank" rel="noopener noreferrer" style="font-size:12px;color:var(--secondary-text-color,#64748b);font-weight:400;text-decoration:underline">Optional support for HA Tools</a><button type="button" class="support-dismiss" aria-label="Dismiss support link" style="margin-left:auto;padding:2px 6px;min-height:0;line-height:1;border:0;background:none;color:var(--secondary-text-color,#64748b);cursor:pointer">×</button></div>';
 function _localSupportDismissed() { try { return localStorage.getItem(_LOCAL_SUPPORT_KEY) === '1'; } catch (_) { return false; } }
 function _bindLocalSupportDismiss(root) { root.querySelector('.support-dismiss')?.addEventListener('click', () => { try { localStorage.setItem(_LOCAL_SUPPORT_KEY, '1'); } catch (_) {} root.querySelector('.donate-section[data-source="own-card"]')?.remove(); }); }
-function _localIntroDismissed() {
-  try { return localStorage.getItem(_LOCAL_INTRO_KEY) === '1'; } catch(e) { return false; }
-}
-function _renderLocalIntro(language = 'en') {
-  if (_localIntroDismissed()) return '';
-  const intro = language === 'pl' ? _LOCAL_INTRO_PL : _LOCAL_INTRO;
-  const dismiss = language === 'pl' ? 'Ukryj instrukcję' : 'Dismiss instructions';
-  const steps = intro.steps.map(step => '<li>' + _esc(step) + '</li>').join('');
-  return '<div class="intro-banner" data-intro="ha-entity-renamer">'
-    + '<button class="intro-dismiss" type="button" title="' + _esc(dismiss) + '" aria-label="' + _esc(dismiss) + '">✕</button>'
-    + '<div class="intro-headline">💡 ' + _esc(intro.headline) + '</div>'
-    + '<ol class="intro-steps">' + steps + '</ol>'
-    + '</div>';
-}
-function _bindLocalIntroDismiss(root) {
-  const button = root && root.querySelector('.intro-banner[data-intro="ha-entity-renamer"] .intro-dismiss');
-  if (!button) return;
-  button.addEventListener('click', event => {
-    event.stopPropagation();
-    try { localStorage.setItem(_LOCAL_INTRO_KEY, '1'); } catch(e) {}
-    button.closest('.intro-banner')?.remove();
-  });
-}
 /* ============================================================ */
 
 
@@ -1273,6 +1250,7 @@ function _bindFamilyNavigation(card, restoreFocus=null) {
         if(!card.isConnected||card._familyNavTarget!==target)return;
         const entry=entries.find(item=>item.target===target);if(!entry)return;
         card._familyNavWidth=entry.contentRect.width;applyWidth(card._familyNavWidth);
+        card._syncHelpWidth(card._familyNavWidth);
       });
       card._familyNavObserver.observe(target);
     }
@@ -1397,6 +1375,48 @@ class HAEntityRenamer extends HTMLElement {
 
   static getStubConfig() { return { type: 'custom:ha-entity-renamer', title: 'Entity Renamer' }; }
   setConfig(config) { this._config = config || {}; if (this._hass) this.render(); }
+  _helpPreference() {
+    const account = this._hass?.user?.id || null;
+    if (!this._helpState || this._helpState.account !== account) {
+      const key = account ? `${_LOCAL_INTRO_KEY}:${encodeURIComponent(account)}` : null;
+      let closed = false;
+      try { closed = key && localStorage.getItem(key) === '1'; } catch (_) {}
+      this._helpState = { account, key, closed, open: false, width: null };
+    }
+    return this._helpState;
+  }
+  _renderHelp() {
+    if (this._config?.show_help === false) return '';
+    const state = this._helpPreference();
+    const intro = this._lang === 'pl' ? _LOCAL_INTRO_PL : _LOCAL_INTRO;
+    const label = this._lang === 'pl' ? 'Jak to działa?' : 'How does it work?';
+    return `<details class="renamer-help" ${state.open ? 'open' : ''}><summary>ⓘ ${label}</summary>
+      <p>${_esc(intro.headline)}</p><ol>${intro.steps.map(step => `<li>${_esc(step)}</li>`).join('')}</ol></details>`;
+  }
+  _syncHelpWidth(width) {
+    const help = this.shadowRoot.querySelector('details.renamer-help');
+    if (!help || !(width > 0)) return;
+    const state = this._helpPreference();
+    if (state.width === width) return;
+    if (state.width === null) state.open = width >= 500 && !state.closed;
+    else if (width < 500) state.open = false;
+    state.width = width;
+    help.open = state.open;
+  }
+  _bindHelp() {
+    const help = this.shadowRoot.querySelector('details.renamer-help');
+    help?.querySelector('summary')?.addEventListener('click', event => {
+      if (event.defaultPrevented) return;
+      const state = this._helpPreference();
+      state.open = !help.open;
+      // The native details default action provides keyboard and pointer behavior.
+      if (!state.open) {
+        state.closed = true;
+        try { if (state.key) localStorage.setItem(state.key, '1'); } catch (_) {}
+      }
+    });
+    if (this._familyNavWidth > 0) this._syncHelpWidth(this._familyNavWidth);
+  }
   constructor() {
     super();
     this._toolId = this.tagName.toLowerCase().replace('ha-', '');
@@ -3010,17 +3030,22 @@ class HAEntityRenamer extends HTMLElement {
         :host input[type=checkbox] { accent-color:var(--_hat-primary-fill); }
         :host .btn-primary:disabled { opacity:1;background:var(--_hat-chip);color:var(--_hat-text-2);box-shadow:none; }
 
+        .renamer-help { margin:8px 0 12px;font-size:14px; }
+        .renamer-help summary { cursor:pointer;min-height:44px;align-content:center; }
+        .renamer-help summary:focus-visible { outline:3px solid var(--primary-color);outline-offset:2px; }
+        .renamer-help p { margin:8px 0; }
+        .renamer-help ol { padding-inline-start:24px; }
         .card { min-width:0;container-type:inline-size; }
         .prefix-row,.queue-actions { flex-wrap:wrap; }
         .device-header { min-height:44px;min-width:44px; }
         .prefix-row input,.device-detail input { min-width:44px;max-width:100%; }
         </style>
-    ${_renderLocalIntro(this._lang)}
     <div class="card">
       <h1>📱️ ${_esc(typeof this._config?.title === 'string' && this._config.title.trim() ? this._config.title : t.deviceEntityRenamer)}</h1>
       <div class="subtitle">${this._registryCount(this._devices.length,'device')} • ${this._registryCount(this._entities.length,'entity')}
         </div>
 
+      ${this._renderHelp()}
       ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${this._message.outcome ? createUiV3({language:this._lang}).statusHtml(this._message.outcome) : ''} ${_esc(this._message.text || '')}</div>` : ''}
       ${this._renderApplyResult()}
       ${this._confirmDialogOpen ? this._renderRenameConfirmation() : ''}
@@ -3042,13 +3067,14 @@ class HAEntityRenamer extends HTMLElement {
     </div>
     ${this._hass?.user?.is_admin && this._config?.show_support !== false && !_localSupportDismissed() ? _LOCAL_DONATE_HTML : ''}`;
 
-    _bindLocalIntroDismiss(this.shadowRoot);
+    this._bindHelp();
     _bindLocalSupportDismiss(this.shadowRoot);
     this._attachEvents();
     for (const group of this.shadowRoot.querySelectorAll('[data-auto-group]')) group.open = openAutomaticDevices.has(group.dataset.autoGroup);
     this._syncListExpansion();
     _restoreFamilyDrafts(this,familyDrafts);
     _bindFamilyNavigation(this,familyFocus);
+    if (this._familyNavWidth > 0) this._syncHelpWidth(this._familyNavWidth);
     _restoreFamilyRowFocus(this,familyRowFocus);
     _restoreListViewport(this,listViewport);
   }
