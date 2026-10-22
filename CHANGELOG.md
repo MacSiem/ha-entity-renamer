@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.5.0 (2026-10-22)
+
+- Keep confirmation button labels whole at narrow widths (GitHub #9), use theme-aware primary contrast and neutral removal actions.
+- Keep tabs and filters in one horizontally scrollable row with keyboard navigation; use one expand/collapse control and avoid repeated New badges within new devices.
+- Wrap entity IDs only at domain and underscore boundaries; increase small text and constrain wide content.
+- Add account-scoped, collapsible help and visual configuration for default/visible tabs, help and support.
+- Undo clearing a draft queue for eight seconds without overwriting newer proposals.
+- Suggest area prefixes in the local queue, respecting entity area overrides and preserving existing proposals. Registry writes still require administrator review and confirmation.
+
 ## 4.4.1 (2026-10-17)
 
 - Preserve list position, expanded groups and logical keyboard focus when queuing or removing Automatic ID proposals and expanding Devices. Filtered rows that disappear no longer pull the viewport toward their group header.

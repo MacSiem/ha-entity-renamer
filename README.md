@@ -91,6 +91,28 @@ type: custom:ha-entity-renamer
 That's it — no options are required. An optional **Title** field is
 available in the card's visual editor.
 
+## Card options
+
+All options below are available in the visual editor. Additional YAML fields are retained when editing.
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| `title` | Localized tool title | Custom heading; empty uses the default. |
+| `default_tab` | `devices` | Initial view: `devices`, `automatic`, `queue` or `log`. Must be included in `tabs`. |
+| `tabs` | All four | Visible views in the standard order. An empty/invalid list falls back to all views. Internal queue/history flows can reveal their required view. |
+| `show_help` | `true` | Collapsible instructions. Starts collapsed below 500 px; closing is remembered for the current HA account in this browser. |
+| `show_support` | `true` | Optional administrator support link; existing dismissal is respected. |
+
+```yaml
+type: custom:ha-entity-renamer
+default_tab: devices
+tabs: [devices, automatic, queue, log]
+show_help: true
+show_support: false
+```
+
+Selecting **Queue area prefixes** in a device's details adds proposals such as `sensor.salon_temperature` for review. An entity's area takes precedence over its device's area. Unknown areas and names that cannot form a valid prefix produce no proposal; an existing prefix is not repeated. Existing queued proposals are retained. Area names are converted to lowercase ASCII identifier segments. This action only reads the area registry and prepares drafts; it does not rename entities.
+
 ## Features
 
 - **Device & entity browser** — search across devices and entities, grouped
@@ -183,7 +205,7 @@ Adding or removing proposals keeps the list position, expanded groups and keyboa
 
 **New** means created in the Home Assistant registry within the last seven days; migrated entries with an unknown creation time are not marked. Choose **Newest** or **Name A–Z / Z–A** and expand or collapse groups.
 
-The queue groups proposals by device and shows their source: Automatic IDs, Manual or Prefix. Removing one proposal offers **Undo** for eight seconds and restores the same proposal at its original position. Clear, opening confirmation, disconnecting or changing accounts cancels undo. The queue bar also includes queued device-name changes. Applying changes retains the existing administrator permission, impact review and explicit confirmation.
+The queue groups proposals by device and shows their source: Automatic IDs, Manual, Prefix or Area. Removing one proposal offers **Undo** for eight seconds and restores the same proposal at its original position. **Clear** replaces any individual undo with an eight-second undo for the cleared batch, including device-name drafts; newer proposals take precedence when restoring. Opening confirmation, disconnecting or changing accounts cancels undo. The queue bar also includes queued device-name changes. Applying changes retains the existing administrator permission, impact review and explicit confirmation.
 
 #### Automatic IDs preview
 
