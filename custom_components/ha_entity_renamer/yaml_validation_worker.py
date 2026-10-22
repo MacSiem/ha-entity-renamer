@@ -117,6 +117,12 @@ async def _expected_runtime(root, domains):
     loader.async_setup(hass)
     result = {}
     try:
+        from homeassistant.const import __version__
+        if __version__ == '2026.10.2':
+            # Current native trigger validation requires its own platform
+            # registry initialized even when no automation is activated.
+            from homeassistant.helpers import trigger
+            await trigger.async_setup(hass)
         config = await async_hass_config_yaml(hass)
         for domain in domains:
             try:
