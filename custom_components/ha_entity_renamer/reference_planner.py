@@ -264,6 +264,22 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
 
         def expression(node, bindings):
             charge()
+            # HA creates this local object for every repeat iteration. Counters
+            # and flags carry no entity provenance; item/dynamic access may.
+            if isinstance(node, (nodes.Getattr, nodes.Getitem)) and isinstance(node.node, nodes.Name):
+                bound = bindings.get(node.node.name)
+                if bound and bound[0] == 'runtime_repeat':
+                    attribute = (node.attr if isinstance(node, nodes.Getattr) else
+                                 node.arg.value if isinstance(node.arg, nodes.Const)
+                                 and type(node.arg.value) is str else None)
+                    if attribute not in {'index', 'first', 'last'}:
+                        mark('unsupported_runtime_repeat', 'Unproven runtime repeat item or access')
+                    return
+            if isinstance(node, nodes.Name):
+                bound = bindings.get(node.name)
+                if bound and bound[0] == 'runtime_repeat':
+                    mark('unsupported_runtime_repeat', 'Runtime repeat object escapes counter access')
+                    return
             if (isinstance(node, nodes.Getattr) and isinstance(node.node, nodes.Name)
                     and node.node.name == 'loop' and bindings.get('loop')
                     and bindings['loop'][0] == 'loop'

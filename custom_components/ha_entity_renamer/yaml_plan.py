@@ -374,6 +374,8 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
                     output_reference=field)
                 used.update(consumed)
                 unsafe.update(escaped)
+                if any(code == 'unsupported_runtime_repeat' for code, _ in markers):
+                    issue(node, 'yaml_runtime_repeat_variable_unsupported')
                 for origin in consumed:
                     record(origin, 'jinja_entity_reference')
                 for origin in escaped:
@@ -585,7 +587,7 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
                 invariant = envelope(entry, writes)
                 # HA defines this runtime object locally on every iteration.
                 # It must never inherit a same-named outer static binding.
-                invariant['repeat'] = None
+                invariant['repeat'] = ('runtime_repeat', ())
                 for key, child in repeat.value:
                     scan(key, invariant)
                     if not isinstance(key, ScalarNode) or key.value != 'sequence':
@@ -593,20 +595,6 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
                 local_interference = ({name: bound for name, bound in interference.items()
                                        if name != 'repeat'} if interference else {})
                 branch(body, invariant, local_interference)
-                # No proof for runtime repeat.item/index/etc. Any textual use
-                # gets an explicit block, independently of Jinja sink detection.
-                pending = [repeat]
-                while pending:
-                    current = pending.pop()
-                    charge()
-                    if isinstance(current, ScalarNode):
-                        if (current.tag == _STR and any(t in current.value for t in ('{{', '{%', '{#'))
-                                and re.search(r'\brepeat\b', current.value)):
-                            issue(current, 'yaml_runtime_repeat_variable_unsupported')
-                    elif isinstance(current, SequenceNode):
-                        pending.extend(current.value)
-                    elif isinstance(current, MappingNode):
-                        pending.extend(n for pair in current.value for n in pair)
                 for local in exits[1:]:
                     if 'repeat' in entry:
                         local['repeat'] = entry['repeat']

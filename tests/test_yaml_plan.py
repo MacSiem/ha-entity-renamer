@@ -627,8 +627,8 @@ class YAMLPlannerTests(unittest.TestCase):
             """.replace('EXPRESSION', expression))
             self.assert_variable_patch(source)
 
-    def test_runtime_repeat_item_and_index_have_explicit_block(self):
-        for expression in ('states(repeat.item)', 'repeat.index'):
+    def test_runtime_repeat_item_and_dynamic_access_have_explicit_block(self):
+        for expression in ('states(repeat.item)', 'repeat.item', "repeat['item']", 'repeat[key]', 'repeat'):
             source = self.control_source('''
                 - repeat:
                     count: 2
