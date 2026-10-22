@@ -1901,7 +1901,18 @@ class HAEntityRenamer extends HTMLElement {
     return `<div class="list-toolbar"><input type="search" id="${automatic?'automaticSearch':'searchInput'}" aria-label="${_esc(this._t.searchPlaceholder)}" placeholder="🔍 ${_esc(this._t.searchPlaceholder)}" value="${_esc(automatic?this._automaticSearch:this._searchQuery)}">
       <label>${pl?'Sortowanie':'Sort'} <select id="listSort">${[['name',pl?'Nazwa A–Z':'Name A–Z'],['reverse',pl?'Nazwa Z–A':'Name Z–A'],['newest',pl?'Najnowsze':'Newest']].map(([key,label])=>`<option value="${key}" ${this._listSort===key?'selected':''}>${label}</option>`).join('')}</select></label></div>
       <div class="list-chips" role="group" aria-label="${pl?'Filtry encji':'Entity filters'}">${keys.map((key,i)=>`<button type="button" class="btn btn-sm btn-outline" data-list-filter="${key}" data-list-scope="${scope}" aria-pressed="${this._listFilters[scope]===key}">${labels[i]} (${count(key)})</button>`).join('')}</div>
-      <div class="list-expand"><button class="btn btn-sm btn-outline" data-expand-list="true">${pl?'Rozwiń wszystkie':'Expand all'}</button><button class="btn btn-sm btn-outline" data-expand-list="false">${pl?'Zwiń wszystkie':'Collapse all'}</button></div>`;
+      <div class="list-expand"><button type="button" class="btn btn-sm btn-outline" data-expand-list="true">${pl?'Rozwiń wszystkie':'Expand all'}</button></div>`;
+  }
+
+  _syncListExpansion() {
+    const root=this.shadowRoot,button=root.querySelector('[data-expand-list]');
+    if(!button)return;
+    const groups=Array.from(root.querySelectorAll(this._activeTab==='automatic'?'[data-auto-group]':'[data-device-id]'));
+    const allOpen=groups.length>0&&groups.every(group=>this._activeTab==='automatic'?group.open:this._expandedDevices.has(group.dataset.deviceId));
+    button.dataset.expandList=String(!allOpen);
+    button.textContent=this._lang==='pl'?(allOpen?'Zwiń wszystkie':'Rozwiń wszystkie'):(allOpen?'Collapse all':'Expand all');
+    button.setAttribute('aria-expanded',String(allOpen));
+    button.disabled=groups.length===0;
   }
 
   _clearQueueUndo() {
@@ -2890,6 +2901,7 @@ class HAEntityRenamer extends HTMLElement {
     _bindLocalSupportDismiss(this.shadowRoot);
     this._attachEvents();
     for (const group of this.shadowRoot.querySelectorAll('[data-auto-group]')) group.open = openAutomaticDevices.has(group.dataset.autoGroup);
+    this._syncListExpansion();
     _restoreFamilyDrafts(this,familyDrafts);
     _bindFamilyNavigation(this,familyFocus);
     _restoreFamilyRowFocus(this,familyRowFocus);
@@ -3185,7 +3197,10 @@ class HAEntityRenamer extends HTMLElement {
       const expand=button.dataset.expandList==='true';
       if(this._activeTab==='automatic') root.querySelectorAll('[data-auto-group]').forEach(group=>{group.open=expand;});
       else {this._getFilteredDevices().forEach(device=>expand?this._expandedDevices.add(device.id):this._expandedDevices.delete(device.id));this.render();}
+      this._syncListExpansion();
+      this.shadowRoot.querySelector('[data-expand-list]')?.focus({preventScroll:true});
     }));
+    root.querySelectorAll('[data-auto-group]').forEach(group=>group.addEventListener('toggle',()=>this._syncListExpansion()));
     root.getElementById('automaticSearch')?.addEventListener('input',event=>{
       const caret=event.target.selectionStart;this._automaticSearch=event.target.value;this.render();
       const field=this.shadowRoot.getElementById('automaticSearch');field?.focus();if(field)field.setSelectionRange(caret,caret);
