@@ -182,6 +182,15 @@ class TemplateBindingsTest(unittest.TestCase):
                        "{% macro f(e) %}{{ states(e) }}{% endmacro %}{{ f('sensor.a') }}"]:
             self.assert_blocked(source, 'unsupported_template_scope')
 
+    def test_numeric_namespace_accumulators_consume_references_without_storing_ids(self):
+        source = ("{% set ns=namespace(total=0) %}{% for e in ['sensor.a'] %}"
+                  "{% set ns.total=ns.total+(states(e)|int) %}{% endfor %}{{ ns.total }}")
+        self.assert_migrates(source, source.replace("'sensor.a'", "'sensor.b'"))
+        for source in ["{% set e='sensor.a' %}{% set ns=namespace(ref=e) %}{{ states(e) }}",
+                       "{% set e='sensor.a' %}{% set ns.ref=e %}{{ states(e) }}",
+                       "{% set ns.refs=['sensor.a'] %}{{ expand(ns.refs) }}"]:
+            self.assert_blocked(source)
+
     def test_dynamic_expressions_and_failed_expand_are_atomic(self):
         for source in ["{% set e='sensor.' ~ suffix %}{{ states(e) }}",
                        "{% set ids=['sensor.a'] %}{{ expand(ids + others) }}",
@@ -293,8 +302,17 @@ class ExternalYAMLBindingTests(unittest.TestCase):
             result = self.analyze(source, shape='list', field=True)
             self.assertIn(self.origin, result[3])
 
+    def test_with_and_numeric_namespace_preserve_external_entity_origins(self):
+        for source in ["{% with x=refs %}{{ states(x) }}{% endwith %}",
+                       "{% set ns=namespace(total=0) %}{% set ns.total=states(refs)|int %}{{ ns.total }}"]:
+            value, markers, used, unsafe = self.analyze(source)
+            self.assertEqual(value, source)
+            self.assertFalse(markers)
+            self.assertEqual(used, {self.origin})
+            self.assertFalse(unsafe)
+
     def test_non_reference_escape_and_unknown_scope_retain_origins(self):
-        for source in ("{{ states(refs) }} {{ refs }}", "{% with x=refs %}{{ states(x) }}{% endwith %}",
+        for source in ("{{ states(refs) }} {{ refs }}",
                        "{{ refs | join(',') }}", "{{ custom(refs) }}", "{# refs #}{{ states(refs) }}"):
             result = self.analyze(source)
             self.assertIn(self.origin, result[3], source)

@@ -178,7 +178,7 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
 
         globals_ = {'states', 'is_state', 'state_attr', 'is_state_attr', 'expand'}
         unsupported = (nodes.Macro, nodes.Import, nodes.FromImport, nodes.CallBlock,
-                       nodes.Include, nodes.Extends, nodes.NSRef,
+                       nodes.Include, nodes.Extends,
                        nodes.Block, nodes.FilterBlock)
         for node in all_nodes:
             if isinstance(node, unsupported):
@@ -366,6 +366,14 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                         expression(node.node, bindings)
                     if isinstance(node.target, nodes.Name):
                         bindings[node.target.name] = bound
+                    elif isinstance(node.target, nodes.NSRef):
+                        # A numeric/state-result accumulator can depend on
+                        # states(e) without storing the entity ID itself. The
+                        # RHS was inspected above. Storing proven entity origins
+                        # in a mutable namespace still needs a richer model.
+                        if bound:
+                            escape(bound)
+                            mark('unsupported_template_scope', 'Namespace entity provenance unsupported')
                     else:
                         # Destructuring needs element provenance; remain unknown.
                         if bound:

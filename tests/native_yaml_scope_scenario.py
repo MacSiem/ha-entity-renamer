@@ -63,9 +63,13 @@ async def run_yaml_scopes(hass, root):
     cases['jinja_loopcontrols'] = ("- action: renamer_probe.capture\n  data:\n    value: >-\n"
         "      {% for e in ['sensor.foo','light.old'] %}"
         "{% if loop.first %}{% continue %}{% endif %}{{ states(e) }}{% break %}{% endfor %}\n")
+    cases['jinja_namespace'] = ("- action: renamer_probe.capture\n  data:\n    value: >-\n"
+        "      {% set ns=namespace(total=0) %}{% for e in ['sensor.foo'] %}"
+        "{% set ns.total=ns.total+(states(e)|int) %}{% endfor %}{{ ns.total }}\n")
     expected = {'map_items': ['42|Sensor;on|Light;'], 'choose_if': ['on'],
                 'jinja_branch_true': ['42'], 'jinja_branch_false': ['on'],
                 'jinja_with': ['42'], 'jinja_do': ['42'], 'jinja_loopcontrols': ['on'],
+                'jinja_namespace': ['42'],
                 'repeat': ['42', 'on'], 'parallel': ['42', '42']}
     captured = []
 
