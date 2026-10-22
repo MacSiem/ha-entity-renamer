@@ -375,7 +375,14 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                             walk(value, depth + 1, field, parent_key, lovelace)
                             continue
                         if not isinstance(key, ScalarNode) or key.tag != _STR:
-                            # YAML merge and complex keys need semantic provenance.
+                            # Primitive non-string keys cannot be entity IDs.
+                            # Preserve them and still inspect their descendants;
+                            # a numeric/boolean key must not hide a reference.
+                            if (isinstance(key, ScalarNode) and parent_key != 'entities'
+                                    and key.tag in {_STANDARD + kind for kind in ('bool', 'int', 'float', 'null')}):
+                                walk(value, depth + 1, False, '', lovelace)
+                                continue
+                            # Complex keys need semantic provenance.
                             issue(key, "unsupported_mapping_key")
                             walk(key, depth + 1)
                             walk(value, depth + 1)

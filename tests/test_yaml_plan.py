@@ -8,6 +8,17 @@ from custom_components.ha_entity_renamer.yaml_plan import Limits, YAMLPlanError,
 
 
 class YAMLPlannerTests(unittest.TestCase):
+    def test_primitive_keys_preserved_with_nested_reference_coverage(self):
+        source = 'modes:\n  on:\n    entity_id: sensor.foo\n  1: label\n  null: value\n'
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertEqual(plan.patches[0].proposed_bytes, source.replace('sensor.foo', 'sensor.new').encode())
+        self.put('configuration.yaml', 'modes:\n  1: sensor.foo\n')
+        self.assertIn('ambiguous_reference_context', self.codes(self.plan()))
+        self.put('configuration.yaml', 'entities:\n  1: on\n')
+        self.assertIn('unsupported_mapping_key', self.codes(self.plan()))
+
     def test_native_entity_ids_and_typed_source(self):
         source = 'sensor:\n- platform: integration\n  source: sensor.foo\n- platform: min_max\n  entity_ids: [sensor.foo, light.old]\n'
         self.put('configuration.yaml', source)
