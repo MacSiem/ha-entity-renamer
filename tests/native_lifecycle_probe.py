@@ -47,10 +47,10 @@ async def run(root):
     config = {'http': {'server_host': '127.0.0.1', 'server_port': port}}
     try:
         loader.async_setup(hass)
-        hass.auth = await auth.auth_manager_from_config(hass, [], [])
         hass.config_entries = ConfigEntries(hass, config)
         await loader.async_get_custom_components(hass)
         assert (await async_load_base_functionality(hass)) is not False
+        hass.auth = await auth.auth_manager_from_config(hass, [], [])
         assert await async_setup_component(hass, 'http', config)
         await hass.async_start()
         result = await hass.config_entries.flow.async_init('ha_entity_renamer', context={'source': 'user'})
