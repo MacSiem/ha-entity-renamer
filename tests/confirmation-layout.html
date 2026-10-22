@@ -4,10 +4,11 @@
 <style>body{margin:16px;font-family:system-ui;background:#eee} main{width:320px;max-width:100%} label{margin-right:12px}</style>
 <label>Card width <select id="width"><option>320</option><option>390</option><option>656</option><option>900</option></select></label>
 <label>Language <select id="language"><option>en</option><option>pl</option></select></label>
+<label>Theme <select id="theme"><option>light</option><option>dark</option></select></label>
 <button id="open">Open confirmation</button>
 <p>Synthetic entities only. Registry writes: <output id="writes">0</output></p>
 <main><ha-entity-renamer></ha-entity-renamer></main>
-<script src="../ha-entity-renamer.js?confirmation-layout=222"></script>
+<script src="../ha-entity-renamer.js?confirmation-layout=222-theme"></script>
 <script>
 const card=document.querySelector('ha-entity-renamer');
 const entries=[{id:'qa-entry',entity_id:'sensor.qa_before',device_id:'qa-device',unique_id:'qa',platform:'mqtt'}];
@@ -27,5 +28,10 @@ function openConfirmation(){card._addToQueue('sensor.qa_before','sensor.qa_after
 document.querySelector('#open').onclick=openConfirmation;
 document.querySelector('#width').onchange=e=>document.querySelector('main').style.width=e.target.value+'px';
 document.querySelector('#language').onchange=e=>{hass.language=e.target.value;card.hass={...hass};};
+document.querySelector('#theme').onchange=e=>{
+ const dark=e.target.value==='dark';
+ for(const [key,value] of Object.entries({'--primary-color':dark?'#818cf8':'#3b82f6','--card-background-color':dark?'#1c1c1e':'#ffffff','--primary-text-color':dark?'#e5e7eb':'#111827','--secondary-text-color':dark?'#a1a1aa':'#4b5563'}))card.style.setProperty(key,value);
+ card.hass={...hass,themes:{darkMode:dark}};
+};
 openConfirmation();
 </script>
