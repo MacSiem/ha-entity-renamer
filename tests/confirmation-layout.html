@@ -1,0 +1,31 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Renamer confirmation layout — synthetic fixture</title>
+<style>body{margin:16px;font-family:system-ui;background:#eee} main{width:320px;max-width:100%} label{margin-right:12px}</style>
+<label>Card width <select id="width"><option>320</option><option>390</option><option>656</option><option>900</option></select></label>
+<label>Language <select id="language"><option>en</option><option>pl</option></select></label>
+<button id="open">Open confirmation</button>
+<p>Synthetic entities only. Registry writes: <output id="writes">0</output></p>
+<main><ha-entity-renamer></ha-entity-renamer></main>
+<script src="../ha-entity-renamer.js?confirmation-layout=222"></script>
+<script>
+const card=document.querySelector('ha-entity-renamer');
+const entries=[{id:'qa-entry',entity_id:'sensor.qa_before',device_id:'qa-device',unique_id:'qa',platform:'mqtt'}];
+const devices=[{id:'qa-device',name:'Synthetic QA'}];
+const connection=new EventTarget(); connection.connected=true;
+const hass={language:'en',connection,user:{id:'qa-admin',is_admin:true},states:{},callWS:async msg=>{
+ if(msg.type.endsWith('/update')){document.querySelector('#writes').value=String(Number(document.querySelector('#writes').value)+1);return {};}
+ if(msg.type==='config/entity_registry/list')return entries;
+ if(msg.type==='config/device_registry/list')return devices;
+ if(msg.type==='lovelace/dashboards/list')return [];
+ return {};
+}};
+card.setConfig({type:'custom:ha-entity-renamer',show_support:false});
+card._hass=hass;card._entities=entries;card._devices=devices;card._deviceEntities={'qa-device':entries};
+card._bindRenameExportEvents();
+function openConfirmation(){card._addToQueue('sensor.qa_before','sensor.qa_after');card._showRenameConfirmation();}
+document.querySelector('#open').onclick=openConfirmation;
+document.querySelector('#width').onchange=e=>document.querySelector('main').style.width=e.target.value+'px';
+document.querySelector('#language').onchange=e=>{hass.language=e.target.value;card.hass={...hass};};
+openConfirmation();
+</script>

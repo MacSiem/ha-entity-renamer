@@ -2666,7 +2666,11 @@ class HAEntityRenamer extends HTMLElement {
         font-size: 12px; text-align: center;
       }
       .rename-confirm-actions {
-        display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px;
+        display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 14px;
+      }
+      :host .rename-confirm-actions .btn {
+        width: auto; flex: 0 0 auto; white-space: nowrap !important;
+        overflow-wrap: normal;
       }
       .apply-result {
         background: var(--bento-success-light, rgba(16,185,129,0.08));
@@ -2955,7 +2959,7 @@ class HAEntityRenamer extends HTMLElement {
         ${idChanges.length ? rows : `<div style="font-size:12.5px;${sub}">${_esc(t.confirmNoEntityChanges)}</div>`}
         ${more > 0 ? `<div style="font-size:12px;opacity:.7;padding-top:6px">${fill(t.confirmMore, more)}</div>` : ''}
         ${devEntries.length ? `<div style="font-size:12.5px;font-weight:600;margin:10px 0 4px">${fill(t.confirmDeviceCount, devEntries.length)}</div>${devRows}` : ''}
-        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+        <div class="rename-confirm-actions">
           <button id="cancelRenameDialog" class="btn btn-outline">${_esc(t.cancel)}</button>
           <button id="confirmRenameApply" class="btn btn-primary">${_esc(t.rename)}</button>
         </div>
