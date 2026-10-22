@@ -60,6 +60,25 @@ class PreparedTests(unittest.IsolatedAsyncioTestCase):
         fresh = PreparedStore(self.disk); await fresh.initialize()
         self.assertEqual([decode_change(row) for row in fresh.resolve('native', digest)], changes)
 
+    async def test_allowed_large_yaml_source_survives_immutable_storage_roundtrip(self):
+        import hashlib
+        from custom_components.ha_entity_renamer.yaml_transaction import PreparedYAML, YAMLFile
+        from custom_components.ha_entity_renamer.yaml_validation import ValidationReceipt
+        from custom_components.ha_entity_renamer.prepared import encode_change, decode_change
+        before = b'#' + b'x' * 600000 + b'\nentity_id: sensor.a\n'
+        after = before.replace(b'sensor.a', b'sensor.b')
+        digest = lambda raw: hashlib.sha256(raw).hexdigest()
+        receipt = ValidationReceipt('/synthetic-private-config',
+            (('scripts.yaml', digest(before), 1, 2),),
+            (('.', (('scripts.yaml', 0o100600, 1, 2),), ('scripts.yaml',)),),
+            (('scripts.yaml', digest(after)),), ('script',), (), '2026.10.2')
+        change = PreparedYAML(receipt, (YAMLFile('scripts.yaml', before.hex(), after.hex(), 1, 2),))
+        prepared = encode_change(change)
+        checksum = await self.store.create('large-yaml', prepared)
+        fresh = PreparedStore(self.disk)
+        await fresh.initialize()
+        self.assertEqual(decode_change(fresh.resolve('large-yaml', checksum)), change)
+
     async def test_paths_cycles_and_nonfinite_rejected(self):
         for key in ('../plan', '/absolute', '', 'a/b'):
             with self.assertRaises(ValueError): await self.store.create(key, {})
