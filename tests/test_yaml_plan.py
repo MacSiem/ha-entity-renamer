@@ -618,7 +618,7 @@ class YAMLPlannerTests(unittest.TestCase):
         self.assert_control_blocked(source)
 
     def test_repeat_runtime_counters_do_not_block_static_entity_migration(self):
-        for expression in ("repeat.index", "repeat.first", "repeat.last", "repeat['index']"):
+        for expression in ("repeat.index", "repeat.first", "repeat.last", 'repeat["index"]'):
             source = self.control_source("""
                 - repeat:
                     count: 2
@@ -628,7 +628,7 @@ class YAMLPlannerTests(unittest.TestCase):
             self.assert_variable_patch(source)
 
     def test_runtime_repeat_item_and_dynamic_access_have_explicit_block(self):
-        for expression in ('states(repeat.item)', 'repeat.item', "repeat['item']", 'repeat[key]', 'repeat'):
+        for expression in ('states(repeat.item)', 'repeat.item', 'repeat["item"]', 'repeat[key]', 'repeat'):
             source = self.control_source('''
                 - repeat:
                     count: 2
