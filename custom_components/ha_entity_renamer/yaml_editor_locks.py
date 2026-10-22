@@ -16,10 +16,12 @@ class NativeYAMLEditorLocks:
     def __init__(self, hass):
         from homeassistant.const import __version__
         from homeassistant.components.config.view import BaseEditConfigView
+        from homeassistant.components.http.view import request_handler_factory
         if __version__ not in ('2025.6.0', '2026.10.2'):
             raise EditorLockConflict('unsupported_editor_runtime')
         self.hass = hass
         self.base_class = BaseEditConfigView
+        self.handler_module = request_handler_factory.__module__
 
     def enumerate(self):
         """Resolve the actual registered view, never create a replacement lock."""
@@ -41,7 +43,7 @@ class NativeYAMLEditorLocks:
                 if path.startswith('/api/config/') and '{config_key}' in path:
                     raise EditorLockConflict('unknown_editor_view')
                 continue
-            if (handler.__module__ != 'homeassistant.components.http.view'
+            if (handler.__module__ != self.handler_module
                     or type(view.mutation_lock) is not asyncio.Lock
                     or type(view.path) is not str or not view.path):
                 raise EditorLockConflict('unsupported_editor_layout')
