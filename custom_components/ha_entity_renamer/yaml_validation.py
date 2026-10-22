@@ -32,6 +32,8 @@ class ValidationReceipt:
     changed_domains: tuple[str, ...]
     unsupported_domains: tuple[str, ...]
     version: str
+    # Only digests leave the isolated validator; never expanded secrets/config.
+    runtime_expected: tuple[tuple[str, str | None, str | None], ...] = ()
 
     @property
     def ready_for_apply(self):
@@ -301,7 +303,8 @@ async def async_validate_proposed(hass, plan, scratch_parent, *, timeout=120):
                 raise YAMLValidationError('native_config_rejected')
             receipt = ValidationReceipt(str(root), sources, directories,
                 tuple(sorted((patch.path, _digest(patch.proposed_bytes)) for patch in plan.patches)),
-                tuple(result['changed_domains']), tuple(result['unsupported_domains']), result['version'])
+                tuple(result['changed_domains']), tuple(result['unsupported_domains']), result['version'],
+                tuple(tuple(row) for row in result.get('runtime_expected', ())))
             await hass.async_add_executor_job(assert_validation_current, receipt)
             return receipt
     except (OSError, TimeoutError):

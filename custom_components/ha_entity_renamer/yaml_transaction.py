@@ -89,7 +89,11 @@ class PreparedYAML:
 
     @property
     def identity(self):
-        return 'yaml:' + _digest(asdict(self))
+        payload = asdict(self)
+        if not self.receipt.runtime_expected:
+            # Preserve identities of durable preparations created before this field.
+            payload['receipt'].pop('runtime_expected', None)
+        return 'yaml:' + _digest(payload)
 
     @property
     def before_revision(self):
@@ -111,8 +115,10 @@ def decode_yaml(data):
     """Strict bounded JSON codec; no caller-controlled class/path resolution."""
     _keys(data, ('receipt', 'files'))
     raw = data['receipt']
-    _keys(raw, ('config_root', 'source_files', 'source_directories', 'proposed_files',
-                'changed_domains', 'unsupported_domains', 'version'))
+    receipt_keys = ('config_root', 'source_files', 'source_directories', 'proposed_files',
+                'changed_domains', 'unsupported_domains', 'version')
+    # Old durable preparations remain decodable, but lack runtime proof.
+    _keys(raw, receipt_keys + (('runtime_expected',) if 'runtime_expected' in raw else ()))
     root = _text(raw['config_root'])
     if not Path(root).is_absolute() or str(Path(root)) != root or '..' in Path(root).parts:
         raise ValueError('invalid_prepared_yaml_root')
@@ -181,8 +187,17 @@ def decode_yaml(data):
         raise ValueError('prepared_yaml_source_mismatch')
     if tuple(sorted(proposed)) != tuple(sorted((f.path, _hash(f.after)) for f in files)):
         raise ValueError('prepared_yaml_proposal_mismatch')
+    runtime_expected = []
+    for row in sequence(raw.get('runtime_expected', ()), 4):
+        if type(row) not in (tuple, list) or len(row) != 3 or row[0] not in domains:
+            raise ValueError('invalid_prepared_yaml_runtime')
+        domain, before, after = row
+        runtime_expected.append((domain, None if before is None else _sha(before),
+                                 None if after is None else _sha(after)))
+    if len({row[0] for row in runtime_expected}) != len(runtime_expected):
+        raise ValueError('invalid_prepared_yaml_runtime')
     receipt = ValidationReceipt(root, tuple(sources), tuple(directories), tuple(proposed),
-                                domains, (), _text(raw['version']))
+                                domains, (), _text(raw['version']), tuple(runtime_expected))
     return PreparedYAML(receipt, tuple(files))
 
 

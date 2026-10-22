@@ -8,7 +8,9 @@ ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
 parser.add_argument('--container', choices=('ha-renamer-qa222', 'ha-renamer-min222'),
                     default='ha-renamer-qa222')
-parser.add_argument('--transaction', action='store_true')
+mode = parser.add_mutually_exclusive_group()
+mode.add_argument('--transaction', action='store_true')
+mode.add_argument('--observer', action='store_true')
 args = parser.parse_args()
 info = json.loads(subprocess.check_output(['docker', 'inspect', args.container], text=True))[0]
 mounts = [item['Source'] for item in info['Mounts'] if item['Destination'] == '/config']
@@ -16,8 +18,10 @@ assert info['State']['Running'] and len(mounts) == 1
 assert '/ha-tools-v4-20261016/renamer222-' in mounts[0]
 sources = {p.name: p.read_text() for p in
            (ROOT / 'custom_components/ha_entity_renamer').glob('*.py')}
-scenario = (ROOT / ('tests/native_yaml_transaction_scenario.py' if args.transaction
-                    else 'tests/native_yaml_validation_scenario.py')).read_text()
+scenario_name = ('native_yaml_runtime_observer_scenario.py' if args.observer else
+                 'native_yaml_transaction_scenario.py' if args.transaction else
+                 'native_yaml_validation_scenario.py')
+scenario = (ROOT / 'tests' / scenario_name).read_text()
 support = (ROOT / 'tests/native_yaml_validation_scenario.py').read_text()
 program = r'''
 import os, pathlib, runpy, sys, tempfile
