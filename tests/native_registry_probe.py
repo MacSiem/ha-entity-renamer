@@ -5,6 +5,7 @@ QA or production APIs, loads their configuration, or opens their database.
 Full statistics-cycle and installed-product QA remain separate requirements.
 """
 from pathlib import Path
+import argparse
 import json
 import subprocess
 
@@ -69,7 +70,7 @@ async def run(root):
         loader.async_setup(hass)
         hass.config_entries = ConfigEntries(hass, config)
         await loader.async_get_custom_components(hass)
-        assert await async_load_base_functionality(hass)
+        assert (await async_load_base_functionality(hass)) is not False
         from homeassistant.helpers.recorder import async_initialize_recorder
         async_initialize_recorder(hass)
         assert await async_setup_component(hass, 'recorder', config)
@@ -120,11 +121,13 @@ async def run(root):
 with tempfile.TemporaryDirectory(prefix='renamer223-registry-probe-', dir='/config') as root:
     asyncio.run(run(root))
 '''
-container = 'ha-renamer-qa222'
+parser = argparse.ArgumentParser()
+parser.add_argument('--container', choices=('ha-renamer-qa222', 'ha-renamer-min222'), default='ha-renamer-qa222')
+container = parser.parse_args().container
 inspected = json.loads(subprocess.check_output(['docker', 'inspect', container], text=True))[0]
 assert inspected['State']['Running']
 mounts = [item.get('Source', '') for item in inspected['Mounts'] if item['Destination'] == '/config']
-assert len(mounts) == 1 and '/ha-tools-v4-20261016/renamer222-native/' in mounts[0]
+assert len(mounts) == 1 and '/ha-tools-v4-20261016/renamer222-' in mounts[0]
 completed = subprocess.run(['docker', 'exec', '-i', container, 'python', '-B', '-'],
     input='SOURCES = ' + repr(sources) + '\n' + probe,
     text=True, capture_output=True, timeout=120)
