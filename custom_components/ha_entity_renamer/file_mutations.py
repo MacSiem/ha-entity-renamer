@@ -94,10 +94,16 @@ def apply_file_patch(config_root, patch, expected_snapshot, operation_id, guard=
     if path != expected_snapshot.path or patch.expected_sha256 != expected_snapshot.sha256:
         raise FileConflict('patch_snapshot_mismatch')
     reader = _Reader(config_root, Limits())
-    parent = None
+    parent = source_pin = temporary_fd = None
     try:
+        # Pin the compared source until replacement/readback completes. Some
+        # mounted filesystems refresh lookup identities when the last handle
+        # closes; a staged write must keep its source identity observable.
+        source_pin = reader.open(path)
+        pinned = os.fstat(source_pin)
         before, info = reader.read(path)
-        if (_hash(before) != patch.expected_sha256 or info.st_dev != expected_snapshot.device
+        if ((info.st_dev, info.st_ino) != (pinned.st_dev, pinned.st_ino)
+                or _hash(before) != patch.expected_sha256 or info.st_dev != expected_snapshot.device
                 or info.st_ino != expected_snapshot.inode):
             raise FileConflict('source_changed')
         projected = before
@@ -117,21 +123,21 @@ def apply_file_patch(config_root, patch, expected_snapshot, operation_id, guard=
         filename = PurePosixPath(path).name
         temporary = '.renamer-' + operation_id + '-' + uuid.uuid4().hex + '.pending'
         guard()
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        temporary_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                      stat.S_IMODE(info.st_mode), dir_fd=parent)
-        try:
-            os.fchmod(fd, stat.S_IMODE(info.st_mode))
-            if (info.st_uid, info.st_gid) != (os.geteuid(), os.getegid()):
-                os.fchown(fd, info.st_uid, info.st_gid)
-            _write_all(fd, projected)
-            new_info = os.fstat(fd)
-        finally:
-            os.close(fd)
+        os.fchmod(temporary_fd, stat.S_IMODE(info.st_mode))
+        if (info.st_uid, info.st_gid) != (os.geteuid(), os.getegid()):
+            os.fchown(temporary_fd, info.st_uid, info.st_gid)
+        _write_all(temporary_fd, projected)
+        new_info = os.fstat(temporary_fd)
         # Re-open through the held root: catch source or path replacement while
         # staging the backup/temp. Native editor locks must span this operation.
         current, current_info = reader.read(path)
         if (current != before or (current_info.st_dev, current_info.st_ino) != (info.st_dev, info.st_ino)):
             raise FileConflict('source_changed_before_replace')
+        staged = os.stat(temporary, dir_fd=parent, follow_symlinks=False)
+        if (staged.st_dev, staged.st_ino) != (new_info.st_dev, new_info.st_ino):
+            raise FileConflict('staged_identity_changed')
         guard()
         os.replace(temporary, filename, src_dir_fd=parent, dst_dir_fd=parent)
         os.fsync(parent)
@@ -143,5 +149,7 @@ def apply_file_patch(config_root, patch, expected_snapshot, operation_id, guard=
     except OSError:
         raise FileConflict('file_io_unconfirmed') from None
     finally:
+        if temporary_fd is not None: os.close(temporary_fd)
+        if source_pin is not None: os.close(source_pin)
         if parent is not None: os.close(parent)
         os.close(reader.root)
