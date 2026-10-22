@@ -7,7 +7,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 
-async def make_linked(hass, bridge, registry_change, history_check):
+async def make_linked(hass, bridge, registry_change, history_check, helpers=False):
     from homeassistant.components.energy.data import EnergyManager
     from homeassistant.components.lovelace.const import LOVELACE_DATA
     from homeassistant.components.lovelace.dashboard import LovelaceStorage
@@ -21,6 +21,11 @@ async def make_linked(hass, bridge, registry_change, history_check):
     from .transaction import Coordinator, Plan, Step
 
     old, new = next(iter(registry_change.mapping.items()))
+    helper = None
+    if helpers:
+        from .native_helper_runtime_scenario import create_helper
+        helper = await create_helper(hass, old, new)
+        await bridge.io.flush('entity')
     original_registry = bridge.io.document('entity')
     default = LovelaceStorage(hass, None)
     metadata = {'id': 'unaffected', 'url_path': 'unchanged-board', 'mode': 'storage',
@@ -53,6 +58,8 @@ async def make_linked(hass, bridge, registry_change, history_check):
     prepared = native_prepared_store(hass)
     await prepared.initialize()
     changes = {'registry': registry_change, 'dashboard': dashboard_change, 'energy': energy_change}
+    if helper:
+        changes['helper'] = helper.change
     digest = await prepared.create('linked', {key: encode_change(change) for key, change in changes.items()})
     holder = {'store': prepared}
     def resolve(key): return decode_change(holder['store'].resolve('linked', digest)[key])
@@ -93,13 +100,20 @@ async def make_linked(hass, bridge, registry_change, history_check):
         Step('energy', 'energy', 'energy', energy_change.before.revision, energy_change.after_revision, 'energy'),
     )
     scopes = ('fixture_registry', 'fixture_dashboards', 'fixture_energy')
+    if helper:
+        step = Step('helper', 'helpers', helper.change.identity, helper.change.before_revision,
+                    helper.change.after_revision, 'helper', ('registry',))
+        steps += (step,)
+        catalog = {item.key: item for item in steps}
+        adapters['helpers'] = helper.adapter(resolve, catalog.__getitem__)
+        scopes += ('fixture_helpers',)
     plan = Plan('linked', scopes, scopes, steps, digest, tuple(adapters))
     journal = native_journal(hass)
     await journal.initialize()
     def guard():
         if not bridge.io.running(): raise RuntimeError('fixture_not_running')
     result = SimpleNamespace(coordinator=Coordinator(adapters, journal, guard, required_scopes=scopes),
-                             plan=plan, updates=updates)
+                             plan=plan, updates=updates, helper=helper)
     async def reopen():
         fresh = native_prepared_store(hass)
         await fresh.initialize()
