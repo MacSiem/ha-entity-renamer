@@ -1367,6 +1367,16 @@ function _restoreListViewport(card, saved) {
   }
 }
 
+const _RENAMER_TABS = ['devices', 'automatic', 'queue', 'log'];
+function _configuredTabs(config) {
+  const tabs = Array.isArray(config?.tabs) ? _RENAMER_TABS.filter(tab => config.tabs.includes(tab)) : _RENAMER_TABS;
+  return tabs.length ? tabs : _RENAMER_TABS;
+}
+function _defaultTab(config) {
+  const tabs = _configuredTabs(config);
+  return tabs.includes(config?.default_tab) ? config.default_tab : tabs[0];
+}
+
 class HAEntityRenamer extends HTMLElement {
   static getConfigElement() { return document.createElement('ha-entity-renamer-editor'); }
   getCardSize() { return 8; }
@@ -1374,7 +1384,19 @@ class HAEntityRenamer extends HTMLElement {
   getGridOptions() { return { columns: 12, min_rows: 3, min_columns: 6 }; }
 
   static getStubConfig() { return { type: 'custom:ha-entity-renamer', title: 'Entity Renamer' }; }
-  setConfig(config) { this._config = config || {}; if (this._hass) this.render(); }
+  setConfig(config) {
+    const next = { ...(config || {}) };
+    const signature = JSON.stringify([_configuredTabs(next), _defaultTab(next)]);
+    if (signature !== this._navigationConfig) this._activeTab = _defaultTab(next);
+    this._navigationConfig = signature;
+    this._config = next;
+    if (this._hass) this.render();
+  }
+  _visibleTabs() {
+    const configured = _configuredTabs(this._config);
+    // Internal transaction flows may need Queue or Log even on a restricted card.
+    return _RENAMER_TABS.filter(tab => configured.includes(tab) || tab === this._activeTab);
+  }
   _helpPreference() {
     const account = this._hass?.user?.id || null;
     if (!this._helpState || this._helpState.account !== account) {
@@ -3052,10 +3074,7 @@ class HAEntityRenamer extends HTMLElement {
       ${this._renderEntityEditor()}
 
       <div class="tabs">
-        <button class="tab-button ${this._activeTab === 'devices' ? 'active' : ''}" data-tab="devices">📱 ${t.devices}</button>
-        <button class="tab-button ${this._activeTab === 'automatic' ? 'active' : ''}" data-tab="automatic">↻ ${t.automatic}</button>
-        <button class="tab-button ${this._activeTab === 'queue' ? 'active' : ''}" data-tab="queue">📋 ${t.queue}${queueCount > 0 ? ` (${queueCount})` : ''}</button>
-        <button class="tab-button ${this._activeTab === 'log' ? 'active' : ''}" data-tab="log">📜 ${t.log}</button>
+        ${this._visibleTabs().map(tab => `<button class="tab-button ${this._activeTab === tab ? 'active' : ''}" data-tab="${tab}">${({devices:'📱',automatic:'↻',queue:'📋',log:'📜'})[tab]} ${t[tab]}${tab === 'queue' && queueCount > 0 ? ` (${queueCount})` : ''}</button>`).join('')}
       </div>
 
       ${this._activeTab === 'devices' ? this._renderDevicesTab(devices) : ''}
@@ -3356,7 +3375,7 @@ class HAEntityRenamer extends HTMLElement {
       });
     });
 
-    root.getElementById('openQueue')?.addEventListener('click',()=>root.querySelector('[data-tab="queue"]').click());
+    root.getElementById('openQueue')?.addEventListener('click',()=>this.setActiveTab('queue'));
     root.getElementById('undoQueueRemoval')?.addEventListener('click',()=>this._undoQueueRemoval());
     root.getElementById('listSort')?.addEventListener('change',event=>{this._listSort=event.target.value;this.render();this.shadowRoot.getElementById('listSort')?.focus();});
     root.querySelectorAll('[data-list-filter]').forEach(button=>button.addEventListener('click',()=>{
@@ -3542,6 +3561,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   setActiveTab(tabId) {
+    if (!_RENAMER_TABS.includes(tabId)) return;
     this._activeTab = tabId;
     this.render();
   }
@@ -3562,6 +3582,7 @@ class HaEntityRenamerEditor extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._updateTitleLabel();
+    this._syncOptions();
   }
   _titleLabel() {
     const language = typeof this._config?.language === 'string' ? this._config.language : this._hass?.language || navigator.language || 'en';
@@ -3570,6 +3591,41 @@ class HaEntityRenamerEditor extends HTMLElement {
   _updateTitleLabel() {
     const label = this.shadowRoot.querySelector('label[for="cf_title"]');
     if (label) label.textContent = this._titleLabel();
+  }
+  _optionLabels() {
+    const pl = (this._config.language || this._hass?.language || navigator.language || 'en').startsWith('pl');
+    return pl ? {default_tab:'Domyślna zakładka',tabs:'Widoczne zakładki',show_help:'Pokaż pomoc',show_support:'Pokaż link wsparcia',devices:'Urządzenia',automatic:'Automatyczne',queue:'Kolejka',log:'Historia'}
+      : {default_tab:'Default tab',tabs:'Visible tabs',show_help:'Show help',show_support:'Show support link',devices:'Devices',automatic:'Automatic',queue:'Queue',log:'History'};
+  }
+  _syncOptions() {
+    const root = this.shadowRoot, labels = this._optionLabels(), tabs = _configuredTabs(this._config);
+    root.querySelectorAll('[data-option-label]').forEach(node => { node.textContent = labels[node.dataset.optionLabel]; });
+    for (const name of ['show_help','show_support']) {
+      const input = root.querySelector('#cf_' + name);
+      if (input) input.checked = this._config[name] !== false;
+    }
+    root.querySelectorAll('[data-config-tab]').forEach(input => { input.checked = tabs.includes(input.dataset.configTab); });
+    const select = root.querySelector('#cf_default_tab');
+    if (select) {
+      for (const option of select.options) { option.textContent = labels[option.value]; option.disabled = !tabs.includes(option.value); }
+      if (select.value !== _defaultTab(this._config)) select.value = _defaultTab(this._config);
+    }
+  }
+  _bindOptions() {
+    const root = this.shadowRoot;
+    for (const name of ['show_help','show_support']) root.querySelector('#cf_' + name)?.addEventListener('change', event => {
+      this._config = {...this._config, [name]:event.target.checked}; this._dispatch();
+    });
+    root.querySelector('#cf_default_tab')?.addEventListener('change', event => {
+      this._config = {...this._config,default_tab:event.target.value}; this._dispatch();
+    });
+    root.querySelectorAll('[data-config-tab]').forEach(input => input.addEventListener('change', () => {
+      const tabs = Array.from(root.querySelectorAll('[data-config-tab]:checked'), node => node.dataset.configTab);
+      if (!tabs.length) { input.checked = true; return; }
+      const next = {...this._config,tabs};
+      this._config = {...next, default_tab:_defaultTab(next)};
+      this._syncOptions(); this._dispatch();
+    }));
   }
   _dispatch() {
     this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: this._config }, bubbles: true, composed: true }));
@@ -3581,12 +3637,16 @@ class HaEntityRenamerEditor extends HTMLElement {
       // Reuse the Config Auditor editor fix: equal HA echoes must not reset selection.
       if (title.value !== value) title.value = value;
       this._updateTitleLabel();
+      this._syncOptions();
       return;
     }
     this.shadowRoot.innerHTML = `
       <style>
         :host { display:block; padding:16px; }
         h3 { margin:0 0 16px; font-size:15px; font-weight:600; color:var(--bento-text, var(--primary-text-color,#1e293b)); }
+        label { display:flex;align-items:center;gap:8px;font-size:14px; }
+        fieldset { margin:12px 0;border:1px solid var(--divider-color);border-radius:8px; }
+        select { display:block;width:100%;min-height:44px;font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:8px; }
         input { box-sizing:border-box;min-height:44px;min-width:44px;max-width:100%;transition:border-color .2s; }
             input:focus-visible { outline:3px solid var(--primary-color,#1769aa);outline-offset:2px; }
         input:focus { border-color:var(--bento-primary, var(--primary-color,#3b82f6)); }
@@ -3597,7 +3657,15 @@ class HaEntityRenamerEditor extends HTMLElement {
               <input type="text" id="cf_title" value="${_esc(value)}"
                 style="width:100%;padding:8px 12px;border:1px solid var(--divider-color,#e2e8f0);border-radius:8px;background:var(--card-background-color,#fff);color:var(--primary-text-color,#1e293b);font-size:14px;box-sizing:border-box;">
             </div>
+      <label for="cf_default_tab" data-option-label="default_tab"></label>
+      <select id="cf_default_tab">${_RENAMER_TABS.map(tab => `<option value="${tab}"></option>`).join('')}</select>
+      <fieldset><legend data-option-label="tabs"></legend>
+        ${_RENAMER_TABS.map(tab => `<label><input type="checkbox" data-config-tab="${tab}"><span data-option-label="${tab}"></span></label>`).join('')}
+      </fieldset>
+      ${['show_help','show_support'].map(name => `<label><input type="checkbox" id="cf_${name}"><span data-option-label="${name}"></span></label>`).join('')}
     `;
+        this._syncOptions();
+        this._bindOptions();
         const f_title = this.shadowRoot.querySelector('#cf_title');
         if (f_title) f_title.addEventListener('input', (e) => {
           this._config = { ...this._config, title: e.target.value };
