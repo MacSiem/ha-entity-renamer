@@ -2212,6 +2212,42 @@ class HAEntityRenamer extends HTMLElement {
     this.render();
   }
 
+  async _addAreaPrefix() {
+    if (this._loading || this._areaPrefixPending || !this._selectedDevice || ![true,false].includes(this._hass?.user?.is_admin)) return;
+    const { hass, current } = this._captureRead();
+    const deviceId = this._selectedDevice;
+    this._areaPrefixPending = true;
+    this.render();
+    try {
+      const areas = await hass.callWS({type:'config/area_registry/list'});
+      if (!current() || this._selectedDevice !== deviceId) return;
+      if (!Array.isArray(areas)) throw new Error('Invalid area registry');
+      const device = this._devices.find(item => item.id === deviceId);
+      const queued = new Set(this._renameQueue.map(row => row.oldId));
+      let count = 0;
+      for (const entity of this._deviceEntities[deviceId] || []) {
+        if (queued.has(entity.entity_id)) continue;
+        const areaId = entity.area_id || device?.area_id;
+        const area = areas.find(item => item.area_id === areaId);
+        if (!area || typeof area.name !== 'string') continue;
+        const prefix = area.name.toLowerCase().replace(/ł/g,'l').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+        if (!prefix) continue;
+        const [domain,objectId] = entity.entity_id.split('.');
+        if (!objectId || objectId.startsWith(prefix + '_')) continue;
+        this._addToQueue(entity.entity_id, `${domain}.${prefix}_${objectId}`, undefined, 'area');
+        count++;
+      }
+      this._message = {type:'info',text:this._lang==='pl'
+        ? `Dodano propozycje z obszarów: ${count}. Istniejące propozycje pozostawiono bez zmian.`
+        : `Area proposals added: ${count}. Existing proposals were kept.`};
+    } catch (_) {
+      if (current()) this._message = {type:'error',text:this._lang==='pl'?'Nie udało się odczytać obszarów. Spróbuj ponownie.':'Could not read areas. Try again.'};
+    } finally {
+      this._areaPrefixPending = false;
+      if (current()) this.render();
+    }
+  }
+
   _addPrefixRename() {
     if (this._loading) return;
     if (!this._prefixOld || !this._prefixNew || this._prefixOld === this._prefixNew) return;
@@ -3267,6 +3303,7 @@ class HAEntityRenamer extends HTMLElement {
                   <input type="text" id="deviceName" data-family-draft-context="${_esc(d.id)}" aria-label="${_esc(t.newDeviceName)}" value="${_esc(this._deviceRenameQueue[d.id] || this._getDeviceName(d))}" placeholder="${t.newDeviceName}" style="width:300px;font-family:inherit">
                   <button class="btn btn-primary btn-sm" id="applyDeviceName" data-device-id="${_esc(d.id)}">${t.changeName}</button>
                 </div>
+                <button type="button" class="btn btn-outline" id="addAreaPrefix" ${this._areaPrefixPending || this._loading ? 'disabled' : ''}>${this._lang==='pl'?'Dodaj prefiksy obszarów do kolejki':'Queue area prefixes'}</button>
                 <h3>📄 ${t.prefixChange}</h3>
                 <div class="prefix-row">
                   <input type="text" id="prefixOld" data-family-draft-context="${_esc(d.id)}" aria-label="${_esc(t.oldPrefix)}" value="${_esc(this._prefixOld || '')}" placeholder="${t.oldPrefix}">
@@ -3307,7 +3344,7 @@ class HAEntityRenamer extends HTMLElement {
                 <span style="color:var(--bento-text-secondary,#94A3B8);">→</span>
                 <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:12px;">${r.newId !== r.oldId ? _entityIdHtml(r.newId) : '<span>' + t.noIdChange + '</span>'}</span>
               </div>
-              <span class="proposal-source">${r.automatic ? t.automatic : r.source==='prefix' ? (this._lang==='pl'?'Prefiks':'Prefix') : (this._lang==='pl'?'Ręcznie':'Manual')}</span>
+              <span class="proposal-source">${r.automatic ? t.automatic : r.source==='area' ? (this._lang==='pl'?'Obszar':'Area') : r.source==='prefix' ? (this._lang==='pl'?'Prefiks':'Prefix') : (this._lang==='pl'?'Ręcznie':'Manual')}</span>
               ${r.newName ? '<div style="margin:6px 0 0 24px;min-width:0;overflow-wrap:anywhere;font-size:12px;color:var(--bento-text, var(--primary-text-color, #E2E8F0));">📝 ' + _esc(r.newName) + '</div>' : ''}
               ${hasImpact ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05);">
                 <span style="font-size:12px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
@@ -3502,6 +3539,8 @@ class HAEntityRenamer extends HTMLElement {
         this._removeDeviceFromQueue(btn.dataset.removeDevQueue);
       });
     });
+
+    root.getElementById('addAreaPrefix')?.addEventListener('click',()=>this._addAreaPrefix());
 
     // Prefix rename
     const applyPrefix = root.getElementById('applyPrefix');
