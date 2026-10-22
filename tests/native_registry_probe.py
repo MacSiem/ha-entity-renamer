@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NAMES = ('reference_planner', 'persistence', 'dashboard_plan', 'lovelace_native',
          'recorder_guard', 'native_registry', 'energy_plan', 'energy_native',
          'transaction', 'journal', 'helper_plan', 'helper_native', 'helper_persistence',
-         'prepared', 'helper_transaction', 'helper_observers', 'native_adapters')
+         'prepared', 'helper_transaction', 'helper_observers', 'native_adapters', 'history_guard')
 sources = {name: (ROOT / 'custom_components/ha_entity_renamer' / (name + '.py')).read_text()
            for name in NAMES}
 sources['native_helper_runtime_scenario'] = (ROOT / 'tests/native_helper_runtime_scenario.py').read_text()
@@ -45,6 +45,7 @@ for name, source in SOURCES.items():
     exec(compile(source, '<' + name + '>', 'exec'), module.__dict__)
 from migration_probe.native_registry import NativeRegistryIO, NativeRegistryBridge
 from migration_probe.recorder_guard import NativeRecorderGuard
+from migration_probe.history_guard import NativeHistoryGuard
 
 class Meter(SensorEntity):
     _attr_name = 'Renamer Probe Meter'
@@ -101,6 +102,8 @@ async def run(root):
         history = await recorder.async_add_executor_job(points, recorder, metadata_id)
         assert len(history) >= 1
         ceiling = history[-1][0]
+        historical = NativeHistoryGuard(guard)
+        historical_before = await historical.capture(mapping)
         linked = None
         if LINKED:
             from migration_probe.native_linked_scenario import make_linked
@@ -118,6 +121,7 @@ async def run(root):
         assert meter.entity_id == mapping[old]
         assert registry.async_get(mapping[old]).id == entry.id
         assert await recorder.async_add_executor_job(points, recorder, metadata_id, ceiling) == history
+        assert await historical.verify(historical_before)
         meter._attr_native_value = 43
         meter.async_write_ha_state()
         await guard.snapshot(mapping)
@@ -150,11 +154,13 @@ async def run(root):
             print({'helper_kind': HELPER_KIND, 'native_helper_activation': 'INACTIVE_PRESERVED' if INACTIVE else 'PASS', 'source_change_after_rename': 'NOT_APPLICABLE_INACTIVE' if INACTIVE else 'PASS',
                    'source_change_after_rollback': 'NOT_APPLICABLE_INACTIVE' if INACTIVE else 'PASS', 'helper_stable_identity': 'PASS'})
         assert (await bridge.inspect(prepared)).position == 'before'
+        assert await historical.verify(historical_before)
         assert meter.entity_id == old and registry.async_get(old).id == entry.id
         assert await recorder.async_add_executor_job(points, recorder, metadata_id, ceiling) == history
         print({'ha': __version__, 'native_registry_event': 'PASS', 'sensor_object_identity': 'PASS',
                'recorder_metadata_identity': 'PASS', 'historical_points': 'PASS',
                'new_state_point': 'PASS', 'compensation': 'PASS',
+               'historical_content_digest': 'PASS',
                'new_statistics_cycle': 'NOT_TESTED', 'live_config_access': False})
         if GROUPS:
             from migration_probe.native_group_scenario import run_groups
