@@ -81,7 +81,7 @@ async def run(root):
     assert await bridge.verify(descriptor, snapshot.revision)
     # Model HA's documented logged-but-not-raised Store failure using native code.
     from homeassistant.util.file import WriteError
-    async def fail(_): raise WriteError('synthetic fixture write failure')
+    async def fail(*args): raise WriteError('synthetic fixture write failure')
     fresh._store._async_write_data = fail
     current, forward = await bridge.plan(descriptor, {'sensor.fixture_old': 'sensor.fixture_new'})
     try:
