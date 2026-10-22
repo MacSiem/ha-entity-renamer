@@ -109,9 +109,30 @@ class TemplateBindingsTest(unittest.TestCase):
 
     def test_branch_merge_is_unknown_and_dynamic_rebind_remains_blocked(self):
         for source in ["{% set e='sensor.a' %}{% if flag %}{% set e=other %}{% endif %}{{ states(e) }}",
-                       "{% if flag %}{% set e='sensor.a' %}{% else %}{% set e='sensor.a' %}{% endif %}{{ states(e) }}",
                        "{% set e='sensor.a' %}{% set e=other %}{{ states(e) }}"]:
             self.assert_blocked(source, 'dynamic_reference')
+
+    def test_exhaustive_branches_join_known_entity_origins(self):
+        for source in [
+            "{% if flag %}{% set e='sensor.a' %}{% else %}{% set e='sensor.c' %}{% endif %}{{ states(e) }}",
+            "{% set e=other %}{% if flag %}{% set e='sensor.a' %}{% else %}{% set e='sensor.c' %}{% endif %}{{ states(e) }}",
+            "{% set e='sensor.a' %}{% if flag %}{% set e='sensor.c' %}{% endif %}{{ states(e) }}",
+            "{% if flag %}{% set e=['sensor.a'] %}{% else %}{% set e=['sensor.c'] %}{% endif %}{{ expand(e) | list }}",
+        ]:
+            self.assert_migrates(source, source.replace("'sensor.a'", "'sensor.b'"))
+
+    def test_branch_shape_or_missing_origin_cannot_authorize_migration(self):
+        for source in [
+            "{% if flag %}{% set e='sensor.a' %}{% endif %}{{ states(e) }}",
+            "{% if flag %}{% set e='sensor.a' %}{% else %}{% set e=['sensor.a'] %}{% endif %}{{ expand(e) }}",
+            "{% if flag %}{% set e='sensor.a' %}{% else %}{% set e=other %}{% endif %}{{ states(e) }}",
+        ]:
+            self.assert_blocked(source, 'dynamic_reference')
+
+    def test_exhaustive_branch_alias_escape_blocks_all_possible_origins(self):
+        source = ("{% if flag %}{% set e='sensor.a' %}{% else %}{% set e='sensor.c' %}{% endif %}"
+                  "{{ states(e) }}{{ e }}")
+        self.assert_blocked(source, 'unsupported_reference')
 
     def test_conditional_alias_escape_retains_possible_origins(self):
         for use in ['{{ alias }}', '{{ custom(alias) }}', '{{ expand(alias) }}']:

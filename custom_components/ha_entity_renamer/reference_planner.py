@@ -417,16 +417,20 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                     statements(node.else_, branch)
                     branches.append(branch)
                     for name in assigned([node]):
-                        # Losing a definite value must not lose possible source
-                        # origins: an escaped post-branch alias can still expose
-                        # an earlier constant at runtime on one branch.
-                        origins = set()
-                        for branch in [bindings] + branches:
+                        # Every branch starts from the incoming environment.
+                        # Join the actual possible outputs, not an extra path
+                        # that skips an exhaustive if/else. Equal known shapes
+                        # preserve all producer origins; undefined/dynamic or
+                        # incompatible branches remain unknown.
+                        origins, shapes = set(), set()
+                        for branch in branches:
                             bound = branch.get(name)
+                            shapes.add(bound[0] if bound else 'unknown')
                             if bound:
                                 charge(len(bound[1]))
                                 origins.update(bound[1])
-                        bindings[name] = ('unknown', tuple(sorted(origins))) if origins else None
+                        shape = next(iter(shapes)) if len(shapes) == 1 else 'unknown'
+                        bindings[name] = (shape, tuple(sorted(origins))) if origins else None
                 elif isinstance(node, nodes.Scope):
                     statements(node.body, bindings.copy())
                 else:
