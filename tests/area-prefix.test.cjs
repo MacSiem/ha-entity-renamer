@@ -69,3 +69,22 @@ test('impact analysis supersedes area lookup without a false added confirmation'
   }finally{dom.window.close();}
  }
 });
+
+// Reproduce native HA: change an area after the card has already loaded.
+test('area action reads current device and entity assignments instead of cached ones',async()=>{
+ const {dom,card}=fixture();try {
+  const reads=[];
+  card._hass.callWS=async msg=>{
+   reads.push(msg.type);
+   if(msg.type==='config/area_registry/list')return [{area_id:'fresh',name:'Nowy Salon'},{area_id:'override',name:'Biuro'}];
+   if(msg.type==='config/device_registry/list')return [{id:'d',name:'QA',area_id:'fresh'}];
+   if(msg.type==='config/entity_registry/list')return [{entity_id:'sensor.temperature',device_id:'d',area_id:'override'},{entity_id:'sensor.humidity',device_id:'d'}];
+   throw Error('Unexpected write or API');
+  };
+  await card._addAreaPrefix();
+  assert.deepEqual(Array.from(card._renameQueue,row=>[row.oldId,row.newId]),[
+   ['sensor.humidity','sensor.nowy_salon_humidity'],['sensor.temperature','sensor.biuro_temperature']]);
+  assert.equal(reads.filter(t=>t.endsWith('/list')).length,3);
+  assert.equal(card._loading,false);
+ }finally{dom.window.close();}
+});
