@@ -83,7 +83,14 @@ async def run_activation(scratch, planner, validation):
                 plan = planner.plan_yaml(root, mapping)
                 assert plan.ready and len(plan.patches) == 1, plan.issues
                 async with leases.hold(lambda: None):
-                    receipt = await validation.async_validate_proposed(hass, plan, scratch)
+                    try:
+                        receipt = await validation.async_validate_proposed(hass, plan, scratch)
+                    except validation.YAMLValidationError:
+                        print({'fixture_source_drift': [(item.path,
+                            hashlib.sha256((root / item.path).read_bytes()).hexdigest() == item.sha256,
+                            (root / item.path).stat().st_ino == item.inode)
+                            for item in plan.files]}, flush=True)
+                        raise
                     validation.assert_proposal_matches(receipt, plan)
                     validation.assert_activation_available(hass, receipt)
                     await hass.async_add_executor_job(validation.assert_validation_current, receipt)
