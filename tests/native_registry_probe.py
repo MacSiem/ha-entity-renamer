@@ -17,6 +17,7 @@ NAMES = ('reference_planner', 'persistence', 'dashboard_plan', 'lovelace_native'
 sources = {name: (ROOT / 'custom_components/ha_entity_renamer' / (name + '.py')).read_text()
            for name in NAMES}
 sources['native_helper_runtime_scenario'] = (ROOT / 'tests/native_helper_runtime_scenario.py').read_text()
+sources['native_group_scenario'] = (ROOT / 'tests/native_group_scenario.py').read_text()
 sources['native_linked_scenario'] = (ROOT / 'tests/native_linked_scenario.py').read_text()
 probe = '''
 import asyncio
@@ -155,6 +156,9 @@ async def run(root):
                'recorder_metadata_identity': 'PASS', 'historical_points': 'PASS',
                'new_state_point': 'PASS', 'compensation': 'PASS',
                'new_statistics_cycle': 'NOT_TESTED', 'live_config_access': False})
+        if GROUPS:
+            from migration_probe.native_group_scenario import run_groups
+            await run_groups(hass, bridge)
     finally:
         await hass.async_stop(force=True)
 
@@ -165,6 +169,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--container', choices=('ha-renamer-qa222', 'ha-renamer-min222'), default='ha-renamer-qa222')
 parser.add_argument('--linked', action='store_true')
 parser.add_argument('--helpers', action='store_true')
+parser.add_argument('--groups', action='store_true')
 parser.add_argument('--helper-kind', choices=('threshold', 'min', 'max', 'mean', 'median', 'range', 'sum'), default='threshold')
 args = parser.parse_args()
 container = args.container
@@ -175,7 +180,7 @@ assert inspected['State']['Running']
 mounts = [item.get('Source', '') for item in inspected['Mounts'] if item['Destination'] == '/config']
 assert len(mounts) == 1 and '/ha-tools-v4-20261016/renamer222-' in mounts[0]
 completed = subprocess.run(['docker', 'exec', '-i', container, 'python', '-B', '-'],
-    input='SOURCES = ' + repr(sources) + '\nLINKED = ' + repr(args.linked) + '\nHELPERS = ' + repr(args.helpers) + '\nHELPER_KIND = ' + repr(args.helper_kind) + '\n' + probe,
+    input='SOURCES = ' + repr(sources) + '\nLINKED = ' + repr(args.linked) + '\nHELPERS = ' + repr(args.helpers) + '\nHELPER_KIND = ' + repr(args.helper_kind) + '\nGROUPS = ' + repr(args.groups) + '\n' + probe,
     text=True, capture_output=True, timeout=120)
 print(completed.stdout)
 print(completed.stderr)
