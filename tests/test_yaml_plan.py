@@ -46,6 +46,14 @@ class YAMLPlannerTests(unittest.TestCase):
         self.assertEqual(plan.patches[0].proposed_bytes, source.replace('sensor.foo', 'sensor.new').encode())
         self.assertEqual(len(plan.patches[0].edits), 1)
 
+    def test_include_alias_cannot_cross_reference_and_text_contexts(self):
+        for source in ('entity_id: &inc !include ids.yaml\nlabel: *inc\n',
+                       'label: &inc !include ids.yaml\nentity_id: *inc\n'):
+            self.put('configuration.yaml', source)
+            self.put('ids.yaml', 'sensor.foo\n')
+            with self.assertRaises(YAMLPlanError):
+                self.plan()
+
     def test_recursive_packages_and_all_directory_tags(self):
         tags = ('list', 'named', 'merge_list', 'merge_named')
         self.put('configuration.yaml', 'homeassistant:\n  packages: !include packages.yaml\n')

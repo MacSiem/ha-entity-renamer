@@ -120,6 +120,21 @@ class ReferencePlannerTest(unittest.TestCase):
         self.assertEqual(plan.value, source)
         self.assertIn("unsupported_reference", [m.code for m in plan.markers])
 
+    def test_loop_bindings_do_not_rewrite_local_states(self):
+        source = "{% for states in items %}{{ states.sensor.a }}{% endfor %}"
+        plan = plan_references(source, {"sensor.a": "sensor.b"}, jinja())
+        self.assertEqual(plan.value, source)
+        self.assertIn("unsupported_template_scope", [m.code for m in plan.markers])
+
+    def test_spaced_attribute_access_is_migrated(self):
+        for source in ("{{ states . sensor . a.state }}", "{{ states.sensor . a }}",
+                       "{{ states .sensor.a }}"):
+            plan = plan_references(source, {"sensor.a": "sensor.b"}, jinja())
+            self.assertFalse(plan.markers)
+            self.assertEqual(len(plan.changes), 1)
+            self.assertNotIn(". a", plan.value)
+            self.assertIn("sensor.b", plan.value)
+
     def test_each_consumer_requires_explicit_supported_scopes(self):
         for consumer in Consumer:
             plan = plan_references({"entity": "sensor.a"}, {"sensor.a": "sensor.b"}, refs(("entity",), consumer=consumer))
