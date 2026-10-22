@@ -7,7 +7,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 
-async def make_linked(hass, bridge, registry_change, history_check, helpers=False):
+async def make_linked(hass, bridge, registry_change, history_check, helpers=False, helper_kind="threshold", component=None):
     from homeassistant.components.energy.data import EnergyManager
     from homeassistant.components.lovelace.const import LOVELACE_DATA
     from homeassistant.components.lovelace.dashboard import LovelaceStorage
@@ -24,7 +24,7 @@ async def make_linked(hass, bridge, registry_change, history_check, helpers=Fals
     helper = None
     if helpers:
         from .native_helper_runtime_scenario import create_helper
-        helper = await create_helper(hass, old, new)
+        helper = await create_helper(hass, old, new, helper_kind, component)
         await bridge.io.flush('entity')
     original_registry = bridge.io.document('entity')
     default = LovelaceStorage(hass, None)

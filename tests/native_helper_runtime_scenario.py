@@ -2,7 +2,7 @@
 from types import MappingProxyType, SimpleNamespace
 
 
-async def create_helper(hass, old, new):
+async def create_helper(hass, old, new, kind="threshold", component=None):
     from homeassistant.config_entries import ConfigEntry, ConfigEntryState
     from homeassistant.helpers import entity_registry as er
     from .helper_observers import NativeHelperObservers, RegistryMappingProof
@@ -10,11 +10,30 @@ async def create_helper(hass, old, new):
     from .helper_persistence import NativeHelperPersistence
     from .helper_transaction import prepare_helper, HelperTransactionAdapter
 
-    entry = ConfigEntry(domain='threshold', title='Renamer threshold fixture',
-        data={}, options={'name': 'Renamer threshold fixture', 'entity_id': old,
-                          'hysteresis': 0.0, 'lower': None, 'upper': 42.5},
-        discovery_keys=MappingProxyType({}), source='user', version=1, minor_version=2,
-        subentries_data=[], unique_id='renamer-threshold-fixture')
+    auxiliary = None
+    if kind == 'threshold':
+        domain, minor = 'threshold', 2
+        options = {'name': 'Renamer threshold fixture', 'entity_id': old,
+                   'hysteresis': 0.0, 'lower': None, 'upper': 42.5}
+    else:
+        from homeassistant.components.sensor import SensorEntity
+        assert kind in ('min', 'max', 'mean', 'median', 'range', 'sum')
+        assert component is not None
+        class Auxiliary(SensorEntity):
+            _attr_name = 'Renamer auxiliary fixture'
+            _attr_unique_id = 'renamer-auxiliary-fixture'
+            _attr_native_value = 3
+            _attr_native_unit_of_measurement = 'kWh'
+            _attr_should_poll = False
+        auxiliary = Auxiliary()
+        await component.async_add_entities([auxiliary])
+        domain, minor = 'min_max', 1
+        options = {'name': 'Renamer aggregation fixture',
+                   'entity_ids': [old, auxiliary.entity_id], 'type': kind, 'round_digits': 2}
+    entry = ConfigEntry(domain=domain, title='Renamer helper fixture',
+        data={}, options=options,
+        discovery_keys=MappingProxyType({}), source='user', version=1, minor_version=minor,
+        subentries_data=[], unique_id='renamer-helper-fixture')
     await hass.config_entries.async_add(entry)
     await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.LOADED, entry.state
@@ -50,4 +69,4 @@ async def create_helper(hass, old, new):
 
     await runtime(before)
     return SimpleNamespace(change=change, adapter=adapter, runtime=runtime,
-                           before=before, after=change.after)
+                           before=before, after=change.after, auxiliary=auxiliary)

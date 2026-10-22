@@ -105,7 +105,8 @@ async def run(root):
             from migration_probe.native_linked_scenario import make_linked
             async def history_check():
                 return await recorder.async_add_executor_job(points, recorder, metadata_id, ceiling) == history
-            linked = await make_linked(hass, bridge, prepared, history_check, helpers=HELPERS)
+            linked = await make_linked(hass, bridge, prepared, history_check, helpers=HELPERS,
+                                       helper_kind=HELPER_KIND, component=component)
             applied = await linked.coordinator.apply(linked.plan, linked.plan.fingerprint, 'linked_op')
             assert applied.status == 'applied', applied
             assert len(linked.updates) == 1
@@ -122,6 +123,9 @@ async def run(root):
         current = await recorder.async_add_executor_job(points, recorder, metadata_id)
         assert float(current[-1][1]) == 43 and current[-1][0] > ceiling, (history, current, hass.states.get(meter.entity_id).state)
         if linked and linked.helper:
+            if linked.helper.auxiliary:
+                linked.helper.auxiliary._attr_native_value = 5
+                linked.helper.auxiliary.async_write_ha_state()
             await linked.helper.runtime(linked.helper.after)
         if linked:
             await linked.reopen()
@@ -135,11 +139,14 @@ async def run(root):
         else:
             await bridge.compensate(prepared, lambda: None)
         if linked and linked.helper:
+            if linked.helper.auxiliary:
+                linked.helper.auxiliary._attr_native_value = 2
+                linked.helper.auxiliary.async_write_ha_state()
             meter._attr_native_value = 41
             meter.async_write_ha_state()
             await hass.async_block_till_done()
             await linked.helper.runtime(linked.helper.before)
-            print({'native_helper_activation': 'PASS', 'source_change_after_rename': 'PASS',
+            print({'helper_kind': HELPER_KIND, 'native_helper_activation': 'PASS', 'source_change_after_rename': 'PASS',
                    'source_change_after_rollback': 'PASS', 'helper_stable_identity': 'PASS'})
         assert (await bridge.inspect(prepared)).position == 'before'
         assert meter.entity_id == old and registry.async_get(old).id == entry.id
@@ -158,6 +165,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--container', choices=('ha-renamer-qa222', 'ha-renamer-min222'), default='ha-renamer-qa222')
 parser.add_argument('--linked', action='store_true')
 parser.add_argument('--helpers', action='store_true')
+parser.add_argument('--helper-kind', choices=('threshold', 'min', 'max', 'mean', 'median', 'range', 'sum'), default='threshold')
 args = parser.parse_args()
 container = args.container
 assert not args.helpers or args.linked, '--helpers requires --linked'
@@ -167,7 +175,7 @@ assert inspected['State']['Running']
 mounts = [item.get('Source', '') for item in inspected['Mounts'] if item['Destination'] == '/config']
 assert len(mounts) == 1 and '/ha-tools-v4-20261016/renamer222-' in mounts[0]
 completed = subprocess.run(['docker', 'exec', '-i', container, 'python', '-B', '-'],
-    input='SOURCES = ' + repr(sources) + '\nLINKED = ' + repr(args.linked) + '\nHELPERS = ' + repr(args.helpers) + '\n' + probe,
+    input='SOURCES = ' + repr(sources) + '\nLINKED = ' + repr(args.linked) + '\nHELPERS = ' + repr(args.helpers) + '\nHELPER_KIND = ' + repr(args.helper_kind) + '\n' + probe,
     text=True, capture_output=True, timeout=120)
 print(completed.stdout)
 print(completed.stderr)
