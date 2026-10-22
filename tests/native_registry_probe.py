@@ -16,6 +16,7 @@ sources = {name: (ROOT / 'custom_components/ha_entity_renamer' / (name + '.py'))
 probe = '''
 import asyncio
 import logging
+import os
 import sys
 import tempfile
 import types
@@ -56,6 +57,7 @@ def points(recorder, metadata_id, ceiling=None):
         return [tuple(row) for row in session.execute(query.order_by(States.state_id))]
 
 async def run(root):
+    os.chdir(root)
     hass = HomeAssistant(root)
     config = {'recorder': {'db_url': 'sqlite:///' + root + '/fixture.db', 'commit_interval': 0,
                             'auto_purge': False, 'auto_repack': False},
@@ -68,6 +70,8 @@ async def run(root):
         hass.config_entries = ConfigEntries(hass, config)
         await loader.async_get_custom_components(hass)
         assert await async_load_base_functionality(hass)
+        from homeassistant.helpers.recorder import async_initialize_recorder
+        async_initialize_recorder(hass)
         assert await async_setup_component(hass, 'recorder', config)
         component = EntityComponent(logging.getLogger('probe'), 'sensor', hass, timedelta(seconds=60))
         meter = Meter()
