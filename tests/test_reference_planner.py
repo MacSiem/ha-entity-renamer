@@ -22,6 +22,12 @@ def jinja(path=()):
 
 
 class ReferencePlannerTest(unittest.TestCase):
+    def test_shadowed_states_function_is_not_blindly_rewritten(self):
+        source = "{% set states = custom_lookup %}{{ states('sensor.a') }}"
+        plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+        self.assertEqual(plan.value, source)
+        self.assertTrue(plan.markers)
+
     def test_nested_simultaneous_swaps_keys_order_types_no_mutation(self):
         source = {"sensor.a": ["sensor.b", {"ref": "sensor.a"}], "meta": [1, True, None, 2.5]}
         plan = plan_references(source, {"sensor.a": "sensor.b", "sensor.b": "sensor.a"}, refs(()))

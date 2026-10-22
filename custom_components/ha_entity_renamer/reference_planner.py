@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from bisect import bisect_right
 from enum import Enum
 import re
-from typing import Any
+from typing import Any, Union
 
 
 class PlanError(ValueError):
@@ -28,7 +28,7 @@ class Syntax(str, Enum):
     JINJA = "jinja"
 
 
-Path = tuple[str | int, ...]
+Path = tuple[Union[str, int], ...]
 
 
 @dataclass(frozen=True)
@@ -161,6 +161,9 @@ def plan_references(
         return any(match.group(1) in mapping for match in _TOKEN.finditer(text))
 
     def template(text: str, path: Path) -> str:
+        if re.search(r"{%[-+]?\s*(?:set|macro|import|from|call|include|extends)\b", text):
+            markers.append(Marker(path, "unsupported_template_scope", "Template bindings require syntax-aware resolution"))
+            return text
         if _EXTERNAL.search(text):
             markers.append(Marker(path, "external_content", "URL/script-bearing field left unchanged"))
             return text
