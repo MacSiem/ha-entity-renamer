@@ -51,6 +51,18 @@ def _digest(raw):
 
 
 def _stage(config_root, plan, baseline, proposed):
+    reader = _Reader(config_root, Limits(max_file_bytes=_MAX_BYTES))
+    try:
+        return _stage_owned(reader, plan, baseline, proposed)
+    except (OSError, ValueError) as error:
+        if isinstance(error, YAMLValidationError):
+            raise
+        raise YAMLValidationError('validation_staging_failed') from None
+    finally:
+        os.close(reader.root)
+
+
+def _stage_owned(reader, plan, baseline, proposed):
     if not plan.ready or not plan.patches:
         raise YAMLValidationError('yaml_plan_not_ready')
     reachable = {'configuration.yaml'}
@@ -63,7 +75,6 @@ def _stage(config_root, plan, baseline, proposed):
         reachable = expanded
     if any(patch.path not in reachable for patch in plan.patches):
         raise YAMLValidationError('yaml_activation_outside_native_config')
-    reader = _Reader(config_root, Limits(max_file_bytes=_MAX_BYTES))
     paths = {item.path for item in plan.files}
     # Secrets searches walk up from each included YAML to the configuration root.
     for path in tuple(paths):
@@ -193,8 +204,6 @@ def _stage(config_root, plan, baseline, proposed):
         if isinstance(exc, YAMLValidationError):
             raise
         raise YAMLValidationError('validation_staging_failed') from None
-    finally:
-        os.close(reader.root)
 
 
 def assert_validation_current(receipt):

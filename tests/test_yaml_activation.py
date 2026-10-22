@@ -24,6 +24,39 @@ class ActivationTests(unittest.IsolatedAsyncioTestCase):
     def receipt(self, domains=('automation', 'script'), unsupported=()):
         return validation.ValidationReceipt('/unused', (), (), (), domains, unsupported, '2025.6.0')
 
+    async def test_cancelled_staging_drains_before_caller_can_remove_private_files(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        finished = []
+        async def work():
+            entered.set()
+            await release.wait()
+            finished.append(True)
+        hass = SimpleNamespace(async_add_executor_job=lambda *args: asyncio.create_task(work()))
+        task = asyncio.create_task(validation._settled_executor(hass, lambda: None))
+        await entered.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(finished, [True])
+
+    async def test_role_revocation_after_reload_prevents_next_domain_reload(self):
+        calls, allowed = [], [True]
+        async def call(domain, service, data, **kwargs):
+            calls.append(domain)
+            allowed[0] = False
+        def guard():
+            if not allowed[0]:
+                raise PermissionError('revoked')
+        hass = SimpleNamespace(services=SimpleNamespace(has_service=lambda *args: True, async_call=call))
+        with self.assertRaises(validation.YAMLValidationError):
+            await validation.async_activate_yaml(hass, self.receipt(), context=None, guard=guard)
+        self.assertEqual(calls, ['automation'])
+
     async def test_unknown_domains_and_missing_services_block_before_any_reload(self):
         calls = []
         services = SimpleNamespace(has_service=lambda domain, service: domain == 'automation',
