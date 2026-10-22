@@ -704,7 +704,7 @@ const HA_ENTITY_RENAMER_BENTO_CSS = `
 .header-badge {
   margin-left: auto;
   background: var(--bento-grad-primary); color: #fff;
-  font-size: 11px; padding: 4px 10px; border-radius: var(--bento-radius-pill);
+  font-size: 12px; padding: 4px 10px; border-radius: var(--bento-radius-pill);
   font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
   box-shadow: 0 4px 14px -2px var(--bento-primary-glow);
 }
@@ -777,7 +777,7 @@ const HA_ENTITY_RENAMER_BENTO_CSS = `
   font-feature-settings: "tnum" 1;
 }
 .stat-label, .stat-lbl, .metric-label, .kpi-lbl {
-  font-size: 11px; color: var(--bento-text-secondary);
+  font-size: 12px; color: var(--bento-text-secondary);
   margin-top: 4px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
 }
 .stat-num {
@@ -828,7 +828,7 @@ const HA_ENTITY_RENAMER_BENTO_CSS = `
   line-height: 1.55;
 }
 .last-updated {
-  font-size: 11px; color: var(--bento-text-muted);
+  font-size: 12px; color: var(--bento-text-muted);
   text-align: right; margin-top: 12px; font-feature-settings: "tnum" 1;
 }
 
@@ -879,7 +879,7 @@ const HA_ENTITY_RENAMER_BENTO_CSS = `
 /* ── Badges / Status (modern pill) ───────────── */
 .badge, .status-badge, .tag, .chip {
   padding: 4px 12px; border-radius: var(--bento-radius-pill);
-  font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; gap: 5px;
   letter-spacing: 0.04em; text-transform: uppercase;
   border: 1px solid;
 }
@@ -889,7 +889,7 @@ const HA_ENTITY_RENAMER_BENTO_CSS = `
 .badge-info { background: var(--bento-info-light); color: var(--bento-info); border-color: var(--bento-info-border); }
 
 .count-badge {
-  font-size: 11px; font-weight: 700; padding: 3px 10px;
+  font-size: 12px; font-weight: 700; padding: 3px 10px;
   border-radius: var(--bento-radius-pill); display: inline-flex; align-items: center;
   font-feature-settings: "tnum" 1;
 }
@@ -902,7 +902,7 @@ const HA_ENTITY_RENAMER_BENTO_CSS = `
 table { width: 100%; border-collapse: separate; border-spacing: 0; }
 th {
   background: var(--bento-bg-2); color: var(--bento-text-secondary);
-  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
   padding: 12px 16px; text-align: left;
   border-bottom: 1px solid var(--bento-border);
 }
@@ -1028,12 +1028,12 @@ pre {
     grid-template-columns: repeat(2, 1fr); gap: 10px;
   }
   .stat-value, .stat-val, .kpi-val, .metric-val { font-size: 22px; }
-  .stat-label, .stat-lbl, .kpi-lbl, .metric-lbl { font-size: 10px; }
+  .stat-label, .stat-lbl, .kpi-lbl, .metric-lbl { font-size: 12px; }
   .send-grid, .schedule-grid { grid-template-columns: 1fr; }
   .log-entry { flex-wrap: wrap; gap: 2px 6px; padding: 8px 10px; }
-  .log-domain { max-width: 60%; font-size: 11.5px; }
-  .log-msg { flex-basis: 100%; max-width: 100%; font-size: 11.5px; }
-  pre { padding: 12px; font-size: 11.5px; }
+  .log-domain { max-width: 60%; font-size: 12px; }
+  .log-msg { flex-basis: 100%; max-width: 100%; font-size: 12px; }
+  pre { padding: 12px; font-size: 12px; }
   h2 { font-size: 18px; }
   h3 { font-size: 15px; }
   table { font-size: 12.5px; }
@@ -1041,7 +1041,7 @@ pre {
 }
 @media (max-width: 480px) {
   .tabs { gap: 1px !important; padding: 2px !important; }
-  .tab, .tab-button, .tab-btn { padding: 5px 10px !important; font-size: 11px !important; }
+  .tab, .tab-button, .tab-btn { padding: 5px 10px !important; font-size: 12px !important; }
   .overview-grid, .stats-grid, .summary-grid { grid-template-columns: 1fr 1fr; }
   .stat-value, .stat-val, .kpi-val { font-size: 18px; }
 }
@@ -1057,7 +1057,7 @@ const _LOCAL_INTRO_PL = {
   steps: ['Wybierz encję i ustaw nowy identyfikator.', 'Zmiana prefiksu: sensor.old_* → sensor.new_*.', 'Sprawdź i w razie potrzeby popraw odwołania w dashboardach Lovelace.']
 };
 const _LOCAL_SUPPORT_KEY = 'ha-entity-renamer-support-dismissed';
-const _LOCAL_DONATE_HTML = '<div class="donate-section" data-source="own-card" style="margin:8px 0 0;padding:4px 0;background:none;border:0;box-shadow:none;min-height:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex-direction:row;justify-content:flex-start;text-align:left"><a href="https://buymeacoffee.com/macsiem" target="_blank" rel="noopener noreferrer" style="font-size:11px;color:var(--secondary-text-color,#64748b);font-weight:400;text-decoration:underline">Optional support for HA Tools</a><button type="button" class="support-dismiss" aria-label="Dismiss support link" style="margin-left:auto;padding:2px 6px;min-height:0;line-height:1;border:0;background:none;color:var(--secondary-text-color,#64748b);cursor:pointer">×</button></div>';
+const _LOCAL_DONATE_HTML = '<div class="donate-section" data-source="own-card" style="margin:8px 0 0;padding:4px 0;background:none;border:0;box-shadow:none;min-height:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex-direction:row;justify-content:flex-start;text-align:left"><a href="https://buymeacoffee.com/macsiem" target="_blank" rel="noopener noreferrer" style="font-size:12px;color:var(--secondary-text-color,#64748b);font-weight:400;text-decoration:underline">Optional support for HA Tools</a><button type="button" class="support-dismiss" aria-label="Dismiss support link" style="margin-left:auto;padding:2px 6px;min-height:0;line-height:1;border:0;background:none;color:var(--secondary-text-color,#64748b);cursor:pointer">×</button></div>';
 function _localSupportDismissed() { try { return localStorage.getItem(_LOCAL_SUPPORT_KEY) === '1'; } catch (_) { return false; } }
 function _bindLocalSupportDismiss(root) { root.querySelector('.support-dismiss')?.addEventListener('click', () => { try { localStorage.setItem(_LOCAL_SUPPORT_KEY, '1'); } catch (_) {} root.querySelector('.donate-section[data-source="own-card"]')?.remove(); }); }
 function _localIntroDismissed() {
@@ -2707,7 +2707,7 @@ class HAEntityRenamer extends HTMLElement {
 .intro-banner .intro-headline {  font-weight: 700; font-size: 14.5px; margin-bottom: 10px; letter-spacing: -0.02em;  background: linear-gradient(135deg, #6366f1, #ec4899);  -webkit-background-clip: text; background-clip: text; color: transparent;  display: flex; align-items: center; gap: 8px;}
 .intro-banner .intro-steps {  margin: 8px 0 0; padding: 0; list-style: none; counter-reset: introstep;}
 .intro-banner .intro-steps li {  margin-bottom: 8px; line-height: 1.55; color: var(--bento-text, #0c0a09);  padding-left: 32px; position: relative; counter-increment: introstep;  font-size: 12.5px;}
-.intro-banner .intro-steps li::before {  content: counter(introstep); position: absolute; left: 0; top: -1px;  width: 22px; height: 22px; border-radius: 50%;  background: var(--bento-card, #fff); border: 1px solid rgba(99,102,241,0.25);  display: flex; align-items: center; justify-content: center;  font-size: 11px; font-weight: 800; color: #6366f1;  font-family: 'JetBrains Mono', ui-monospace, monospace;  font-feature-settings: 'tnum' 1;}
+.intro-banner .intro-steps li::before {  content: counter(introstep); position: absolute; left: 0; top: -1px;  width: 22px; height: 22px; border-radius: 50%;  background: var(--bento-card, #fff); border: 1px solid rgba(99,102,241,0.25);  display: flex; align-items: center; justify-content: center;  font-size: 12px; font-weight: 800; color: #6366f1;  font-family: 'JetBrains Mono', ui-monospace, monospace;  font-feature-settings: 'tnum' 1;}
 .intro-banner .intro-dismiss {  position: absolute; top: 12px; right: 14px;  background: var(--bento-card, transparent); border: 1px solid var(--bento-border, transparent);  cursor: pointer; font-size: 14px; line-height: 1;  color: var(--bento-text-secondary, #64748B);  padding: 4px 8px; border-radius: 999px;  transition: all 0.15s ease;}
 .intro-banner .intro-dismiss:hover {  background: var(--bento-bg-2, #e7e5e4); color: var(--bento-text, #0c0a09);  transform: rotate(90deg);}
 :host(.bento-dark) .intro-banner { background: linear-gradient(135deg, rgba(129,140,248,0.14), rgba(244,114,182,0.10)); border-color: rgba(129,140,248,0.30); }
@@ -2781,7 +2781,7 @@ class HAEntityRenamer extends HTMLElement {
       .rename-confirm-counts span {
         padding: 4px 10px; border-radius: 999px;
         background: rgba(59,130,246,0.12); color: var(--bento-primary, #3B82F6);
-        font-size: 11px; font-weight: 700;
+        font-size: 12px; font-weight: 700;
       }
       .rename-preview {
         max-height: 260px; overflow-y: auto; border: 1px solid var(--bento-border, #334155);
@@ -2790,7 +2790,7 @@ class HAEntityRenamer extends HTMLElement {
       .rename-preview-row {
         display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
         gap: 8px; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.05);
-        align-items: center; font-size: 11px; font-family: 'JetBrains Mono', monospace;
+        align-items: center; font-size: 12px; font-family: 'JetBrains Mono', monospace;
       }
       .rename-preview-row:last-child { border-bottom: 0; }
       .rename-preview-old, .rename-preview-new {
@@ -2800,7 +2800,7 @@ class HAEntityRenamer extends HTMLElement {
       .rename-preview-new { color: #86EFAC; }
       .rename-preview-arrow { color: var(--bento-text-secondary, #94A3B8); }
       .rename-preview-detail {
-        grid-column: 1 / -1; color: var(--bento-text, var(--primary-text-color, #E2E8F0)); font-family: inherit; font-size: 10px;
+        grid-column: 1 / -1; color: var(--bento-text, var(--primary-text-color, #E2E8F0)); font-family: inherit; font-size: 12px;
       }
       .rename-preview-more, .rename-preview-empty {
         padding: 10px; color: var(--bento-text-secondary, #94A3B8);
@@ -2825,13 +2825,13 @@ class HAEntityRenamer extends HTMLElement {
       .apply-result-ok { font-size: 12px; color: var(--bento-text, #E2E8F0); }
       .apply-result-failures { margin-top: 10px; }
       .apply-result-failures-title {
-        font-size: 11px; font-weight: 700; color: var(--bento-warning, #F59E0B);
+        font-size: 12px; font-weight: 700; color: var(--bento-warning, #F59E0B);
         text-transform: uppercase; margin-bottom: 6px;
       }
       .apply-result-failure {
         display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px;
         padding: 8px 0; border-top: 1px solid rgba(255,255,255,0.06);
-        font-size: 11px;
+        font-size: 12px;
       }
       .apply-result-path {
         color: var(--bento-text, #E2E8F0); font-family: 'JetBrains Mono', monospace;
@@ -2853,7 +2853,7 @@ class HAEntityRenamer extends HTMLElement {
 
       .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: 12px; margin-bottom: 20px; }
       .stat-card .num { font-size: 26px; font-weight: 700; }
-      .stat-card .label { font-size: 11px; text-transform: uppercase; color: var(--bento-text-secondary, #94A3B8); margin-top: 4px; }
+      .stat-card .label { font-size: 12px; text-transform: uppercase; color: var(--bento-text-secondary, #94A3B8); margin-top: 4px; }
 
       .device-list { max-height: 60vh; overflow-y: auto; }
       .device-item {
@@ -2867,7 +2867,7 @@ class HAEntityRenamer extends HTMLElement {
       }
       .device-header:hover { background: rgba(59,130,246,0.05); }
       .device-name { flex: 1; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .device-meta { font-size: 11px; color: var(--bento-text-secondary, #94A3B8); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .device-meta { font-size: 12px; color: var(--bento-text-secondary, #94A3B8); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .device-expand { font-size: 12px; transition: transform 0.2s; }
       .device-expand.open { transform: rotate(90deg); }
       .entity-list { padding: 0 16px 12px; }
@@ -2877,7 +2877,7 @@ class HAEntityRenamer extends HTMLElement {
       }
       .entity-id { flex: 1; font-family: 'JetBrains Mono', 'Fira Code', monospace; color: var(--bento-text-secondary, #94A3B8); word-break: break-all; }
       .entity-name { flex: 1; min-width: 120px; }
-      .entity-domain { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.12); color: var(--bento-text, var(--primary-text-color, #E2E8F0)); }
+      .entity-domain { font-size: 12px; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.12); color: var(--bento-text, var(--primary-text-color, #E2E8F0)); }
 
       .btn {
         padding: 8px 16px; border: none; border-radius: 8px; cursor: pointer;
@@ -2887,7 +2887,7 @@ class HAEntityRenamer extends HTMLElement {
       .btn-primary:hover { opacity: 0.85; }
       .btn-danger { background: #EF4444; color: white; }
       .btn-danger:hover { opacity: 0.85; }
-      .btn-sm { padding: 4px 10px; font-size: 11px; }
+      .btn-sm { padding: 4px 10px; font-size: 12px; }
       .btn-outline {
         background: transparent; border: 1px solid var(--bento-border, #334155);
         color: var(--bento-text, #E2E8F0);
@@ -2911,12 +2911,12 @@ class HAEntityRenamer extends HTMLElement {
       .prefix-row .arrow { color: var(--bento-text-secondary, #94A3B8); }
 
       .queue-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-      .queue-table th { text-align: left; padding: 8px; font-size: 11px; text-transform: uppercase; color: var(--bento-text-secondary, #94A3B8); border-bottom: 1px solid var(--bento-border, #334155); }
-      .queue-table td { padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.04); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+      .queue-table th { text-align: left; padding: 8px; font-size: 12px; text-transform: uppercase; color: var(--bento-text-secondary, #94A3B8); border-bottom: 1px solid var(--bento-border, #334155); }
+      .queue-table td { padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.04); font-family: 'JetBrains Mono', monospace; font-size: 12px; }
       .queue-table .old { color: #FCA5A5; text-decoration: line-through; }
       .queue-table .new { color: #86EFAC; }
-      .queue-table .impact { font-family: inherit; font-size: 11px; }
-      .impact-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; margin: 1px; }
+      .queue-table .impact { font-family: inherit; font-size: 12px; }
+      .impact-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 12px; margin: 1px; }
       .impact-badge.automation { background: rgba(168,85,247,0.15); color: #C084FC; }
       .impact-badge.script { background: rgba(245,158,11,0.15); color: #FCD34D; }
       .impact-badge.dashboard { background: rgba(59,130,246,0.15); color: var(--bento-text, var(--primary-text-color, #E2E8F0)); }
@@ -2924,7 +2924,7 @@ class HAEntityRenamer extends HTMLElement {
       .queue-actions { display: flex; gap: 8px; margin-bottom: 12px; justify-content: flex-end; }
 
       .log-entry { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 12px; }
-      .log-time { color: var(--bento-text-secondary, #94A3B8); font-size: 10px; }
+      .log-time { color: var(--bento-text-secondary, #94A3B8); font-size: 12px; }
       .log-ok { color: #86EFAC; }
       .log-err { color: #FCA5A5; }
 
@@ -2953,22 +2953,22 @@ class HAEntityRenamer extends HTMLElement {
           h1 { font-size: 18px; }
           .stats-row { grid-template-columns: repeat(auto-fit, minmax(70px, 1fr)); gap: 8px; }
           .stat-card .num { font-size: 20px; }
-          .stat-card .label { font-size: 10px; }
+          .stat-card .label { font-size: 12px; }
           .device-header { padding: 10px 12px; gap: 8px; }
           .device-name { font-size: 13px; }
-          .device-meta { font-size: 10px; }
-          .entity-row { gap: 4px; padding: 4px 0; font-size: 11px; }
+          .device-meta { font-size: 12px; }
+          .entity-row { gap: 4px; padding: 4px 0; font-size: 12px; }
           .entity-id { min-width: 0; }
-          .entity-name { min-width: 80px; font-size: 11px; }
-          .btn { padding: 6px 12px; font-size: 11px; }
-          .btn-sm { padding: 3px 8px; font-size: 10px; }
+          .entity-name { min-width: 80px; font-size: 12px; }
+          .btn { padding: 6px 12px; font-size: 12px; }
+          .btn-sm { padding: 3px 8px; font-size: 12px; }
           .prefix-row { gap: 6px; }
           .prefix-row input { width: 100%; max-width: 140px; padding: 5px 8px; font-size: 12px; }
-          .queue-table { font-size: 11px; }
-          .queue-table th { padding: 6px; font-size: 10px; }
+          .queue-table { font-size: 12px; }
+          .queue-table th { padding: 6px; font-size: 12px; }
           .queue-table td { padding: 6px; }
           .queue-actions { flex-wrap: wrap; justify-content: center; }
-          .log-entry { font-size: 11px; padding: 4px 0; }
+          .log-entry { font-size: 12px; padding: 4px 0; }
         }
         .rename-preview-row { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center; }
         .automatic-row-ids { min-width:0;overflow-wrap:anywhere;font-size:12px;line-height:1.6; }
@@ -2996,9 +2996,11 @@ class HAEntityRenamer extends HTMLElement {
         .queue-group-heading { display:flex;justify-content:space-between;gap:8px;overflow-wrap:anywhere;font-size:14px; }
         ${_FAMILY_CONTROL_CSS}
         .tabs { flex-wrap:nowrap !important;overflow-x:auto !important;overflow-y:hidden !important;scrollbar-width:thin; }
-        :host .tabs button { flex:0 0 auto;white-space:nowrap !important; }
+        :host .tabs button { flex:0 0 auto !important;white-space:nowrap !important;font-size:14px !important; }
         .list-chips { flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin; }
         :host .list-chips button { flex:0 0 auto;white-space:nowrap !important; }
+        .card { max-width:1200px;margin-inline:auto;font-size:14px;line-height:1.5; }
+        .device-name,.entity-name,.btn,.list-toolbar input,.list-toolbar select { font-size:14px; }
         .registry-id { display:inline-block;max-width:100%;min-width:0;overflow-x:auto;vertical-align:bottom;white-space:normal;word-break:normal;overflow-wrap:normal;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .automatic-target { display:flex;align-items:baseline;gap:4px; }
         .automatic-target code { min-width:0;flex:1; }
@@ -3252,12 +3254,12 @@ class HAEntityRenamer extends HTMLElement {
               </div>
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 <span style="color:var(--bento-text-secondary,#94A3B8);">→</span>
-                <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? _entityIdHtml(r.newId) : '<span>' + t.noIdChange + '</span>'}</span>
+                <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:12px;">${r.newId !== r.oldId ? _entityIdHtml(r.newId) : '<span>' + t.noIdChange + '</span>'}</span>
               </div>
               <span class="proposal-source">${r.automatic ? t.automatic : r.source==='prefix' ? (this._lang==='pl'?'Prefiks':'Prefix') : (this._lang==='pl'?'Ręcznie':'Manual')}</span>
-              ${r.newName ? '<div style="margin:6px 0 0 24px;min-width:0;overflow-wrap:anywhere;font-size:11px;color:var(--bento-text, var(--primary-text-color, #E2E8F0));">📝 ' + _esc(r.newName) + '</div>' : ''}
+              ${r.newName ? '<div style="margin:6px 0 0 24px;min-width:0;overflow-wrap:anywhere;font-size:12px;color:var(--bento-text, var(--primary-text-color, #E2E8F0));">📝 ' + _esc(r.newName) + '</div>' : ''}
               ${hasImpact ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05);">
-                <span style="font-size:10px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
+                <span style="font-size:12px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
                 ${imp.automations.map(a => '<span class="impact-badge automation">⚙ ' + _esc(a) + '</span>').join('')}
                 ${imp.scripts.map(s => '<span class="impact-badge script">📜 ' + _esc(s) + '</span>').join('')}
                 ${imp.dashboards.map(d => '<span class="impact-badge dashboard">📊 ' + _esc(d) + '</span>').join('')}
@@ -3302,7 +3304,7 @@ class HAEntityRenamer extends HTMLElement {
             ${l.error ? `<br><small style="color:#FCA5A5">${_esc(l.error)}</small>` : ''}
             ${this._dashboardCoverageHtml(imp)}
             ${hasImpact ? `<div style="margin-top:4px;padding-left:24px;">
-              <span style="font-size:10px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
+              <span style="font-size:12px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
               ${automations.map(a => '<span class="impact-badge automation">⚙ ' + _esc(a) + '</span>').join('')}
               ${scripts.map(s => '<span class="impact-badge script">📜 ' + _esc(s) + '</span>').join('')}
               ${dashboards.map(d => '<span class="impact-badge dashboard">📊 ' + _esc(d) + '</span>').join('')}
