@@ -37,14 +37,14 @@ async def run():
         (root / 'packages').mkdir()
         (root / 'configuration.yaml').write_text('homeassistant:\n  packages: !include_dir_named packages\nscript: !include scripts.yaml\n')
         (root / 'scripts.yaml').write_text('direct:\n  sequence:\n    - action: homeassistant.update_entity\n      target:\n        entity_id: sensor.old\n')
-        (root / 'packages' / 'nested.yaml').write_text('script:\n  packaged:\n    sequence:\n      - action: homeassistant.update_entity\n        target:\n          entity_id: sensor.old\n  secret_ref:\n    sequence:\n      - action: homeassistant.update_entity\n        target:\n          entity_id: !secret source_entity\n')
-        (root / 'secrets.yaml').write_text('source_entity: sensor.secret_reference\n')
+        (root / 'packages' / 'nested.yaml').write_text('script:\n  packaged:\n    sequence:\n      - action: homeassistant.update_entity\n        target:\n          entity_id: sensor.old\n  secret_ref:\n    sequence:\n      - action: persistent_notification.create\n        data:\n          message: !secret source_message\n')
+        (root / 'secrets.yaml').write_text('source_message: sensor.secret_reference\n')
         async def executor(function, *args):
             return await asyncio.to_thread(function, *args)
         hass = SimpleNamespace(config=SimpleNamespace(config_dir=str(root)), async_add_executor_job=executor)
         original_dir = hass.config.config_dir
         plan = planner.plan_yaml(root, {'sensor.old': 'sensor.new'})
-        assert plan.ready and len(plan.patches) == 2
+        assert plan.ready and len(plan.patches) == 2, plan.issues
         receipt = await validation.async_validate_proposed(hass, plan, scratch)
         assert receipt.changed_domains == ('script',), receipt
         assert receipt.ready_for_apply
@@ -54,7 +54,7 @@ async def run():
         validation.assert_proposal_matches(receipt, plan)
         validation.assert_validation_current(receipt)
         # Changing a secret invalidates the same receipt even though planner skips !secret.
-        (root / 'secrets.yaml').write_text('source_entity: sensor.changed_secret\n')
+        (root / 'secrets.yaml').write_text('source_message: sensor.changed_secret\n')
         try:
             validation.assert_validation_current(receipt)
         except validation.YAMLValidationError as error:
@@ -69,7 +69,7 @@ async def run():
             assert str(error) == 'native_config_rejected'
         else:
             raise AssertionError('missing secret accepted')
-        (root / 'secrets.yaml').write_text('source_entity: sensor.secret_reference\n')
+        (root / 'secrets.yaml').write_text('source_message: sensor.secret_reference\n')
         # An unrelated invalid domain blocks a valid script proposal (native warnings).
         with (root / 'configuration.yaml').open('a') as stream:
             stream.write('input_boolean:\n  invalid:\n    unexpected_schema_key: true\n')
