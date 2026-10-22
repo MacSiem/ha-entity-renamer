@@ -19,6 +19,8 @@ def _encoded(value):
     def special(item):
         if isinstance(item, datetime):
             return {'datetime': item.isoformat()}
+        if isinstance(item, (bytes, bytearray, memoryview)):
+            return {'bytes': bytes(item).hex()}
         raise HistoryConflict('unsupported_history_value')
     return json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(',', ':'),
                       default=special).encode()

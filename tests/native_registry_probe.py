@@ -88,6 +88,17 @@ async def run(root):
         guard = NativeRecorderGuard(hass)
         io = NativeRegistryIO(hass)
         old = meter.entity_id
+        from homeassistant.components.recorder.statistics import async_import_statistics
+        from homeassistant.components.recorder.models import StatisticMeanType
+        from homeassistant.util import dt as dt_util
+        hour = dt_util.utcnow().replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+        statistic_metadata = {'statistic_id': old, 'source': 'recorder', 'name': None,
+                              'unit_of_measurement': 'kWh', 'has_sum': True,
+                              'mean_type': StatisticMeanType.NONE}
+        if __version__ == '2026.10.2': statistic_metadata['unit_class'] = 'energy'
+        async_import_statistics(hass, statistic_metadata,
+            [{'start': hour, 'state': 40.0, 'sum': 10.0},
+             {'start': hour + timedelta(hours=1), 'state': 41.0, 'sum': 11.0}])
         mapping = {old: 'sensor.renamer_probe_changed'}
         meter._attr_native_value = 42
         meter.async_write_ha_state()
@@ -104,6 +115,8 @@ async def run(root):
         ceiling = history[-1][0]
         historical = NativeHistoryGuard(guard)
         historical_before = await historical.capture(mapping)
+        assert historical_before['content']['hourly']['count'] == 2
+        assert historical_before['content']['attributes']['count'] >= 1
         linked = None
         if LINKED:
             from migration_probe.native_linked_scenario import make_linked
@@ -162,6 +175,12 @@ async def run(root):
                'new_state_point': 'PASS', 'compensation': 'PASS',
                'historical_content_digest': 'PASS',
                'new_statistics_cycle': 'NOT_TESTED', 'live_config_access': False})
+        # Alter a historical fixture point through HA's own import API.
+        # The read-only verifier must detect it, even though metadata is unchanged.
+        async_import_statistics(hass, statistic_metadata,
+            [{'start': hour, 'state': 999.0, 'sum': 999.0}])
+        assert not await historical.verify(historical_before)
+        print({'changed_hourly_point_rejected': 'PASS', 'hourly_fixture_source': 'native_import'})
         if GROUPS:
             from migration_probe.native_group_scenario import run_groups
             await run_groups(hass, bridge)
