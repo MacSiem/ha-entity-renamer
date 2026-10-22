@@ -19,7 +19,7 @@ from yaml.nodes import MappingNode, ScalarNode, SequenceNode
 from yaml.tokens import ScalarToken
 
 from .reference_planner import (Consumer, Context, Scope, Syntax, plan_references,
-                                analyze_template_bindings, Plan as ReferencePlan,
+                                analyze_template_bindings, analyze_template_alias, Plan as ReferencePlan,
                                 Change as ReferenceChange)
 
 
@@ -414,7 +414,23 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
                 scan(child, bindings)
                 continue
             part = static(child)
-            if part:
+            alias = (analyze_template_alias(child.value, bindings, max_nodes=max_nodes)
+                     if isinstance(child, ScalarNode) and child.tag == _STR
+                     and '{{' in child.value else None)
+            if alias:
+                observed[id(child)] = observed.get(id(child), 0) + 1
+                previous = templates.get(id(child))
+                review = previous[1] if previous else []
+                if review:
+                    unsafe.update(alias[1])
+                    issue(child, 'yaml_template_alias_scope_conflict')
+                templates[id(child)] = (child.value, review,
+                    (previous[2] if previous else 0) + 1,
+                    set(alias[1]) | (previous[3] if previous else set()))
+                bindings[key.value] = alias
+                for origin in alias[1]:
+                    record(origin, 'yaml_template_alias')
+            elif part:
                 bound, nodes = part
                 for producer in nodes:
                     producers[id(producer)] = producers.get(id(producer), 0) + 1

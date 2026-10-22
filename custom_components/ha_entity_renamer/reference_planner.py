@@ -386,6 +386,8 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                                            and not child.data.strip())]
                     bound = value(expressions[0], bindings) if len(expressions) == 1 else None
                     if bound and bound[0] in ('scalar', 'list'):
+                        if binding_report is not None:
+                            binding_report['output_value'] = bound
                         consume([bound])
                     else:
                         expression(node, bindings)
@@ -537,6 +539,28 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
         # Native parser syntax/version incompatibility is explicitly unsupported;
         # never fall back to regex rewriting after a failed syntax analysis.
         return original_text, [('unsupported_template', 'Native parser rejected template: ' + type(err).__name__)]
+
+
+def analyze_template_alias(text, bindings, *, max_nodes=10000):
+    """Prove a whole native-template scalar/list alias without rendering it.
+
+    Only adapter-owned external origins can flow into a later YAML binding.
+    Creating an alias does not authorize renaming its producer: a real entity
+    sink must still consume it, and label/custom consumers remain unsafe.
+    """
+    if (set(bindings) & {'states', 'is_state', 'state_attr', 'is_state_attr', 'expand'}
+            or _EXTERNAL.search(text) or '{#' in text
+            or re.search(r'{%[-+]?\s*raw\b', text)):
+        return None
+    report = {}
+    _, markers = _syntax_template(text, {}, max_nodes, initial_bindings=bindings,
+                                   binding_report=report, output_reference=True)
+    bound = report.get('output_value')
+    if (markers or report.get('unsafe') or not report.get('complete') or not bound
+            or bound[0] not in ('scalar', 'list') or not bound[1]
+            or any(origin[0] >= 0 for origin in bound[1])):
+        return None
+    return bound
 
 
 def analyze_template_bindings(text, mapping, bindings, *, max_nodes=10000,
