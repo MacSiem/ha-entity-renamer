@@ -62,7 +62,10 @@ async def run(root):
         assert duplicate['type'] == 'abort' and duplicate['reason'] in ('already_configured', 'single_instance_allowed'), duplicate
         from custom_components.ha_entity_renamer.const import DATA_RUNTIME
         from custom_components.ha_entity_renamer.websocket_api import ws_status
+        owner = await hass.auth.async_create_user('Fixture owner', group_ids=[GROUP_ID_ADMIN])
+        assert owner.is_owner
         admin = await hass.auth.async_create_user('Fixture admin', group_ids=[GROUP_ID_ADMIN])
+        assert not admin.is_owner
         household = await hass.auth.async_create_user('Fixture household', group_ids=[])
         async def status(user):
             connection = Connection(user)
@@ -87,7 +90,8 @@ async def run(root):
         await entered.wait()
         await hass.auth.async_update_user(admin, group_ids=[])
         resume.set()
-        assert await pending == ('error', 'unauthorized')
+        revoked = await pending
+        assert revoked == ('error', 'unauthorized'), revoked
         runtime.journal.active = original
         await hass.auth.async_update_user(admin, group_ids=[GROUP_ID_ADMIN])
         async with runtime.operation_lock:
