@@ -79,13 +79,15 @@ def _backup(reader, path, raw, operation_id):
         os.close(folder)
 
 
-def apply_file_patch(config_root, patch, expected_snapshot, operation_id):
+def apply_file_patch(config_root, patch, expected_snapshot, operation_id, guard=None):
     """Synchronous executor operation. No reload and no registry writes.
 
     Call only after server-side validation of the whole proposed configuration.
     A returned receipt confirms this file only; full operation success requires
     HA activation, dependent readback and native historical continuity.
     """
+    guard = guard or (lambda: None)
+    guard()
     if type(operation_id) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', operation_id):
         raise FileConflict('invalid_operation_id')
     path = _relative(patch.path)
@@ -108,11 +110,13 @@ def apply_file_patch(config_root, patch, expected_snapshot, operation_id):
             last = edit.start
         if projected != patch.proposed_bytes or projected == before:
             raise FileConflict('invalid_patch_content')
+        guard()
         backup = _backup(reader, path, before, operation_id)
         parent_path = str(PurePosixPath(path).parent)
         parent = os.dup(reader.root) if parent_path == '.' else reader.open(parent_path, directory=True)
         filename = PurePosixPath(path).name
         temporary = '.renamer-' + operation_id + '-' + uuid.uuid4().hex + '.pending'
+        guard()
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                      stat.S_IMODE(info.st_mode), dir_fd=parent)
         try:
@@ -128,6 +132,7 @@ def apply_file_patch(config_root, patch, expected_snapshot, operation_id):
         current, current_info = reader.read(path)
         if (current != before or (current_info.st_dev, current_info.st_ino) != (info.st_dev, info.st_ino)):
             raise FileConflict('source_changed_before_replace')
+        guard()
         os.replace(temporary, filename, src_dir_fd=parent, dst_dir_fd=parent)
         os.fsync(parent)
         after, after_info = reader.read(path)

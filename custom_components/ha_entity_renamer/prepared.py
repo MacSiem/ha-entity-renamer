@@ -110,7 +110,10 @@ def encode_change(change):
     from .lovelace_native import PreparedDashboard
     from .energy_native import PreparedEnergy
     from .helper_transaction import PreparedHelper
-    kinds = {PreparedRegistryChange: 'registry', PreparedDashboard: 'dashboard', PreparedEnergy: 'energy', PreparedHelper: 'helper'}
+    from .yaml_transaction import PreparedYAML
+    kinds = {PreparedRegistryChange: 'registry', PreparedDashboard: 'dashboard', PreparedEnergy: 'energy', PreparedHelper: 'helper', PreparedYAML: 'yaml'}
+    if type(change) is PreparedYAML:
+        change.checked()
     if type(change) is PreparedHelper:
         change.plan()
     if type(change) not in kinds:
@@ -126,6 +129,9 @@ def decode_change(row):
     if type(row) is not dict or set(row) != {'kind', 'data'} or type(row['data']) is not dict:
         raise ValueError('invalid_prepared_change')
     data = deepcopy(row['data'])
+    if row['kind'] == 'yaml':
+        from .yaml_transaction import decode_yaml
+        return decode_yaml(data)
     if row['kind'] == 'registry':
         return PreparedRegistryChange(**data)
     if row['kind'] == 'helper':
