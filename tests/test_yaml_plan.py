@@ -304,5 +304,136 @@ class YAMLPlannerTests(unittest.TestCase):
                 plan_yaml(self.root, mapping)
 
 
+    def assert_variable_patch(self, source, expected=None):
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        expected = expected if expected is not None else source.replace('sensor.foo', 'sensor.new').replace('light.old', 'light.new')
+        self.assertEqual(plan.patches[0].proposed_bytes, expected.encode())
+        self.assertTrue(plan.variable_bindings)
+        self.assertTrue(all(proof.approved for proof in plan.variable_bindings))
+        for proof in plan.variable_bindings:
+            self.assertEqual(proof.yaml_occurrences, proof.accounted_occurrences)
+            self.assertTrue(proof.consumer_counts)
+        return plan
+
+    def test_yaml_scalar_variable_to_jinja(self):
+        source = "automation:\n- variables:\n    ref: sensor.foo\n  action:\n  - value_template: \"{{ states(ref) }}\"\n"
+        self.assert_variable_patch(source)
+
+    def test_yaml_list_variable_to_expand_and_aliased_entity_ids(self):
+        source = "script:\n  demo:\n    variables:\n      refs: &refs [sensor.foo, light.old]\n    sequence:\n    - value_template: \"{{ expand(refs) | list }}\"\n    - target:\n        entity_ids: *refs\n"
+        plan = self.assert_variable_patch(source)
+        self.assertEqual(len(plan.patches[0].edits), 2)
+
+    def test_yaml_entity_field_can_return_native_list(self):
+        source = 'script:\n  demo:\n    variables:\n      refs: [sensor.foo, light.old]\n    sequence:\n    - target:\n        entity_id: "{{ refs }}"\n'
+        self.assert_variable_patch(source)
+
+    def test_yaml_entity_key_map_requires_iteration_consumer_and_preserves_metadata(self):
+        source = "script:\n  demo:\n    variables:\n      entities:\n        sensor.foo:\n          name: 'Kitchen label'\n          icon: mdi:flash\n        light.old: 'Lamp label'\n    sequence:\n    - value_template: '{% for e in entities %}{{ states(e) }}{% endfor %}'\n"
+        self.assert_variable_patch(source)
+        unused = source[:source.index('    sequence:')] + '    sequence: []\n'
+        self.put('configuration.yaml', unused)
+        plan = self.plan()
+        self.assertFalse(plan.ready)
+        self.assertFalse(plan.patches)
+        self.assertFalse(any(p.approved for p in plan.variable_bindings))
+
+    def test_yaml_map_key_target_collision_blocks(self):
+        source = "script:\n  demo:\n    variables:\n      refs:\n        sensor.foo: Kitchen\n        sensor.new: Other\n    sequence:\n    - value_template: '{% for e in refs %}{{ states(e) }}{% endfor %}'\n"
+        self.put('configuration.yaml', source)
+        self.assertIn('entity_key_collision', self.codes(self.plan()))
+
+    def test_yaml_variable_unsafe_output_prevents_origin_rewrite(self):
+        source = "script:\n  demo:\n    variables:\n      ref: sensor.foo\n    sequence:\n    - value_template: '{{ states(ref) }}'\n    - data:\n        message: '{{ ref }}'\n"
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertFalse(plan.ready)
+        self.assertFalse(plan.patches)
+        self.assertFalse(plan.variable_bindings[0].approved)
+
+    def test_yaml_variable_anchor_shared_with_label_blocks(self):
+        source = "script:\n  demo:\n    variables:\n      ref: &ref sensor.foo\n    sequence:\n    - target:\n        entity_id: *ref\n    - alias: *ref\n    - value_template: '{{ states(ref) }}'\n"
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertFalse(plan.ready)
+        self.assertFalse(plan.patches)
+
+    def test_yaml_variable_alias_outside_supported_scope_is_accounted_as_unknown(self):
+        source = "script:\n  demo:\n    variables:\n      ref: &ref sensor.foo\n    sequence:\n    - value_template: '{{ states(ref) }}'\nmetadata: *ref\n"
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertFalse(plan.ready)
+        self.assertFalse(plan.patches)
+        proof = plan.variable_bindings[0]
+        self.assertGreater(proof.yaml_occurrences, proof.accounted_occurrences)
+
+    def test_yaml_variable_rebinding_has_separate_origins(self):
+        source = "script:\n  demo:\n    variables:\n      ref: sensor.foo\n    sequence:\n    - value_template: '{{ states(ref) }}'\n    - variables:\n        ref: light.old\n    - value_template: '{{ states(ref) }}'\n"
+        self.assert_variable_patch(source)
+
+    def test_yaml_script_scopes_do_not_leak(self):
+        source = "script:\n  first:\n    variables:\n      ref: sensor.foo\n    sequence:\n    - value_template: '{{ states(ref) }}'\n  second:\n    variables:\n      ref: light.old\n    sequence:\n    - value_template: '{{ states(ref) }}'\n"
+        self.assert_variable_patch(source)
+
+    def test_yaml_control_scope_retains_unknown_and_origin(self):
+        for branch in ('choose: []', 'if: []', 'repeat: {count: 2, sequence: []}', 'parallel: []'):
+            source = "script:\n  demo:\n    variables:\n      ref: sensor.foo\n    sequence:\n    - " + branch + "\n    - value_template: '{{ states(ref) }}'\n"
+            self.put('configuration.yaml', source)
+            plan = self.plan()
+            self.assertIn('yaml_variable_control_scope_unsupported', self.codes(plan))
+            self.assertFalse(plan.patches)
+
+    def test_yaml_variable_caller_include_scope_is_explicitly_unsupported(self):
+        self.put('configuration.yaml', "script:\n  demo:\n    variables:\n      ref: sensor.foo\n    sequence: !include steps.yaml\n")
+        self.put('steps.yaml', "- value_template: '{{ states(ref) }}'\n")
+        plan = self.plan()
+        self.assertIn('yaml_variable_include_scope_unsupported', self.codes(plan))
+        self.assertFalse(plan.ready)
+        self.assertFalse(plan.patches)
+
+    def test_yaml_automation_include_preserves_file_provenance(self):
+        self.put('configuration.yaml', 'automation: !include automations.yaml\n')
+        source = "- variables:\n    ref: sensor.foo\n  actions:\n  - value_template: '{{ states(ref) }}'\n"
+        self.put('automations.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertEqual(plan.patches[0].path, 'automations.yaml')
+        self.assertEqual(plan.variable_bindings[0].path, 'automations.yaml')
+
+    def test_yaml_variable_merge_scope_is_explicitly_unsupported(self):
+        source = "script:\n  demo:\n    <<: &base {description: Keep}\n    variables:\n      ref: sensor.foo\n    sequence:\n    - value_template: '{{ states(ref) }}'\n"
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertIn('yaml_variable_merge_scope_unsupported', self.codes(plan))
+        self.assertFalse(plan.patches)
+
+    def test_yaml_unknown_nested_automation_key_does_not_create_a_scope(self):
+        source = "metadata:\n  automation:\n    variables:\n      ref: sensor.foo\n    action:\n    - value_template: '{{ states(ref) }}'\n"
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertFalse(plan.ready)
+        self.assertFalse(plan.patches)
+
+    def test_yaml_unknown_variable_key_maps_cannot_use_generic_entities_context(self):
+        for prefix in ('metadata:', 'script:\n  demo:\n    sequence:\n    - choose:\n      - conditions: []\n        sequence:'):
+            if prefix == 'metadata:':
+                source = prefix + '\n  variables:\n    entities:\n      sensor.foo: Label\n'
+            else:
+                source = prefix + '\n        - variables:\n            entities:\n              sensor.foo: Label\n'
+            self.put('configuration.yaml', source)
+            plan = self.plan()
+            self.assertFalse(plan.ready)
+            self.assertFalse(plan.patches)
+
+    def test_yaml_response_variable_rebinding_is_explicit(self):
+        source = "script:\n  demo:\n    variables:\n      ref: sensor.foo\n    sequence:\n    - action: example.lookup\n      response_variable: ref\n    - value_template: '{{ states(ref) }}'\n"
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertIn('yaml_response_variable_rebinding_unsupported', self.codes(plan))
+        self.assertFalse(plan.patches)
+
+
 if __name__ == '__main__':
     unittest.main()

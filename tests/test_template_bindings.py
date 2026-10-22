@@ -183,5 +183,49 @@ class TemplateBindingsTest(unittest.TestCase):
         self.assert_blocked("{% set lookup=states %}{{ lookup(entity) }}", 'dynamic_reference')
 
 
+
+@requires_jinja
+class ExternalYAMLBindingTests(unittest.TestCase):
+    def analyze(self, source, *, shape='scalar', field=False):
+        from reference_planner import analyze_template_bindings
+        self.origin = (-1, 0, 'sensor.a')
+        return analyze_template_bindings(source, MAPPING,
+                                        {'refs': (shape, (self.origin,))},
+                                        output_reference=field)
+
+    def test_external_scalar_has_no_editable_template_span(self):
+        source = "{{ states(refs) }}"
+        value, markers, used, unsafe = self.analyze(source)
+        self.assertEqual(value, source)
+        self.assertFalse(markers)
+        self.assertEqual(used, {self.origin})
+        self.assertFalse(unsafe)
+
+    def test_external_list_and_key_iteration(self):
+        for shape in ('list', 'keys'):
+            result = self.analyze('{% for e in refs %}{{ states(e) }}{% endfor %}', shape=shape)
+            self.assertFalse(result[1])
+            self.assertEqual(result[2], {self.origin})
+            self.assertFalse(result[3])
+
+    def test_direct_field_output_requires_one_complete_expression(self):
+        safe = self.analyze('{{ refs }}', shape='list', field=True)
+        self.assertEqual(safe[2], {self.origin})
+        self.assertFalse(safe[3])
+        for source in ('{{ refs }} suffix', '{% for e in refs %}{{ e }}{% endfor %}'):
+            result = self.analyze(source, shape='list', field=True)
+            self.assertIn(self.origin, result[3])
+
+    def test_non_reference_escape_and_unknown_scope_retain_origins(self):
+        for source in ("{{ states(refs) }} {{ refs }}", "{% with x=refs %}{{ states(x) }}{% endwith %}",
+                       "{{ refs | join(',') }}", "{{ custom(refs) }}", "{# refs #}{{ states(refs) }}"):
+            result = self.analyze(source)
+            self.assertIn(self.origin, result[3], source)
+
+    def test_static_key_map_is_not_an_expand_list(self):
+        result = self.analyze('{{ expand(refs) }}', shape='keys')
+        self.assertTrue(result[1])
+        self.assertIn(self.origin, result[3])
+
 if __name__ == '__main__':
     unittest.main()

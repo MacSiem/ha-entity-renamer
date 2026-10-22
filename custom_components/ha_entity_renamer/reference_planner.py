@@ -81,7 +81,8 @@ _EXTERNAL = re.compile(r"(?:[a-z][a-z0-9+.-]{0,31}://|javascript:|<script\b)", r
 _TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?=([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![A-Za-z0-9_]))", re.ASCII)
 
 
-def _syntax_template(text, mapping, max_nodes):
+def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
+                     binding_report=None, output_reference=False):
     """Parse only: return exact replacements and review marker (code, detail) pairs.
 
     Jinja's parser has no columns. Feed its native lexer tokens through a parser
@@ -333,7 +334,19 @@ def _syntax_template(text, mapping, max_nodes):
         def statements(items, bindings):
             for node in items:
                 charge()
-                if isinstance(node, nodes.Assign):
+                if (isinstance(node, nodes.Output) and output_reference
+                        and len(tree.body) == 1 and tree.body[0] is node):
+                    # An entity field may return a native scalar/list. Surrounding
+                    # non-whitespace output or concatenation is not a reference.
+                    expressions = [child for child in node.nodes
+                                   if not (isinstance(child, nodes.TemplateData)
+                                           and not child.data.strip())]
+                    bound = value(expressions[0], bindings) if len(expressions) == 1 else None
+                    if bound and bound[0] in ('scalar', 'list'):
+                        consume([bound])
+                    else:
+                        expression(node, bindings)
+                elif isinstance(node, nodes.Assign):
                     bound = value(node.node, bindings)
                     if bound is None:
                         expression(node.node, bindings)
@@ -352,7 +365,7 @@ def _syntax_template(text, mapping, max_nodes):
                 elif isinstance(node, nodes.For):
                     bound = value(node.iter, bindings)
                     local = bindings.copy()
-                    supported = (bound is not None and bound[0] == 'list'
+                    supported = (bound is not None and bound[0] in ('list', 'keys')
                                  and isinstance(node.target, nodes.Name)
                                  and node.test is None and not node.recursive)
                     if supported:
@@ -399,13 +412,15 @@ def _syntax_template(text, mapping, max_nodes):
                 else:
                     expression(node, bindings)
 
-        statements(tree.body, {})
+        statements(tree.body, dict(initial_bindings or {}))
+        if binding_report is not None:
+            binding_report.update(used=set(used), unsafe=set(unsafe), complete=True)
         for origin in used & unsafe:
             mark('unsupported_reference', 'Static origin also used outside a recognized HA reference')
         authorized = used - unsafe
         # Preserve old visibility of source tokens in labels, custom functions,
         # comments and raw text; these are blockers, never replacement targets.
-        approved_spans = {(a, b) for a, b, _ in authorized}
+        approved_spans = {(a, b) for a, b, _ in authorized if a >= 0}
         ordered_spans = sorted(approved_spans)
         span_starts = [span[0] for span in ordered_spans]
         data_spans = [(start, end) for _, kind, _, start, end in raw if kind == 'data']
@@ -423,7 +438,7 @@ def _syntax_template(text, mapping, max_nodes):
         edits = []
         for origin in authorized:
             a, b, entity = origin
-            if entity in mapping:
+            if a >= 0 and entity in mapping:
                 edits.append((a, b, replacements.get(origin, mapping[entity])))
         edits.sort()
         if any(left[1] > right[0] for left, right in zip(edits, edits[1:])):
@@ -438,6 +453,33 @@ def _syntax_template(text, mapping, max_nodes):
         # Native parser syntax/version incompatibility is explicitly unsupported;
         # never fall back to regex rewriting after a failed syntax analysis.
         return original_text, [('unsupported_template', 'Native parser rejected template: ' + type(err).__name__)]
+
+
+def analyze_template_bindings(text, mapping, bindings, *, max_nodes=10000,
+                              output_reference=False):
+    """Parse Jinja with adapter-owned origins, without evaluating any expression.
+
+    Bindings use the existing (shape, origins) bounded dataflow representation.
+    External origins must have a negative start, so they can never be edited as
+    template source. Missing parser/unsupported scope retains every origin as an
+    unsafe consumer. The adapter owns source location and scope validation.
+    """
+    origins = {origin for bound in bindings.values() if bound for origin in bound[1]}
+    if any(origin[0] >= 0 for origin in origins):
+        raise PlanError('external binding origins must have negative positions')
+    if set(bindings) & {'states', 'is_state', 'state_attr', 'is_state_attr', 'expand'}:
+        return text, [('unsupported_template_scope', 'YAML binding shadows HA global')], set(), origins
+    if _EXTERNAL.search(text) or '{#' in text or re.search(r'{%[-+]?\s*raw\b', text):
+        return text, [('unsupported_template', 'External/comment/raw-bearing template')], set(), origins
+    report = {}
+    value, markers = _syntax_template(
+        text, mapping, max_nodes, initial_bindings=bindings,
+        binding_report=report, output_reference=output_reference)
+    used = report.get('used', set()) & origins
+    unsafe = report.get('unsafe', set()) & origins
+    if not report.get('complete') or markers:
+        unsafe |= origins
+    return value, markers, used, unsafe
 
 
 def plan_references(
