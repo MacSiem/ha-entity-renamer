@@ -43,6 +43,29 @@ class YAMLPlannerTests(unittest.TestCase):
         self.put('configuration.yaml', 'unknown:\n  source: sensor.foo\n')
         self.assertIn('ambiguous_reference_context', self.codes(self.plan()))
 
+    def test_utility_meter_source_is_typed_through_include_forms(self):
+        fixtures = (
+            ('utility_meter:\n  daily:\n    source: sensor.foo\n', {}),
+            ('utility_meter: !include meters.yaml\n',
+             {'meters.yaml': 'daily:\n  source: sensor.foo\n'}),
+            ('utility_meter: !include_dir_named meters\n',
+             {'meters/daily.yaml': 'source: sensor.foo\n'}),
+            ('utility_meter: !include_dir_merge_named meters\n',
+             {'meters/daily.yaml': 'daily:\n  source: sensor.foo\n'}),
+        )
+        for root, children in fixtures:
+            with self.subTest(root=root):
+                self.put('configuration.yaml', root)
+                for path, source in children.items(): self.put(path, source)
+                plan = self.plan()
+                self.assertTrue(plan.ready, plan.issues)
+                self.assertEqual(len(plan.patches), 1)
+                self.assertIn(b'source: sensor.new', plan.patches[0].proposed_bytes)
+
+    def test_utility_meter_context_does_not_leak_to_nested_unknown_fields(self):
+        self.put('configuration.yaml', 'utility_meter:\n  daily:\n    unrelated:\n      source: sensor.foo\n')
+        self.assertIn('ambiguous_reference_context', self.codes(self.plan()))
+
     def test_merge_anchor_references_preserved_and_changed_once(self):
         source = 'defaults: &base\n  entity_id: sensor.foo\naction:\n  <<: *base\n  action: light.turn_on\n'
         self.put('configuration.yaml', source)

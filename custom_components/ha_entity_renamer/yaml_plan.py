@@ -334,7 +334,10 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                         targets = (target,) if node.tag == '!include' else reader.listing(target)
                         edges.append(IncludeEdge(path, node.start_mark.line + 1, node.tag, target, targets))
                         for child in targets:
-                            visit(child, graph_depth + 1, field, parent_key, lovelace)
+                            child_key = ('__utility_meter_entry__'
+                                         if parent_key == 'utility_meter' and node.tag == '!include_dir_named'
+                                         else parent_key)
+                            visit(child, graph_depth + 1, field, child_key, lovelace)
                     elif node.tag == '!secret':
                         if field:
                             issue(node, "secret_reference_unresolved")
@@ -397,7 +400,10 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                         platform = values.get('platform')
                         source_field = (key.value == 'source' and isinstance(platform, ScalarNode)
                                         and platform.value in ('integration', 'derivative'))
-                        walk(value, depth + 1, key.value in _FIELDS or source_field, key.value,
+                        source_field = source_field or (key.value == 'source'
+                                                       and parent_key == '__utility_meter_entry__')
+                        child_key = '__utility_meter_entry__' if parent_key == 'utility_meter' else key.value
+                        walk(value, depth + 1, key.value in _FIELDS or source_field, child_key,
                              lovelace or key.value == 'lovelace')
                 else:
                     issue(node, "unsupported_yaml_node")
