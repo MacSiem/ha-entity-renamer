@@ -64,10 +64,18 @@ async def run_names(hass, bridge, meter):
         identifiers={('threshold', 'native-name-fixture')}, name='Native probe device')
     device = devices.async_update_device(device.id, name_by_user='Native baseline device')
     registry.async_update_entity(meter.entity_id, device_id=device.id)
+    # Device listeners are installed at native entity addition, not by a late
+    # manual device_id edit on an already-active entity. Re-add a real producer
+    # against its same preconfigured registry identity before testing names.
+    platform = meter.platform
+    await platform.async_remove_entity(meter.entity_id)
+    meter = type(meter)()
     meter._attr_has_entity_name = True
-    # Rebind listeners using HA's native entity registry event.
-    registry.async_update_entity(meter.entity_id, name='Explicit meter override', has_entity_name=True)
+    registry.async_update_entity(meter_row.entity_id, name='Explicit meter override', has_entity_name=True)
+    await platform.async_add_entities([meter])
     await io.settle()
+    assert meter.registry_entry.id == before_id
+    assert meter.device_entry is devices.async_get(device.id)
     await io.flush('entity')
     await io.flush('device')
     for desired in ('Native renamed device', None, ''):
