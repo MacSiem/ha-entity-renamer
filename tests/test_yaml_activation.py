@@ -35,13 +35,13 @@ class ActivationTests(unittest.IsolatedAsyncioTestCase):
             forward = plan_yaml(root, {'sensor.old': 'sensor.new'})
             snapshots = {row.path: row for row in forward.files}
             patch = forward.patches[0]
-            written = apply_file_patch(root, patch, snapshots[patch.path], 'stage_forward')
+            written = await asyncio.to_thread(apply_file_patch, root, patch, snapshots[patch.path], 'stage_forward')
             reverse = plan_yaml(root, {'sensor.new': 'sensor.old'})
             script = next(row for row in reverse.files if row.path == 'scripts.yaml')
             self.assertEqual(script.inode, written['inode'])
             before, after = parent / 'before', parent / 'after'
             before.mkdir(); after.mkdir()
-            files, _ = validation._stage(root, reverse, before, after)
+            files, _ = await asyncio.to_thread(validation._stage, root, reverse, before, after)
             self.assertTrue(any(row[0] == 'scripts.yaml' for row in files))
 
     async def test_cancelled_staging_drains_before_caller_can_remove_private_files(self):

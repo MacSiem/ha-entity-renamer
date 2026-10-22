@@ -15,15 +15,15 @@ class YAMLPlannerTests(unittest.TestCase):
         self.put('configuration.yaml', 'entity_id: sensor.foo\n')
         replacement = self.root / 'replacement.yaml'
         replacement.write_bytes((self.root / 'configuration.yaml').read_bytes())
-        original = os.read
-        swapped = []
-        def read(fd, count):
-            result = original(fd, count)
-            if not swapped:
-                swapped.append(True)
+        original = os.fstat
+        observed = []
+        def fstat(fd):
+            result = original(fd)
+            observed.append(True)
+            if len(observed) == 3:  # after-read metadata captured, before named re-open
                 replacement.replace(self.root / 'configuration.yaml')
             return result
-        with patch.object(yaml_plan.os, 'read', read):
+        with patch.object(yaml_plan.os, 'fstat', fstat):
             with self.assertRaisesRegex(YAMLPlanError, 'file name changed during read'):
                 self.plan()
 
