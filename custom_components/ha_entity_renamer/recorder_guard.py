@@ -82,7 +82,17 @@ class NativeRecorderGuard:
     async def snapshot(self, mapping):
         # Registry callbacks must enqueue migration work before the commit barrier.
         await self.hass.async_block_till_done()
-        await self.instance.async_block_till_done()
+        # async_get_commit_future has an empty-queue fast path: a worker may
+        # already have dequeued an event without marking its writes pending.
+        # Always enqueue HA's own synchronization task behind prior events.
+        # This performs no SQL mutation of our own; native Recorder owns commit.
+        import asyncio
+        from homeassistant.components.recorder.tasks import SynchronizeTask
+        if not self.instance.is_alive():
+            raise RecorderConflict("recorder_not_running")
+        future = self.hass.loop.create_future()
+        self.instance.queue_task(SynchronizeTask(future))
+        await asyncio.wait_for(asyncio.shield(future), timeout=60)
         ids = tuple(sorted(set(mapping) | set(mapping.values())))
         return await self.instance.async_add_executor_job(partial(_read, self.instance, ids))
 
