@@ -8,6 +8,21 @@ from custom_components.ha_entity_renamer.yaml_plan import Limits, YAMLPlanError,
 
 
 class YAMLPlannerTests(unittest.TestCase):
+    def test_customize_entity_key_migrates_and_retains_display_settings(self):
+        source = 'homeassistant:\n  customize:\n    sensor.foo:\n      friendly_name: Unchanged label\n      icon: mdi:flash\n'
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertEqual(plan.patches[0].proposed_bytes, source.replace('sensor.foo', 'sensor.new').encode())
+        self.put('configuration.yaml', source + '    sensor.new: {}\n')
+        self.assertIn('entity_key_collision', self.codes(self.plan()))
+
+    def test_customization_glob_change_cannot_silently_drop_attributes(self):
+        for pattern, blocked in (('sensor.foo*', True), ('sensor.*', False), ('light.*', False)):
+            self.put('configuration.yaml', f'homeassistant:\n  customize_glob:\n    "{pattern}":\n      icon: mdi:flash\n')
+            plan = self.plan()
+            self.assertEqual('customization_glob_membership_changed' in self.codes(plan), blocked)
+
     def test_primitive_keys_preserved_with_nested_reference_coverage(self):
         source = 'modes:\n  on:\n    entity_id: sensor.foo\n  1: label\n  null: value\n'
         self.put('configuration.yaml', source)

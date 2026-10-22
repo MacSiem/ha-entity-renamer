@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import fnmatch
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -104,6 +105,7 @@ _INCLUDE = frozenset({"!include", "!include_dir_list", "!include_dir_named",
                       "!include_dir_merge_list", "!include_dir_merge_named"})
 _STR = "tag:yaml.org,2002:str"
 _STANDARD = "tag:yaml.org,2002:"
+_ENTITY_KEY_MAPS = frozenset({'entities', 'customize'})
 
 
 def _relative(value: str) -> str:
@@ -352,7 +354,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                     if len(raw_keys) != len(set(raw_keys)):
                         issue(node, "duplicate_mapping_keys")
                     merged_keys = effective_keys(node)
-                    projected = [mapping.get(k, k) if parent_key == 'entities' else k for k in merged_keys]
+                    projected = [mapping.get(k, k) if parent_key in _ENTITY_KEY_MAPS else k for k in merged_keys]
                     if len(projected) != len(set(projected)):
                         issue(node, "entity_key_collision")
                     values = {k.value: v for k, v in node.value if isinstance(k, ScalarNode)}
@@ -378,7 +380,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                             # Primitive non-string keys cannot be entity IDs.
                             # Preserve them and still inspect their descendants;
                             # a numeric/boolean key must not hide a reference.
-                            if (isinstance(key, ScalarNode) and parent_key != 'entities'
+                            if (isinstance(key, ScalarNode) and parent_key not in _ENTITY_KEY_MAPS
                                     and key.tag in {_STANDARD + kind for kind in ('bool', 'int', 'float', 'null')}):
                                 walk(value, depth + 1, False, '', lovelace)
                                 continue
@@ -387,7 +389,11 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                             walk(key, depth + 1)
                             walk(value, depth + 1)
                             continue
-                        walk(key, depth + 1, parent_key == 'entities')
+                        if parent_key == 'customize_glob' and any(
+                                fnmatch.fnmatchcase(old, key.value) != fnmatch.fnmatchcase(new, key.value)
+                                for old, new in mapping.items()):
+                            issue(key, 'customization_glob_membership_changed')
+                        walk(key, depth + 1, parent_key in _ENTITY_KEY_MAPS)
                         platform = values.get('platform')
                         source_field = (key.value == 'source' and isinstance(platform, ScalarNode)
                                         and platform.value in ('integration', 'derivative'))
