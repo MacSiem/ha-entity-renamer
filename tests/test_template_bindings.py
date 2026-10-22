@@ -116,6 +116,7 @@ class TemplateBindingsTest(unittest.TestCase):
         for source in [
             "{% if flag %}{% set e='sensor.a' %}{% else %}{% set e='sensor.c' %}{% endif %}{{ states(e) }}",
             "{% set e=other %}{% if flag %}{% set e='sensor.a' %}{% else %}{% set e='sensor.c' %}{% endif %}{{ states(e) }}",
+            "{% if flag %}{% set e='sensor.a' %}{% elif other %}{% set e='sensor.c' %}{% else %}{% set e='sensor.a' %}{% endif %}{{ states(e) }}",
             "{% set e='sensor.a' %}{% if flag %}{% set e='sensor.c' %}{% endif %}{{ states(e) }}",
             "{% if flag %}{% set e=['sensor.a'] %}{% else %}{% set e=['sensor.c'] %}{% endif %}{{ expand(e) | list }}",
         ]:

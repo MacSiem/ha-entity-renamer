@@ -50,7 +50,14 @@ async def run_yaml_scopes(hass, root):
         value: '{{ states(ref) }}'
 ''',
     }
+    for branch in ('true', 'false'):
+        cases['jinja_branch_' + branch] = (
+            "- action: renamer_probe.capture\n  data:\n    value: >-\n"
+            "      {% if " + branch + " %}{% set e='sensor.foo' %}"
+            "{% elif true %}{% set e='light.old' %}"
+            "{% else %}{% set e='sensor.foo' %}{% endif %}{{ states(e) }}\n")
     expected = {'map_items': ['42|Sensor;on|Light;'], 'choose_if': ['on'],
+                'jinja_branch_true': ['42'], 'jinja_branch_false': ['on'],
                 'repeat': ['42', 'on'], 'parallel': ['42', '42']}
     captured = []
 

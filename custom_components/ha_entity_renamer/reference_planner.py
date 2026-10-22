@@ -411,7 +411,8 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                     branches.append(branch)
                     for elif_node in node.elif_:
                         branch = bindings.copy()
-                        statements([elif_node], branch)
+                        expression(elif_node.test, branch)
+                        statements(elif_node.body, branch)
                         branches.append(branch)
                     branch = bindings.copy()
                     statements(node.else_, branch)
