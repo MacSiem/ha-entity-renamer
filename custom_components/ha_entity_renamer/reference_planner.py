@@ -98,10 +98,19 @@ def _syntax_template(text, mapping, max_nodes):
     class Unsupported(ValueError):
         pass
 
+    original_text = text
+    # Parse Jinja's normalized newlines while retaining an exact original-source
+    # boundary for every character. Only authorized spans are written back.
+    offsets, normalized = [], []
+    cursor = 0
+    while cursor < len(original_text):
+        offsets.append(cursor)
+        character = original_text[cursor]
+        normalized.append('\n' if character == '\r' else character)
+        cursor += 2 if original_text[cursor:cursor + 2] == '\r\n' else 1
+    offsets.append(len(original_text))
+    text = ''.join(normalized)
     try:
-        # Jinja normalizes CRLF before lexing. Refuse rather than guess columns.
-        if '\r' in text:
-            raise Unsupported('CR/CRLF source span attribution unsupported')
         env = Environment(keep_trailing_newline=True)
         raw = []
         cursor = 0
@@ -170,9 +179,9 @@ def _syntax_template(text, mapping, max_nodes):
                        nodes.Block, nodes.FilterBlock)
         for node in all_nodes:
             if isinstance(node, unsupported):
-                return text, [('unsupported_template_scope', 'Unsupported lexical template scope')]
+                return original_text, [('unsupported_template_scope', 'Unsupported lexical template scope')]
             if isinstance(node, nodes.Name) and node.ctx in ('store', 'param') and node.name in globals_:
-                return text, [('unsupported_template_scope', 'HA global shadowed by local binding')]
+                return original_text, [('unsupported_template_scope', 'HA global shadowed by local binding')]
 
         markers = []
         used, unsafe = set(), set()
@@ -399,7 +408,12 @@ def _syntax_template(text, mapping, max_nodes):
         approved_spans = {(a, b) for a, b, _ in authorized}
         ordered_spans = sorted(approved_spans)
         span_starts = [span[0] for span in ordered_spans]
+        data_spans = [(start, end) for _, kind, _, start, end in raw if kind == 'data']
+        data_starts = [span[0] for span in data_spans]
         for match in _TOKEN.finditer(text):
+            position = bisect_right(data_starts, match.start(1)) - 1
+            if position >= 0 and match.end(1) <= data_spans[position][1]:
+                continue  # Literal template output is a label, not a dependency.
             if match.group(1) in mapping and match.span(1) not in approved_spans:
                 # Spaced states.sensor . object references cover several tokens.
                 position = bisect_right(span_starts, match.start(1)) - 1
@@ -413,15 +427,16 @@ def _syntax_template(text, mapping, max_nodes):
         edits.sort()
         if any(left[1] > right[0] for left, right in zip(edits, edits[1:])):
             raise Unsupported('Overlapping source spans')
+        result = original_text
         for a, b, replacement in reversed(edits):
-            text = text[:a] + replacement + text[b:]
-        return text, markers
+            result = result[:offsets[a]] + replacement + result[offsets[b]:]
+        return result, markers
     except (Unsupported, RecursionError, ValueError, TypeError, KeyError, IndexError) as err:
-        return text, [('unsupported_template', str(err)[:160])]
+        return original_text, [('unsupported_template', str(err)[:160])]
     except Exception as err:
         # Native parser syntax/version incompatibility is explicitly unsupported;
         # never fall back to regex rewriting after a failed syntax analysis.
-        return text, [('unsupported_template', 'Native parser rejected template: ' + type(err).__name__)]
+        return original_text, [('unsupported_template', 'Native parser rejected template: ' + type(err).__name__)]
 
 
 def plan_references(

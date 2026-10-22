@@ -46,6 +46,13 @@ class TemplateBindingsTest(unittest.TestCase):
         if code:
             self.assertIn(code, [m.code for m in result.markers])
 
+    def test_original_newlines_unicode_and_plain_labels_are_preserved(self):
+        for newline in ('\n', '\r\n', '\r'):
+            source = ("żółć sensor.a" + newline + "{% set e='sensor.a' %}" + newline
+                      + "{{ states(e) }}" + newline + "{{ states.sensor.a.state }}")
+            expected = source.replace("e='sensor.a'", "e='sensor.b'").replace('states.sensor.a', 'states.sensor.b')
+            self.assert_migrates(source, expected)
+
     def test_scalar_set_aliases_and_all_scalar_sinks(self):
         for function, extra in [('states', ''), ('is_state', ", 'on'"),
                                 ('state_attr', ", 'unit'"), ('is_state_attr', ", 'unit', 'C'")]:
@@ -143,9 +150,9 @@ class TemplateBindingsTest(unittest.TestCase):
         source = "x  {%- set e = 'sensor.a' -%}{{ '}}' ~ states(e) }}"
         self.assert_migrates(source, source.replace("'sensor.a'", "'sensor.b'"))
 
-    def test_comments_raw_malformed_crlf_and_budget_have_explicit_blockers(self):
+    def test_comments_raw_malformed_and_budget_have_explicit_blockers(self):
         for source in ["{# states('sensor.a') #}", "{% raw %}{{ states('sensor.a') }}{% endraw %}",
-                       "{{ states('sensor.a') ", "\r\n{{ states('sensor.a') }}",
+                       "{{ states('sensor.a') ",
                        '{{ ' + '[' * 200 + "'sensor.a'" + ']' * 200 + ' }}']:
             self.assert_blocked(source, 'unsupported_template')
         from reference_planner import Limits
