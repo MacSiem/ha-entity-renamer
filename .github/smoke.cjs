@@ -172,7 +172,26 @@ const delay = (ms) => new Promise(r => setTimeout(r, ms));
           card.remove();
         }
       }
-      if (!problem && localIntroTags.has(t.tag)) {
+      if (!problem && t.tag === 'ha-entity-renamer') {
+        const help = el.shadowRoot.querySelector('details.renamer-help');
+        if (!help?.querySelector('summary')) problem = 'native help summary missing';
+        else {
+          el._syncHelpWidth(900);
+          if (!help.open) problem = 'first wide help was not expanded';
+          help.querySelector('summary').click(); await delay(20);
+          if (help.open) problem = 'help summary did not collapse instructions';
+          else if (window.localStorage.getItem('ha-intro-dismissed-ha-entity-renamer:u') !== '1') problem = 'account-scoped closure was not persisted';
+          else {
+            const second = window.document.createElement(t.tag);
+            second.setConfig({type:'custom:' + t.tag});
+            second.hass = mockHass(); window.document.body.appendChild(second); second.hass = mockHass(); await delay(100);
+            second._syncHelpWidth(900);
+            if (second.shadowRoot.querySelector('details.renamer-help')?.open !== false) problem = 'closed help reopened on a fresh card';
+            else if (second.shadowRoot.querySelectorAll('.donate-section').length !== 1) problem = 'support footer missing after a new render';
+            second.remove();
+          }
+        }
+      } else if (!problem && localIntroTags.has(t.tag)) {
         const intro = el.shadowRoot.querySelector('.intro-banner[data-intro="' + t.tag + '"]');
         const dismiss = intro && intro.querySelector('.intro-dismiss');
         if (!intro || !dismiss) problem = 'local first-run intro/dismiss missing';
