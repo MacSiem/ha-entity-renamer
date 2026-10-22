@@ -20,6 +20,7 @@ class Runtime:
     preparations: object
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     loaded: bool = True
+    unloading: bool = False
 
 
 async def async_setup(hass, config):
@@ -54,9 +55,14 @@ async def async_unload_entry(hass, entry):
     runtime = hass.data.get(DATA_RUNTIME)
     if runtime is None or runtime.entry_id != entry.entry_id:
         return False
-    if runtime.operation_lock.locked():
-        return False
-    runtime.loaded = False
-    del hass.data[DATA_RUNTIME]
+    # Returning False leaves native HA in FAILED_UNLOAD. Drain the current
+    # operation while refusing new work, then let HA complete its lifecycle.
+    runtime.unloading = True
+    try:
+        async with runtime.operation_lock:
+            runtime.loaded = False
+            del hass.data[DATA_RUNTIME]
+    finally:
+        runtime.unloading = False
     # Private preparations/journal survive reload/removal for explicit recovery.
     return True

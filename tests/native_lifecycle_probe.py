@@ -95,8 +95,13 @@ async def run(root):
         runtime.journal.active = original
         await hass.auth.async_update_user(admin, group_ids=[GROUP_ID_ADMIN])
         async with runtime.operation_lock:
-            assert not await hass.config_entries.async_unload(entry.entry_id)
-        assert await hass.config_entries.async_unload(entry.entry_id)
+            unloading = asyncio.create_task(hass.config_entries.async_unload(entry.entry_id))
+            for _ in range(100):
+                if runtime.unloading: break
+                await asyncio.sleep(0)
+            assert runtime.unloading and not unloading.done()
+            assert await status(admin) == ('error', 'unavailable')
+        assert await unloading
         assert await status(admin) == ('error', 'unavailable')
         assert await hass.config_entries.async_setup(entry.entry_id)
         assert (await status(admin))[0] == 'result'

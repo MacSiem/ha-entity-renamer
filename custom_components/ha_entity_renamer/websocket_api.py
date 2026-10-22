@@ -16,7 +16,7 @@ def async_register(hass):
 async def ws_status(hass, connection, message):
     user_id = connection.user.id
     runtime = hass.data.get(DATA_RUNTIME)
-    if runtime is None or not runtime.loaded:
+    if runtime is None or not runtime.loaded or runtime.unloading:
         connection.send_error(message['id'], 'unavailable', 'Entity Renamer backend is not loaded')
         return
     try:
@@ -29,7 +29,7 @@ async def ws_status(hass, connection, message):
             or connection.user.id != user_id or not connection.user.is_admin):
         connection.send_error(message['id'], 'unauthorized', 'Administrator permissions are required')
         return
-    if hass.data.get(DATA_RUNTIME) is not runtime or not runtime.loaded:
+    if hass.data.get(DATA_RUNTIME) is not runtime or not runtime.loaded or runtime.unloading:
         connection.send_error(message['id'], 'unavailable', 'Entity Renamer backend was unloaded')
         return
     connection.send_result(message['id'], {
