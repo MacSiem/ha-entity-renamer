@@ -5,7 +5,7 @@ from types import MappingProxyType, SimpleNamespace
 async def create_helper(hass, old, new):
     from homeassistant.config_entries import ConfigEntry, ConfigEntryState
     from homeassistant.helpers import entity_registry as er
-    from homeassistant.components.threshold.config_flow import CONFIG_SCHEMA
+    from .helper_observers import NativeHelperObservers, RegistryMappingProof
     from .helper_native import read_entry
     from .helper_persistence import NativeHelperPersistence
     from .helper_transaction import prepare_helper, HelperTransactionAdapter
@@ -27,39 +27,19 @@ async def create_helper(hass, old, new):
     await persistence.flush(before, lambda: None)
     change = prepare_helper(before, {old: new})
 
-    async def settle():
-        await hass.async_block_till_done()
-
-    async def validate(snapshot):
-        assert snapshot['domain'] == 'threshold'
-        assert snapshot['identity'] == before['identity']
-        assert not snapshot['data'] and not snapshot['subentries']
-        # Flow validation precedes _validate_mode adding absent limits as None.
-        CONFIG_SCHEMA({k: v for k, v in snapshot['options'].items() if v is not None})
-        assert snapshot['options']['lower'] is None and snapshot['options']['upper'] == 42.5
-
-    async def activation(snapshot):
-        assert entry.state is ConfigEntryState.LOADED
-        row = registry.async_get(entity_id)
-        assert row.id == identity and row.unique_id == entry.entry_id
-        state = hass.states.get(entity_id)
-        assert state is not None
-        assert state.attributes['entity_id'] == snapshot['options']['entity_id']
-
-    async def runtime(snapshot):
-        await activation(snapshot)
-        state = hass.states.get(entity_id)
-        source = hass.states.get(snapshot['options']['entity_id'])
-        assert source is not None
-        assert state.attributes['sensor_value'] == float(source.state)
-        assert state.state == ('on' if float(source.state) > 42.5 else 'off')
+    observer = await NativeHelperObservers.capture(hass, (before,),
+        (RegistryMappingProof(old, new, registry.async_get(old).id),))
+    settle = observer.settle
+    validate = observer.validate_snapshot
+    activation = observer.verify_activation
+    runtime = observer.verify_runtime
 
     async def verify(plan, forward):
         expected = change.after if forward else change.before
         await settle()
         assert read_entry(hass, entry.entry_id) == expected
         assert await persistence.inspect_current(expected)
-        await runtime(expected)
+        await (observer.verify_inventory(plan) if forward else observer.verify_original_inventory(plan))
         return True
 
     def adapter(resolve, resolve_step):
