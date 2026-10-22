@@ -52,9 +52,11 @@ async def run_activation(scratch, planner, validation):
         captured = []
         renames = []
         def audit(event, args):
-            if event == 'os.rename' and str(args[1]).endswith('scripts.yaml'):
+            if ((event == 'os.rename' and str(args[1]).endswith('scripts.yaml'))
+                    or (event == 'open' and str(args[0]).endswith('scripts.yaml')
+                        and args[2] & (os.O_WRONLY | os.O_RDWR))):
                 import traceback
-                renames.append([(frame.name, frame.lineno) for frame in traceback.extract_stack()[-8:-1]])
+                renames.append((event, str(args[0]), [(frame.name, frame.lineno) for frame in traceback.extract_stack()[-8:-1]]))
         sys.addaudithook(audit)
         async def capture(call):
             captured.append(str(call.data['value']))
