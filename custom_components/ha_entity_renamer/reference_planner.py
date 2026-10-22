@@ -5,8 +5,8 @@ string replacement engine. A plan describes only its explicitly selected scopes.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from bisect import bisect_right
+from dataclasses import dataclass
 from enum import Enum
 import re
 from typing import Any, Union
@@ -75,32 +75,353 @@ class Plan:
 
 
 _ENTITY = re.compile(r"[a-z_][a-z0-9_]*\.[a-z0-9_]+\Z", re.ASCII)
-_JINJA_OPEN = re.compile(r"{{|{%")
-# Support only a complete first literal argument, never evaluate templates.
-_CALL = re.compile(
-    r"(?<![\w.])(?:states|is_state|state_attr|is_state_attr)\s*\(\s*"
-    r"(?P<quote>['\"])(?P<id>[a-z_][a-z0-9_]*\.[a-z0-9_]+)(?P=quote)(?=\s*[,\)])",
-    re.ASCII,
-)
-_STATE = re.compile(
-    r"(?<![\w.])states\s*\.\s*(?P<id>[a-z_][a-z0-9_]*\s*\.\s*[a-z0-9_]+)(?![\w])",
-    re.ASCII,
-)
-_DYNAMIC = re.compile(r"\b(?:states|is_state|state_attr|is_state_attr|expand)\s*\(|\bstates\s*(?:\[|\.\s*[a-z_][a-z0-9_]*\s*\[)")
-_BRACKET = re.compile(
-    r"(?<![\w.])states\s*\[\s*(?P<quote>['\"])(?P<id>[a-z_][a-z0-9_]*\.[a-z0-9_]+)(?P=quote)\s*\]",
-    re.ASCII,
-)
-_EXPAND = re.compile(r"(?<![\w.])expand\s*\(\s*(?P<args>[^()]*)\)", re.ASCII)
-_ENTITY_LITERAL = re.compile(r"(?P<quote>['\"])(?P<id>[a-z_][a-z0-9_]*\.[a-z0-9_]+)(?P=quote)", re.ASCII)
-_SPLIT_STATE = re.compile(
-    r"(?<![\w.])states\s*(?:\.\s*(?P<domain>[a-z_][a-z0-9_]*)|"
-    r"\[\s*(?P<dq>['\"])(?P<bracket_domain>[a-z_][a-z0-9_]*)(?P=dq)\s*\])"
-    r"\s*\[\s*(?P<oq>['\"])(?P<object>[a-z0-9_]+)(?P=oq)\s*\]", re.ASCII)
 # A bounded scheme suffix also catches long schemes without quadratic retries
 # against a very long alphabetic string that contains no colon.
 _EXTERNAL = re.compile(r"(?:[a-z][a-z0-9+.-]{0,31}://|javascript:|<script\b)", re.I)
 _TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?=([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![A-Za-z0-9_]))", re.ASCII)
+
+
+def _syntax_template(text, mapping, max_nodes):
+    """Parse only: return exact replacements and review marker (code, detail) pairs.
+
+    Jinja's parser has no columns. Feed its native lexer tokens through a parser
+    that attaches original character spans to primary nodes. Never render or
+    compile a template, evaluate expressions, or call a template function.
+    """
+    try:
+        from jinja2 import Environment, nodes
+        from jinja2.lexer import TokenStream
+        from jinja2.parser import Parser
+    except ImportError:
+        return text, [('unsupported_template_parser', 'Native Jinja parser unavailable')]
+
+    class Unsupported(ValueError):
+        pass
+
+    try:
+        # Jinja normalizes CRLF before lexing. Refuse rather than guess columns.
+        if '\r' in text:
+            raise Unsupported('CR/CRLF source span attribution unsupported')
+        env = Environment(keep_trailing_newline=True)
+        raw = []
+        cursor = 0
+        cap = min(max_nodes, 10000)
+        for line, kind, value in env.lex(text):
+            if len(raw) >= cap:
+                raise Unsupported('Template token budget exceeded')
+            start = text.find(value, cursor)
+            if start < 0 or text[cursor:start].strip():
+                raise Unsupported('Ambiguous native lexer source span')
+            raw.append((line, kind, value, start, start + len(value)))
+            cursor = start + len(value)
+        if text[cursor:].strip():
+            raise Unsupported('Incomplete native lexer source coverage')
+        tokens, spans, indexes = [], {}, {}
+        for line, kind, value, start, end in raw:
+            for token in env.lexer.wrap(iter([(line, kind, value)]), None):
+                indexes[id(token)] = len(tokens)
+                spans[id(token)] = (start, end)
+                tokens.append(token)
+
+        class SpannedParser(Parser):
+            def parse_primary(self, *args, **kwargs):
+                token = self.stream.current
+                node = super().parse_primary(*args, **kwargs)
+                if token.type in ('name', 'string'):
+                    span = spans[id(token)]
+                    if token.type == 'string':
+                        # Adjacent Jinja strings are folded into one Const. An
+                        # escaped literal also has no one-to-one editable ID.
+                        following = indexes[id(token)] + 1
+                        if following < len(tokens) and tokens[following].type == 'string':
+                            span = None
+                        elif text[span[0] + 1:span[1] - 1] != node.value:
+                            span = None
+                        elif span:
+                            span = (span[0] + 1, span[1] - 1)
+                    node.source_span = span
+                return node
+
+            def parse_subscript(self, node):
+                token = self.stream.current
+                position = indexes[id(token)]
+                result = super().parse_subscript(node)
+                if token.type == 'dot' and isinstance(result, nodes.Getattr):
+                    result.source_span = spans[id(tokens[position + 1])]
+                return result
+
+        # A fresh environment without extensions: no extension parser callbacks.
+        env._tokenize = lambda *args, **kwargs: TokenStream(tokens, None, None)
+        tree = SpannedParser(env, text).parse()
+        count = 0
+        pending = [(tree, 0)]
+        all_nodes = []
+        while pending:
+            node, depth = pending.pop()
+            count += 1
+            if depth > 64 or count > cap:
+                raise Unsupported('Template AST budget exceeded')
+            all_nodes.append(node)
+            pending.extend((child, depth + 1) for child in node.iter_child_nodes())
+
+        globals_ = {'states', 'is_state', 'state_attr', 'is_state_attr', 'expand'}
+        unsupported = (nodes.Macro, nodes.Import, nodes.FromImport, nodes.CallBlock,
+                       nodes.Include, nodes.Extends, nodes.With, nodes.NSRef,
+                       nodes.Block, nodes.FilterBlock)
+        for node in all_nodes:
+            if isinstance(node, unsupported):
+                return text, [('unsupported_template_scope', 'Unsupported lexical template scope')]
+            if isinstance(node, nodes.Name) and node.ctx in ('store', 'param') and node.name in globals_:
+                return text, [('unsupported_template_scope', 'HA global shadowed by local binding')]
+
+        markers = []
+        used, unsafe = set(), set()
+        replacements = {}
+        work_left = cap * 8
+
+        def charge(amount=1):
+            nonlocal work_left
+            work_left -= amount
+            if work_left < 0:
+                raise Unsupported('Static dataflow work budget exceeded')
+
+        def escape(bound):
+            charge(len(bound[1]))
+            unsafe.update(bound[1])
+
+        # A value is (shape, immutable origins); origin = (start, end, entity).
+        def value(node, bindings):
+            charge()
+            if isinstance(node, nodes.Const) and type(node.value) is str:
+                span = getattr(node, 'source_span', None)
+                if span and _ENTITY.fullmatch(node.value):
+                    return ('scalar', ((span[0], span[1], node.value),))
+            if isinstance(node, nodes.Name):
+                bound = bindings.get(node.name)
+                if bound:
+                    charge(len(bound[1]))
+                return bound
+            if isinstance(node, (nodes.List, nodes.Tuple)):
+                values = [value(item, bindings) for item in node.items]
+                if values and all(item is not None and item[0] == 'scalar' for item in values):
+                    origins = set()
+                    for item in values:
+                        charge(len(item[1]))
+                        origins.update(item[1])
+                    return ('list', tuple(sorted(origins)))
+            return None
+
+        def mark(code, detail):
+            if (code, detail) not in markers:
+                markers.append((code, detail))
+
+        def consume(values):
+            for item in values:
+                charge(len(item[1]))
+                used.update(item[1])
+
+        def access(node):
+            parts = []
+            while isinstance(node, (nodes.Getattr, nodes.Getitem)):
+                if isinstance(node, nodes.Getattr):
+                    parts.append((node.attr, getattr(node, 'source_span', None), False))
+                else:
+                    arg = node.arg
+                    if isinstance(arg, nodes.Const) and type(arg.value) is str:
+                        parts.append((arg.value, getattr(arg, 'source_span', None), True))
+                    else:
+                        parts.append((None, None, True))
+                node = node.node
+            if not isinstance(node, nodes.Name) or node.name != 'states':
+                return None
+            return list(reversed(parts))
+
+        def trailing_indices(node, count, bindings):
+            for _ in range(count):
+                if isinstance(node, nodes.Getitem):
+                    expression(node.arg, bindings)
+                node = node.node
+
+        def expression(node, bindings):
+            charge()
+            if isinstance(node, nodes.Call):
+                name = node.node.name if isinstance(node.node, nodes.Name) else None
+                if name in globals_:
+                    args = node.args if name == 'expand' else node.args[:1]
+                    values = [value(arg, bindings) for arg in args]
+                    valid = bool(args) and all(item is not None and item[0] in ('scalar', 'list')
+                                               for item in values)
+                    if name != 'expand':
+                        valid = valid and values[0][0] == 'scalar'
+                    valid = valid and not (node.kwargs or node.dyn_args or node.dyn_kwargs)
+                    if valid:
+                        consume(values)
+                        if name != 'expand':
+                            for arg in node.args[1:]:
+                                expression(arg, bindings)
+                        return
+                    mark('dynamic_reference', 'Unresolved HA call argument or call signature')
+                    # Failed sinks do not authorize any partial literal rewrite.
+                    for arg in node.iter_child_nodes():
+                        expression(arg, bindings)
+                    return
+            parts = access(node) if isinstance(node, (nodes.Getattr, nodes.Getitem)) else None
+            if parts is not None:
+                if parts and parts[0][0] and _ENTITY.fullmatch(parts[0][0]):
+                    entity, span, _ = parts[0]
+                    if span:
+                        consume([('scalar', ((span[0], span[1], entity),))])
+                        trailing_indices(node, len(parts) - 1, bindings)
+                        return
+                elif len(parts) >= 2 and parts[0][0] and parts[1][0]:
+                    entity = parts[0][0] + '.' + parts[1][0]
+                    if _ENTITY.fullmatch(entity) and parts[0][1] and parts[1][1]:
+                        first, second = parts[0], parts[1]
+                        if not first[2] and not second[2]:
+                            span = (first[1][0], second[1][1])
+                            consume([('scalar', ((span[0], span[1], entity),))])
+                        else:
+                            # Split string indices: only object ID changes.
+                            span = second[1]
+                            origin = (span[0], span[1], entity)
+                            used.add(origin)
+                            if entity in mapping:
+                                replacements[origin] = mapping[entity].split('.', 1)[1]
+                        trailing_indices(node, len(parts) - 2, bindings)
+                        return
+                mark('dynamic_reference', 'Unresolved states object access')
+                # Inspect only computed indices; static property names are labels.
+                current = node
+                while isinstance(current, (nodes.Getattr, nodes.Getitem)):
+                    if isinstance(current, nodes.Getitem):
+                        expression(current.arg, bindings)
+                    current = current.node
+                return
+            if isinstance(node, nodes.Name):
+                if node.name in globals_:
+                    mark('dynamic_reference', 'HA global used outside recognized reference syntax')
+                bound = bindings.get(node.name)
+                if bound:
+                    escape(bound)
+                return
+            if isinstance(node, nodes.Const):
+                bound = value(node, bindings)
+                if bound:
+                    escape(bound)
+                return
+            for child in node.iter_child_nodes():
+                expression(child, bindings)
+
+        def assigned(statements):
+            names = set()
+            for stmt in statements:
+                for child in [stmt] + list(stmt.find_all(nodes.Name)):
+                    charge()
+                    if isinstance(child, nodes.Name) and child.ctx == 'store':
+                        names.add(child.name)
+            return names
+
+        def statements(items, bindings):
+            for node in items:
+                charge()
+                if isinstance(node, nodes.Assign):
+                    bound = value(node.node, bindings)
+                    if bound is None:
+                        expression(node.node, bindings)
+                    if isinstance(node.target, nodes.Name):
+                        bindings[node.target.name] = bound
+                    else:
+                        # Destructuring needs element provenance; remain unknown.
+                        if bound:
+                            escape(bound)
+                        for name in node.target.find_all(nodes.Name):
+                            bindings[name.name] = None
+                elif isinstance(node, nodes.AssignBlock):
+                    statements(node.body, bindings.copy())
+                    if isinstance(node.target, nodes.Name):
+                        bindings[node.target.name] = None
+                elif isinstance(node, nodes.For):
+                    bound = value(node.iter, bindings)
+                    local = bindings.copy()
+                    supported = (bound is not None and bound[0] == 'list'
+                                 and isinstance(node.target, nodes.Name)
+                                 and node.test is None and not node.recursive)
+                    if supported:
+                        local[node.target.name] = ('scalar', bound[1])
+                        # previtem/nextitem expose iterable values too. Treat all
+                        # loop metadata uses conservatively as origin escapes.
+                        local['loop'] = bound
+                    else:
+                        expression(node.iter, bindings)
+                        targets = [node.target] + list(node.target.find_all(nodes.Name))
+                        for target in targets:
+                            if isinstance(target, nodes.Name):
+                                local[target.name] = None
+                    if node.test is not None:
+                        expression(node.test, local)
+                    statements(node.body, local)
+                    statements(node.else_, bindings.copy())
+                elif isinstance(node, nodes.If):
+                    expression(node.test, bindings)
+                    branches = []
+                    branch = bindings.copy()
+                    statements(node.body, branch)
+                    branches.append(branch)
+                    for elif_node in node.elif_:
+                        branch = bindings.copy()
+                        statements([elif_node], branch)
+                        branches.append(branch)
+                    branch = bindings.copy()
+                    statements(node.else_, branch)
+                    branches.append(branch)
+                    for name in assigned([node]):
+                        # Losing a definite value must not lose possible source
+                        # origins: an escaped post-branch alias can still expose
+                        # an earlier constant at runtime on one branch.
+                        origins = set()
+                        for branch in [bindings] + branches:
+                            bound = branch.get(name)
+                            if bound:
+                                charge(len(bound[1]))
+                                origins.update(bound[1])
+                        bindings[name] = ('unknown', tuple(sorted(origins))) if origins else None
+                elif isinstance(node, nodes.Scope):
+                    statements(node.body, bindings.copy())
+                else:
+                    expression(node, bindings)
+
+        statements(tree.body, {})
+        for origin in used & unsafe:
+            mark('unsupported_reference', 'Static origin also used outside a recognized HA reference')
+        authorized = used - unsafe
+        # Preserve old visibility of source tokens in labels, custom functions,
+        # comments and raw text; these are blockers, never replacement targets.
+        approved_spans = {(a, b) for a, b, _ in authorized}
+        ordered_spans = sorted(approved_spans)
+        span_starts = [span[0] for span in ordered_spans]
+        for match in _TOKEN.finditer(text):
+            if match.group(1) in mapping and match.span(1) not in approved_spans:
+                # Spaced states.sensor . object references cover several tokens.
+                position = bisect_right(span_starts, match.start(1)) - 1
+                if position < 0 or match.end(1) > ordered_spans[position][1]:
+                    mark('unsupported_reference', 'Unrecognized entity token left unchanged')
+        edits = []
+        for origin in authorized:
+            a, b, entity = origin
+            if entity in mapping:
+                edits.append((a, b, replacements.get(origin, mapping[entity])))
+        edits.sort()
+        if any(left[1] > right[0] for left, right in zip(edits, edits[1:])):
+            raise Unsupported('Overlapping source spans')
+        for a, b, replacement in reversed(edits):
+            text = text[:a] + replacement + text[b:]
+        return text, markers
+    except (Unsupported, RecursionError, ValueError, TypeError, KeyError, IndexError) as err:
+        return text, [('unsupported_template', str(err)[:160])]
+    except Exception as err:
+        # Native parser syntax/version incompatibility is explicitly unsupported;
+        # never fall back to regex rewriting after a failed syntax analysis.
+        return text, [('unsupported_template', 'Native parser rejected template: ' + type(err).__name__)]
 
 
 def plan_references(
@@ -171,159 +492,15 @@ def plan_references(
         return any(match.group(1) in mapping for match in _TOKEN.finditer(text))
 
     def template(text: str, path: Path) -> str:
-        if re.search(r"{%[-+]?\s*(?:macro|import|from|call|include|extends|with)\b", text):
-            markers.append(Marker(path, "unsupported_template_scope", "Template bindings require syntax-aware resolution"))
-            return text
         if _EXTERNAL.search(text):
             markers.append(Marker(path, "external_content", "URL/script-bearing field left unchanged"))
             return text
         if "{#" in text or re.search(r"{%[-+]?\s*raw\b", text):
             markers.append(Marker(path, "unsupported_template", "Comment/raw-bearing template left unchanged"))
             return text
-        blocks: list[tuple[int, str]] = []
-        cursor = 0
-        while opening := _JINJA_OPEN.search(text, cursor):
-            closing = "}}" if opening.group() == "{{" else "%}"
-            end = opening.end()
-            quote = None
-            while end < len(text):
-                if quote is not None:
-                    if text[end] == "\\":
-                        end += 2
-                        continue
-                    if text[end] == quote:
-                        quote = None
-                elif text.startswith(closing, end):
-                    break
-                elif text[end] in "'\"":
-                    quote = text[end]
-                end += 1
-            if end >= len(text):
-                markers.append(Marker(path, "unsupported_template", "Unterminated Jinja block left unchanged"))
-                return text
-            blocks.append((opening.start(), text[opening.start():end + 2]))
-            cursor = end + 2
-        # Plain local assignments/loop variables do not change HA's global
-        # lookup functions. Permit those bindings only when their complete
-        # target grammar is known and none shadows a recognized HA global.
-        # Imports/macros/namespace assignments remain separate unsupported scope.
-        globals_used = {'states', 'is_state', 'state_attr', 'is_state_attr', 'expand'}
-        for _, expression in blocks:
-            binding = re.match(r"{%[-+]?\s*(set|for)\b(?P<rest>.*)", expression, re.S)
-            if binding is None:
-                continue
-            rest = binding.group('rest')
-            target = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*(.*)", rest, re.S)
-            valid = target is not None
-            if target:
-                names = {name.strip() for name in target.group(1).split(',')}
-                suffix = target.group(2)
-                valid = not names.intersection(globals_used)
-                if binding.group(1) == 'for':
-                    valid &= bool(re.match(r'in\b', suffix))
-                else:
-                    valid &= suffix.startswith('=') or bool(re.fullmatch(r'[-+]?%}', suffix.strip()))
-            if not valid:
-                markers.append(Marker(path, 'unsupported_template_scope', 'Unknown or shadowing template binding'))
-                return text
-        if not blocks:
-            if mentions_source(text):
-                markers.append(Marker(path, "unsupported_reference", "Non-Jinja text left unchanged"))
-            return text
-        replacements: list[tuple[int, int, str]] = []
-        for block_start, expression in blocks:
-            spans: set[tuple[int, int]] = set()
-            recognized_calls = set()
-            # Ignore text inside Jinja string literals except approved HA call
-            # arguments. This prevents treating a string containing source code
-            # as an executable states.sensor.foo reference.
-            strings: list[tuple[int, int]] = []
-            index = 0
-            while index < len(expression):
-                if expression[index] not in "'\"":
-                    index += 1
-                    continue
-                start = index
-                quote = expression[index]
-                index += 1
-                while index < len(expression):
-                    if expression[index] == "\\":
-                        index += 2
-                    elif expression[index] == quote:
-                        index += 1
-                        break
-                    else:
-                        index += 1
-                strings.append((start, index))
-            string_starts = [a for a, _ in strings]
-            def inside_string(offset):
-                string_index = bisect_right(string_starts, offset) - 1
-                return string_index >= 0 and offset < strings[string_index][1]
-
-            for matcher in (_CALL, _STATE, _BRACKET):
-                for match in matcher.finditer(expression):
-                    if inside_string(match.start()):
-                        continue
-                    recognized_calls.add(match.start())
-                    start, end = match.span('id')
-                    spans.add((start, end))
-                    old = re.sub(r'\s+', '', match.group('id'))
-                    if old in mapping:
-                        replacements.append((block_start + start, block_start + end, mapping[old]))
-            for match in _SPLIT_STATE.finditer(expression):
-                if inside_string(match.start()):
-                    continue
-                recognized_calls.add(match.start())
-                old = (match.group('domain') or match.group('bracket_domain')) + '.' + match.group('object')
-                if old in mapping:
-                    start, end = match.span('object')
-                    replacements.append((block_start + start, block_start + end, mapping[old].split('.', 1)[1]))
-            # expand accepts multiple entities or a literal list. Validate the
-            # complete argument grammar before rewriting any of its literals;
-            # an arbitrary string/list expression is not a static reference.
-            for match in _EXPAND.finditer(expression):
-                if inside_string(match.start()):
-                    continue
-                args = match.group('args')
-                offset = match.start('args')
-                stripped = args.strip()
-                if stripped.startswith('[') and stripped.endswith(']'):
-                    left = args.index('[') + 1
-                    right = args.rindex(']')
-                    args, offset = args[left:right], offset + left
-                literals = list(_ENTITY_LITERAL.finditer(args))
-                cursor = 0
-                valid = bool(literals)
-                for index, literal in enumerate(literals):
-                    between = args[cursor:literal.start()].strip()
-                    valid &= between == ('' if index == 0 else ',')
-                    cursor = literal.end()
-                valid &= args[cursor:].strip() in ('', ',')
-                if not valid:
-                    continue
-                recognized_calls.add(match.start())
-                for literal in literals:
-                    start, end = literal.span('id')
-                    start, end = start + offset, end + offset
-                    spans.add((start, end))
-                    old = literal.group('id')
-                    if old in mapping:
-                        replacements.append((block_start + start, block_start + end, mapping[old]))
-            unresolved = False
-            for match in _TOKEN.finditer(expression):
-                if match.group(1) in mapping and match.span(1) not in spans:
-                    unresolved = True
-            # Dynamic accesses can reference sources without spelling a full ID.
-            if any(
-                not inside_string(m.start()) and m.start() not in recognized_calls
-                for m in _DYNAMIC.finditer(expression)
-            ):
-                markers.append(Marker(path, "dynamic_reference", "Dynamic/indirect template references need review"))
-            if unresolved:
-                markers.append(Marker(path, "unsupported_reference", "Unrecognized entity token left unchanged"))
-        for start, end, replacement in sorted(set(replacements), reverse=True):
-            text = text[:start] + replacement + text[end:]
-        return text
+        result, review = _syntax_template(text, mapping, limits.max_nodes)
+        markers.extend(Marker(path, code, detail) for code, detail in review)
+        return result
 
     def string(text: str, path: Path, syntax: Syntax | None, location: str) -> str:
         if len(text) > limits.max_string_length:

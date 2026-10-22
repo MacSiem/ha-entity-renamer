@@ -21,7 +21,11 @@ def jinja(path=()):
     return Context(Consumer.TEMPLATE, (Scope(path, Syntax.JINJA),))
 
 
+requires_jinja = unittest.skipUnless(importlib.util.find_spec('jinja2'), 'native Jinja parser unavailable')
+
+
 class ReferencePlannerTest(unittest.TestCase):
+    @requires_jinja
     def test_split_static_state_access(self):
         for source in ("{{ states.sensor['a'].state }}", "{{ states['sensor']['a'].state }}",
                        '''{{ states [ "sensor" ] [ 'a' ] }}'''):
@@ -29,12 +33,14 @@ class ReferencePlannerTest(unittest.TestCase):
             self.assertEqual(plan.value, source.replace("'a'", "'b'"))
             self.assertFalse(plan.markers, plan.markers)
 
+    @requires_jinja
     def test_split_dynamic_state_access_is_blocked_without_full_id(self):
         for source in ("{{ states.sensor[variable] }}", "{{ states['sensor'][variable] }}"):
             plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
             self.assertEqual(plan.value, source)
             self.assertIn('dynamic_reference', [m.code for m in plan.markers])
 
+    @requires_jinja
     def test_local_binding_preserves_global_static_reference_migration(self):
         for source in ("{% set reading = states('sensor.a') %}{{ reading }}",
                        "{% for item in items %}{{ states('sensor.a') }}{% endfor %}",
@@ -44,6 +50,7 @@ class ReferencePlannerTest(unittest.TestCase):
             self.assertFalse(plan.markers, plan.markers)
             self.assertEqual(plan.value, source.replace('sensor.a', 'sensor.b'))
 
+    @requires_jinja
     def test_binding_shadowing_and_namespace_assignment_are_blocked(self):
         for source in ("{% set foo, states = pair %}{{ states('sensor.a') }}",
                        "{% set ns.states = lookup %}{{ states('sensor.a') }}",
@@ -52,12 +59,14 @@ class ReferencePlannerTest(unittest.TestCase):
             self.assertEqual(plan.value, source)
             self.assertIn('unsupported_template_scope', [m.code for m in plan.markers])
 
+    @requires_jinja
     def test_static_bracket_reference_preserves_attribute_and_format(self):
         source = "{{ states [ 'sensor.a' ].state }}"
         plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
         self.assertEqual(plan.value, "{{ states [ 'sensor.b' ].state }}")
         self.assertFalse(plan.markers)
 
+    @requires_jinja
     def test_expand_all_static_arguments_and_list_without_cascading(self):
         for source in ("{{ expand('sensor.a', 'sensor.b') }}",
                        "{{ expand(['sensor.a', 'sensor.b',]) | list }}"):
@@ -65,6 +74,7 @@ class ReferencePlannerTest(unittest.TestCase):
             self.assertEqual(plan.value, source.replace('sensor.b', 'sensor.c').replace('sensor.a', 'sensor.b'))
             self.assertFalse(plan.markers)
 
+    @requires_jinja
     def test_expand_dynamic_or_malformed_arguments_remain_blocked(self):
         for source in ("{{ expand('sensor.a', others) }}", "{{ expand(['sensor.a'] + others) }}",
                        "{{ expand('sensor.a' ~ suffix) }}", "{{ expand('sensor.a' 'sensor.b') }}"):
@@ -72,18 +82,21 @@ class ReferencePlannerTest(unittest.TestCase):
             self.assertEqual(plan.value, source)
             self.assertIn('dynamic_reference', [m.code for m in plan.markers])
 
+    @requires_jinja
     def test_bracket_dynamic_and_quoted_code_not_rewritten(self):
         for source in ("{{ states['sensor.' ~ suffix] }}", '''{{ "states['sensor.a']" }}'''):
             plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
             self.assertEqual(plan.value, source)
             self.assertTrue(plan.markers)
 
+    @requires_jinja
     def test_arithmetic_on_static_reading_is_not_a_dynamic_entity_reference(self):
         source = "{{ states('sensor.a') | float + 2 }}"
         plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
         self.assertEqual(plan.value, source.replace('sensor.a', 'sensor.b'))
         self.assertFalse(plan.markers)
 
+    @requires_jinja
     def test_shadowed_states_function_is_not_blindly_rewritten(self):
         source = "{% set states = custom_lookup %}{{ states('sensor.a') }}"
         plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
@@ -111,12 +124,14 @@ class ReferencePlannerTest(unittest.TestCase):
             plan_references(source, {"sensor.a": "sensor.b"}, refs(()))
         self.assertEqual(source, {"sensor.a": 1, "sensor.b": 2})
 
+    @requires_jinja
     def test_template_literals_state_objects_and_token_boundaries(self):
         source = "{{ states('sensor.a') }} {{ states.sensor.a.state }} {{ states('sensor.ab') }}"
         plan = plan_references(source, {"sensor.a": "sensor.b"}, jinja())
         self.assertEqual(plan.value, "{{ states('sensor.b') }} {{ states.sensor.b.state }} {{ states('sensor.ab') }}")
         self.assertEqual(plan.markers, ())
 
+    @requires_jinja
     def test_template_swap_replacements_use_original_spans(self):
         source = "{{ is_state('sensor.a', 'on') and state_attr('sensor.b', 'unit') }}"
         plan = plan_references(source, {"sensor.a": "sensor.b", "sensor.b": "sensor.a"}, jinja())
@@ -130,29 +145,34 @@ class ReferencePlannerTest(unittest.TestCase):
         self.assertEqual(plan.value["url"], source["url"])
         self.assertEqual(plan.coverage, "explicit_scopes_only")
 
+    @requires_jinja
     def test_url_and_script_in_templates_are_not_rewritten(self):
         for source in ("https://example.invalid/{{ states('sensor.a') }}", "<script>{{ states('sensor.a') }}</script>"):
             plan = plan_references(source, {"sensor.a": "sensor.b"}, jinja())
             self.assertEqual(plan.value, source)
             self.assertEqual(plan.markers[0].code, "external_content")
 
+    @requires_jinja
     def test_dynamic_and_unknown_references_are_marked(self):
         source = "{{ states('sensor.' ~ name) }} {{ custom('sensor.a') }}"
         plan = plan_references(source, {"sensor.a": "sensor.b"}, jinja())
         self.assertEqual(plan.value, source)
         self.assertEqual({m.code for m in plan.markers}, {"dynamic_reference", "unsupported_reference"})
 
+    @requires_jinja
     def test_known_reference_can_change_while_dynamic_requires_review(self):
         plan = plan_references("{{ states('sensor.a') + states(entity) }}", {"sensor.a": "sensor.b"}, jinja())
         self.assertIn("states('sensor.b')", plan.value)
         self.assertIn("dynamic_reference", [m.code for m in plan.markers])
 
+    @requires_jinja
     def test_strings_containing_code_raw_and_comments_are_not_code(self):
         for source in ('''{{ "states.sensor.a" }}''', "{% raw %}{{ states('sensor.a') }}{% endraw %}", "{# {{ states('sensor.a') }} #}"):
             plan = plan_references(source, {"sensor.a": "sensor.b"}, jinja())
             self.assertEqual(plan.value, source)
             self.assertTrue(plan.markers)
 
+    @requires_jinja
     def test_plain_template_text_and_exact_tree_embedded_tokens(self):
         for context in (jinja(), refs(())):
             plan = plan_references("sensor.a is a label", {"sensor.a": "sensor.b"}, context)
@@ -161,6 +181,7 @@ class ReferencePlannerTest(unittest.TestCase):
         plan = plan_references("sensor.ab", {"sensor.a": "sensor.b"}, refs(()))
         self.assertEqual(plan.markers, ())
 
+    @requires_jinja
     def test_quoted_template_delimiters_and_unterminated_blocks(self):
         source = '''{{ '}}' ~ states('sensor.a') }}'''
         plan = plan_references(source, {"sensor.a": "sensor.b"}, jinja())
@@ -170,18 +191,21 @@ class ReferencePlannerTest(unittest.TestCase):
         self.assertEqual(plan.value, malformed)
         self.assertEqual(plan.markers[0].code, "unsupported_template")
 
+    @requires_jinja
     def test_quoted_call_text_is_unchanged(self):
         source = '''{{ "states('sensor.a')" }}'''
         plan = plan_references(source, {"sensor.a": "sensor.b"}, jinja())
         self.assertEqual(plan.value, source)
         self.assertIn("unsupported_reference", [m.code for m in plan.markers])
 
+    @requires_jinja
     def test_loop_bindings_do_not_rewrite_local_states(self):
         source = "{% for states in items %}{{ states.sensor.a }}{% endfor %}"
         plan = plan_references(source, {"sensor.a": "sensor.b"}, jinja())
         self.assertEqual(plan.value, source)
         self.assertIn("unsupported_template_scope", [m.code for m in plan.markers])
 
+    @requires_jinja
     def test_spaced_attribute_access_is_migrated(self):
         for source in ("{{ states . sensor . a.state }}", "{{ states.sensor . a }}",
                        "{{ states .sensor.a }}"):
