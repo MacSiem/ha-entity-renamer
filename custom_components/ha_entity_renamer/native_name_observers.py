@@ -55,7 +55,10 @@ class NativeNameObserver:
         entity, state, entry = self._object(row), self.hass.states.get(row.entity_id), self._entry(row)
         active = entity is not None
         if not active:
-            require(state is None, 'name_inactive_state_present')
+            require(state is None or (entry is not None and entry['state'] == 'not_loaded'
+                    and row.disabled_by in (None, 'config_entry')
+                    and state.state == 'unavailable' and state.attributes.get('restored') is True),
+                    'name_inactive_state_present')
             require(row.disabled_by is not None or (entry is not None and
                     entry['state'] == 'not_loaded'), 'name_unexplained_runtime_absence')
         else:
@@ -79,10 +82,13 @@ class NativeNameObserver:
         devices = self.io.document('device')
         device_ids = {row.device_id for row in rows if row.device_id is not None}
         for row in rows:
-            _, _, entry, active = self._sample(row)
+            _, state, entry, active = self._sample(row)
             native = next(item for item in document['entities'] if item['id'] == row.id)
             baseline[row.id] = {'row': native, 'identity': list(registry_identity(row)),
-                                'entry': entry, 'active': active}
+                                'entry': entry, 'active': active,
+                                'inactive_state': (state.state if state is not None else None) if not active else None,
+                                'inactive_attributes': ({k: v for k, v in state.attributes.items()
+                                    if k != 'friendly_name'} if state is not None else None) if not active else None}
         payload = {'ha': version, 'entities': baseline,
                    'devices': {row['id']: row for row in devices['devices']
                                if row['id'] in device_ids}}
@@ -116,6 +122,15 @@ class NativeNameObserver:
             entity, state, entry, active = self._sample(row)
             require(entry == saved['entry'] and active is saved['active'], 'name_lifecycle_or_preferences_changed')
             if not active:
+                require((state.state if state is not None else None) == saved['inactive_state']
+                        and ({k: v for k, v in state.attributes.items() if k != 'friendly_name'}
+                             if state is not None else None) == saved['inactive_attributes'],
+                        'name_inactive_state_or_attributes_changed')
+                if state is not None:
+                    friendly = (er.async_get_legacy_friendly_name(self.hass, row)
+                                if version == '2026.10.2' else row.name or row.original_name)
+                    require(state.attributes.get('friendly_name') == (friendly if friendly else None),
+                            'name_inactive_friendly_name_stale')
                 continue
             if row.device_id and entity.has_entity_name:
                 require(entity.device_entry is dr.async_get(self.hass).async_get(row.device_id),
