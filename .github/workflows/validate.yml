@@ -5,6 +5,17 @@ on:
   pull_request:
   workflow_dispatch:
 jobs:
+  backend-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install planner test dependencies
+        run: python -m pip install PyYAML==6.0.3 Jinja2==3.1.6
+      - name: Backend planning, persistence and transaction regressions
+        run: python -B -m unittest discover -s tests -p 'test*.py' -v
   check:
     runs-on: ubuntu-latest
     steps:
