@@ -50,6 +50,12 @@ async def run_activation(scratch, planner, validation):
             port = sock.getsockname()[1]
         config = {'http': {'server_host': '127.0.0.1', 'server_port': port}}
         captured = []
+        renames = []
+        def audit(event, args):
+            if event == 'os.rename' and str(args[1]).endswith('scripts.yaml'):
+                import traceback
+                renames.append([(frame.name, frame.lineno) for frame in traceback.extract_stack()[-8:-1]])
+        sys.addaudithook(audit)
         async def capture(call):
             captured.append(str(call.data['value']))
         try:
@@ -87,7 +93,7 @@ async def run_activation(scratch, planner, validation):
                     try:
                         receipt = await validation.async_validate_proposed(hass, plan, scratch)
                     except validation.YAMLValidationError:
-                        print({'phase': value, 'fixture_source_drift': [(item.path,
+                        print({'renames': renames, 'phase': value, 'fixture_source_drift': [(item.path,
                             hashlib.sha256((root / item.path).read_bytes()).hexdigest() == item.sha256,
                             ((root / item.path).stat().st_ino, item.inode))
                             for item in plan.files]}, flush=True)
