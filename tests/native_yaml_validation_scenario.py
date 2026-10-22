@@ -50,14 +50,6 @@ async def run_activation(scratch, planner, validation):
             port = sock.getsockname()[1]
         config = {'http': {'server_host': '127.0.0.1', 'server_port': port}}
         captured = []
-        renames = []
-        def audit(event, args):
-            if ((event == 'os.rename' and str(args[1]).endswith('scripts.yaml'))
-                    or (event == 'open' and str(args[0]).endswith('scripts.yaml')
-                        and args[2] & (os.O_WRONLY | os.O_RDWR))):
-                import traceback
-                renames.append((event, str(args[0]), [(frame.name, frame.lineno) for frame in traceback.extract_stack()[-8:-1]]))
-        sys.addaudithook(audit)
         async def capture(call):
             captured.append(str(call.data['value']))
         try:
@@ -89,20 +81,12 @@ async def run_activation(scratch, planner, validation):
                 ({'sensor.new': 'sensor.old'}, 'sensor.new', 'sensor.old', '43'),
             ]:
                 await hass.async_block_till_done()  # Outside editor locks; settle prior reload.
-                prior_inode = script_path.stat().st_ino
-                plan = planner.plan_yaml(root, mapping)
-                print({'phase': value, 'prior_inode': prior_inode, 'planned_inode': next(item.inode for item in plan.files if item.path == 'scripts.yaml'), 'named_inode': script_path.stat().st_ino}, flush=True)
-                assert plan.ready and len(plan.patches) == 1, plan.issues
                 async with leases.hold(lambda: None):
-                    print({'phase': value, 'lease_inode': script_path.stat().st_ino}, flush=True)
-                    try:
-                        receipt = await validation.async_validate_proposed(hass, plan, scratch)
-                    except validation.YAMLValidationError:
-                        print({'renames': renames, 'phase': value, 'fixture_source_drift': [(item.path,
-                            hashlib.sha256((root / item.path).read_bytes()).hexdigest() == item.sha256,
-                            ((root / item.path).stat().st_ino, item.inode))
-                            for item in plan.files]}, flush=True)
-                        raise
+                    # Capture the plan only after acquiring native editor locks;
+                    # a plan from before lock acquisition can already be stale.
+                    plan = planner.plan_yaml(root, mapping)
+                    assert plan.ready and len(plan.patches) == 1, plan.issues
+                    receipt = await validation.async_validate_proposed(hass, plan, scratch)
                     validation.assert_proposal_matches(receipt, plan)
                     validation.assert_activation_available(hass, receipt)
                     await hass.async_add_executor_job(validation.assert_validation_current, receipt)
