@@ -71,6 +71,11 @@ async def run_names(hass, bridge, meter):
     await platform.async_remove_entity(meter.entity_id)
     meter = type(meter)()
     meter._attr_has_entity_name = True
+    # Native platform setup assigns its ConfigEntry before adding device-info
+    # entities; mirror that setup in this isolated synthetic platform.
+    platform.config_entry = entry
+    meter._attr_device_info = {'identifiers': {('threshold', 'native-name-fixture')},
+                               'name': 'Native probe device'}
     registry.async_update_entity(meter_row.entity_id, name='Explicit meter override', has_entity_name=True)
     await platform.async_add_entities([meter])
     await io.settle()
