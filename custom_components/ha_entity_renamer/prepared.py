@@ -19,8 +19,9 @@ _MAX_BYTES = 60 * 1024 * 1024
 
 def canonical(value):
     """Bound a detached JSON tree before serialization/hashing/storage."""
-    from .reference_planner import Context, Consumer, plan_references
-    checked = plan_references(value, {}, Context(Consumer.AUTOMATION, ())).value
+    from .reference_planner import Context, Consumer, Limits, plan_references
+    checked = plan_references(value, {}, Context(Consumer.AUTOMATION, ()),
+                              limits=Limits(max_string_length=_MAX_BYTES)).value
     raw = json.dumps(checked, sort_keys=True, separators=(',', ':'), allow_nan=False)
     if len(raw.encode()) > _MAX_BYTES:
         raise ValueError('preparation_size_limit')
