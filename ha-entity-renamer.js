@@ -2225,6 +2225,11 @@ class HAEntityRenamer extends HTMLElement {
       const areas = await hass.callWS({type:'config/area_registry/list'});
       if (!applicable()) return;
       if (!Array.isArray(areas)) throw new Error('Invalid area registry');
+      // Area assignments may change in HA while this card remains open. Reuse
+      // the authorized registry refresh before composing drafts from those IDs.
+      const registries = await this._loadData();
+      if (!applicable()) return;
+      if (!registries) throw new Error('Could not refresh registry assignments');
       const device = this._devices.find(item => item.id === deviceId);
       const queued = new Set(this._renameQueue.map(row => row.oldId));
       let count = 0;

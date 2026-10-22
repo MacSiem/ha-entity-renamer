@@ -7,7 +7,10 @@ function fixture() {
  const card=dom.window.document.createElement('ha-entity-renamer');dom.window.document.body.append(card);
  const calls=[];
  card._hass={user:{id:'qa',is_admin:true},language:'en',states:{},callWS:async msg=>{
-  calls.push(msg.type);assert.equal(msg.type,'config/area_registry/list');
+  calls.push(msg.type);
+  if(msg.type==='config/device_registry/list')return card._devices;
+  if(msg.type==='config/entity_registry/list')return card._entities;
+  assert.equal(msg.type,'config/area_registry/list');
   return [{area_id:'bath',name:'Łazienka'},{area_id:'living',name:'Salon'}];
  }};
  card._devices=[{id:'d',name:'QA',area_id:'living'}];card._selectedDevice='d';
@@ -20,8 +23,8 @@ test('area prefix respects entity override, device fallback and existing prefix,
  const {dom,card,calls}=fixture();try {
   await card._addAreaPrefix();
   assert.deepEqual(Array.from(card._renameQueue,row=>[row.oldId,row.newId]),[
-   ['sensor.temperature','sensor.lazienka_temperature'],['sensor.humidity','sensor.salon_humidity']]);
-  assert.deepEqual(calls,['config/area_registry/list']);
+   ['sensor.humidity','sensor.salon_humidity'],['sensor.temperature','sensor.lazienka_temperature']]);
+  assert.deepEqual(calls,['config/area_registry/list','config/device_registry/list','config/entity_registry/list']);
   assert.ok(card._renameQueue.every(row=>row.source==='area'));
  }finally{dom.window.close();}
 });
@@ -86,5 +89,16 @@ test('area action reads current device and entity assignments instead of cached 
    ['sensor.humidity','sensor.nowy_salon_humidity'],['sensor.temperature','sensor.biuro_temperature']]);
   assert.equal(reads.filter(t=>t.endsWith('/list')).length,3);
   assert.equal(card._loading,false);
+ }finally{dom.window.close();}
+});
+
+test('failed registry refresh never composes drafts from old area assignments',async()=>{
+ const {dom,card}=fixture();try {
+  card._hass.callWS=async msg=>{
+   if(msg.type==='config/area_registry/list')return [{area_id:'living',name:'Salon'}];
+   throw Error('Registry unavailable');
+  };
+  await card._addAreaPrefix();assert.equal(card._renameQueue.length,0);
+  assert.equal(card._loading,false);assert.equal(card._message.type,'error');
  }finally{dom.window.close();}
 });
