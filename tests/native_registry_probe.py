@@ -105,7 +105,7 @@ async def run(root):
         meter.async_write_ha_state()
         await guard.snapshot(mapping)
         current = await recorder.async_add_executor_job(points, recorder, metadata_id)
-        assert current[-1][1] == '43' and current[-1][0] > ceiling
+        assert float(current[-1][1]) == 43 and current[-1][0] > ceiling, (history, current, hass.states.get(meter.entity_id).state)
         await bridge.compensate(prepared, lambda: None)
         assert (await bridge.inspect(prepared)).position == 'before'
         assert meter.entity_id == old and registry.async_get(old).id == entry.id
