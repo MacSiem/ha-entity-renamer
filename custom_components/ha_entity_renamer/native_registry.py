@@ -35,6 +35,7 @@ class PreparedRegistryChange:
     before_json: str
     after_json: str
     recorder_before_json: str = ""
+    history_before_json: str = ""
 
     @property
     def before(self):
@@ -168,10 +169,17 @@ class NativeRegistryBridge:
     activation observer before they can be marked transaction BEFORE/AFTER.
     """
 
-    def __init__(self, io, recorder, runtime_probe=None):
+    def __init__(self, io, recorder, runtime_probe=None, *, history_guard=None):
         self.io = io
         self.recorder = recorder
         self.runtime_probe = runtime_probe or io.runtime
+        self.history_guard = history_guard
+
+    def _history(self):
+        if self.history_guard is None:
+            from .history_guard import NativeHistoryGuard
+            self.history_guard = NativeHistoryGuard(self.recorder)
+        return self.history_guard
 
     def _live(self, change):
         return _row(self.io.document(change.kind), change.kind, change.identity)
@@ -212,12 +220,15 @@ class NativeRegistryBridge:
         change = PreparedRegistryChange(kind, identity, json.dumps(before, sort_keys=True),
                                         json.dumps(after, sort_keys=True))
         self._fresh(change, before, guard)
-        recorder_before = {}
+        recorder_before, history_before = {}, {}
         if change.mapping:
             recorder_before = await self.recorder.preflight(change.mapping)
             self._fresh(change, before, guard)  # Guard and revision AFTER await.
+            history_before = await self._history().capture(change.mapping)
+            self._fresh(change, before, guard)
         from dataclasses import replace
-        change = replace(change, recorder_before_json=json.dumps(recorder_before, sort_keys=True))
+        change = replace(change, recorder_before_json=json.dumps(recorder_before, sort_keys=True),
+                         history_before_json=json.dumps(history_before, sort_keys=True))
         evidence = await self.inspect(change)
         self._fresh(change, before, guard)
         if evidence.position != "before":
@@ -229,6 +240,8 @@ class NativeRegistryBridge:
         try:
             await self.io.settle()  # Deliver event listeners BEFORE Recorder barrier.
             recorder = await self.recorder.snapshot(change.mapping) if change.mapping else None
+            history = (await self._history().verify(json.loads(change.history_before_json))
+                       if change.mapping else None)
             try:
                 live = self._live(change)
             except RegistryConflict:
@@ -268,10 +281,11 @@ class NativeRegistryBridge:
             if self.io.pending(change.kind):
                 return RegistryEvidence("unknown", True, runtime, durable, metadata,
                                         reason="native_persistence_pending")
-            if durable is not True or runtime is not True or metadata is not True:
-                return RegistryEvidence("unknown", True, runtime, durable, metadata,
+            if (durable is not True or runtime is not True or metadata is not True
+                    or (change.mapping and history is not True)):
+                return RegistryEvidence("unknown", True, runtime, durable, metadata, history,
                                         reason="scoped_evidence_incomplete")
-            return RegistryEvidence(position, True, True, True, True)
+            return RegistryEvidence(position, True, True, True, True, history)
         except Exception:
             # Preserve cancellation on Python 3.9+ (BaseException).
             return RegistryEvidence("unknown", None, None, None, None,

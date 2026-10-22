@@ -136,7 +136,7 @@ async def run(root):
         else:
             await bridge.apply(prepared, lambda: None)
         evidence = await bridge.inspect(prepared)
-        assert evidence.position == 'after', evidence
+        assert evidence.position == 'after' and evidence.complete_history is True, evidence
         assert meter.entity_id == mapping[old]
         assert registry.async_get(mapping[old]).id == entry.id
         assert await recorder.async_add_executor_job(points, recorder, metadata_id, ceiling) == history
@@ -191,6 +191,15 @@ async def run(root):
         async_import_statistics(hass, statistic_metadata,
             [{'start': hour, 'state': 999.0, 'sum': 999.0}])
         assert not await historical.verify(historical_before)
+        rejected = await bridge.inspect(prepared)
+        assert rejected.position == 'unknown' and rejected.complete_history is False, rejected
+        from migration_probe.native_registry import RegistryConflict
+        try:
+            await bridge.apply(prepared, lambda: None)
+            raise AssertionError('Historical corruption allowed a registry write')
+        except RegistryConflict:
+            pass
+        assert meter.entity_id == old
         print({'changed_hourly_point_rejected': 'PASS', 'hourly_fixture_source': 'native_import'})
         if GROUPS:
             from migration_probe.native_group_scenario import run_groups

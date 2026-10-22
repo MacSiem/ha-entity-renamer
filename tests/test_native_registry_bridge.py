@@ -119,11 +119,27 @@ class Recorder:
         return snapshot
 
 
+class History:
+    def __init__(self):
+        self.content = {'states': [41, 42], 'hourly': [10, 11]}
+        self.after_capture = None
+
+    async def capture(self, mapping):
+        result = deepcopy(self.content)
+        if self.after_capture:
+            self.after_capture()
+        return result
+
+    async def verify(self, snapshot):
+        return snapshot == self.content
+
+
 class Tests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.io = IO()
         self.recorder = Recorder(self.io)
-        self.bridge = Bridge(self.io, self.recorder)
+        self.history = History()
+        self.bridge = Bridge(self.io, self.recorder, history_guard=self.history)
         self.valid = True
 
     def guard(self):
@@ -143,7 +159,32 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.io.flushes, 1)
         self.assertEqual(self.io.data["entities"][0]["unique_id"], "integration-unique")
         self.assertEqual(self.io.data["entities"][0]["options"], {"opaque": True})
-        self.assertIsNone(report.complete_history)
+        self.assertTrue(report.complete_history)
+
+    async def test_history_change_prevents_write_even_with_same_metadata(self):
+        change = await self.prepare()
+        self.history.content['hourly'][0] = 999
+        evidence = await self.bridge.inspect(change)
+        self.assertTrue(evidence.recorder_metadata)
+        self.assertFalse(evidence.complete_history)
+        self.assertEqual(evidence.position, 'unknown')
+        with self.assertRaises(Conflict):
+            await self.bridge.apply(change, self.guard)
+        self.assertEqual(self.io.updates, [])
+
+    async def test_missing_history_baseline_is_never_accepted(self):
+        from dataclasses import replace
+        change = replace(await self.prepare(), history_before_json='')
+        self.assertEqual((await self.bridge.inspect(change)).position, 'unknown')
+        with self.assertRaises(Conflict):
+            await self.bridge.apply(change, self.guard)
+        self.assertEqual(self.io.updates, [])
+
+    async def test_guard_revoked_during_history_capture_refuses_prepare(self):
+        self.history.after_capture = lambda: setattr(self, 'valid', False)
+        with self.assertRaises(Conflict):
+            await self.prepare()
+        self.assertEqual(self.io.updates, [])
 
     async def test_fresh_guard_after_inspection_await_prevents_mutation(self):
         change = await self.prepare()
