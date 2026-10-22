@@ -1231,7 +1231,20 @@ function _bindFamilyNavigation(card, restoreFocus=null) {
   }
   buttons.forEach((button,index)=>{select.options[index].textContent=button.getAttribute('aria-label')||button.textContent.trim();});
   const selected=buttons.find(button=>button.classList.contains(FAMILY_ACTIVE));select.value=selected?.getAttribute(FAMILY_ATTR)||'';
-  const target=nav.parentElement;
+  nav.setAttribute('role','tablist');
+  buttons.forEach((button,index)=>{
+    button.setAttribute('role','tab');button.setAttribute('aria-selected',String(button===selected));button.tabIndex=button===selected?0:-1;
+    if(button.dataset.tabKeysBound)return;
+    button.dataset.tabKeysBound='true';
+    button.addEventListener('keydown',event=>{
+      if(event.altKey||event.ctrlKey||event.metaKey||!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+      event.preventDefault();
+      const next=event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowRight'?1:-1)+buttons.length)%buttons.length;
+      const id=buttons[next].getAttribute(FAMILY_ATTR);buttons[next].click();
+      Array.from(card.shadowRoot.querySelectorAll(FAMILY_NAV+' button')).find(item=>item.getAttribute(FAMILY_ATTR)===id)?.focus({preventScroll:true});
+    });
+  });
+  const target=card;
   const applyWidth=width=>{
     const currentNav=root.querySelector(FAMILY_NAV),currentLabel=root.querySelector('.ht-tab-picker');if(!currentNav||!currentLabel)return;
     const input=currentLabel.querySelector('select'),active=root.activeElement;
@@ -1239,6 +1252,13 @@ function _bindFamilyNavigation(card, restoreFocus=null) {
     const available=width-(parseFloat(style.paddingLeft)||0)-(parseFloat(style.paddingRight)||0);
     const narrow=available>0&&available<280,fromTab=currentNav.contains(active),fromPicker=active===input;
     currentNav.hidden=narrow;currentLabel.hidden=!narrow;
+    if(!narrow){
+      const tab=currentNav.querySelector('button.'+FAMILY_ACTIVE);
+      if(tab){const a=tab.getBoundingClientRect(),b=currentNav.getBoundingClientRect();
+        if(a.left<b.left)currentNav.scrollLeft-=b.left-a.left;
+        else if(a.right>b.right)currentNav.scrollLeft+=a.right-b.right;
+      }
+    }
     if(narrow&&fromTab)input.focus({preventScroll:true});
     else if(!narrow&&fromPicker)currentNav.querySelector('button.'+FAMILY_ACTIVE)?.focus({preventScroll:true});
   };
@@ -1258,8 +1278,7 @@ function _bindFamilyNavigation(card, restoreFocus=null) {
     }
   }
   applyWidth(card._familyNavWidth||900);
-  // If ResizeObserver is unavailable, all native tabs and the complete picker stay usable.
-  if(typeof ResizeObserver!=='function') { nav.hidden=false;label.hidden=false; }
+  // Without ResizeObserver keep the initially measured navigation usable.
   if(restoreFocus) {
     const button=buttons.find(item=>item.getAttribute(FAMILY_ATTR)===restoreFocus.tab)||selected;
     if(nav.hidden)select.focus({preventScroll:true});else button?.focus({preventScroll:true});
@@ -2976,6 +2995,10 @@ class HAEntityRenamer extends HTMLElement {
         .queued-badge { color:var(--primary-text-color,inherit);border-color:var(--success-color,#16a34a); }
         .queue-group-heading { display:flex;justify-content:space-between;gap:8px;overflow-wrap:anywhere;font-size:14px; }
         ${_FAMILY_CONTROL_CSS}
+        .tabs { flex-wrap:nowrap !important;overflow-x:auto !important;overflow-y:hidden !important;scrollbar-width:thin; }
+        :host .tabs button { flex:0 0 auto;white-space:nowrap !important; }
+        .list-chips { flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin; }
+        :host .list-chips button { flex:0 0 auto;white-space:nowrap !important; }
         .registry-id { display:inline-block;max-width:100%;min-width:0;overflow-x:auto;vertical-align:bottom;white-space:normal;word-break:normal;overflow-wrap:normal;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .automatic-target { display:flex;align-items:baseline;gap:4px; }
         .automatic-target code { min-width:0;flex:1; }
