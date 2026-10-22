@@ -43,12 +43,28 @@ class ActivationTests(unittest.IsolatedAsyncioTestCase):
             before.mkdir(); after.mkdir()
             files, directories = await asyncio.to_thread(validation._stage, root, reverse, before, after)
             self.assertTrue(any(row[0] == 'scripts.yaml' for row in files))
+            # Source identity changes after capture must always fail closed.
+            replacement = root / 'replacement.yaml'
+            replacement.write_bytes((root / 'scripts.yaml').read_bytes())
+            replacement.replace(root / 'scripts.yaml')
             receipt = validation.ValidationReceipt(str(root), files, directories,
                 (), ('script',), (), '2026.10.2')
-            for path, digest, device, inode in files:
-                current = (root / path).stat()
-                self.assertEqual((current.st_dev, current.st_ino), (device, inode), path)
-            validation.assert_validation_current(receipt)
+            with self.assertRaisesRegex(validation.YAMLValidationError, 'source_changed'):
+                validation.assert_validation_current(receipt)
+
+    async def test_unrelated_runtime_files_do_not_invalidate_actual_validator_inputs(self):
+        from custom_components.ha_entity_renamer.yaml_plan import plan_yaml
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = parent / 'config'; root.mkdir(); (root / '.storage').mkdir()
+            (root / 'configuration.yaml').write_text('script: !include scripts.yaml\n')
+            (root / 'scripts.yaml').write_text('fixture:\n  sequence:\n    - action: homeassistant.update_entity\n      target:\n        entity_id: sensor.old\n')
+            plan = plan_yaml(root, {'sensor.old': 'sensor.new'})
+            before, after = parent / 'before', parent / 'after'
+            before.mkdir(); after.mkdir()
+            files, directories = validation._stage(root, plan, before, after)
+            receipt = validation.ValidationReceipt(str(root), files, directories,
+                (), ('script',), (), '2026.10.2')
             (root / 'home-assistant.log').write_text('normal runtime log')
             (root / '.storage' / 'trace.saved_traces').write_text('{}')
             validation.assert_validation_current(receipt)
