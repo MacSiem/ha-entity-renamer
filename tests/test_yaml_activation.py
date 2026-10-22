@@ -45,6 +45,10 @@ class ActivationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(row[0] == 'scripts.yaml' for row in files))
             receipt = validation.ValidationReceipt(str(root), files, directories,
                 (), ('script',), (), '2026.10.2')
+            for path, digest, device, inode in files:
+                current = (root / path).stat()
+                self.assertEqual((current.st_dev, current.st_ino), (device, inode), path)
+            validation.assert_validation_current(receipt)
             (root / 'home-assistant.log').write_text('normal runtime log')
             (root / '.storage' / 'trace.saved_traces').write_text('{}')
             validation.assert_validation_current(receipt)
