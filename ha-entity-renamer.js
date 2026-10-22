@@ -3090,11 +3090,17 @@ class HAEntityRenamer extends HTMLElement {
         .list-chips { flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin; }
         :host .list-chips button { flex:0 0 auto;white-space:nowrap !important; }
         .card { max-width:1200px;margin-inline:auto;font-size:14px;line-height:1.5; }
-        .device-name,.entity-name,.btn,.list-toolbar input,.list-toolbar select { font-size:14px; }
+        .device-name,.entity-name,.btn,.list-toolbar input,.list-toolbar select,.prefix-section h3,.prefix-row input { font-size:14px; }
         .registry-id { display:inline-block;max-width:100%;min-width:0;overflow-x:auto;vertical-align:bottom;white-space:normal;word-break:normal;overflow-wrap:normal;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .stat-card .num,.stat-card .label { display:block; }
         .stats-row .stat-card { min-width:0; }
         @container (max-width:500px) {
+          .list-toolbar input { flex:1 0 100%;width:100%; }
+          .device-header { display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:4px 8px; }
+          .device-header .device-expand { grid-column:1;grid-row:1; }
+          .device-header .device-name { grid-column:2 / -1;grid-row:1; }
+          .device-header .device-meta { grid-column:2;grid-row:2; }
+          .device-header .new-badge { grid-column:3;grid-row:2;margin-left:0;justify-self:end; }
           .stats-row { grid-template-columns:repeat(2,minmax(0,1fr)); }
           .entity-row { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px; }
           .entity-row .entity-name { grid-column:1;grid-row:1;min-width:0;overflow-wrap:anywhere; }
