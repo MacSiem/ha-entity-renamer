@@ -7,6 +7,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 import re
+import json
 from typing import Any
 
 from .reference_planner import Consumer, Context, Marker, Scope, Syntax, plan_references
@@ -140,6 +141,12 @@ def plan_helper(snapshot: dict, mapping: dict[str, str]) -> HelperPlan:
     return HelperPlan(before, result.value, result.changes, retained + tuple(markers), listener_paths)
 
 
+def snapshot_equal(left, right):
+    """Exact JSON semantics, including bool versus int and int versus float."""
+    return json.dumps(left, sort_keys=True, allow_nan=False, separators=(',', ':')) == json.dumps(
+        right, sort_keys=True, allow_nan=False, separators=(',', ':'))
+
+
 def rebase_after_listeners(plan: HelperPlan, current: dict) -> dict:
     """Accept baseline or exact native forms, preserve all listener changes.
 
@@ -156,9 +163,10 @@ def rebase_after_listeners(plan: HelperPlan, current: dict) -> dict:
             old_parent, new_parent = old_parent[part], new_parent[part]
             now_parent, expected_parent = now_parent[part], expected_parent[part]
         key = path[-1]
-        if now_parent[key] not in (old_parent[key], new_parent[key]):
+        if not any(snapshot_equal(now_parent[key], value)
+                   for value in (old_parent[key], new_parent[key])):
             raise ValueError('helper_listener_conflict')
         expected_parent[key] = now_parent[key]
-    if expected != current:
+    if not snapshot_equal(expected, current):
         raise ValueError('helper_snapshot_conflict')
     return deepcopy(plan.after)

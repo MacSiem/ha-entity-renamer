@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 
-from .helper_plan import HelperPlan, plan_helper, rebase_after_listeners
+from .helper_plan import HelperPlan, plan_helper, rebase_after_listeners, snapshot_equal
 
 
 def _plain(value):
@@ -66,18 +66,18 @@ async def apply_entry(hass, plan: HelperPlan, *, guard, settle, record_intent,
     guard()
     current = read_entry(hass, entry_id)
     desired = rebase_after_listeners(plan, current)
-    if desired['subentries'] != current['subentries']:
+    if not snapshot_equal(desired['subentries'], current['subentries']):
         raise ValueError('helper_subentry_schema_unsupported')
     await validate_snapshot(desired)
     guard()
-    if read_entry(hass, entry_id) != current:
+    if not snapshot_equal(read_entry(hass, entry_id), current):
         raise ValueError('helper_snapshot_conflict')
     await record_intent(current, desired)
     # Journaling awaits: protect against any intervening edit or removed entry.
     guard()
-    if read_entry(hass, entry_id) != current:
+    if not snapshot_equal(read_entry(hass, entry_id), current):
         raise ValueError('helper_snapshot_conflict')
-    changed = desired != current
+    changed = not snapshot_equal(desired, current)
     if changed:
         entry = hass.config_entries.async_get_entry(entry_id)
         # No await between final compare and native synchronous mutation.
@@ -86,16 +86,17 @@ async def apply_entry(hass, plan: HelperPlan, *, guard, settle, record_intent,
         if desired['domain'] != 'powercalc':
             # options_flow_reloads only applies to OptionsFlowWithReload, not
             # direct manager writes. Do not infer automatic reload from it.
+            guard()
             if not await hass.config_entries.async_reload(entry_id):
                 raise ValueError('helper_reload_failed')
         # Powercalc add_update_listener reloads self and parents; don't duplicate.
         await settle()
         guard()
-    if read_entry(hass, entry_id) != desired:
+    if not snapshot_equal(read_entry(hass, entry_id), desired):
         raise ValueError('helper_readback_mismatch')
     await verify_runtime(desired)
     guard()
-    if read_entry(hass, entry_id) != desired:
+    if not snapshot_equal(read_entry(hass, entry_id), desired):
         raise ValueError('helper_changed_during_runtime_verification')
     return {'manager_readback': 'verified', 'runtime': 'verified',
             'persistence': 'unknown', 'adapter_write': changed}

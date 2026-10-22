@@ -25,6 +25,8 @@ class JournalFailure(Exception):
 class Position(str, Enum):
     BEFORE = "before"  # Definitively settled: no in-flight effect remains.
     AFTER = "after"  # Identity, expected revision AND content verified.
+    # Exact native listener subset; not a baseline, never initial authorization.
+    NATIVE_PARTIAL = "native_partial"
     UNKNOWN = "unknown"
 
 
@@ -37,8 +39,8 @@ class Step:
     after_revision: str
     # Opaque LOCAL durable prepared patch/backup reference, never telemetry.
     prepared_ref: str
-    # Explicit preceding steps whose native listeners may fully satisfy this
-    # step. AFTER still requires the adapter's independent durable/runtime proof.
+    # Explicit preceding steps whose native listeners may satisfy all or a
+    # checked subset of this step. AFTER still requires the adapter's independent durable/runtime proof.
     caused_by: tuple[str, ...] = ()
 
 
@@ -105,6 +107,8 @@ class Adapter(Protocol):
         """Independent identity/revision/content read, including durable/runtime state.
 
         BEFORE/AFTER must also prove no outstanding native listener/write remains.
+        NATIVE_PARTIAL is only an exact, settled listener subset, possibly with
+        a delayed save; it is never an initial baseline or arbitrary conflict.
         Never report AFTER using only an ACK or cached expected patch.
         """
     async def apply(self, step: Step, guard: Callable[[], None]) -> None:
@@ -113,6 +117,12 @@ class Adapter(Protocol):
         Call guard after every internal await, immediately before EVERY mutation.
         Must include activation, durable flush and native barriers as needed.
         An exception may mean an effect happened. Do not retry inside adapter.
+        """
+    async def apply_native(self, step: Step, guard: Callable[[], None]) -> None:
+        """Complete an independently inspected exact native-listener subset.
+
+        Called only after verified declared causes and durable intent. Recompare
+        the subset at write time; arbitrary UNKNOWN must never enter this path.
         """
     async def compensate(self, step: Step, guard: Callable[[], None]) -> None:
         """Guard identity + after revision at actual write; preserve foreign edits.
@@ -228,7 +238,10 @@ class Coordinator:
             expected = Position.AFTER if record.phases[index] == "verified" else Position.BEFORE
             position = await self._adapter(step).inspect(step)
             self.guard()
-            if position != expected:
+            causal = (record.phases[index] == "pending"
+                      and position in (Position.AFTER, Position.NATIVE_PARTIAL)
+                      and self._native_effect_proven(record, step))
+            if position != expected and not causal:
                 return await self._unknown(record, "preflight_revision_conflict")
         for index, step in enumerate(record.plan.steps):
             if record.phases[index] == "verified":
@@ -241,12 +254,18 @@ class Coordinator:
                 # outcome. Record the observed native result without replaying it.
                 record = await self._phase(record, index, "verified")
                 continue
-            if position != Position.BEFORE:
+            native = (position == Position.NATIVE_PARTIAL
+                      and self._native_effect_proven(record, step)
+                      and callable(getattr(adapter, "apply_native", None)))
+            if position != Position.BEFORE and not native:
                 return await self._unknown(record, "revision_conflict")
             record = await self._phase(record, index, "intent")
             self.guard()  # Rechecked AFTER durable intent await, before effect.
             try:
-                await adapter.apply(step, self.guard)
+                if native:
+                    await adapter.apply_native(step, self.guard)
+                else:
+                    await adapter.apply(step, self.guard)
                 self.guard()
                 position = await adapter.inspect(step)
                 self.guard()
@@ -305,6 +324,11 @@ class Coordinator:
                 elif (position == Position.AFTER and (phase in ("intent", "verified")
                       or (phase == "pending" and not undoing and self._native_effect_proven(record, step)))):
                     record = await self._phase(record, index, "verified")
+                elif (position == Position.NATIVE_PARTIAL and phase in ("pending", "intent")
+                      and not undoing and self._native_effect_proven(record, step)):
+                    # Inspection proves the exact listener subset; no uncertain
+                    # adapter-owned change is admitted by this position.
+                    record = await self._phase(record, index, "pending")
                 elif position == Position.BEFORE and phase in ("pending", "intent"):
                     record = await self._phase(record, index, "pending")
                 else:

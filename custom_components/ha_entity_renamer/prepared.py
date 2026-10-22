@@ -109,7 +109,10 @@ def encode_change(change):
     from .native_registry import PreparedRegistryChange
     from .lovelace_native import PreparedDashboard
     from .energy_native import PreparedEnergy
-    kinds = {PreparedRegistryChange: 'registry', PreparedDashboard: 'dashboard', PreparedEnergy: 'energy'}
+    from .helper_transaction import PreparedHelper
+    kinds = {PreparedRegistryChange: 'registry', PreparedDashboard: 'dashboard', PreparedEnergy: 'energy', PreparedHelper: 'helper'}
+    if type(change) is PreparedHelper:
+        change.plan()
     if type(change) not in kinds:
         raise ValueError('unsupported_prepared_change')
     return canonical(json.loads(json.dumps({'kind': kinds[type(change)],
@@ -125,6 +128,11 @@ def decode_change(row):
     data = deepcopy(row['data'])
     if row['kind'] == 'registry':
         return PreparedRegistryChange(**data)
+    if row['kind'] == 'helper':
+        from .helper_transaction import PreparedHelper
+        change = PreparedHelper(**data)
+        change.plan()
+        return change
     if row['kind'] not in ('dashboard', 'energy'):
         raise ValueError('unsupported_prepared_change')
     before = data.pop('before')

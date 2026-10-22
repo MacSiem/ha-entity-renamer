@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from .helper_native import read_entry
+from .helper_plan import snapshot_equal
 from .lovelace_native import durable_snapshot
 from .persistence import PersistenceError
 
@@ -53,9 +54,29 @@ class NativeHelperPersistence:
         stored, identity = await self.hass.async_add_executor_job(
             durable_snapshot, Path(self.store.path), self.store.key, 1, 5)
         self._settled()
-        if identity is None or stored != initial or self.document() != initial:
+        if identity is None or not snapshot_equal(stored, initial) or not snapshot_equal(self.document(), initial):
             raise PersistenceError('config_entries_cache_disk_disagree')
         return stored
+
+    async def inspect_current(self, expected_entry):
+        """Read-only proof, or explicit native delayed-save observation.
+
+        False means only that the manager has a delayed save waiting. In-flight
+        writes, poisoned runtime and disk disagreement still raise, never become
+        authorization to overwrite. Caller independently verifies activation.
+        """
+        self._identity()
+        if self.failed or self.store._write_lock.locked():
+            raise PersistenceError('config_entries_write_uncertain')
+        entry_id = expected_entry['identity']['entry_id']
+        if not snapshot_equal(read_entry(self.hass, entry_id), expected_entry):
+            raise PersistenceError('helper_snapshot_conflict')
+        if self.store._delay_handle is not None:
+            return False
+        await self.read()
+        if not snapshot_equal(read_entry(self.hass, entry_id), expected_entry):
+            raise PersistenceError('helper_snapshot_conflict')
+        return True
 
     async def flush(self, expected_entry, guard):
         """Flush after guarded native apply/listeners, not as a mutation shortcut.
@@ -71,7 +92,7 @@ class NativeHelperPersistence:
                 raise PersistenceError('config_entries_write_uncertain')
             self._identity()
             entry_id = expected_entry['identity']['entry_id']
-            if read_entry(self.hass, entry_id) != expected_entry:
+            if not snapshot_equal(read_entry(self.hass, entry_id), expected_entry):
                 raise PersistenceError('helper_snapshot_conflict')
             if self.store._write_lock.locked():
                 raise PersistenceError('config_entries_write_in_flight')
@@ -80,13 +101,13 @@ class NativeHelperPersistence:
             async def effect():
                 guard()
                 self._identity()
-                if self.document() != baseline or self.store._write_lock.locked():
+                if not snapshot_equal(self.document(), baseline) or self.store._write_lock.locked():
                     raise PersistenceError('config_entries_changed_before_save')
                 await self.store.async_save(self.manager._data_to_save())
                 guard()
                 actual = await self.read()
                 guard()
-                if actual != baseline or read_entry(self.hass, entry_id) != expected_entry:
+                if not snapshot_equal(actual, baseline) or not snapshot_equal(read_entry(self.hass, entry_id), expected_entry):
                     raise PersistenceError('config_entries_changed_during_save')
                 return actual
 

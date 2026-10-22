@@ -12,7 +12,8 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 NAMES = ('reference_planner', 'persistence', 'dashboard_plan', 'lovelace_native',
          'recorder_guard', 'native_registry', 'energy_plan', 'energy_native',
-         'transaction', 'journal', 'prepared', 'native_adapters')
+         'transaction', 'journal', 'helper_plan', 'helper_native', 'helper_persistence',
+         'prepared', 'helper_transaction', 'native_adapters')
 sources = {name: (ROOT / 'custom_components/ha_entity_renamer' / (name + '.py')).read_text()
            for name in NAMES}
 sources['native_linked_scenario'] = (ROOT / 'tests/native_linked_scenario.py').read_text()
