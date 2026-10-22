@@ -137,6 +137,12 @@ async def run_names(hass, bridge, meter):
     await io.settle()
     assert entry.state is ConfigEntryState.NOT_LOADED
     await io.flush('entity')
+    inactive_row = next(row for row in er.async_entries_for_config_entry(registry, entry.entry_id)
+                        if row.id == threshold_id)
+    inactive_state = hass.states.get(inactive_row.entity_id)
+    print({'inactive_fixture': {'state': inactive_state.state if inactive_state else None,
+           'restored': inactive_state.attributes.get('restored') if inactive_state else None,
+           'disabled_by': str(inactive_row.disabled_by), 'entry': entry.state.value}}, flush=True)
     change = await bridge.prepare('entity', threshold_id, {'name': 'Inactive entry rename'}, lambda: None)
     await bridge.apply(change, lambda: None)
     assert (await bridge.inspect(change)).position == 'after'
