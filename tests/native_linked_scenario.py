@@ -102,7 +102,8 @@ async def make_linked(hass, bridge, registry_change, history_check, helpers=Fals
     scopes = ('fixture_registry', 'fixture_dashboards', 'fixture_energy')
     if helper:
         step = Step('helper', 'helpers', helper.change.identity, helper.change.before_revision,
-                    helper.change.after_revision, 'helper', ('registry',))
+                    helper.change.after_revision, 'helper',
+                    ('registry',) if helper.change.plan().listener_paths else ())
         steps += (step,)
         catalog = {item.key: item for item in steps}
         adapters['helpers'] = helper.adapter(resolve, catalog.__getitem__)
