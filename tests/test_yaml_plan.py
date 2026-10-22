@@ -371,6 +371,22 @@ class YAMLPlannerTests(unittest.TestCase):
 """
         self.assert_variable_patch(source)
 
+    def test_entity_map_unknown_or_missing_index_is_not_authorized(self):
+        for index in ('runtime', '"light.old"'):
+            source = """script:
+  demo:
+    variables:
+      refs:
+        sensor.foo: Kitchen
+    sequence:
+    - data:
+        message: '{{ refs[INDEX] }}'
+""".replace('INDEX', index)
+            self.put('configuration.yaml', source)
+            result = self.plan()
+            self.assertFalse(result.ready)
+            self.assertFalse(result.patches)
+
     def test_yaml_map_key_target_collision_blocks(self):
         source = "script:\n  demo:\n    variables:\n      refs:\n        sensor.foo: Kitchen\n        sensor.new: Other\n    sequence:\n    - value_template: '{% for e in refs %}{{ states(e) }}{% endfor %}'\n"
         self.put('configuration.yaml', source)

@@ -286,6 +286,17 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                     and node.attr in {'index', 'index0', 'revindex', 'revindex0',
                                       'first', 'last', 'length', 'depth', 'depth0'}):
                 return  # Loop counters/flags do not expose iterable entity IDs.
+            if isinstance(node, nodes.Getitem):
+                container = value(node.node, bindings)
+                key = value(node.arg, bindings)
+                if (container and container[0] == 'keys' and key and key[0] == 'scalar'
+                        and {origin[2] for origin in key[1]}
+                            <= {origin[2] for origin in container[1]}):
+                    # Lookup into adapter-proven entity-key metadata. Renaming
+                    # the key and index preserves the metadata value exactly;
+                    # it does not make that metadata an entity reference.
+                    consume([container, key])
+                    return
             if isinstance(node, nodes.Call):
                 name = node.node.name if isinstance(node.node, nodes.Name) else None
                 if name in globals_:
