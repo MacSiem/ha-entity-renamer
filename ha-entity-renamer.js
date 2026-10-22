@@ -3103,7 +3103,9 @@ class HAEntityRenamer extends HTMLElement {
           .entity-row > .btn { grid-column:2;grid-row:1 / span 2; }
           .entity-row > .queued-badge { grid-column:1;grid-row:3;justify-self:start; }
         }
-        .automatic-target { display:flex;align-items:baseline;gap:4px; }
+        .automatic-target { display:flex;align-items:flex-start;gap:4px; }
+        .rename-target { display:flex;align-items:flex-start;gap:8px;min-width:0;flex:1 1 180px; }
+        .rename-target code { flex:1; }
         .automatic-target code { min-width:0;flex:1; }
         .confirm-dialog code { min-width:0;max-width:100%; }
 
@@ -3205,8 +3207,7 @@ class HAEntityRenamer extends HTMLElement {
     const rows = shown.map(r => `
         <div style="${rowStyle}">
           <code style="${codeStyle}">${_entityIdHtml(r.oldId)}</code>
-          <span style="opacity:.6">&rarr;</span>
-          <code style="${codeStyle}">${_entityIdHtml(r.newId)}</code>
+          <span class="rename-target"><span style="opacity:.6">&rarr;</span><code style="${codeStyle}">${_entityIdHtml(r.newId)}</code></span>
           ${r.newName ? `<span style="${sub}">"${_esc(r.newName)}"</span>` : ''}
         </div>`).join('');
     const devRows = devEntries.slice(0, MAX).map(([id, name]) => `
@@ -3357,7 +3358,7 @@ class HAEntityRenamer extends HTMLElement {
                 <span class="old" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:12px;">${_entityIdHtml(r.oldId)}</span>
                 <button class="btn btn-sm btn-outline" style="flex-shrink:0;" data-remove-queue="${_esc(r.oldId)}" aria-label="${_esc(t.removeFromQueue)}">✕</button>
               </div>
-              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <div style="display:flex;align-items:flex-start;gap:8px;">
                 <span style="color:var(--bento-text-secondary,#94A3B8);">→</span>
                 <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:12px;">${r.newId !== r.oldId ? _entityIdHtml(r.newId) : '<span>' + t.noIdChange + '</span>'}</span>
               </div>
