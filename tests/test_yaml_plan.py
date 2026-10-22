@@ -694,7 +694,7 @@ class YAMLPlannerTests(unittest.TestCase):
                     - value_template: '{{ repeat.index }}:{{ states(repeat.item) }}'
             """.replace('ITEMS', items), definitions='refs: [sensor.foo, light.old]')
             if items.startswith('['):
-                source = source.replace('      refs: [sensor.foo, light.old]\n', '')
+                source = source.replace('    variables:\n      refs: [sensor.foo, light.old]\n', '')
             self.assert_variable_patch(source)
 
     def test_static_repeat_for_each_item_used_as_label_still_blocks(self):
@@ -704,7 +704,7 @@ class YAMLPlannerTests(unittest.TestCase):
                 sequence:
                 - data:
                     message: '{{ repeat.item }}'
-        """)
+        """, definitions='flag: 1')
         self.put('configuration.yaml', source)
         result = self.plan()
         self.assertFalse(result.ready)
