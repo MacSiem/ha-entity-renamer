@@ -108,6 +108,25 @@ class YAMLPlannerTests(unittest.TestCase):
         self.assertFalse(plan.patches)
         self.assertEqual(self.codes(plan), {'secret_reference_unresolved', 'template_requires_reference_parser'})
 
+    def test_static_template_preserves_yaml_source_and_decoded_value(self):
+        for source in [
+            '''value_template: "{{ states('sensor.foo') }}" # retain\n''',
+            '''value_template: |-\n  {{ states('sensor.foo') }}\n''',
+        ]:
+            self.put('configuration.yaml', source)
+            plan = self.plan()
+            self.assertTrue(plan.ready, plan.issues)
+            self.assertEqual(plan.patches[0].proposed_bytes, source.replace('sensor.foo', 'sensor.new').encode())
+
+    def test_non_reference_secret_is_preserved_without_opening_store(self):
+        source = 'password: !secret token\nentity_id: sensor.foo\n'
+        self.put('configuration.yaml', source)
+        self.put('secrets.yaml', 'invalid: [ intentionally unreadable')
+        plan = self.plan()
+        self.assertTrue(plan.ready)
+        self.assertEqual(len(plan.files), 1)
+        self.assertEqual(plan.patches[0].proposed_bytes, source.replace('sensor.foo', 'sensor.new').encode())
+
     def test_escaped_scalar_custom_tag_and_alias_cycle(self):
         self.put('configuration.yaml', 'entity_id: "sensor.\\u0066oo"\nfoo: !custom value\n')
         plan = self.plan()

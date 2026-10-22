@@ -16,6 +16,8 @@ import yaml
 from yaml.nodes import MappingNode, ScalarNode, SequenceNode
 from yaml.tokens import ScalarToken
 
+from .reference_planner import Consumer, Context, Scope, Syntax, plan_references
+
 
 class YAMLPlanError(ValueError):
     """Graph, source or safety error: no partial plan is returned."""
@@ -308,7 +310,8 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                         for child in targets:
                             visit(child, graph_depth + 1, field, parent_key, lovelace)
                     elif node.tag == '!secret':
-                        issue(node, "secret_reference_unresolved")
+                        if field:
+                            issue(node, "secret_reference_unresolved")
                     elif not node.tag.startswith(_STANDARD):
                         issue(node, "unsupported_yaml_tag")
                     elif node.tag == _STR:
@@ -362,7 +365,34 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
         for node, contexts in candidates.values():
             value = node.value
             if any(x in value for x in ('{{', '{%', '{#', '[[[')):
-                issue(node, "template_requires_reference_parser")
+                if '[[[' in value:
+                    issue(node, "template_requires_reference_parser")
+                    continue
+                template_context = Context(Consumer.TEMPLATE, (Scope((), Syntax.JINJA),))
+                decoded_plan = plan_references(value, mapping, template_context)
+                token = tokens.get(node.end_mark.index)
+                if token is None or token.value != value or decoded_plan.markers:
+                    issue(node, "template_requires_reference_parser")
+                    continue
+                raw = text[token.start_mark.index:token.end_mark.index]
+                source_plan = plan_references(raw, mapping, template_context)
+                if source_plan.markers:
+                    issue(node, "template_requires_source_span_mapper")
+                    continue
+                # Operate on the source token, preserving YAML quoting, block
+                # indentation and comments. Independent decoding must match
+                # the planned template exactly; escaped spellings fail closed.
+                try:
+                    decoded = yaml.compose(source_plan.value, Loader=yaml.SafeLoader)
+                except yaml.YAMLError:
+                    decoded = None
+                if not isinstance(decoded, ScalarNode) or decoded.value != decoded_plan.value:
+                    issue(node, "template_requires_source_span_mapper")
+                    continue
+                if raw != source_plan.value:
+                    start = len(text[:token.start_mark.index].encode('utf-8'))
+                    end = len(text[:token.end_mark.index].encode('utf-8'))
+                    edits.append(Edit(start, end, raw.encode('utf-8'), source_plan.value.encode('utf-8')))
                 continue
             mentioned = any(m.group(1) in mapping for m in _TOKEN.finditer(value))
             if not mentioned:
