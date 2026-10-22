@@ -2,7 +2,7 @@
 from types import MappingProxyType, SimpleNamespace
 
 
-async def create_helper(hass, old, new, kind="threshold", component=None):
+async def create_helper(hass, old, new, kind="threshold", component=None, inactive=False):
     from homeassistant.config_entries import ConfigEntry, ConfigEntryState
     from homeassistant.helpers import entity_registry as er
     from .helper_observers import NativeHelperObservers, RegistryMappingProof
@@ -41,6 +41,11 @@ async def create_helper(hass, old, new, kind="threshold", component=None):
     rows = er.async_entries_for_config_entry(registry, entry.entry_id)
     assert len(rows) == 1
     identity, entity_id = rows[0].id, rows[0].entity_id
+    if inactive:
+        from homeassistant.config_entries import ConfigEntryDisabler
+        assert await hass.config_entries.async_set_disabled_by(entry.entry_id, ConfigEntryDisabler.USER)
+        await hass.async_block_till_done()
+        assert entry.state is ConfigEntryState.NOT_LOADED
     persistence = NativeHelperPersistence(hass)
     before = read_entry(hass, entry.entry_id)
     await persistence.flush(before, lambda: None)

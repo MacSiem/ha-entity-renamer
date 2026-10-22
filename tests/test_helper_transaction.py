@@ -40,7 +40,7 @@ class HelperAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.before = snapshot()
         self.change = prepare_helper(self.before, MAP)
         self.entry = SimpleNamespace(domain='powercalc', **self.before['identity'],
-            data=deepcopy(self.before['data']), options={}, subentries={})
+            data=deepcopy(self.before['data']), options={}, subentries={}, state=SimpleNamespace(value='loaded'))
         self.writes, self.reloads, self.flushes, self.proofs = [], [], [], []
         self.dirty = False
         self.foreign = None
@@ -258,7 +258,7 @@ class PersistenceInspectionTests(unittest.IsolatedAsyncioTestCase):
         from custom_components.ha_entity_renamer.persistence import PersistenceError
         before = snapshot()
         entry = SimpleNamespace(domain=before['domain'], **before['identity'],
-            data=before['data'], options={}, subentries={})
+            data=before['data'], options={}, subentries={}, state=SimpleNamespace(value='loaded'))
         manager = SimpleNamespace(async_get_entry=lambda _: entry)
         store = SimpleNamespace(_write_lock=asyncio.Lock(), _delay_handle=object())
         persistence = object.__new__(NativeHelperPersistence)

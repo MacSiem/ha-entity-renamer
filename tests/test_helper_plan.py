@@ -93,7 +93,7 @@ class PlannerTests(unittest.TestCase):
 class NativeTests(unittest.IsolatedAsyncioTestCase):
     def setup_bridge(self, before):
         entry = SimpleNamespace(domain=before['domain'], **before['identity'],
-            data=deepcopy(before['data']), options=deepcopy(before['options']), subentries={})
+            data=deepcopy(before['data']), options=deepcopy(before['options']), subentries={}, state=SimpleNamespace(value='loaded'))
         self.calls = []
         def update(e, **kwargs):
             self.calls.append('write')
@@ -137,6 +137,16 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, 'conflict'):
             await apply_entry(hass, plan_helper(before, MAP), **callbacks)
         self.assertNotIn('write', self.calls)
+
+    async def test_inactive_entry_is_updated_without_loading(self):
+        before = snapshot('group', options={'entities': ['sensor.before']})
+        hass, entry, callbacks = self.setup_bridge(before)
+        entry.state.value = 'not_loaded'
+        result = await apply_entry(hass, plan_helper(before, MAP), **callbacks)
+        self.assertTrue(result['adapter_write'])
+        self.assertNotIn('reload', self.calls)
+        self.assertEqual(entry.state.value, 'not_loaded')
+        self.assertEqual(entry.options['entities'], ['sensor.after'])
 
     async def test_failed_reload_does_not_report_success(self):
         before = snapshot('group', options={'entities': ['sensor.before']})

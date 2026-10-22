@@ -103,8 +103,9 @@ class NativeHelperObservers:
 
     Construct via capture(), before any registry rename. Supply every helper
     whose coverage these callbacks will assert, including unchanged helpers.
-    Unknown domains/layouts, inactive runtime, stale IDs and missing values
-    raise. Owner separately accounts for unsupported integrations and sources.
+    Unknown domains/layouts, stale IDs and missing active values raise.
+    Inactive helpers prove preserved absence of runtime and source identities;
+    they do not claim an active value sample. Owner separately accounts for unsupported integrations and sources.
     """
 
     def __init__(self, hass, before, after, source_rows, helper_rows, modes,
@@ -147,11 +148,11 @@ class NativeHelperObservers:
             before[entry_id], after[entry_id] = snapshot, plan.after
             entry = hass.config_entries.async_get_entry(entry_id)
             modes[entry_id] = entry.state.value
-            require(entry.disabled_by is None and entry.state.value == 'loaded',
-                    'helper_inactive_no_runtime_proof')
+            require(entry.state.value in ('loaded', 'not_loaded'), 'helper_unsettled_capture')
             native_rows = er.async_entries_for_config_entry(registry, entry_id)
-            require(len(native_rows) == 1, 'helper_expected_one_registry_entity')
-            rows[entry_id] = helper_row(native_rows[0])
+            require(len(native_rows) == 1 if entry.state.value == 'loaded' else len(native_rows) <= 1,
+                    'helper_registry_count_unsupported')
+            rows[entry_id] = tuple(helper_row(row) for row in native_rows)
             sources[entry_id] = []
             # Resolve UUIDs via installed registry, never infer presence from syntax.
             for ref in cls._references(snapshot):
@@ -260,7 +261,7 @@ class NativeHelperObservers:
         entry_id = self._bound(snapshot)
         registry = er.async_get(self.hass)
         native_rows = er.async_entries_for_config_entry(registry, entry_id)
-        require(len(native_rows) == 1 and helper_row(native_rows[0]) == self.helper_rows[entry_id],
+        require(tuple(helper_row(row) for row in native_rows) == self.helper_rows[entry_id],
                 'helper_registry_identity_or_settings_changed')
         entry = self.hass.config_entries.async_get_entry(entry_id)
         candidates = []
@@ -270,9 +271,7 @@ class NativeHelperObservers:
         if entry.disabled_by is not None or entry.state.value == 'not_loaded':
             require(self.modes[entry_id] == 'not_loaded' and not candidates,
                     'helper_inactive_lifecycle_changed')
-            # async_reload loads previously unloaded entries: explicitly refuse
-            # an affected inactive helper BEFORE apply_entry could change it.
-            raise ObservationUnavailable('helper_inactive_no_runtime_proof')
+            return None  # No active output is claimed; preserve absence of runtime.
         require(self.modes[entry_id] == 'loaded' and entry.state.value == 'loaded',
                 'helper_lifecycle_changed')
         require(native_rows[0].disabled_by is None, 'helper_entity_disabled')
@@ -294,6 +293,8 @@ class NativeHelperObservers:
     async def verify_activation(self, snapshot):
         await self.validate_snapshot(snapshot)
         entity = self._entity(snapshot)
+        if entity is None:
+            return True
         from homeassistant.helpers import entity_registry as er
 
         registry = er.async_get(self.hass)
@@ -315,7 +316,7 @@ class NativeHelperObservers:
             require(entity.mode is (all if options['all'] else any), 'group_native_mode_mismatch')
         return True
 
-    def _source_states(self, snapshot):
+    def _source_states(self, snapshot, *, require_values=True):
         from homeassistant.helpers import entity_registry as er
 
         entry_id = snapshot['identity']['entry_id']
@@ -331,6 +332,8 @@ class NativeHelperObservers:
             row = registry.async_get(entity_id)
             require(row is not None and registry_identity(row) == identity,
                     'helper_source_registry_identity_changed')
+            if not require_values:
+                continue
             require(row.disabled_by is None, 'helper_source_disabled')
             state = self.hass.states.get(entity_id)
             require(state is not None and state.state not in ('unknown', 'unavailable'),
@@ -343,6 +346,9 @@ class NativeHelperObservers:
         await self.verify_activation(snapshot)
         # No await after acquiring this coherent source/object/output sample.
         entity = self._entity(snapshot)
+        if entity is None:
+            self._source_states(snapshot, require_values=False)
+            return True
         states = self._source_states(snapshot)
         output = self.hass.states.get(entity.entity_id)
         require(output is not None and output.state not in ('unknown', 'unavailable'),

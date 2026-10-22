@@ -107,7 +107,7 @@ async def run(root):
             async def history_check():
                 return await recorder.async_add_executor_job(points, recorder, metadata_id, ceiling) == history
             linked = await make_linked(hass, bridge, prepared, history_check, helpers=HELPERS,
-                                       helper_kind=HELPER_KIND, component=component)
+                                       helper_kind=HELPER_KIND, component=component, inactive=INACTIVE)
             applied = await linked.coordinator.apply(linked.plan, linked.plan.fingerprint, 'linked_op')
             assert applied.status == 'applied', applied
             assert len(linked.updates) == 1
@@ -147,8 +147,8 @@ async def run(root):
             meter.async_write_ha_state()
             await hass.async_block_till_done()
             await linked.helper.runtime(linked.helper.before)
-            print({'helper_kind': HELPER_KIND, 'native_helper_activation': 'PASS', 'source_change_after_rename': 'PASS',
-                   'source_change_after_rollback': 'PASS', 'helper_stable_identity': 'PASS'})
+            print({'helper_kind': HELPER_KIND, 'native_helper_activation': 'INACTIVE_PRESERVED' if INACTIVE else 'PASS', 'source_change_after_rename': 'NOT_APPLICABLE_INACTIVE' if INACTIVE else 'PASS',
+                   'source_change_after_rollback': 'NOT_APPLICABLE_INACTIVE' if INACTIVE else 'PASS', 'helper_stable_identity': 'PASS'})
         assert (await bridge.inspect(prepared)).position == 'before'
         assert meter.entity_id == old and registry.async_get(old).id == entry.id
         assert await recorder.async_add_executor_job(points, recorder, metadata_id, ceiling) == history
@@ -170,6 +170,7 @@ parser.add_argument('--container', choices=('ha-renamer-qa222', 'ha-renamer-min2
 parser.add_argument('--linked', action='store_true')
 parser.add_argument('--helpers', action='store_true')
 parser.add_argument('--groups', action='store_true')
+parser.add_argument('--inactive-helper', action='store_true')
 parser.add_argument('--helper-kind', choices=('threshold', 'min', 'max', 'mean', 'median', 'range', 'sum'), default='threshold')
 args = parser.parse_args()
 container = args.container
@@ -180,7 +181,7 @@ assert inspected['State']['Running']
 mounts = [item.get('Source', '') for item in inspected['Mounts'] if item['Destination'] == '/config']
 assert len(mounts) == 1 and '/ha-tools-v4-20261016/renamer222-' in mounts[0]
 completed = subprocess.run(['docker', 'exec', '-i', container, 'python', '-B', '-'],
-    input='SOURCES = ' + repr(sources) + '\nLINKED = ' + repr(args.linked) + '\nHELPERS = ' + repr(args.helpers) + '\nHELPER_KIND = ' + repr(args.helper_kind) + '\nGROUPS = ' + repr(args.groups) + '\n' + probe,
+    input='SOURCES = ' + repr(sources) + '\nLINKED = ' + repr(args.linked) + '\nHELPERS = ' + repr(args.helpers) + '\nHELPER_KIND = ' + repr(args.helper_kind) + '\nGROUPS = ' + repr(args.groups) + '\nINACTIVE = ' + repr(args.inactive_helper) + '\n' + probe,
     text=True, capture_output=True, timeout=120)
 print(completed.stdout)
 print(completed.stderr)

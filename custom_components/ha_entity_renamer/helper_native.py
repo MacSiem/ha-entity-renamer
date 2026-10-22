@@ -85,15 +85,20 @@ async def apply_entry(hass, plan: HelperPlan, *, guard, settle, record_intent,
     changed = not snapshot_equal(desired, current)
     if changed:
         entry = hass.config_entries.async_get_entry(entry_id)
+        lifecycle = entry.state.value
+        if lifecycle not in ('loaded', 'not_loaded'):
+            raise ValueError('helper_lifecycle_unsettled')
         # No await between final compare and native synchronous mutation.
         hass.config_entries.async_update_entry(
             entry, data=desired['data'], options=desired['options'])
-        if desired['domain'] != 'powercalc':
+        if desired['domain'] != 'powercalc' and lifecycle == 'loaded':
             # options_flow_reloads only applies to OptionsFlowWithReload, not
             # direct manager writes. Do not infer automatic reload from it.
             guard()
             if not await hass.config_entries.async_reload(entry_id):
                 raise ValueError('helper_reload_failed')
+        # Previously unloaded/disabled entries must remain inactive. The required
+        # activation observer checks that native update listeners did not load them.
         # Powercalc add_update_listener reloads self and parents; don't duplicate.
         await settle()
         guard()
