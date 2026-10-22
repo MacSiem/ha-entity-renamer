@@ -410,9 +410,10 @@ def _syntax_template(text, mapping, max_nodes):
         span_starts = [span[0] for span in ordered_spans]
         data_spans = [(start, end) for _, kind, _, start, end in raw if kind == 'data']
         data_starts = [span[0] for span in data_spans]
+        has_template_code = any(kind in ('variable_begin', 'block_begin') for _, kind, _, _, _ in raw)
         for match in _TOKEN.finditer(text):
             position = bisect_right(data_starts, match.start(1)) - 1
-            if position >= 0 and match.end(1) <= data_spans[position][1]:
+            if has_template_code and position >= 0 and match.end(1) <= data_spans[position][1]:
                 continue  # Literal template output is a label, not a dependency.
             if match.group(1) in mapping and match.span(1) not in approved_spans:
                 # Spaced states.sensor . object references cover several tokens.
