@@ -18,7 +18,7 @@ program = r'''
 import asyncio, os, socket, tempfile
 from pathlib import Path
 from homeassistant.core import HomeAssistant
-from homeassistant import loader
+from homeassistant import loader, auth
 from homeassistant.bootstrap import async_load_base_functionality
 from homeassistant.config_entries import ConfigEntries, ConfigEntryState
 from homeassistant.setup import async_setup_component
@@ -47,6 +47,7 @@ async def run(root):
     config = {'http': {'server_host': '127.0.0.1', 'server_port': port}}
     try:
         loader.async_setup(hass)
+        hass.auth = await auth.auth_manager_from_config(hass, [], [])
         hass.config_entries = ConfigEntries(hass, config)
         await loader.async_get_custom_components(hass)
         assert (await async_load_base_functionality(hass)) is not False
