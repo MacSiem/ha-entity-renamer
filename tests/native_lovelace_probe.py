@@ -8,7 +8,7 @@ import json
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-NAMES = ('reference_planner', 'persistence', 'dashboard_plan', 'lovelace_native', 'transaction', 'journal')
+NAMES = ('reference_planner', 'persistence', 'dashboard_plan', 'lovelace_native', 'transaction', 'journal', 'energy_plan', 'energy_native')
 sources = {name: (ROOT / 'custom_components/ha_entity_renamer' / (name + '.py')).read_text()
            for name in NAMES}
 probe = '''
@@ -89,6 +89,33 @@ async def run(root):
         assert bridge._failed
     else:
         raise AssertionError('native silent Store failure was accepted')
+    from homeassistant.components.energy.data import EnergyManager
+    from migration_probe.energy_native import NativeEnergy
+    manager = EnergyManager(hass)
+    await manager.async_initialize()
+    energy = NativeEnergy(hass, manager)
+    assert (await energy.plan({'sensor.fixture_old': 'sensor.fixture_new'}))[1] is None
+    preferences = {'energy_sources': [{'type': 'solar', 'stat_energy_from': 'sensor.fixture_old'}],
+                   'device_consumption': [{'stat_consumption': 'sensor.fixture_old'}],
+                   'device_consumption_water': []}
+    await manager.async_update(preferences)
+    await manager._store.async_save(manager.data)
+    updates = []
+    async def observed(): updates.append(True)
+    manager.async_listen_updates(observed)
+    initial, energy_plan = await energy.plan({'sensor.fixture_old': 'sensor.fixture_new'})
+    ready = energy.prepare(initial, energy_plan)
+    await energy.write(ready, lambda: None)
+    assert len(updates) == 1
+    assert await energy.verify(ready.after_revision)
+    reloaded_manager = EnergyManager(hass)
+    await reloaded_manager.async_initialize()
+    assert reloaded_manager.data == ready.after
+    after, reverse = await energy.plan({'sensor.fixture_new': 'sensor.fixture_old'})
+    await energy.write(energy.prepare(after, reverse), lambda: None)
+    assert len(updates) == 2 and await energy.verify(initial.revision)
+    print({'native_energy': 'PASS', 'energy_listener': 'PASS', 'energy_reverse': 'PASS',
+           'fresh_energy_manager': 'PASS'})
     await hass.async_block_till_done()
     await hass.async_stop(force=True)
     print({'ha': __version__, 'native_lovelace': 'PASS', 'cold_cache': 'PASS',

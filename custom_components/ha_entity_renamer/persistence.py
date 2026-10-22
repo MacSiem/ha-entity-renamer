@@ -34,7 +34,7 @@ def _constant(value):
     raise ValueError("nonfinite_number")
 
 
-def _snapshot(path: Path, key: str):
+def _snapshot(path: Path, key: str, version: int = 1, minor_version: int = 1):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
@@ -52,8 +52,8 @@ def _snapshot(path: Path, key: str):
         parsed = json.loads(raw, object_pairs_hook=_pairs, parse_constant=_constant)
         if (not isinstance(parsed, dict)
                 or set(parsed) != {"version", "minor_version", "key", "data"}
-                or type(parsed["version"]) is not int or parsed["version"] != 1
-                or type(parsed["minor_version"]) is not int or parsed["minor_version"] != 1
+                or type(parsed["version"]) is not int or parsed["version"] != version
+                or type(parsed["minor_version"]) is not int or parsed["minor_version"] != minor_version
                 or parsed["key"] != key or not isinstance(parsed["data"], dict)):
             raise ValueError("invalid_store_envelope")
         identity = (after.st_dev, after.st_ino, hashlib.sha256(raw).hexdigest())

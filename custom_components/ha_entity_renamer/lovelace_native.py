@@ -23,7 +23,7 @@ def revision(value):
                                     allow_nan=False).encode()).hexdigest()
 
 
-def durable_snapshot(path, key):
+def durable_snapshot(path, key, version=1, minor_version=1):
     """Strict independent read, file+directory barrier, then inode/hash readback.
 
     fsync adds no config bytes. It also catches unsupported/erroring durability
@@ -32,7 +32,7 @@ def durable_snapshot(path, key):
     the caller, independently of the native Store object.
     """
     path = Path(path)
-    data, identity = _snapshot(path, key)
+    data, identity = _snapshot(path, key, version, minor_version)
     if identity is None:
         return data, identity
     try:
@@ -49,7 +49,7 @@ def durable_snapshot(path, key):
             os.fsync(directory)
         finally:
             os.close(directory)
-        final, final_identity = _snapshot(path, key)
+        final, final_identity = _snapshot(path, key, version, minor_version)
         if identity != final_identity:
             raise PersistenceError('lovelace_file_changed')
         return final, final_identity
