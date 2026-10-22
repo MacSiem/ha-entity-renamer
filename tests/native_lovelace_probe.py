@@ -8,7 +8,7 @@ import json
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-NAMES = ('reference_planner', 'persistence', 'dashboard_plan', 'lovelace_native')
+NAMES = ('reference_planner', 'persistence', 'dashboard_plan', 'lovelace_native', 'transaction', 'journal')
 sources = {name: (ROOT / 'custom_components/ha_entity_renamer' / (name + '.py')).read_text()
            for name in NAMES}
 probe = '''
@@ -35,6 +35,19 @@ from migration_probe.persistence import PersistenceError
 
 async def run(root):
     hass = HomeAssistant(root)
+    from migration_probe.journal import native_journal
+    from migration_probe.transaction import Plan, Step, Record
+    journal = native_journal(hass)
+    assert journal.store._writer.__self__._atomic_writes is True
+    await journal.initialize()
+    frozen = Plan('fixture', ('scope',), ('scope',),
+        (Step('one', 'fixture', 'stable', 'before', 'after', 'local'),), 'proof', ('fixture',))
+    record = Record('fixture_op', frozen, phases=('intent',), status='unknown')
+    await journal.create(record)
+    fresh_journal = native_journal(hass)
+    await fresh_journal.initialize()
+    assert await fresh_journal.load('fixture_op') == record
+    assert len(await fresh_journal.active()) == 1
     default = LovelaceStorage(hass, None)
     metadata = {'id': 'fixture', 'url_path': 'fixture-board', 'mode': 'storage',
                 'require_admin': True, 'title': 'Fixture'}
@@ -80,7 +93,7 @@ async def run(root):
     await hass.async_stop(force=True)
     print({'ha': __version__, 'native_lovelace': 'PASS', 'cold_cache': 'PASS',
            'fresh_manager_readback': 'PASS', 'reverse_patch': 'PASS',
-           'silent_store_failure': 'PASS', 'live_config_access': False})
+           'silent_store_failure': 'PASS', 'atomic_journal_readback': 'PASS', 'live_config_access': False})
 
 with tempfile.TemporaryDirectory(prefix='renamer223-lovelace-probe-', dir='/config') as root:
     asyncio.run(run(root))

@@ -112,7 +112,7 @@ def native_journal(hass):
     from homeassistant.helpers.storage import Store
     from .persistence import VerifiedStore
     key = 'ha_entity_renamer.migrations'
-    writer = Store(hass, 1, key, private=True, minor_version=1)
+    writer = Store(hass, 1, key, private=True, minor_version=1, atomic_writes=True)
     verified = VerifiedStore(hass.config.path('.storage', key), key,
                              writer.async_save, hass.async_add_executor_job)
     return DurableJournal(verified)

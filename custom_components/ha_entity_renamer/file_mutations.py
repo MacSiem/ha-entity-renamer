@@ -57,8 +57,13 @@ def _backup(reader, path, raw, operation_id):
                 info = os.fstat(fd)
                 if not stat.S_ISREG(info.st_mode) or info.st_size != len(raw):
                     raise FileConflict('backup_conflict')
-                chunks = []
-                while chunk := os.read(fd, 65536): chunks.append(chunk)
+                chunks, remaining = [], len(raw) + 1
+                while remaining:
+                    chunk = os.read(fd, min(65536, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
                 if b''.join(chunks) != raw:
                     raise FileConflict('backup_conflict')
             finally:

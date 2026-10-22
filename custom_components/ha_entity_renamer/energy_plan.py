@@ -23,6 +23,8 @@ def plan_energy(preferences, mapping):
     New reference-bearing HA fields fail coverage instead of being silently
     omitted. This does not invent sources, alter prices, or merge statistics.
     """
+    # Validate bounds/cycles before the schema walker touches caller input.
+    preferences = plan_references(preferences, mapping, Context(Consumer.ENERGY, ())).value
     scopes, markers = [], []
 
     def visit(value, path=()):

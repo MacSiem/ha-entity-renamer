@@ -3,6 +3,13 @@ from custom_components.ha_entity_renamer.energy_plan import plan_energy
 
 
 class EnergyPlanTests(unittest.TestCase):
+    def test_cycle_rejected_before_schema_walk(self):
+        from custom_components.ha_entity_renamer.reference_planner import PlanError
+        source = {'energy_sources': []}
+        source['energy_sources'].append(source)
+        with self.assertRaises(PlanError):
+            plan_energy(source, {'sensor.a': 'sensor.b'})
+
     def test_grid_consumers_prices_and_inclusion_without_double_counting(self):
         source = {'energy_sources': [{'type': 'grid', 'stat_energy_from': 'sensor.old',
                   'entity_energy_price': 'sensor.price', 'number_energy_price': 0.75,
