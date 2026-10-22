@@ -49,6 +49,29 @@ test('all queued proposals expose a secondary disabled action rather than a prim
   } finally {dom.window.close();}
 });
 
+test('one expansion toggle reflects manual expansion and toggles all visible groups in both views',async()=>{
+  const {dom,card,root,entities}=fixture();
+  try {
+    await card._loadData();card.render();
+    assert.equal(root.querySelectorAll('[data-expand-list]').length,1);
+    root.querySelector('[data-expand-list]').click();
+    assert.equal(card._expandedDevices.size,4);
+    assert.match(root.querySelector('[data-expand-list]').textContent,/Zwiń/);
+    root.querySelector('[data-device-id="two"]').click();
+    assert.match(root.querySelector('[data-expand-list]').textContent,/Rozwiń/);
+    card._activeTab='automatic';card._automaticLoaded=true;
+    card._automaticRows=entities.map(e=>({oldId:e.entity_id,newId:e.entity_id+'_new',deviceId:e.device_id}));card.render();
+    assert.equal(root.querySelectorAll('[data-expand-list]').length,1);
+    root.querySelector('[data-expand-list]').click();
+    assert.equal(root.querySelectorAll('[data-auto-group][open]').length,4);
+    assert.match(root.querySelector('[data-expand-list]').textContent,/Zwiń/);
+    root.querySelector('[data-expand-list]').click();
+    assert.equal(root.querySelectorAll('[data-auto-group][open]').length,0);
+    assert.match(root.querySelector('[data-expand-list]').textContent,/Rozwiń/);
+    assert.equal(card._renameQueue.length,0);
+  } finally {dom.window.close();}
+});
+
 test('all views use the HA natural order, including numeric device names',async()=>{
   const {dom,card,root,entities}=fixture();
   try {
