@@ -13,12 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 NAMES = ('reference_planner', 'persistence', 'dashboard_plan', 'lovelace_native',
          'recorder_guard', 'native_registry', 'energy_plan', 'energy_native',
          'transaction', 'journal', 'helper_plan', 'helper_native', 'helper_persistence',
-         'prepared', 'helper_transaction', 'helper_observers', 'native_adapters', 'history_guard')
+         'prepared', 'helper_transaction', 'helper_observers', 'native_adapters', 'history_guard', 'native_name_observers')
 sources = {name: (ROOT / 'custom_components/ha_entity_renamer' / (name + '.py')).read_text()
            for name in NAMES}
 sources['native_helper_runtime_scenario'] = (ROOT / 'tests/native_helper_runtime_scenario.py').read_text()
 sources['native_group_scenario'] = (ROOT / 'tests/native_group_scenario.py').read_text()
 sources['native_linked_scenario'] = (ROOT / 'tests/native_linked_scenario.py').read_text()
+sources['native_name_scenario'] = (ROOT / 'tests/native_name_scenario.py').read_text()
 probe = '''
 import asyncio
 import logging
@@ -201,6 +202,9 @@ async def run(root):
             pass
         assert meter.entity_id == old
         print({'changed_hourly_point_rejected': 'PASS', 'hourly_fixture_source': 'native_import'})
+        if NAMES_ONLY:
+            from migration_probe.native_name_scenario import run_names
+            await run_names(hass, bridge, meter)
         if GROUPS:
             from migration_probe.native_group_scenario import run_groups
             await run_groups(hass, bridge)
@@ -212,6 +216,7 @@ with tempfile.TemporaryDirectory(prefix='renamer223-registry-probe-', dir='/conf
 '''
 parser = argparse.ArgumentParser()
 parser.add_argument('--container', choices=('ha-renamer-qa222', 'ha-renamer-min222'), default='ha-renamer-qa222')
+parser.add_argument('--names', action='store_true')
 parser.add_argument('--linked', action='store_true')
 parser.add_argument('--helpers', action='store_true')
 parser.add_argument('--groups', action='store_true')
@@ -226,7 +231,7 @@ assert inspected['State']['Running']
 mounts = [item.get('Source', '') for item in inspected['Mounts'] if item['Destination'] == '/config']
 assert len(mounts) == 1 and '/ha-tools-v4-20261016/renamer222-' in mounts[0]
 completed = subprocess.run(['docker', 'exec', '-i', container, 'python', '-B', '-'],
-    input='SOURCES = ' + repr(sources) + '\nLINKED = ' + repr(args.linked) + '\nHELPERS = ' + repr(args.helpers) + '\nHELPER_KIND = ' + repr(args.helper_kind) + '\nGROUPS = ' + repr(args.groups) + '\nINACTIVE = ' + repr(args.inactive_helper) + '\n' + probe,
+    input='SOURCES = ' + repr(sources) + '\nNAMES_ONLY = ' + repr(args.names) + '\nLINKED = ' + repr(args.linked) + '\nHELPERS = ' + repr(args.helpers) + '\nHELPER_KIND = ' + repr(args.helper_kind) + '\nGROUPS = ' + repr(args.groups) + '\nINACTIVE = ' + repr(args.inactive_helper) + '\n' + probe,
     text=True, capture_output=True, timeout=120)
 print(completed.stdout)
 print(completed.stderr)

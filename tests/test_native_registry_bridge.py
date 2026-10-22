@@ -281,6 +281,22 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.bridge.inspect(change)).position, "after")
         self.assertEqual(self.io.data["devices"][0]["identifiers"], [["test", "physical-device"]])
 
+    async def test_name_only_captures_serialized_runtime_baseline(self):
+        self.io.capture_runtime = lambda change: '{"native_baseline": true}'
+        change = await self.bridge.prepare('entity', 'stable', {'name': 'After'}, self.guard)
+        self.assertEqual(change.runtime_before_json, '{"native_baseline": true}')
+        self.assertFalse(change.mapping)
+        await self.bridge.apply(change, self.guard)
+        self.assertEqual((await self.bridge.inspect(change)).position, 'after')
+
+    async def test_runtime_failure_before_disk_cannot_be_hidden_by_later_success(self):
+        change = await self.prepare()
+        self.io.runtime_ok = False
+        self.io.after_disk = lambda: setattr(self.io, 'runtime_ok', True)
+        evidence = await self.bridge.inspect(change)
+        self.assertEqual(evidence.position, 'unknown')
+        self.assertFalse(evidence.runtime)
+
     async def test_malformed_native_patch_refused(self):
         for updates in ({"entity_id": None}, {"entity_id": "light.after"},
                         {"unique_id": "replacement"}, {"name": {"bad": "value"}}):

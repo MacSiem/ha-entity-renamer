@@ -36,6 +36,7 @@ class PreparedRegistryChange:
     after_json: str
     recorder_before_json: str = ""
     history_before_json: str = ""
+    runtime_before_json: str = ""
 
     @property
     def before(self):
@@ -116,17 +117,21 @@ class NativeRegistryIO:
         await self.hass.async_block_till_done()
 
     def runtime(self, prepared, target):
-        if prepared.kind == "device":
-            # Device has no independent native activation state to observe.
-            return None
+        if prepared.kind == "device" or not prepared.mapping:
+            from .native_name_observers import NativeNameObserver
+            return NativeNameObserver(self).verify(prepared, target)
         old, new = prepared.before["entity_id"], prepared.after["entity_id"]
-        if old == new:
-            return None  # A registry name is not necessarily the state friendly_name.
         other = new if target["entity_id"] == old else old
         if self.hass.states.get(other) is not None:
             return False
         state = self.hass.states.get(target["entity_id"])
         return (state is None) if target.get("disabled_by") else (state is not None)
+
+    def capture_runtime(self, prepared):
+        if prepared.kind == "device" or not prepared.mapping:
+            from .native_name_observers import NativeNameObserver
+            return NativeNameObserver(self).capture(prepared)
+        return ""
 
     def mutate(self, prepared, target):
         registry = self.registries[prepared.kind]
@@ -165,8 +170,8 @@ class NativeRegistryBridge:
 
     recorder implements existing NativeRecorderGuard (read-only). Runtime probe
     may be injected for richer integration evidence; None remains UNKNOWN.
-    Device/name-only writes can prove storage but require an owner-supplied
-    activation observer before they can be marked transaction BEFORE/AFTER.
+    Native device/name-only writes capture a durable runtime baseline; missing
+    legacy baselines remain UNKNOWN. Injected probes remain a trusted IO seam.
     """
 
     def __init__(self, io, recorder, runtime_probe=None, *, history_guard=None):
@@ -229,6 +234,11 @@ class NativeRegistryBridge:
         from dataclasses import replace
         change = replace(change, recorder_before_json=json.dumps(recorder_before, sort_keys=True),
                          history_before_json=json.dumps(history_before, sort_keys=True))
+        capture = getattr(self.io, "capture_runtime", None)
+        if capture is not None:
+            await self.io.settle()
+            self._fresh(change, before, guard)
+            change = replace(change, runtime_before_json=capture(change))
         evidence = await self.inspect(change)
         self._fresh(change, before, guard)
         if evidence.position != "before":
@@ -277,7 +287,8 @@ class NativeRegistryBridge:
                 else:
                     from .recorder_guard import verify
                     metadata = verify(change.mapping, baseline, recorder)
-            runtime = self.runtime_probe(change, target) if runtime is not None else None
+            runtime_after = self.runtime_probe(change, target)
+            runtime = (runtime and runtime_after) if runtime is not None else None
             if self.io.pending(change.kind):
                 return RegistryEvidence("unknown", True, runtime, durable, metadata,
                                         reason="native_persistence_pending")
