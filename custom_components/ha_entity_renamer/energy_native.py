@@ -34,13 +34,15 @@ class NativeEnergy:
     def __init__(self, hass, manager):
         from homeassistant.components.energy.data import EnergyManager
         from homeassistant.const import __version__
-        if __version__ != '2026.10.2' or type(manager) is not EnergyManager:
+        if __version__ not in ('2025.6.0', '2026.10.2') or type(manager) is not EnergyManager:
             raise PersistenceError('unsupported_energy_runtime')
         self.hass, self.manager = hass, manager
+        self._legacy = __version__ == '2025.6.0'
+        self._minor_version = 1 if self._legacy else 3
         self._lock = asyncio.Lock()
         self._failed = False
         store = manager._store
-        if (store.key != 'energy' or store.version != 1 or store.minor_version != 3
+        if (store.key != 'energy' or store.version != 1 or store.minor_version != self._minor_version
                 or Path(store.path) != Path(hass.config.path('.storage', 'energy'))):
             raise PersistenceError('energy_store_identity')
         self._store = store
@@ -57,7 +59,7 @@ class NativeEnergy:
         self._settled()
         initial = deepcopy(self.manager.data)
         data, identity = await self.hass.async_add_executor_job(
-            durable_snapshot, Path(self._store.path), 'energy', 1, 3)
+            durable_snapshot, Path(self._store.path), 'energy', 1, self._minor_version)
         self._settled()
         if initial != self.manager.data or data != initial:
             raise PersistenceError('energy_cache_disk_disagree')
@@ -74,18 +76,28 @@ class NativeEnergy:
         if plan.markers or before.value is None:
             raise PersistenceError('energy_coverage_blocked')
         after = deepcopy(plan.value)
-        if set(after) - {'energy_sources', 'device_consumption', 'device_consumption_water'}:
+        keys = {'energy_sources', 'device_consumption'}
+        if not self._legacy:
+            keys.add('device_consumption_water')
+        if set(after) - keys:
             raise PersistenceError('energy_schema_changed')
         # Validate with the installed HA schemas without adding optional defaults
         # or changing the user's configured consumer set/price representation.
-        import probatio
-        probatio.Schema(ENERGY_SOURCE_SCHEMA)(after.get('energy_sources', []))
-        for key in ('device_consumption', 'device_consumption_water'):
+        if self._legacy:
+            import voluptuous as vol
+            ENERGY_SOURCE_SCHEMA(after.get('energy_sources', []))
+            consumer_schema = vol.Schema(DEVICE_CONSUMPTION_SCHEMA)
+        else:
+            import probatio
+            probatio.Schema(ENERGY_SOURCE_SCHEMA)(after.get('energy_sources', []))
+            consumer_schema = DEVICE_CONSUMPTION_SCHEMA
+        for key in keys - {'energy_sources'}:
             for consumer in after.get(key, []):
-                DEVICE_CONSUMPTION_SCHEMA(consumer)
-        projected = self.manager._process_energy_sources(deepcopy(after.get('energy_sources', [])))
-        if projected != after.get('energy_sources', []):
-            raise PersistenceError('energy_generated_identity_requires_plan')
+                consumer_schema(consumer)
+        if not self._legacy:
+            projected = self.manager._process_energy_sources(deepcopy(after.get('energy_sources', [])))
+            if projected != after.get('energy_sources', []):
+                raise PersistenceError('energy_generated_identity_requires_plan')
         return PreparedEnergy(before, after, revision(after))
 
     async def write(self, prepared, guard):

@@ -5,6 +5,7 @@ This qualifies the native boundary, not an installed end-to-end migration.
 """
 from pathlib import Path
 import json
+import argparse
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,6 +99,8 @@ async def run(root):
     preferences = {'energy_sources': [{'type': 'solar', 'stat_energy_from': 'sensor.fixture_old'}],
                    'device_consumption': [{'stat_consumption': 'sensor.fixture_old'}],
                    'device_consumption_water': []}
+    if __version__ == '2025.6.0':
+        preferences.pop('device_consumption_water')
     await manager.async_update(preferences)
     await manager._store.async_save(manager.data)
     updates = []
@@ -125,11 +128,14 @@ async def run(root):
 with tempfile.TemporaryDirectory(prefix='renamer223-lovelace-probe-', dir='/config') as root:
     asyncio.run(run(root))
 '''
-container = 'ha-renamer-qa222'
+parser = argparse.ArgumentParser()
+parser.add_argument('--container', choices=('ha-renamer-qa222', 'ha-renamer-min222'), default='ha-renamer-qa222')
+container = parser.parse_args().container
 inspected = json.loads(subprocess.check_output(['docker', 'inspect', container], text=True))[0]
 assert inspected['State']['Running']
 mounts = [item.get('Source', '') for item in inspected['Mounts'] if item['Destination'] == '/config']
-assert len(mounts) == 1 and '/ha-tools-v4-20261016/renamer222-native/' in mounts[0]
+expected = 'native' if container == 'ha-renamer-qa222' else 'minimum'
+assert len(mounts) == 1 and '/ha-tools-v4-20261016/renamer222-' + expected + '/' in mounts[0]
 completed = subprocess.run(['docker', 'exec', '-i', container, 'python', '-B', '-'],
     input='SOURCES = ' + repr(sources) + '\n' + probe,
     text=True, capture_output=True, timeout=60)

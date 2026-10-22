@@ -1,4 +1,4 @@
-"""HA 2026.10.2 Lovelace bridge; only native manager writes configuration.
+"""HA 2025.6.0/2026.10.2 Lovelace bridge; only native manager writes configuration.
 
 Private native fields are deliberately version-pinned. No generic Store cache
 reload is evidence: Store/LovelaceStorage both have independent memory caches.
@@ -93,7 +93,7 @@ class NativeLovelace:
         from homeassistant.components.lovelace.const import LOVELACE_DATA
         from homeassistant.components.lovelace.dashboard import LovelaceStorage
         from homeassistant.const import __version__
-        if __version__ != '2026.10.2':
+        if __version__ not in ('2025.6.0', '2026.10.2'):
             raise PersistenceError('unsupported_lovelace_runtime')
         self.hass = hass
         self._data_key = LOVELACE_DATA
