@@ -2974,7 +2974,8 @@ class HAEntityRenamer extends HTMLElement {
       }
       .btn-primary { background: var(--bento-primary, #3B82F6); color: white; }
       .btn-primary:hover { opacity: 0.85; }
-      .btn-danger { background:transparent;color:var(--error-color,#b91c1c);border:1px solid currentColor; }
+      .btn-danger { background:transparent;color:#b91c1c;border:1px solid currentColor; }
+      :host(.bento-dark) .btn-danger { color:#fca5a5; }
       .btn-danger:hover { opacity: 0.85; }
       .btn-sm { padding: 4px 10px; font-size: 12px; }
       .btn-outline {
