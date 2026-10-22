@@ -183,6 +183,8 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
         for node in all_nodes:
             if isinstance(node, unsupported):
                 return original_text, [('unsupported_template_scope', 'Unsupported lexical template scope')]
+            if isinstance(node, nodes.NSRef) and (node.name in globals_ or node.attr in globals_):
+                return original_text, [('unsupported_template_scope', 'HA global namespace binding')]
             if isinstance(node, nodes.Name) and node.ctx in ('store', 'param') and node.name in globals_:
                 return original_text, [('unsupported_template_scope', 'HA global shadowed by local binding')]
 
