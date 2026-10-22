@@ -89,9 +89,12 @@ async def run_activation(scratch, planner, validation):
                 ({'sensor.new': 'sensor.old'}, 'sensor.new', 'sensor.old', '43'),
             ]:
                 await hass.async_block_till_done()  # Outside editor locks; settle prior reload.
+                prior_inode = script_path.stat().st_ino
                 plan = planner.plan_yaml(root, mapping)
+                print({'phase': value, 'prior_inode': prior_inode, 'planned_inode': next(item.inode for item in plan.files if item.path == 'scripts.yaml'), 'named_inode': script_path.stat().st_ino}, flush=True)
                 assert plan.ready and len(plan.patches) == 1, plan.issues
                 async with leases.hold(lambda: None):
+                    print({'phase': value, 'lease_inode': script_path.stat().st_ino}, flush=True)
                     try:
                         receipt = await validation.async_validate_proposed(hass, plan, scratch)
                     except validation.YAMLValidationError:
