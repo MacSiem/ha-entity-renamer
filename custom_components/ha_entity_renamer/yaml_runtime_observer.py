@@ -99,6 +99,7 @@ class NativeYAMLRuntimeReadback:
 
     def _projection(self, domain):
         from homeassistant.helpers.entity_component import DATA_INSTANCES
+        from homeassistant.const import __version__
         if domain == 'homeassistant':
             from homeassistant.core_config import DATA_CUSTOMIZE
             from homeassistant.helpers.entity_values import EntityValues
@@ -128,7 +129,7 @@ class NativeYAMLRuntimeReadback:
                 if type(entity) is not ScriptEntity:
                     raise ValueError('native_script_type')
                 script = entity.script
-                if (script.is_running or script._unloaded or not script.enabled
+                if (script.is_running or (script._unloaded if __version__ == '2026.10.2' else False) or not script.enabled
                         or script._hass is not self.hass or script.domain != domain
                         or entity._blueprint_inputs is not None
                         or not self.hass.services.has_service('script', entity.unique_id)
@@ -143,9 +144,9 @@ class NativeYAMLRuntimeReadback:
                     raise ValueError('native_automation_type')
                 script = entity.action_script
                 if (entity._is_enabled is not False or entity._async_detach_triggers is not None
-                        or entity._condition is not None or entity._trigger_variables is not None
+                        or (entity._condition if __version__ == '2026.10.2' else entity._cond_func) is not None or entity._trigger_variables is not None
                         or entity._blueprint_inputs is not None
-                        or script.is_running or script._unloaded
+                        or script.is_running or (script._unloaded if __version__ == '2026.10.2' else False)
                         or script._hass is not self.hass or script.domain != domain
                         or getattr(script.change_listener, '__self__', None) is not entity):
                     raise ValueError('automation_listener_proof_unavailable')

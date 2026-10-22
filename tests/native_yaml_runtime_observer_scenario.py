@@ -98,7 +98,9 @@ async def run():
             import sys
             worker = importlib.import_module(package + '.yaml_validation_worker')
             def trace(frame, event, arg):
-                if event == 'exception' and frame.f_code.co_name == '_expected_runtime':
+                if (event == 'exception' and not isinstance(arg[1], (StopIteration, StopAsyncIteration))
+                        and frame.f_code.co_name in ('_expected_runtime', 'async_process_component_config',
+                                                     'async_validate_config', '_async_validate_config_item')):
                     print({'expected_runtime_error': type(arg[1]).__name__,
                            'domain': frame.f_locals.get('domain'), 'error': str(arg[1])}, flush=True)
                 return trace
