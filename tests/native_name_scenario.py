@@ -11,6 +11,16 @@ async def run_names(hass, bridge, meter):
     from .prepared import encode_change, decode_change
 
     io = bridge.io
+    native_runtime = bridge.runtime_probe
+    def observed_runtime(change, target):
+        try:
+            return native_runtime(change, target)
+        except Exception as error:
+            # All inputs here are synthetic; observer errors contain codes only.
+            print({'native_name_observer_failure': type(error).__name__,
+                   'reason': str(error), 'kind': change.kind}, flush=True)
+            raise
+    bridge.runtime_probe = observed_runtime
     registry = er.async_get(hass)
     meter_row = registry.async_get(meter.entity_id)
     before_id, before_unique = meter_row.id, meter_row.unique_id
