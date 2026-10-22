@@ -9,9 +9,10 @@ import argparse
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-NAMES = ('reference_planner', 'persistence', 'dashboard_plan', 'lovelace_native', 'transaction', 'journal', 'energy_plan', 'energy_native')
+NAMES = ('reference_planner', 'persistence', 'dashboard_plan', 'lovelace_native', 'transaction', 'journal', 'energy_plan', 'energy_native', 'helper_plan', 'helper_native', 'helper_persistence')
 sources = {name: (ROOT / 'custom_components/ha_entity_renamer' / (name + '.py')).read_text()
            for name in NAMES}
+sources['native_helper_persistence_scenario'] = (ROOT / 'tests/native_helper_persistence_scenario.py').read_text()
 probe = '''
 import asyncio
 import sys
@@ -119,6 +120,9 @@ async def run(root):
     assert len(updates) == 2 and await energy.verify(initial.revision)
     print({'native_energy': 'PASS', 'energy_listener': 'PASS', 'energy_reverse': 'PASS',
            'fresh_energy_manager': 'PASS'})
+    if __version__ == '2026.10.2':
+        from migration_probe.native_helper_persistence_scenario import exercise
+        await exercise(hass)
     await hass.async_block_till_done()
     await hass.async_stop(force=True)
     print({'ha': __version__, 'native_lovelace': 'PASS', 'cold_cache': 'PASS',
