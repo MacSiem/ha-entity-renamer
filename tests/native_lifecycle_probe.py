@@ -52,7 +52,36 @@ async def run(root):
         assert (await async_load_base_functionality(hass)) is not False
         hass.auth = await auth.auth_manager_from_config(hass, [], [])
         assert await async_setup_component(hass, 'http', config)
+        from homeassistant.components.config import automation, script, scene
+        for editor in (automation, script, scene):
+            assert editor.async_setup(hass)
         await hass.async_start()
+        from custom_components.ha_entity_renamer.yaml_editor_locks import NativeYAMLEditorLocks
+        leases = NativeYAMLEditorLocks(hass)
+        native_editors = leases.enumerate()
+        assert len(native_editors) == 3, len(native_editors)
+        entered_editor = asyncio.Event()
+        async def edit():
+            async with native_editors[0][3]:
+                entered_editor.set()
+        async with leases.hold(lambda: None):
+            assert all(row[3].locked() for row in native_editors)
+            pending_editor = asyncio.create_task(edit())
+            await asyncio.sleep(0)
+            assert not entered_editor.is_set()
+        await pending_editor
+        assert entered_editor.is_set() and not any(row[3].locked() for row in native_editors)
+        calls = 0
+        def revoked_guard():
+            nonlocal calls
+            calls += 1
+            if calls > 1: raise PermissionError('revoked fixture')
+        try:
+            async with leases.hold(revoked_guard):
+                raise AssertionError('revocation allowed entry')
+        except PermissionError:
+            pass
+        assert not any(row[3].locked() for row in native_editors)
         result = await hass.config_entries.flow.async_init('ha_entity_renamer', context={'source': 'user'})
         assert result['type'] == 'create_entry', result
         entry = result['result']
@@ -113,7 +142,7 @@ async def run(root):
         assert await status(admin) == ('error', 'unavailable')
         print({'native_config_flow': 'PASS', 'duplicate_rejected': 'PASS',
                'admin_household_and_late_revocation': 'PASS', 'reload_and_busy_unload': 'PASS',
-               'corrupt_journal_refused': 'PASS', 'mutation_api': 'NOT_IMPLEMENTED',
+               'corrupt_journal_refused': 'PASS', 'native_yaml_editor_lock_lease': 'PASS', 'mutation_api': 'NOT_IMPLEMENTED',
                'live_config_access': False}, flush=True)
     finally:
         await hass.async_stop(force=True)
