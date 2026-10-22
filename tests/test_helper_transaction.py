@@ -29,7 +29,8 @@ MAP = {'sensor.before': 'sensor.after'}
 
 def snapshot(domain='powercalc'):
     return {'domain': domain, 'identity': {'entry_id': 'helper', 'unique_id': 'fixed',
-        'title': 'Display', 'version': 1, 'minor_version': 1, 'source': 'user'},
+        'title': 'Display', 'version': 1, 'minor_version': 1, 'source': 'user', 'disabled_by': None,
+            'pref_disable_new_entities': False, 'pref_disable_polling': False},
         'data': {'entity_id': 'sensor.before', 'energy_price_sensor': 'sensor.before'},
         'options': {}, 'subentries': {}}
 
@@ -201,6 +202,16 @@ class HelperAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Position.UNKNOWN, await self.adapter.inspect(self.step))
         with self.assertRaises(Refused): await self.adapter.apply(self.step, self.guard)
         self.assertEqual([], self.writes + self.flushes)
+
+    async def test_changed_entry_enablement_and_preferences_block_mutation(self):
+        for key, value in (('disabled_by', 'user'), ('pref_disable_new_entities', True),
+                           ('pref_disable_polling', True)):
+            original = getattr(self.entry, key)
+            setattr(self.entry, key, value)
+            self.assertEqual(Position.UNKNOWN, await self.adapter.inspect(self.step))
+            with self.assertRaises(Refused): await self.adapter.apply(self.step, self.guard)
+            self.assertEqual([], self.writes + self.reloads + self.flushes)
+            setattr(self.entry, key, original)
 
     async def test_failed_flush_keeps_unknown_and_never_replays_write(self):
         async def fail(value, guard): raise OSError('native persistence uncertain')

@@ -28,10 +28,15 @@ def read_entry(hass, entry_id: str) -> dict:
     entry = hass.config_entries.async_get_entry(entry_id)
     if entry is None:
         raise ValueError('helper_entry_missing')
+    identity = {key: getattr(entry, key) for key in
+                ('entry_id', 'unique_id', 'title', 'version', 'minor_version', 'source')}
+    disabled = entry.disabled_by
+    identity.update(disabled_by=getattr(disabled, 'value', disabled),
+                    pref_disable_new_entities=entry.pref_disable_new_entities,
+                    pref_disable_polling=entry.pref_disable_polling)
     return {
         'domain': entry.domain,
-        'identity': {key: getattr(entry, key) for key in
-                     ('entry_id', 'unique_id', 'title', 'version', 'minor_version', 'source')},
+        'identity': identity,
         'data': _plain(entry.data), 'options': _plain(entry.options),
         'subentries': {key: {
             'identity': {name: getattr(sub, name) for name in

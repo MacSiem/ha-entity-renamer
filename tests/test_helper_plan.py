@@ -12,7 +12,8 @@ MAP = {'sensor.before': 'sensor.after'}
 
 def snapshot(domain, data=None, options=None):
     return {'domain': domain, 'identity': {'entry_id': 'synthetic', 'unique_id': 'fixed',
-            'title': 'Display', 'version': 1, 'minor_version': 1, 'source': 'user'},
+            'title': 'Display', 'version': 1, 'minor_version': 1, 'source': 'user', 'disabled_by': None,
+            'pref_disable_new_entities': False, 'pref_disable_polling': False},
             'data': data or {}, 'options': options or {}, 'subentries': {}}
 
 
