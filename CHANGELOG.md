@@ -8,7 +8,7 @@
 - Place friendly names above IDs on narrow cards and keep statistic values separate from their labels, including the New filter.
 - Add account-scoped, collapsible help and visual configuration for default/visible tabs, help and support.
 - Undo clearing a draft queue for eight seconds without overwriting newer proposals.
-- Suggest area prefixes in the local queue, respecting entity area overrides and preserving existing proposals. Registry writes still require administrator review and confirmation.
+- Suggest area prefixes in the local queue, respecting entity area overrides, reading current assignments when requested and preserving existing proposals. Registry writes still require administrator review and confirmation.
 
 ## 4.4.1 (2026-10-17)
 

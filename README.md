@@ -64,9 +64,9 @@ references visible through Home Assistant's APIs.
 
 | Light | Dark |
 |---|---|
-| ![Rename queue, light theme](docs/screenshots/card-queue-light.png) | ![Rename queue, dark theme](docs/screenshots/card-queue-dark.png) |
+| ![Rename queue, light theme](docs/screenshots/card-queue-light.jpg) | ![Rename queue, dark theme](docs/screenshots/card-queue-dark.jpg) |
 
-*A queued synthetic entity-ID and friendly-name change, before confirmation
+*Three synthetic area-prefix proposals in the queue, before confirmation
 or any registry write. Use Analyze Impact to review readable references.
 Dark mode follows your Home Assistant theme.*
 
@@ -211,11 +211,11 @@ The queue groups proposals by device and shows their source: Automatic IDs, Manu
 
 #### Automatic IDs preview
 
-The screenshots below show a synthetic Home Assistant fixture. The search matches three entities on one QA device, with one local proposal and no registry writes. Queued entities show a text status and one Remove action.
+The screenshots below show a synthetic Home Assistant fixture. The comparison shows three entities on one QA device, with one queued proposal and no registry writes. Queued entities show a text status and one Remove action.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/card-automatic-dark.png">
-  <img src="docs/screenshots/card-automatic-light.png" alt="Automatic IDs with counted filters, naturally sorted devices, queued markers and the queue bar" width="644">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/card-automatic-dark.jpg">
+  <img src="docs/screenshots/card-automatic-light.jpg" alt="Automatic IDs with counted filters, naturally sorted devices, queued markers and the queue bar" width="644">
 </picture>
 
 History dates use the browser/system time zone by default and respect explicit Home Assistant profile choices for local/server time, date language and 12/24-hour format. Open history refreshes when those preferences change. Full ISO timestamps and the displayed time zone remain under **Time details**; legacy entries that only stored a time are explicitly marked **date unknown**. **Source and limits** retains the complete explanation and can be opened with the keyboard.

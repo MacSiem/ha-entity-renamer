@@ -1,59 +1,62 @@
 {
-  "captured_at": "2026-10-13",
-  "runtime_source_head": "7dbdc425292c0d520e7f6302c4f6ef37d51f7256",
-  "runtime_sha256": "e056012efe8eae6e1e0b619809a0dded34503c2004722b12daaae2968d7861b6",
-  "home_assistant": "2025.6.0",
-  "browser": "Google Chrome",
+  "captured_at": "2026-10-22",
+  "runtime_source_head": "dbc7703843a240331a14fa95b533eb76a73dd6fd",
+  "runtime_sha256": "276e220da354defecccd96c115a0073d790b16a8683d332b6413da806116f0f6",
+  "home_assistant": "2026.10.2",
+  "hacs": "2.0.5",
+  "browser": "Chromium in-app browser",
   "zoom": "100%",
   "language": "en",
-  "data": "Owned synthetic fixture only; one uncommitted rename proposal, no registry writes.",
-  "processing": "Crop of actual native browser screenshots to the card bounds; no generated or substituted UI.",
+  "data": "Owned synthetic native HA fixture. Queue: three area-prefix proposals. Automatic IDs: three proposals, one queued. No registry writes.",
+  "processing": "Browser screenshot clipped to measured card host bounds; no generated or substituted UI.",
   "screenshots": [
     {
-      "file": "docs/screenshots/card-queue-light.png",
+      "file": "docs/screenshots/card-queue-light.jpg",
       "theme": "light",
-      "sha256": "a264d33210927cfd75dbf3ecf8a152784dd1b7471b94122829d4f4fa7aa87ace",
-      "width": 492,
-      "height": 382
+      "sha256": "dffd062ef82364e89651e057a3b4348f2900bc9409fbe809cdcc0a48845d10f9",
+      "width": 644,
+      "height": 773,
+      "format": "JPEG",
+      "viewport": {
+        "width": 900,
+        "height": 1200
+      }
     },
     {
-      "file": "docs/screenshots/card-queue-dark.png",
+      "file": "docs/screenshots/card-queue-dark.jpg",
       "theme": "dark",
-      "sha256": "977dc7a85b520022eb25667fbabe50f56d05930a69aea32972ca2c1f596e427a",
-      "width": 492,
-      "height": 382
-    }
-  ],
-  "automatic_ids_v4": {
-    "captured_at": "2026-10-17",
-    "runtime_source_head": "bc8587edde1041148994dd0882f81fd8739e2cf4",
-    "runtime_sha256": "84e3aba43b7a4e12a667528cd3ed57156a75548e4a6dce0554d58e95222679b6",
-    "home_assistant": "2026.10.2",
-    "browser": "Google Chrome (actual Chrome connection ID2)",
-    "zoom": "100%",
-    "viewport": {
-      "width": 900,
-      "height": 1080
-    },
-    "data": "Owned synthetic HA fixture with165actual SensorEntity proposals. Search shows three entities on one QA device, with one uncommitted proposal; no registry writes from the card.",
-    "processing": "Actual Chrome screenshots decoded to PNG and cropped to measured visible card bounds; no generated or substituted UI.",
-    "screenshots": [
-      {
-        "file": "docs/screenshots/card-automatic-light.png",
-        "theme": "light",
-        "language": "en",
-        "sha256": "568c4d69a53e9cf8a67795bc3794e19f68472f6200daa80b76a73a65461b171f",
-        "width": 644,
-        "height": 1009
-      },
-      {
-        "file": "docs/screenshots/card-automatic-dark.png",
-        "theme": "dark",
-        "language": "en",
-        "sha256": "c7b4e343227538fc6eb1b59b752fa65ba4482709dc41c54de7cb690afa361e11",
-        "width": 644,
-        "height": 1009
+      "sha256": "366e6d576e2cb3f51f8c584ab0f3e3dc3834bb6a793e5795061dec94aa25f53a",
+      "width": 644,
+      "height": 773,
+      "format": "JPEG",
+      "viewport": {
+        "width": 900,
+        "height": 1080
       }
-    ]
-  }
+    },
+    {
+      "file": "docs/screenshots/card-automatic-light.jpg",
+      "theme": "light",
+      "sha256": "a5a972fef8508262a0672fc30a315c4f76016c1f77d2972644e91434c52802b1",
+      "width": 644,
+      "height": 1157,
+      "format": "JPEG",
+      "viewport": {
+        "width": 900,
+        "height": 1200
+      }
+    },
+    {
+      "file": "docs/screenshots/card-automatic-dark.jpg",
+      "theme": "dark",
+      "sha256": "1e8769c6daa95c1e7aa644c63f12842a2d8831a65c4b663d1e7f8db9683a1a34",
+      "width": 644,
+      "height": 1049,
+      "format": "JPEG",
+      "viewport": {
+        "width": 900,
+        "height": 1200
+      }
+    }
+  ]
 }
