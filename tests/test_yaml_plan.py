@@ -359,6 +359,18 @@ class YAMLPlannerTests(unittest.TestCase):
         self.assertFalse(plan.patches)
         self.assertFalse(any(p.approved for p in plan.variable_bindings))
 
+    def test_known_yaml_entity_map_key_lookup_migrates_key_and_index(self):
+        source = """script:
+  demo:
+    variables:
+      refs:
+        sensor.foo: Kitchen
+    sequence:
+    - data:
+        message: '{{ refs["sensor.foo"] }}'
+"""
+        self.assert_variable_patch(source)
+
     def test_yaml_map_key_target_collision_blocks(self):
         source = "script:\n  demo:\n    variables:\n      refs:\n        sensor.foo: Kitchen\n        sensor.new: Other\n    sequence:\n    - value_template: '{% for e in refs %}{{ states(e) }}{% endfor %}'\n"
         self.put('configuration.yaml', source)
