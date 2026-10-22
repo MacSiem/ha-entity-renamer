@@ -88,8 +88,7 @@ category **Dashboard** (Lovelace plugin).
 type: custom:ha-entity-renamer
 ```
 
-That's it — no options are required. An optional **Title** field is
-available in the card's visual editor.
+That's it — no options are required. The visual editor also offers a title, tab selection and help/support preferences.
 
 ## Card options
 
@@ -184,8 +183,8 @@ changes and reviewing/exporting private history require an administrator.
 Older unscoped history remains untouched. An administrator can explicitly choose
 **Review legacy history from this browser**. Its account origin remains unknown,
 and reviewing/exporting it does not assign it to the current account or overwrite
-the original storage. This choice clears when authority changes. Preferences
-remain shared by cards on this origin. Signing out of Home Assistant clears this
+the original storage. This choice clears when authority changes. Help closure is scoped to the current HA account; support dismissal
+remains shared by cards on this origin. Signing out of Home Assistant clears this
 origin’s browser storage, including locally kept Renamer history and legacy entries.
 Export a copy before signing out. History is not synchronized to other devices;
 use separate browser profiles on a shared computer. Queued proposals stay in memory

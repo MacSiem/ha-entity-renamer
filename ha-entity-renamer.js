@@ -2200,6 +2200,7 @@ class HAEntityRenamer extends HTMLElement {
 
   _clearQueue() {
     if (this._loading) return;
+    this._areaPrefixEpoch = (this._areaPrefixEpoch || 0) + 1;
     if (this._renameQueue.length || Object.keys(this._deviceRenameQueue).length) {
       this._rememberQueueRemoval({kind:'batch',entities:[...this._renameQueue],devices:{...this._deviceRenameQueue},row:{oldId:this._lang==='pl'?'Cała kolejka':'Entire queue'}});
     } else this._clearQueueUndo();
@@ -2216,11 +2217,13 @@ class HAEntityRenamer extends HTMLElement {
     if (this._loading || this._areaPrefixPending || !this._selectedDevice || ![true,false].includes(this._hass?.user?.is_admin)) return;
     const { hass, current } = this._captureRead();
     const deviceId = this._selectedDevice;
+    const areaEpoch = this._areaPrefixEpoch || 0;
+    const applicable = () => current() && (this._areaPrefixEpoch || 0) === areaEpoch && this._selectedDevice === deviceId && !this._loading && !this._confirmDialogOpen;
     this._areaPrefixPending = true;
     this.render();
     try {
       const areas = await hass.callWS({type:'config/area_registry/list'});
-      if (!current() || this._selectedDevice !== deviceId) return;
+      if (!applicable()) return;
       if (!Array.isArray(areas)) throw new Error('Invalid area registry');
       const device = this._devices.find(item => item.id === deviceId);
       const queued = new Set(this._renameQueue.map(row => row.oldId));
@@ -2235,13 +2238,13 @@ class HAEntityRenamer extends HTMLElement {
         const [domain,objectId] = entity.entity_id.split('.');
         if (!objectId || objectId.startsWith(prefix + '_')) continue;
         this._addToQueue(entity.entity_id, `${domain}.${prefix}_${objectId}`, undefined, 'area');
-        count++;
+        if (this._renameQueue.some(row => row.oldId === entity.entity_id && row.newId === `${domain}.${prefix}_${objectId}` && row.source === 'area')) count++;
       }
       this._message = {type:'info',text:this._lang==='pl'
         ? `Dodano propozycje z obszarów: ${count}. Istniejące propozycje pozostawiono bez zmian.`
         : `Area proposals added: ${count}. Existing proposals were kept.`};
     } catch (_) {
-      if (current()) this._message = {type:'error',text:this._lang==='pl'?'Nie udało się odczytać obszarów. Spróbuj ponownie.':'Could not read areas. Try again.'};
+      if (applicable()) this._message = {type:'error',text:this._lang==='pl'?'Nie udało się odczytać obszarów. Spróbuj ponownie.':'Could not read areas. Try again.'};
     } finally {
       this._areaPrefixPending = false;
       if (current()) this.render();
@@ -2268,6 +2271,7 @@ class HAEntityRenamer extends HTMLElement {
   async _analyzeImpact() {
     if (![true, false].includes(this._hass?.user?.is_admin)) return;
     if (this._loading || !this._renameQueue.length) return;
+    this._areaPrefixEpoch = (this._areaPrefixEpoch || 0) + 1;
     const { hass, current } = this._captureRead();
     const queue = this._renameQueue.map(row => ({ ...row }));
     this._loading = true;
@@ -2466,6 +2470,7 @@ class HAEntityRenamer extends HTMLElement {
       return;
     }
     if (this._loading || (!this._renameQueue.length && !Object.keys(this._deviceRenameQueue || {}).length)) return;
+    this._areaPrefixEpoch = (this._areaPrefixEpoch || 0) + 1;
     this._confirmation = {
       session: this._readSession(),
       epoch: this._authorityEpoch,
