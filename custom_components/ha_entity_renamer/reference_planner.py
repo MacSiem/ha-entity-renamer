@@ -237,7 +237,7 @@ def plan_references(
                 if match.group(1) in mapping and match.span(1) not in spans:
                     unresolved = True
             # Dynamic accesses can reference sources without spelling a full ID.
-            if re.search(r"[~+]|\bstates\s*\[", expression) or any(
+            if re.search(r"\bstates\s*\[", expression) or any(
                 _CALL.match(expression, m.start()) is None
                 for m in _DYNAMIC.finditer(expression)
             ):

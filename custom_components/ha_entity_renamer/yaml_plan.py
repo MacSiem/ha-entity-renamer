@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -376,23 +377,28 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                     continue
                 raw = text[token.start_mark.index:token.end_mark.index]
                 source_plan = plan_references(raw, mapping, template_context)
-                if source_plan.markers:
+                replacement = source_plan.value
+                if source_plan.markers and token.style not in ("'", '"'):
                     issue(node, "template_requires_source_span_mapper")
                     continue
+                if token.style == "'":
+                    replacement = "'" + decoded_plan.value.replace("'", "''") + "'"
+                elif token.style == '"':
+                    replacement = json.dumps(decoded_plan.value, ensure_ascii=False)
                 # Operate on the source token, preserving YAML quoting, block
                 # indentation and comments. Independent decoding must match
                 # the planned template exactly; escaped spellings fail closed.
                 try:
-                    decoded = yaml.compose(source_plan.value, Loader=yaml.SafeLoader)
+                    decoded = yaml.compose(replacement, Loader=yaml.SafeLoader)
                 except yaml.YAMLError:
                     decoded = None
                 if not isinstance(decoded, ScalarNode) or decoded.value != decoded_plan.value:
                     issue(node, "template_requires_source_span_mapper")
                     continue
-                if raw != source_plan.value:
+                if decoded_plan.changes and raw != replacement:
                     start = len(text[:token.start_mark.index].encode('utf-8'))
                     end = len(text[:token.end_mark.index].encode('utf-8'))
-                    edits.append(Edit(start, end, raw.encode('utf-8'), source_plan.value.encode('utf-8')))
+                    edits.append(Edit(start, end, raw.encode('utf-8'), replacement.encode('utf-8')))
                 continue
             mentioned = any(m.group(1) in mapping for m in _TOKEN.finditer(value))
             if not mentioned:

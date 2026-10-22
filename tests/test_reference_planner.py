@@ -22,6 +22,12 @@ def jinja(path=()):
 
 
 class ReferencePlannerTest(unittest.TestCase):
+    def test_arithmetic_on_static_reading_is_not_a_dynamic_entity_reference(self):
+        source = "{{ states('sensor.a') | float + 2 }}"
+        plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+        self.assertEqual(plan.value, source.replace('sensor.a', 'sensor.b'))
+        self.assertFalse(plan.markers)
+
     def test_shadowed_states_function_is_not_blindly_rewritten(self):
         source = "{% set states = custom_lookup %}{{ states('sensor.a') }}"
         plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())

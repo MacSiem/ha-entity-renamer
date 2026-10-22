@@ -112,6 +112,7 @@ class YAMLPlannerTests(unittest.TestCase):
         for source in [
             '''value_template: "{{ states('sensor.foo') }}" # retain\n''',
             '''value_template: |-\n  {{ states('sensor.foo') }}\n''',
+            '''value_template: '{{ states(''sensor.foo'') }}' # retain\n''',
         ]:
             self.put('configuration.yaml', source)
             plan = self.plan()
