@@ -148,7 +148,34 @@ async def run_names(hass, bridge, meter):
     assert (await bridge.inspect(change)).position == 'after'
     await bridge.compensate(change, lambda: None)
 
+    # An independently altered restored placeholder is not overwritten or
+    # accepted merely because the registry name still matches.
+    original_state = hass.states.get(inactive_row.entity_id)
+    foreign_attrs = dict(original_state.attributes, foreign_marker='keep')
+    hass.states.async_set(inactive_row.entity_id, original_state.state, foreign_attrs)
+    assert (await bridge.inspect(change)).position == 'unknown'
+    try:
+        await bridge.apply(change, lambda: None)
+        raise AssertionError('foreign restored attributes accepted')
+    except RegistryConflict:
+        pass
+    assert hass.states.get(inactive_row.entity_id).attributes['foreign_marker'] == 'keep'
+    assert registry.async_get(inactive_row.entity_id).name == change.before['name']
+    # Restore only this synthetic test's injected attribute.
+    registry.async_get(inactive_row.entity_id).write_unavailable_state(hass)
+    await io.settle()
+    empty = devices.async_get_or_create(config_entry_id=entry.entry_id,
+        identifiers={('threshold', 'native-empty-name-fixture')}, name='Empty fixture')
+    await io.flush('device')
+    from .helper_observers import ObservationUnavailable
+    try:
+        await bridge.prepare('device', empty.id, {'name_by_user': 'No runtime proof'}, lambda: None)
+        raise AssertionError('empty device scope accepted')
+    except ObservationUnavailable as error:
+        assert str(error) == 'name_no_observable_entities'
+
     print({'ha': __version__, 'native_name_only': 'PASS', 'device_name_by_user': 'PASS',
            'durable_preparation_reopen': 'PASS', 'inactive_absence': 'PASS',
            'stale_runtime_refused': 'PASS', 'foreign_preferences_refused': 'PASS',
+           'foreign_restored_attributes_preserved': 'PASS', 'empty_device_refused': 'PASS',
            'scope': 'synthetic isolated native fixture; no installed-product claim'})
