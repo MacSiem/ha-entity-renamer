@@ -145,6 +145,24 @@ class NativeRegistryIO:
         else:
             registry.async_update_device(prepared.identity,
                                          name_by_user=target["name_by_user"])
+        if prepared.kind == 'device' or not prepared.mapping:
+            # An unloaded config entry can retain HA's own restored unavailable
+            # placeholder. Registry mutation alone does not refresh its name.
+            # Rebuild only that verified native placeholder, never a live value.
+            from .native_name_observers import NativeNameObserver
+            observer = NativeNameObserver(self)
+            baseline = json.loads(prepared.runtime_before_json)
+            for row in observer._rows(prepared):
+                saved = baseline['entities'][row.id]
+                if saved['active'] or saved['inactive_state'] is None:
+                    continue
+                _, state, entry, active = observer._sample(row)
+                from .helper_observers import require
+                require(not active and state is not None
+                        and state.state == saved['inactive_state']
+                        and {k: v for k, v in state.attributes.items() if k != 'friendly_name'}
+                            == saved['inactive_attributes'], 'name_inactive_refresh_conflict')
+                row.write_unavailable_state(self.hass)
 
     async def flush(self, kind):
         registry = self.registries[kind]
