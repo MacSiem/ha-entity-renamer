@@ -70,15 +70,15 @@ test('same-language and same-role state updates keep the live form DOM', async (
  } finally { f.dom.window.close(); }
 });
 
-test('first-run introduction and dismiss translate per instance after ordinary locale updates', async () => {
+test('native help and summary translate per instance after ordinary locale updates', async () => {
  const a = await fixture('pl'), b = await fixture('en');
  try {
-  assert.match(a.card.shadowRoot.querySelector('.intro-headline').textContent, /Masowa zmiana/);
-  assert.equal(a.card.shadowRoot.querySelector('.intro-dismiss').getAttribute('aria-label'), 'Ukryj instrukcję');
-  assert.match(b.card.shadowRoot.querySelector('.intro-headline').textContent, /Bulk-rename/);
+  assert.match(a.card.shadowRoot.querySelector('.renamer-help p').textContent, /Masowa zmiana/);
+  assert.equal(a.card.shadowRoot.querySelector('.renamer-help summary').textContent, 'ⓘ Jak to działa?');
+  assert.match(b.card.shadowRoot.querySelector('.renamer-help p').textContent, /Bulk-rename/);
   a.card.hass = { ...a.hass, language: 'en' };
-  assert.match(a.card.shadowRoot.querySelector('.intro-headline').textContent, /Bulk-rename/);
-  assert.equal(a.card.shadowRoot.querySelector('.intro-dismiss').getAttribute('aria-label'), 'Dismiss instructions');
+  assert.match(a.card.shadowRoot.querySelector('.renamer-help p').textContent, /Bulk-rename/);
+  assert.equal(a.card.shadowRoot.querySelector('.renamer-help summary').textContent, 'ⓘ How does it work?');
   assert.equal(a.requests.length, 2); assert.equal(b.requests.length, 2);
  } finally { a.dom.window.close(); b.dom.window.close(); }
 });
