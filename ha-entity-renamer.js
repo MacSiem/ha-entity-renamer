@@ -2102,7 +2102,11 @@ class HAEntityRenamer extends HTMLElement {
     const undo = this._queueUndo;
     if (this._loading || !undo) return;
     if (Date.now() < undo.until) {
-      if (undo.kind==='device') {
+      if (undo.kind==='batch') {
+        const existing = new Set(this._renameQueue.map(row => row.oldId));
+        this._renameQueue = [...undo.entities.filter(row => !existing.has(row.oldId)), ...this._renameQueue];
+        this._deviceRenameQueue = {...undo.devices, ...this._deviceRenameQueue};
+      } else if (undo.kind==='device') {
         if(!Object.hasOwn(this._deviceRenameQueue,undo.row.oldId)) {
           const entries=Object.entries(this._deviceRenameQueue);
           entries.splice(Math.min(undo.index,entries.length),0,[undo.row.oldId,undo.row.newId]);
@@ -2196,7 +2200,9 @@ class HAEntityRenamer extends HTMLElement {
 
   _clearQueue() {
     if (this._loading) return;
-    this._clearQueueUndo();
+    if (this._renameQueue.length || Object.keys(this._deviceRenameQueue).length) {
+      this._rememberQueueRemoval({kind:'batch',entities:[...this._renameQueue],devices:{...this._deviceRenameQueue},row:{oldId:this._lang==='pl'?'Cała kolejka':'Entire queue'}});
+    } else this._clearQueueUndo();
     this._confirmDialogOpen = false;
     this._confirmation = null;
     this._lastApplyResult = null;
@@ -2927,7 +2933,7 @@ class HAEntityRenamer extends HTMLElement {
       }
       .btn-primary { background: var(--bento-primary, #3B82F6); color: white; }
       .btn-primary:hover { opacity: 0.85; }
-      .btn-danger { background: #EF4444; color: white; }
+      .btn-danger { background:transparent;color:var(--error-color,#b91c1c);border:1px solid currentColor; }
       .btn-danger:hover { opacity: 0.85; }
       .btn-sm { padding: 4px 10px; font-size: 12px; }
       .btn-outline {
@@ -3163,7 +3169,7 @@ class HAEntityRenamer extends HTMLElement {
         ${devEntries.length ? `<div style="font-size:12.5px;font-weight:600;margin:10px 0 4px">${fill(t.confirmDeviceCount, devEntries.length)}</div>${devRows}` : ''}
         <div class="rename-confirm-actions">
           <button id="cancelRenameDialog" class="btn btn-outline">${_esc(t.cancel)}</button>
-          <button id="confirmRenameApply" class="btn btn-primary">${_esc(t.rename)}</button>
+          <button id="confirmRenameApply" class="btn btn-danger">${_esc(t.rename)}</button>
         </div>
       </div>`;
   }
@@ -3295,7 +3301,7 @@ class HAEntityRenamer extends HTMLElement {
             return `<div style="border:1px solid var(--bento-border,#334155);border-radius:8px;padding:12px;margin-bottom:8px;">
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
                 <span class="old" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:12px;">${_entityIdHtml(r.oldId)}</span>
-                <button class="btn btn-sm btn-danger" style="flex-shrink:0;" data-remove-queue="${_esc(r.oldId)}" aria-label="${_esc(t.removeFromQueue)}">✕</button>
+                <button class="btn btn-sm btn-outline" style="flex-shrink:0;" data-remove-queue="${_esc(r.oldId)}" aria-label="${_esc(t.removeFromQueue)}">✕</button>
               </div>
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 <span style="color:var(--bento-text-secondary,#94A3B8);">→</span>
