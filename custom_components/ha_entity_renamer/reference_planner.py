@@ -90,7 +90,7 @@ _DYNAMIC = re.compile(r"\b(?:states|is_state|state_attr|is_state_attr|expand)\s*
 # A bounded scheme suffix also catches long schemes without quadratic retries
 # against a very long alphabetic string that contains no colon.
 _EXTERNAL = re.compile(r"(?:[a-z][a-z0-9+.-]{0,31}://|javascript:|<script\b)", re.I)
-_TOKEN = re.compile(r"(?<![A-Za-z0-9_])([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![A-Za-z0-9_])", re.ASCII)
+_TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?=([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![A-Za-z0-9_]))", re.ASCII)
 
 
 def plan_references(
