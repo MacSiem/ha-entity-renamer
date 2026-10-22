@@ -1,0 +1,63 @@
+"""Lightweight behavioral regressions; does not import or start Home Assistant."""
+import asyncio
+from dataclasses import replace
+import importlib.util
+import os
+from pathlib import Path
+import sys
+import tempfile
+from types import ModuleType, SimpleNamespace
+import unittest
+
+
+COMPONENT = Path(__file__).resolve().parents[1] / 'custom_components/ha_entity_renamer'
+package = ModuleType('renamer_activation_regression')
+package.__path__ = [str(COMPONENT)]
+sys.modules[package.__name__] = package
+spec = importlib.util.spec_from_file_location(package.__name__ + '.yaml_validation', COMPONENT / 'yaml_validation.py')
+validation = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = validation
+spec.loader.exec_module(validation)
+
+
+class ActivationTests(unittest.IsolatedAsyncioTestCase):
+    def receipt(self, domains=('automation', 'script'), unsupported=()):
+        return validation.ValidationReceipt('/unused', (), (), (), domains, unsupported, '2025.6.0')
+
+    async def test_unknown_domains_and_missing_services_block_before_any_reload(self):
+        calls = []
+        services = SimpleNamespace(has_service=lambda domain, service: domain == 'automation',
+                                   async_call=lambda *args, **kwargs: calls.append(args))
+        hass = SimpleNamespace(services=services)
+        with self.assertRaisesRegex(validation.YAMLValidationError, 'unsupported'):
+            validation.assert_activation_available(hass, self.receipt(('template',), ('template',)))
+        with self.assertRaisesRegex(validation.YAMLValidationError, 'unavailable'):
+            validation.assert_activation_available(hass, self.receipt())
+        self.assertEqual(calls, [])
+
+    async def test_native_calls_are_sequential_and_partial_failure_is_not_success(self):
+        calls = []
+        async def call(domain, service, data, **kwargs):
+            calls.append((domain, service, kwargs))
+            if domain == 'script':
+                raise RuntimeError('private diagnostic must not escape')
+        hass = SimpleNamespace(services=SimpleNamespace(has_service=lambda *args: True, async_call=call))
+        context = object()
+        with self.assertRaisesRegex(validation.YAMLValidationError, '^yaml_activation_unconfirmed$'):
+            await validation.async_activate_yaml(hass, self.receipt(), context=context, guard=lambda: None)
+        self.assertEqual([item[:2] for item in calls], [('automation', 'reload'), ('script', 'reload')])
+        self.assertTrue(all(item[2] == {'blocking': True, 'context': context} for item in calls))
+
+    async def test_core_customize_uses_core_reload_and_requires_readback(self):
+        calls = []
+        async def call(*args, **kwargs):
+            calls.append(args)
+        hass = SimpleNamespace(services=SimpleNamespace(has_service=lambda *args: True, async_call=call))
+        result = await validation.async_activate_yaml(hass, self.receipt(('homeassistant',)),
+            context=None, guard=lambda: None)
+        self.assertEqual(calls[0][:2], ('homeassistant', 'reload_core_config'))
+        self.assertEqual(result['status'], 'reloads_completed_readback_required')
+
+
+if __name__ == '__main__':
+    unittest.main()
