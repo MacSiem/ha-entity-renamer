@@ -72,6 +72,23 @@ test('one expansion toggle reflects manual expansion and toggles all visible gro
   } finally {dom.window.close();}
 });
 
+test('entity IDs retain literal text and offer breaks only after separators in review views',async()=>{
+  const {dom,card,root,entities}=fixture();
+  try {
+    const id='sensor.long_segment_<img src=x onerror=alert(1)>';
+    entities[0].entity_id=id;
+    await card._loadData();card._expandedDevices.add('ten');card.render();
+    let label=root.querySelector('.entity-id .registry-id');
+    assert.ok(label);assert.equal(label.textContent,id);assert.equal(label.title,id);
+    assert.equal(label.querySelector('img'),null);
+    assert.equal(label.querySelectorAll('wbr').length,3);
+    card._addToQueue(id,'sensor.new_segment');card._showRenameConfirmation();
+    label=root.querySelector('.confirm-dialog .registry-id');
+    assert.equal(label.textContent,id);assert.equal(label.querySelector('img'),null);
+    assert.equal(root.querySelector('.queue-list .registry-id').textContent,id);
+  } finally {dom.window.close();}
+});
+
 test('all views use the HA natural order, including numeric device names',async()=>{
   const {dom,card,root,entities}=fixture();
   try {
