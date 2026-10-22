@@ -167,8 +167,15 @@ class Regressions(unittest.IsolatedAsyncioTestCase):
         original_fence = module._assert_sources
         failures = []
         def observed_fence(change, after_paths, restored=False):
+            read_identities = {}
+            original_read = module._Reader.read
+            def observed_read(reader, path):
+                raw, info = original_read(reader, path)
+                read_identities[path] = (info.st_mode, info.st_dev, info.st_ino)
+                return raw, info
             try:
-                return original_fence(change, after_paths, restored)
+                with patch.object(module._Reader, 'read', observed_read):
+                    return original_fence(change, after_paths, restored)
             except Exception as error:
                 files = []
                 for row in self.rows:
@@ -183,15 +190,16 @@ class Regressions(unittest.IsolatedAsyncioTestCase):
                     actual = tuple(sorted((p.name, (s := p.stat()).st_mode, s.st_dev, s.st_ino)
                         for p in parent.iterdir() if names is None or p.name in names))
                     directories.append((path, expected, actual))
-                failures.append((str(error), sorted(after_paths), restored, files, directories))
+                failures.append((str(error), sorted(after_paths), restored, read_identities, files, directories))
                 raise
         with patch.object(module, '_assert_sources', observed_fence):
             result = await self.coordinator.apply(self.plan, self.plan.fingerprint, 'op')
         self.assertEqual(result.status, 'applied', (result.reason, failures))
         self.assertEqual(self.reload_count, 1)
         self.assertEqual(self.observer.inventory_calls, [False])
-        result = await self.coordinator.rollback('op')
-        self.assertEqual(result.status, 'rolled_back')
+        with patch.object(module, '_assert_sources', observed_fence):
+            result = await self.coordinator.rollback('op')
+        self.assertEqual(result.status, 'rolled_back', (result.reason, failures))
         self.assertEqual(self.observer.inventory_calls, [False, True])
         self.assertEqual(self.reload_count, 2)
         for row in self.rows:
