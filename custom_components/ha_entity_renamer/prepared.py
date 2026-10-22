@@ -112,7 +112,8 @@ def encode_change(change):
     kinds = {PreparedRegistryChange: 'registry', PreparedDashboard: 'dashboard', PreparedEnergy: 'energy'}
     if type(change) not in kinds:
         raise ValueError('unsupported_prepared_change')
-    return canonical({'kind': kinds[type(change)], 'data': asdict(change)})[0]
+    return canonical(json.loads(json.dumps({'kind': kinds[type(change)],
+        'data': asdict(change)}, allow_nan=False)))[0]
 
 
 def decode_change(row):
