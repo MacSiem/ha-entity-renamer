@@ -144,7 +144,7 @@ test('New filter excludes unknown and old dates; newest sort uses registry times
   } finally {dom.window.close();}
 });
 
-test('Undo restores exact proposal and insertion position, but Clear invalidates it',async()=>{
+test('Undo restores exact proposals; Clear replaces individual undo with the cleared batch',async()=>{
   const {dom,card,root}=fixture();
   try {
     await card._loadData();
@@ -153,7 +153,9 @@ test('Undo restores exact proposal and insertion position, but Clear invalidates
     const undo=root.querySelector('#undoQueueRemoval');assert.ok(undo,'undo is visible outside Queue');undo.click();
     assert.equal(card._renameQueue[1],original);
     card._removeFromQueue(original.oldId);card._clearQueue();
-    assert.equal(root.querySelector('#undoQueueRemoval'),null);
+    root.querySelector('#undoQueueRemoval').click();
+    assert.deepEqual(Array.from(card._renameQueue,row=>row.oldId),['sensor.old_0','sensor.old_2']);
+    assert.equal(card._renameQueue.includes(original),false,'old individual undo is invalidated');
   } finally {dom.window.close();}
 });
 
@@ -242,4 +244,16 @@ test('device-name proposals share their device group and support exact-position 
     root.querySelector('#undoQueueRemoval').click();
     assert.deepEqual(Object.entries(card._deviceRenameQueue),[['ten','Ten changed'],['two','Two changed']]);
   } finally {dom.window.close();}
+});
+
+
+test('clear restores both entity and device drafts without overwriting newer proposals',async()=>{
+  const {dom,card}=fixture();try {
+    await card._loadData();
+    card._addToQueue('sensor.old_0','sensor.original');card._deviceRenameQueue={ten:'Original device'};
+    card._clearQueue();assert.equal(card._renameQueue.length,0);
+    card._addToQueue('sensor.old_0','sensor.newer');card._deviceRenameQueue.ten='Newer device';
+    card._undoQueueRemoval();
+    assert.equal(card._renameQueue[0].newId,'sensor.newer');assert.equal(card._deviceRenameQueue.ten,'Newer device');
+  }finally{dom.window.close();}
 });
