@@ -44,7 +44,7 @@ scene:
 '''
 
 
-async def run():
+async def run(document=DOCUMENT, registration_checks=None):
     planner, validation, _ = load_modules()
     package = validation.__package__
     yaml_tx = importlib.import_module(package + '.yaml_transaction')
@@ -62,7 +62,7 @@ async def run():
         root = Path(folder)
         (root / '.storage').mkdir()
         path = root / 'configuration.yaml'
-        path.write_text(DOCUMENT)
+        path.write_text(document)
         hass = HomeAssistant(str(root))
         calls = []
         async def capture(call):
@@ -139,14 +139,8 @@ async def run():
                 await hass.services.async_call(domain, service, {}, blocking=True, context=Context())
             await hass.async_block_till_done()
             assert await observer.position(change) == tx.Position.AFTER
-            automation_entity = next(iter(hass.data[DATA_INSTANCES]['automation'].entities))
-            await hass.services.async_call('automation', 'turn_on',
-                {'entity_id': automation_entity.entity_id}, blocking=True, context=Context())
-            assert await observer.position(change) == tx.Position.UNKNOWN
-            await hass.services.async_call('automation', 'turn_off',
-                {'entity_id': automation_entity.entity_id}, blocking=True, context=Context())
-            await hass.async_block_till_done()
-            assert await observer.position(change) == tx.Position.AFTER
+            if registration_checks is not None:
+                await registration_checks(hass, observer, change, tx)
             # A real pending native platform task must prevent settled proof.
             component = hass.data[DATA_INSTANCES]['script']
             platform = next(iter(component._platforms.values()))
@@ -187,14 +181,14 @@ async def run():
             finally:
                 script_entity.script.sequence = sequence
             assert await observer.position(change) == tx.Position.AFTER
-            path.write_text(DOCUMENT)
+            path.write_text(document)
             for domain, service in (('script', 'reload'), ('automation', 'reload'),
                                     ('scene', 'reload'), ('homeassistant', 'reload_core_config')):
                 await hass.services.async_call(domain, service, {}, blocking=True, context=Context())
             await hass.async_block_till_done()
             assert await observer.position(change) == tx.Position.BEFORE
             assert calls == [], 'fixture actions were executed'
-            print('PASS: native read-only YAML projections; source-only/mixed/active/unknown/pending/tampered/rollback; no fixture action calls')
+            print('PASS: native read-only YAML projections; source-only/mixed/registrations/unknown/pending/tampered/rollback; no fixture action calls')
         finally:
             await hass.async_stop(force=True)
 

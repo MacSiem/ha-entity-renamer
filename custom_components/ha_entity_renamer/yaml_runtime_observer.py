@@ -1,14 +1,17 @@
 """Read-only, version-pinned native YAML runtime proof.
 
 No user action/script/template is executed, no listener is installed, no scene
-is activated and no reload is initiated. Enabled automations deliberately remain
-UNKNOWN: a detach callback alone cannot prove the expected trigger listeners.
+is activated and no reload is initiated. Enabled automations require both the
+native detach chain and independently present event/state tracker registrations.
 Whole inventory, dependent-consumer and recorder continuity are a separate
 trusted independent verifier's responsibility; absence of that verifier fails.
 """
 from __future__ import annotations
 
 import asyncio
+from functools import partial
+from importlib import import_module
+from types import CodeType, FunctionType
 from pathlib import Path
 from typing import Protocol
 
@@ -82,12 +85,171 @@ def _platforms_settled(component):
     return True
 
 
+def _closure(function, module, qualname):
+    """Read a pinned native function's cells without invoking any callback."""
+    if (type(function) is not FunctionType or function.__module__ != module
+            or function.__qualname__ != qualname):
+        raise ValueError('native_trigger_function_changed')
+    root = getattr(import_module(module), qualname.split('.', 1)[0])
+    native_codes = [value for value in root.__code__.co_consts
+                    if type(value) is CodeType and value.co_qualname == qualname]
+    if len(native_codes) != 1 or function.__code__ is not native_codes[0]:
+        raise ValueError('native_trigger_code_changed')
+    return dict(zip(function.__code__.co_freevars,
+                    (cell.cell_contents for cell in (function.__closure__ or ()))))
+
+
+def _registered_bus_remove(hass, remove, expected_event=None):
+    """A native unsubscribe partial must name a tuple still on this exact bus."""
+    from homeassistant.core import EventBus
+    if (type(remove) is not partial or remove.keywords
+            or getattr(remove.func, '__self__', None) is not hass.bus
+            or getattr(remove.func, '__func__', None) is not EventBus._async_remove_listener
+            or len(remove.args) != 2):
+        raise ValueError('native_event_detach_changed')
+    event_type, entry = remove.args
+    if expected_event is not None and event_type != expected_event:
+        raise ValueError('native_event_key_changed')
+    entries = hass.bus._listeners.get(event_type, ())
+    if sum(item is entry for item in entries) != 1:
+        raise ValueError('native_event_registration_missing')
+    return entry, (id(remove), id(entries), id(entry), id(entry[0]), id(entry[1]))
+
+
+def _trigger_listener(hass, entity, listener, module, name, config, index):
+    cells = _closure(listener, module, 'async_attach_trigger.<locals>.' + name)
+    job = cells['job']
+    action = job.target
+    if (cells['hass'] is not hass
+            or getattr(action, '__self__', None) is not entity
+            or getattr(action, '__func__', None) is not type(entity)._async_trigger_if_enabled
+            or cells['platform_type'] != config['platform']
+            or cells['trigger_data'] != {'id': config.get('id', str(index)),
+                                        'idx': str(index), 'alias': config.get('alias')}):
+        raise ValueError('native_trigger_owner_changed')
+    return cells, (id(listener), id(job), id(action.__self__), id(action.__func__))
+
+
+def _automation_registrations(hass, entity):
+    """Prove a narrow static native trigger graph; all other shapes fail closed.
+
+    No callbacks, template renderers, matchers or unsubscribe functions are run.
+    Tokens retain registration identity across the observer's two samples.
+    """
+    from homeassistant.helpers import event as event_helper
+    from homeassistant.helpers import trigger as trigger_helper
+    from homeassistant.helpers.template import Template
+    config = entity._trigger_config
+    detach = entity._async_detach_triggers
+    cells = _closure(detach, trigger_helper.__name__,
+                     'async_initialize_triggers.<locals>.remove_triggers')
+    removes = cells['removes']
+    if type(config) is not list or type(removes) is not list or not config or len(config) != len(removes):
+        raise ValueError('native_trigger_count_changed')
+    tokens = [id(detach), id(removes)]
+    for index, (cfg, remove) in enumerate(zip(config, removes)):
+        # Dynamic enabled/variables, disabled triggers, nested/new trigger types
+        # and delay timers need separate proof and remain UNKNOWN.
+        if cfg.get('enabled', True) is not True or 'variables' in cfg:
+            raise ValueError('native_dynamic_trigger_not_covered')
+        platform = cfg.get('platform')
+        module = 'homeassistant.components.homeassistant.triggers.' + str(platform)
+        if platform == 'event':
+            if 'event_data' in cfg or 'context' in cfg:
+                raise ValueError('native_event_filter_not_covered')
+            types = cfg['event_type']
+            if (type(types) is not list or not types
+                    or any(type(value) is not Template or not value.is_static for value in types)):
+                raise ValueError('native_dynamic_event_not_covered')
+            event_types = [value.template for value in types]
+            remove_cells = _closure(remove, module,
+                                   'async_attach_trigger.<locals>.remove_listen_events')
+            event_removes = remove_cells['removes']
+            if type(event_removes) is not list or len(event_removes) != len(event_types):
+                raise ValueError('native_event_count_changed')
+            targets = []
+            for event_type, event_remove in zip(event_types, event_removes):
+                (job, event_filter), token = _registered_bus_remove(hass, event_remove, event_type)
+                listener_cells, listener_token = _trigger_listener(
+                    hass, entity, job.target, module, 'handle_event', cfg, index)
+                if (event_filter is not None or listener_cells['event_context_items'] is not None
+                        or listener_cells['event_context_schema'] is not None):
+                    raise ValueError('native_event_filter_changed')
+                targets.append(id(job.target))
+                tokens.append((token, listener_token))
+            if len(set(targets)) != 1:
+                raise ValueError('native_event_listener_changed')
+            listener = job.target
+            for registered_type, members in hass.bus._listeners.items():
+                count = sum(member_job.target is listener for member_job, _ in members)
+                if count != event_types.count(registered_type):
+                    raise ValueError('native_event_extra_registration')
+        elif platform == 'state':
+            if 'for' in cfg:
+                raise ValueError('native_state_duration_not_covered')
+            remove_cells = _closure(remove, module, 'async_attach_trigger.<locals>.async_remove')
+            unsub = remove_cells['unsub']
+            if (type(unsub) is not partial or unsub.func is not event_helper._remove_listener
+                    or unsub.keywords or len(unsub.args) != 5 or remove_cells['unsub_track_same']):
+                raise ValueError('native_state_detach_changed')
+            owner_hass, tracker, keys, job, callbacks = unsub.args
+            expected_keys = cfg['entity_id']
+            if (owner_hass is not hass or tracker is not event_helper._KEYED_TRACK_STATE_CHANGE
+                    or not expected_keys or tuple(keys) != tuple(expected_keys)):
+                raise ValueError('native_state_keys_changed')
+            data = hass.data.get(tracker.key)
+            if data is None or data.callbacks is not callbacks:
+                raise ValueError('native_state_registry_missing')
+            (bus_job, event_filter), bus_token = _registered_bus_remove(hass, data.listener, tracker.event_type)
+            for function, expected in ((bus_job.target, tracker.dispatcher_callable),
+                                       (event_filter, tracker.filter_callable)):
+                if (type(function) is not partial or function.func is not expected
+                        or function.keywords or len(function.args) != 2
+                        or function.args[0] is not hass or function.args[1] is not callbacks):
+                    raise ValueError('native_state_dispatch_changed')
+            listener_cells, listener_token = _trigger_listener(
+                hass, entity, job.target, module, 'state_automation_listener', cfg, index)
+            if (listener_cells['config'] is not cfg or listener_cells['time_delta'] is not None
+                    or listener_cells['attribute'] != cfg.get('attribute')
+                    or listener_cells['match_all'] != all(key not in cfg for key in ('from', 'not_from', 'to', 'not_to'))):
+                raise ValueError('native_state_config_changed')
+            for side in ('from', 'to'):
+                invert = False
+                parameter = cfg.get(side)
+                if parameter is None:
+                    parameter = cfg.get('not_' + side)
+                    invert = parameter is not None
+                if parameter is None:
+                    parameter = '*'
+                expected = event_helper.process_state_match(parameter, invert=invert)
+                actual = listener_cells['match_' + side + '_state']
+                if (type(actual) is not FunctionType or actual.__code__ is not expected.__code__
+                        or tuple(cell.cell_contents for cell in (actual.__closure__ or ()))
+                        != tuple(cell.cell_contents for cell in (expected.__closure__ or ()))):
+                    raise ValueError('native_state_match_changed')
+            key_tokens = []
+            for key in expected_keys:
+                members = callbacks.get(key, ())
+                if sum(member is job for member in members) != expected_keys.count(key):
+                    raise ValueError('native_state_registration_missing')
+                key_tokens.append((key, id(members)))
+            # The same job under an unexpected key is also a changed registration.
+            if any(key not in expected_keys and any(member is job for member in members)
+                   for key, members in callbacks.items()):
+                raise ValueError('native_state_extra_key')
+            tokens.append((id(remove), id(unsub), id(data), id(callbacks), id(job),
+                           tuple(key_tokens), bus_token, listener_token))
+        else:
+            raise ValueError('native_trigger_platform_not_covered')
+    return tuple(tokens)
+
+
 class NativeYAMLRuntimeReadback:
     """Implementation of yaml_transaction.NativeYAMLRuntimeObserver.
 
     Use only with trusted PreparedYAML decoded by the native preparation store.
     Old receipts lacking runtime expectations, unsupported native structures,
-    active scripts, enabled automations and mixed runtime versions fail closed.
+    active scripts, unsupported triggers and mixed runtime versions fail closed.
     """
 
     def __init__(self, hass, *, inventory_verifier: IndependentYAMLInventoryVerifier | None = None):
@@ -143,12 +305,17 @@ class NativeYAMLRuntimeReadback:
                 if type(entity) is not AutomationEntity:
                     raise ValueError('native_automation_type')
                 script = entity.action_script
-                if (entity._is_enabled is not False or entity._async_detach_triggers is not None
-                        or (entity._condition if __version__ == '2026.10.2' else entity._cond_func) is not None or entity._trigger_variables is not None
+                if ((entity._condition if __version__ == '2026.10.2' else entity._cond_func) is not None or entity._trigger_variables is not None
                         or entity._blueprint_inputs is not None
                         or script.is_running or (script._unloaded if __version__ == '2026.10.2' else False)
                         or script._hass is not self.hass or script.domain != domain
                         or getattr(script.change_listener, '__self__', None) is not entity):
+                    raise ValueError('automation_listener_proof_unavailable')
+                if entity._is_enabled is True:
+                    identities[-1] = (entity.entity_id, id(entity), _automation_registrations(self.hass, entity))
+                elif entity._is_enabled is False and entity._async_detach_triggers is None:
+                    identities[-1] = (entity.entity_id, id(entity), ('disabled',))
+                else:
                     raise ValueError('automation_listener_proof_unavailable')
                 rows.append([entity.unique_id, entity.raw_config, entity._trigger_config,
                     script.sequence, script.script_mode, script.max_runs, script._max_exceeded,

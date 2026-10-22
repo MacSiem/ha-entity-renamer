@@ -156,7 +156,8 @@ async def _expected_runtime(root, domains):
                                 cfg.get('icon'), cfg['description'], cfg['fields'], cfg['trace']])
                     elif domain == 'automation':
                         for cfg in checked[domain]:
-                            # Only inactive, condition-free consumers are currently provable.
+                            # Conditions and trigger variables still need independent proof.
+                            # Enabled static event/state registrations are observed separately.
                             if (not cfg.get('id') or cfg.raw_config is None
                                     or cfg.raw_blueprint_inputs is not None
                                     or cfg.get('conditions') or cfg.get('trigger_variables')):
