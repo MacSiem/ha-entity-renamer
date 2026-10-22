@@ -70,7 +70,8 @@ async def run_yaml_scopes(hass, root):
         for name, steps in cases.items():
             variables = ({'entities': {'sensor.foo': {'label': 'Sensor'},
                                         'light.old': {'label': 'Light'}}}
-                         if name == 'map_items' else {'ref': 'sensor.foo'})
+                         if name == 'map_items' else
+                         {} if name.startswith('jinja_branch_') else {'ref': 'sensor.foo'})
             document = {'script': {'fixture': {'variables': variables,
                                               'sequence': yaml.safe_load(steps)}}}
             path = Path(root) / (name + '.yaml')
