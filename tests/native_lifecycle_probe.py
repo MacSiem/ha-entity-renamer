@@ -15,7 +15,7 @@ assert len(mounts) == 1 and '/ha-tools-v4-20261016/renamer222-' in mounts[0]
 component = ROOT/'custom_components/ha_entity_renamer'
 sources = {p.name: p.read_text() for p in component.iterdir() if p.suffix in ('.py', '.json')}
 program = r'''
-import asyncio, os, tempfile
+import asyncio, os, socket, tempfile
 from pathlib import Path
 from homeassistant.core import HomeAssistant
 from homeassistant import loader
@@ -41,7 +41,10 @@ class Connection:
 async def run(root):
     os.chdir(root)
     hass = HomeAssistant(root)
-    config = {'http': {'server_port': 0}}
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        port = listener.getsockname()[1]
+    config = {'http': {'server_host': '127.0.0.1', 'server_port': port}}
     try:
         loader.async_setup(hass)
         hass.config_entries = ConfigEntries(hass, config)
