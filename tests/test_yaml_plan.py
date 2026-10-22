@@ -617,6 +617,16 @@ class YAMLPlannerTests(unittest.TestCase):
         ''')
         self.assert_control_blocked(source)
 
+    def test_repeat_runtime_counters_do_not_block_static_entity_migration(self):
+        for expression in ("repeat.index", "repeat.first", "repeat.last", "repeat['index']"):
+            source = self.control_source("""
+                - repeat:
+                    count: 2
+                    sequence:
+                    - value_template: '{{ EXPRESSION }}:{{ states(ref) }}'
+            """.replace('EXPRESSION', expression))
+            self.assert_variable_patch(source)
+
     def test_runtime_repeat_item_and_index_have_explicit_block(self):
         for expression in ('states(repeat.item)', 'repeat.index'):
             source = self.control_source('''
