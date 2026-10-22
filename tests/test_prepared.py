@@ -47,6 +47,19 @@ class PreparedTests(unittest.IsolatedAsyncioTestCase):
         fresh = PreparedStore(self.disk)
         with self.assertRaises(ValueError): await fresh.initialize()
 
+    async def test_native_change_codecs_survive_restart(self):
+        from custom_components.ha_entity_renamer.prepared import encode_change, decode_change
+        from custom_components.ha_entity_renamer.native_registry import PreparedRegistryChange
+        from custom_components.ha_entity_renamer.lovelace_native import Dashboard, Snapshot, PreparedDashboard, revision
+        from custom_components.ha_entity_renamer.energy_native import EnergySnapshot, PreparedEnergy
+        before, after = {'refs': ['sensor.a']}, {'refs': ['sensor.b']}
+        changes = [PreparedRegistryChange('entity', 'stable', '{"entity_id":"sensor.a"}', '{"entity_id":"sensor.b"}'),
+            PreparedDashboard(Snapshot(Dashboard(None, 'lovelace', 'identity'), before, revision(before), (1, 2, 'hash')), after, revision(after)),
+            PreparedEnergy(EnergySnapshot(before, revision(before), (1, 2, 'hash')), after, revision(after))]
+        digest = await self.store.create('native', [encode_change(c) for c in changes])
+        fresh = PreparedStore(self.disk); await fresh.initialize()
+        self.assertEqual([decode_change(row) for row in fresh.resolve('native', digest)], changes)
+
     async def test_paths_cycles_and_nonfinite_rejected(self):
         for key in ('../plan', '/absolute', '', 'a/b'):
             with self.assertRaises(ValueError): await self.store.create(key, {})

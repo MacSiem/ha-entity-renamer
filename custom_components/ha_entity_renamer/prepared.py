@@ -101,3 +101,50 @@ def native_prepared_store(hass):
     writer = Store(hass, 1, key, private=True, minor_version=1, atomic_writes=True)
     return PreparedStore(VerifiedStore(hass.config.path('.storage', key), key,
         writer.async_save, hass.async_add_executor_job))
+
+
+def encode_change(change):
+    """Explicit codecs; never deserialize arbitrary classes from a client field."""
+    from dataclasses import asdict
+    from .native_registry import PreparedRegistryChange
+    from .lovelace_native import PreparedDashboard
+    from .energy_native import PreparedEnergy
+    kinds = {PreparedRegistryChange: 'registry', PreparedDashboard: 'dashboard', PreparedEnergy: 'energy'}
+    if type(change) not in kinds:
+        raise ValueError('unsupported_prepared_change')
+    return canonical({'kind': kinds[type(change)], 'data': asdict(change)})[0]
+
+
+def decode_change(row):
+    from .native_registry import PreparedRegistryChange
+    from .lovelace_native import Dashboard, Snapshot, PreparedDashboard, revision
+    from .energy_native import EnergySnapshot, PreparedEnergy
+    if type(row) is not dict or set(row) != {'kind', 'data'} or type(row['data']) is not dict:
+        raise ValueError('invalid_prepared_change')
+    data = deepcopy(row['data'])
+    if row['kind'] == 'registry':
+        return PreparedRegistryChange(**data)
+    if row['kind'] not in ('dashboard', 'energy'):
+        raise ValueError('unsupported_prepared_change')
+    before = data.pop('before')
+    identity = before['file_identity']
+    if identity is not None:
+        if (type(identity) is not list or len(identity) != 3
+                or type(identity[0]) is not int or type(identity[1]) is not int
+                or type(identity[2]) is not str):
+            raise ValueError('invalid_prepared_file_identity')
+        before['file_identity'] = tuple(identity)
+    if row['kind'] == 'dashboard':
+        before['dashboard'] = Dashboard(**before['dashboard'])
+        snapshot = Snapshot(**before)
+        if revision(snapshot.config) != snapshot.revision:
+            raise ValueError('invalid_prepared_revision')
+        change = PreparedDashboard(snapshot, **data)
+    else:
+        snapshot = EnergySnapshot(**before)
+        if revision(snapshot.value) != snapshot.revision:
+            raise ValueError('invalid_prepared_revision')
+        change = PreparedEnergy(snapshot, **data)
+    if revision(change.after) != change.after_revision:
+        raise ValueError('invalid_prepared_revision')
+    return change
