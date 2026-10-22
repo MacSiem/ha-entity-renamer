@@ -98,7 +98,7 @@ class Plan:
 
 _ENTITY = re.compile(r"[a-z_][a-z0-9_]*\.[a-z0-9_]+\Z", re.ASCII)
 _TOKEN = re.compile(r"(?<![\w.])([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![\w.])", re.ASCII)
-_FIELDS = frozenset({"entity", "entity_id", "entities",
+_FIELDS = frozenset({"entity", "entity_id", "entity_ids", "entities",
                      "statistic_id", "statistic_ids", "power_sensor_id", "energy_sensor_id"})
 _INCLUDE = frozenset({"!include", "!include_dir_list", "!include_dir_named",
                       "!include_dir_merge_list", "!include_dir_merge_named"})
@@ -285,6 +285,26 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
         visiting: set[int] = set()
         includes_seen: dict[int, tuple] = {}
         dashboard_paths = set()
+        effective_keys_cache = {}
+
+        def effective_keys(node, ancestry=()):
+            """Include native YAML merge keys when checking renamed-key collisions."""
+            if id(node) in ancestry or len(ancestry) > limits.max_depth:
+                raise YAMLPlanError('YAML merge cycle/depth limit')
+            if id(node) in effective_keys_cache:
+                return effective_keys_cache[id(node)]
+            if not isinstance(node, MappingNode):
+                raise YAMLPlanError('invalid YAML merge source')
+            keys = set()
+            for key, child in node.value:
+                if key.tag == _STANDARD + 'merge':
+                    sources = child.value if isinstance(child, SequenceNode) else (child,)
+                    for source in sources:
+                        keys.update(effective_keys(source, ancestry + (id(node),)))
+                elif isinstance(key, ScalarNode):
+                    keys.add(key.value)
+            effective_keys_cache[id(node)] = keys
+            return keys
 
         def issue(node, code):
             issues.add(Issue(path, node.start_mark.line + 1, code))
@@ -331,7 +351,8 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                     raw_keys = [key.value for key, _ in node.value if isinstance(key, ScalarNode)]
                     if len(raw_keys) != len(set(raw_keys)):
                         issue(node, "duplicate_mapping_keys")
-                    projected = [mapping.get(k, k) if parent_key == 'entities' else k for k in raw_keys]
+                    merged_keys = effective_keys(node)
+                    projected = [mapping.get(k, k) if parent_key == 'entities' else k for k in merged_keys]
                     if len(projected) != len(set(projected)):
                         issue(node, "entity_key_collision")
                     values = {k.value: v for k, v in node.value if isinstance(k, ScalarNode)}
@@ -347,6 +368,12 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                             and mode.value == "yaml" and filename is None):
                         dashboard_paths.add("ui-lovelace.yaml")
                     for key, value in node.value:
+                        if key.tag == _STANDARD + 'merge':
+                            # The alias/anchor bytes stay in place. Walk the
+                            # original source with the receiving map's context;
+                            # conflicting alias consumers remain blocked below.
+                            walk(value, depth + 1, field, parent_key, lovelace)
+                            continue
                         if not isinstance(key, ScalarNode) or key.tag != _STR:
                             # YAML merge and complex keys need semantic provenance.
                             issue(key, "unsupported_mapping_key")
@@ -354,7 +381,10 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                             walk(value, depth + 1)
                             continue
                         walk(key, depth + 1, parent_key == 'entities')
-                        walk(value, depth + 1, key.value in _FIELDS, key.value,
+                        platform = values.get('platform')
+                        source_field = (key.value == 'source' and isinstance(platform, ScalarNode)
+                                        and platform.value in ('integration', 'derivative'))
+                        walk(value, depth + 1, key.value in _FIELDS or source_field, key.value,
                              lovelace or key.value == 'lovelace')
                 else:
                     issue(node, "unsupported_yaml_node")
@@ -378,6 +408,8 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                 if token is None or token.value != value or decoded_plan.markers:
                     issue(node, "template_requires_reference_parser")
                     continue
+                if not decoded_plan.changes:
+                    continue  # Preserve unaffected bytes without re-serializing.
                 raw = text[token.start_mark.index:token.end_mark.index]
                 source_plan = plan_references(raw, mapping, template_context)
                 replacement = source_plan.value
@@ -385,7 +417,12 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                     issue(node, "template_requires_source_span_mapper")
                     continue
                 if token.style == "'":
-                    replacement = "'" + decoded_plan.value.replace("'", "''") + "'"
+                    # Literal newlines in single-quoted YAML are folded. JSON
+                    # escaping preserves the exact decoded template when its
+                    # original single-quoted scalar spans paragraphs.
+                    replacement = (json.dumps(decoded_plan.value, ensure_ascii=False)
+                                   if '\n' in decoded_plan.value or '\r' in decoded_plan.value
+                                   else "'" + decoded_plan.value.replace("'", "''") + "'")
                 elif token.style == '"':
                     replacement = json.dumps(decoded_plan.value, ensure_ascii=False)
                 # Operate on the source token, preserving YAML quoting, block

@@ -8,6 +8,43 @@ from custom_components.ha_entity_renamer.yaml_plan import Limits, YAMLPlanError,
 
 
 class YAMLPlannerTests(unittest.TestCase):
+    def test_native_entity_ids_and_typed_source(self):
+        source = 'sensor:\n- platform: integration\n  source: sensor.foo\n- platform: min_max\n  entity_ids: [sensor.foo, light.old]\n'
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertEqual(plan.patches[0].proposed_bytes, source.replace('sensor.foo', 'sensor.new').replace('light.old', 'light.new').encode())
+        self.put('configuration.yaml', 'unknown:\n  source: sensor.foo\n')
+        self.assertIn('ambiguous_reference_context', self.codes(self.plan()))
+
+    def test_merge_anchor_references_preserved_and_changed_once(self):
+        source = 'defaults: &base\n  entity_id: sensor.foo\naction:\n  <<: *base\n  action: light.turn_on\n'
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertEqual(plan.patches[0].proposed_bytes, source.replace('sensor.foo', 'sensor.new').encode())
+        self.assertEqual(len(plan.patches[0].edits), 1)
+
+    def test_merge_entity_keys_cannot_hide_destination_collision(self):
+        self.put('configuration.yaml', 'entities:\n  <<: &base\n    sensor.foo: on\n  sensor.new: off\n')
+        self.assertIn('entity_key_collision', self.codes(self.plan()))
+
+    def test_merge_cycle_and_invalid_scalar_source_rejected(self):
+        for source in ('a: &loop\n  <<: *loop\n', 'a:\n  <<: scalar\n'):
+            self.put('configuration.yaml', source)
+            with self.assertRaises(YAMLPlanError): self.plan()
+
+    def test_multiline_single_quoted_template_preserves_decoded_newlines(self):
+        import yaml
+        source = "value_template: '{{ states(''sensor.foo'') }}\n\n  next paragraph' # keep\n"
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        proposed = plan.patches[0].proposed_bytes.decode()
+        self.assertEqual(yaml.safe_load(proposed)['value_template'],
+                         yaml.safe_load(source)['value_template'].replace('sensor.foo', 'sensor.new'))
+        self.assertIn('# keep', proposed)
+
     def setUp(self):
         # Owner must set TMPDIR to SSD before executing these tests.
         self.tmp = tempfile.TemporaryDirectory(prefix='renamer-yaml-test-', dir='/Volumes/Samsung_SSD' if Path('/Volumes/Samsung_SSD').is_dir() else None)
