@@ -78,7 +78,7 @@ _ENTITY = re.compile(r"[a-z_][a-z0-9_]*\.[a-z0-9_]+\Z", re.ASCII)
 _JINJA_OPEN = re.compile(r"{{|{%")
 # Support only a complete first literal argument, never evaluate templates.
 _CALL = re.compile(
-    r"(?<![\w.])(?:states|is_state|state_attr|is_state_attr|expand)\s*\(\s*"
+    r"(?<![\w.])(?:states|is_state|state_attr|is_state_attr)\s*\(\s*"
     r"(?P<quote>['\"])(?P<id>[a-z_][a-z0-9_]*\.[a-z0-9_]+)(?P=quote)(?=\s*[,\)])",
     re.ASCII,
 )
@@ -87,6 +87,12 @@ _STATE = re.compile(
     re.ASCII,
 )
 _DYNAMIC = re.compile(r"\b(?:states|is_state|state_attr|is_state_attr|expand)\s*\(|\bstates\s*\[")
+_BRACKET = re.compile(
+    r"(?<![\w.])states\s*\[\s*(?P<quote>['\"])(?P<id>[a-z_][a-z0-9_]*\.[a-z0-9_]+)(?P=quote)\s*\]",
+    re.ASCII,
+)
+_EXPAND = re.compile(r"(?<![\w.])expand\s*\(\s*(?P<args>[^()]*)\)", re.ASCII)
+_ENTITY_LITERAL = re.compile(r"(?P<quote>['\"])(?P<id>[a-z_][a-z0-9_]*\.[a-z0-9_]+)(?P=quote)", re.ASCII)
 # A bounded scheme suffix also catches long schemes without quadratic retries
 # against a very long alphabetic string that contains no colon.
 _EXTERNAL = re.compile(r"(?:[a-z][a-z0-9+.-]{0,31}://|javascript:|<script\b)", re.I)
@@ -200,6 +206,7 @@ def plan_references(
         replacements: list[tuple[int, int, str]] = []
         for block_start, expression in blocks:
             spans: set[tuple[int, int]] = set()
+            recognized_calls = set()
             # Ignore text inside Jinja string literals except approved HA call
             # arguments. This prevents treating a string containing source code
             # as an executable states.sensor.foo reference.
@@ -222,14 +229,49 @@ def plan_references(
                         index += 1
                 strings.append((start, index))
             string_starts = [a for a, _ in strings]
-            for matcher in (_CALL, _STATE):
+            def inside_string(offset):
+                string_index = bisect_right(string_starts, offset) - 1
+                return string_index >= 0 and offset < strings[string_index][1]
+
+            for matcher in (_CALL, _STATE, _BRACKET):
                 for match in matcher.finditer(expression):
-                    string_index = bisect_right(string_starts, match.start()) - 1
-                    if string_index >= 0 and match.start() < strings[string_index][1]:
+                    if inside_string(match.start()):
                         continue
+                    recognized_calls.add(match.start())
                     start, end = match.span('id')
                     spans.add((start, end))
                     old = re.sub(r'\s+', '', match.group('id'))
+                    if old in mapping:
+                        replacements.append((block_start + start, block_start + end, mapping[old]))
+            # expand accepts multiple entities or a literal list. Validate the
+            # complete argument grammar before rewriting any of its literals;
+            # an arbitrary string/list expression is not a static reference.
+            for match in _EXPAND.finditer(expression):
+                if inside_string(match.start()):
+                    continue
+                args = match.group('args')
+                offset = match.start('args')
+                stripped = args.strip()
+                if stripped.startswith('[') and stripped.endswith(']'):
+                    left = args.index('[') + 1
+                    right = args.rindex(']')
+                    args, offset = args[left:right], offset + left
+                literals = list(_ENTITY_LITERAL.finditer(args))
+                cursor = 0
+                valid = bool(literals)
+                for index, literal in enumerate(literals):
+                    between = args[cursor:literal.start()].strip()
+                    valid &= between == ('' if index == 0 else ',')
+                    cursor = literal.end()
+                valid &= args[cursor:].strip() in ('', ',')
+                if not valid:
+                    continue
+                recognized_calls.add(match.start())
+                for literal in literals:
+                    start, end = literal.span('id')
+                    start, end = start + offset, end + offset
+                    spans.add((start, end))
+                    old = literal.group('id')
                     if old in mapping:
                         replacements.append((block_start + start, block_start + end, mapping[old]))
             unresolved = False
@@ -237,8 +279,8 @@ def plan_references(
                 if match.group(1) in mapping and match.span(1) not in spans:
                     unresolved = True
             # Dynamic accesses can reference sources without spelling a full ID.
-            if re.search(r"\bstates\s*\[", expression) or any(
-                _CALL.match(expression, m.start()) is None
+            if any(
+                not inside_string(m.start()) and m.start() not in recognized_calls
                 for m in _DYNAMIC.finditer(expression)
             ):
                 markers.append(Marker(path, "dynamic_reference", "Dynamic/indirect template references need review"))

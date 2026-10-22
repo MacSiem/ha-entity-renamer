@@ -22,6 +22,32 @@ def jinja(path=()):
 
 
 class ReferencePlannerTest(unittest.TestCase):
+    def test_static_bracket_reference_preserves_attribute_and_format(self):
+        source = "{{ states [ 'sensor.a' ].state }}"
+        plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+        self.assertEqual(plan.value, "{{ states [ 'sensor.b' ].state }}")
+        self.assertFalse(plan.markers)
+
+    def test_expand_all_static_arguments_and_list_without_cascading(self):
+        for source in ("{{ expand('sensor.a', 'sensor.b') }}",
+                       "{{ expand(['sensor.a', 'sensor.b',]) | list }}"):
+            plan = plan_references(source, {'sensor.a': 'sensor.b', 'sensor.b': 'sensor.c'}, jinja())
+            self.assertEqual(plan.value, source.replace('sensor.b', 'sensor.c').replace('sensor.a', 'sensor.b'))
+            self.assertFalse(plan.markers)
+
+    def test_expand_dynamic_or_malformed_arguments_remain_blocked(self):
+        for source in ("{{ expand('sensor.a', others) }}", "{{ expand(['sensor.a'] + others) }}",
+                       "{{ expand('sensor.a' ~ suffix) }}", "{{ expand('sensor.a' 'sensor.b') }}"):
+            plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+            self.assertEqual(plan.value, source)
+            self.assertIn('dynamic_reference', [m.code for m in plan.markers])
+
+    def test_bracket_dynamic_and_quoted_code_not_rewritten(self):
+        for source in ("{{ states['sensor.' ~ suffix] }}", '''{{ "states['sensor.a']" }}'''):
+            plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+            self.assertEqual(plan.value, source)
+            self.assertTrue(plan.markers)
+
     def test_arithmetic_on_static_reading_is_not_a_dynamic_entity_reference(self):
         source = "{{ states('sensor.a') | float + 2 }}"
         plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
