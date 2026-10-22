@@ -83,17 +83,34 @@ async def run():
             # Reopen durable immutable preparations; adapter never sees a request payload.
             reopened = codec.native_prepared_store(hass)
             await reopened.initialize()
-            resolver = lambda ref: codec.decode_change(reopened.resolve('native_yaml_fixture', digest))
+            expected_ref = 'native_yaml_fixture:' + digest
+            def resolver(ref):
+                assert ref == expected_ref
+                return codec.decode_change(reopened.resolve('native_yaml_fixture', digest))
             adapter = yaml_tx.YAMLTransactionAdapter(hass, resolver, locks, Observer(), context=Context())
             step = tx.Step('yaml_fixture', 'yaml', change.identity, change.before_revision,
-                           change.after_revision, 'native_yaml_fixture:' + digest)
+                           change.after_revision, expected_ref)
+            journal = importlib.import_module(package + '.journal').native_journal(hass)
+            await journal.initialize()
+            plan = tx.Plan('native_yaml_plan', ('yaml',), ('yaml',), (step,),
+                           'native-script-fixture-scoped', ('yaml',))
+            coordinator = tx.Coordinator({'yaml': adapter}, journal, lambda: None,
+                                         required_scopes=('yaml',))
             assert await adapter.inspect(step) == tx.Position.BEFORE
-            await adapter.apply(step, lambda: None)
+            applied = await coordinator.apply(plan, plan.fingerprint, 'native_yaml_operation')
+            assert applied.status == 'applied', applied
             assert await adapter.inspect(step) == tx.Position.AFTER
-            await adapter.compensate(step, lambda: None)
+            fresh_journal = importlib.import_module(package + '.journal').native_journal(hass)
+            await fresh_journal.initialize()
+            fresh = tx.Coordinator({'yaml': adapter}, fresh_journal, lambda: None,
+                                   required_scopes=('yaml',))
+            duplicate = await fresh.apply(plan, plan.fingerprint, 'native_yaml_operation')
+            assert duplicate == applied
+            restored = await fresh.rollback('native_yaml_operation')
+            assert restored.status == 'rolled_back', restored
             assert await adapter.inspect(step) == tx.Position.BEFORE
             assert (root / 'scripts.yaml').read_text() == original
-            print('PASS: immutable reopen, native adapter source CAS, script execution readback, guarded rollback')
+            print('PASS: immutable/journal reopen without replay, native YAML saga source CAS, script execution readback, guarded rollback')
         finally:
             await hass.async_stop(force=True)
 
