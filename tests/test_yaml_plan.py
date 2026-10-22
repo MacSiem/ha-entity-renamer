@@ -685,6 +685,31 @@ class YAMLPlannerTests(unittest.TestCase):
             """.replace('EXPRESSION', expression))
             self.assert_variable_patch(source)
 
+    def test_static_repeat_for_each_item_reaches_native_entity_sink(self):
+        for items in ('[sensor.foo, light.old]', "'{{ refs }}'", "'{{ refs|list }}'"):
+            source = self.control_source("""
+                - repeat:
+                    for_each: ITEMS
+                    sequence:
+                    - value_template: '{{ repeat.index }}:{{ states(repeat.item) }}'
+            """.replace('ITEMS', items), definitions='refs: [sensor.foo, light.old]')
+            if items.startswith('['):
+                source = source.replace('      refs: [sensor.foo, light.old]\n', '')
+            self.assert_variable_patch(source)
+
+    def test_static_repeat_for_each_item_used_as_label_still_blocks(self):
+        source = self.control_source("""
+            - repeat:
+                for_each: [sensor.foo]
+                sequence:
+                - data:
+                    message: '{{ repeat.item }}'
+        """)
+        self.put('configuration.yaml', source)
+        result = self.plan()
+        self.assertFalse(result.ready)
+        self.assertFalse(result.patches)
+
     def test_runtime_repeat_item_and_dynamic_access_have_explicit_block(self):
         for expression in ('states(repeat.item)', 'repeat.item', 'repeat["item"]', 'repeat[key]', 'repeat'):
             source = self.control_source('''
