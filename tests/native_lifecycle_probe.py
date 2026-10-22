@@ -14,6 +14,7 @@ mounts = [m['Source'] for m in info['Mounts'] if m['Destination'] == '/config']
 assert len(mounts) == 1 and '/ha-tools-v4-20261016/renamer222-' in mounts[0]
 component = ROOT/'custom_components/ha_entity_renamer'
 sources = {p.name: p.read_text() for p in component.iterdir() if p.suffix in ('.py', '.json')}
+scenario = (ROOT/'tests/native_yaml_scope_scenario.py').read_text()
 program = r'''
 import asyncio, os, socket, tempfile
 from pathlib import Path
@@ -82,6 +83,9 @@ async def run(root):
         except PermissionError:
             pass
         assert not any(row[3].locked() for row in native_editors)
+        namespace = {}
+        exec(compile(SCENARIO, '<native_yaml_scope_scenario>', 'exec'), namespace)
+        await namespace['run_yaml_scopes'](hass, root)
         result = await hass.config_entries.flow.async_init('ha_entity_renamer', context={'source': 'user'})
         assert result['type'] == 'create_entry', result
         entry = result['result']
@@ -155,7 +159,7 @@ with tempfile.TemporaryDirectory(prefix='renamer-lifecycle-', dir='/config') as 
     asyncio.run(run(directory))
 '''
 result = subprocess.run(['docker','exec','-i',args.container,'python','-B','-'],
-    input='SOURCES = '+repr(sources)+'\n'+program, text=True, capture_output=True, timeout=90)
+    input='SOURCES = '+repr(sources)+'\nSCENARIO = '+repr(scenario)+'\n'+program, text=True, capture_output=True, timeout=90)
 print(result.stdout)
 print(result.stderr)
 result.check_returncode()
