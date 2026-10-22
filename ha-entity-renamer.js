@@ -545,6 +545,9 @@ const haToolsPersistence = {
   },
 };
 const _esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+// Only separator boundaries wrap; the full literal ID remains selectable and titled.
+const _entityIdHtml = value => `<span class="registry-id" title="${_esc(value)}">${_esc(value).replace(/([._])/g,'$1<wbr>')}</span>`;
+
 
 /**
  * HA Entity Renamer – Device & Entity Rename Tool
@@ -2973,6 +2976,11 @@ class HAEntityRenamer extends HTMLElement {
         .queued-badge { color:var(--primary-text-color,inherit);border-color:var(--success-color,#16a34a); }
         .queue-group-heading { display:flex;justify-content:space-between;gap:8px;overflow-wrap:anywhere;font-size:14px; }
         ${_FAMILY_CONTROL_CSS}
+        .registry-id { display:inline-block;max-width:100%;min-width:0;overflow-x:auto;vertical-align:bottom;white-space:normal;word-break:normal;overflow-wrap:normal;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
+        .automatic-target { display:flex;align-items:baseline;gap:4px; }
+        .automatic-target code { min-width:0;flex:1; }
+        .confirm-dialog code { min-width:0;max-width:100%; }
+
         :host .btn-primary { background:var(--_hat-primary-fill);color:var(--_hat-on-primary); }
         :host input[type=checkbox] { accent-color:var(--_hat-primary-fill); }
         :host .btn-primary:disabled { opacity:1;background:var(--_hat-chip);color:var(--_hat-text-2);box-shadow:none; }
@@ -3067,9 +3075,9 @@ class HAEntityRenamer extends HTMLElement {
     const sub = 'color:var(--bento-text-secondary,#6b7280)';
     const rows = shown.map(r => `
         <div style="${rowStyle}">
-          <code style="${codeStyle}">${_esc(r.oldId)}</code>
+          <code style="${codeStyle}">${_entityIdHtml(r.oldId)}</code>
           <span style="opacity:.6">&rarr;</span>
-          <code style="${codeStyle}">${_esc(r.newId)}</code>
+          <code style="${codeStyle}">${_entityIdHtml(r.newId)}</code>
           ${r.newName ? `<span style="${sub}">"${_esc(r.newName)}"</span>` : ''}
         </div>`).join('');
     const devRows = devEntries.slice(0, MAX).map(([id, name]) => `
@@ -3116,7 +3124,7 @@ class HAEntityRenamer extends HTMLElement {
       return `<details class="device-item" data-auto-group="${_esc(deviceId)}">
         <summary class="device-header"><span class="device-expand" aria-hidden="true">▶</span><span class="device-name">${_esc(device ? this._getDeviceName(device) : deviceId)}</span>${this._newBadge(device?.created_at)}<span class="device-meta">${this._registryCount(rows.length,'entity')} · ${rows.filter(row=>queued.has(row.oldId)).length} ${t.inQueue.toLowerCase()}</span></summary>
         <div class="entity-list">${[...rows].sort((a,b)=>this._listUi.compare(a.oldId,b.oldId)).map(row => `<div class="rename-preview-row entity-row">
-          <div class="automatic-row-ids"><div><code>${_esc(row.oldId)}</code>${this._listUi.isNew(device?.created_at) ? '' : this._newBadge(this._entities.find(e=>e.entity_id===row.oldId)?.created_at)}</div><div class="automatic-target">→ <code>${_esc(row.newId)}</code></div></div>
+          <div class="automatic-row-ids"><div><code>${_entityIdHtml(row.oldId)}</code>${this._listUi.isNew(device?.created_at) ? '' : this._newBadge(this._entities.find(e=>e.entity_id===row.oldId)?.created_at)}</div><div class="automatic-target">→ <code>${_entityIdHtml(row.newId)}</code></div></div>
           <div class="automatic-row-actions">
           ${queued.has(row.oldId)?`<span class="queued-badge">✓ ${t.inQueue}</span><button class="btn btn-sm btn-outline" data-remove-queue="${_esc(row.oldId)}" aria-label="${_esc(t.removeFromQueue)}">${this._lang==='pl'?'Usuń':'Remove'}</button>`:row.conflict ? `<span>${t.automaticConflict}</span>` : `<button class="btn btn-sm btn-outline" data-auto-entity="${_esc(row.oldId)}" ${this._loading ? 'disabled' : ''}>+ ${t.queue}</button>`}
           </div>
@@ -3132,7 +3140,7 @@ class HAEntityRenamer extends HTMLElement {
       ${this._automaticLoaded ? `<p>${this._automaticRows.length} ${t.automatic}; ${this._automaticNull.length} ${t.automaticUnknown}</p>
         ${this._automaticRows.some(row => !row.conflict) ? `<button class="btn ${canQueue ? 'btn-primary' : 'btn-outline'}" id="queueAllAutomatic" ${canQueue && !this._loading ? '' : 'disabled'}>${canQueue ? (this._lang==='pl'?'Dodaj widoczne':'Queue visible')+' ('+visibleRows.filter(eligible).length+')' : '✓ ' + t.inQueue}</button>` : `<p>${t.automaticEmpty}</p>`}
         ${deviceHtml}
-        ${this._visibleAutomaticNull().length ? `<details><summary>${t.automaticUnknown} (${this._visibleAutomaticNull().length})</summary>${this._visibleAutomaticNull().map(ent => `<div><code>${_esc(ent.entity_id)}</code></div>`).join('')}</details>` : ''}` : ''}
+        ${this._visibleAutomaticNull().length ? `<details><summary>${t.automaticUnknown} (${this._visibleAutomaticNull().length})</summary>${this._visibleAutomaticNull().map(ent => `<div><code>${_entityIdHtml(ent.entity_id)}</code></div>`).join('')}</details>` : ''}` : ''}
     </div>`;
   }
 
@@ -3167,7 +3175,7 @@ class HAEntityRenamer extends HTMLElement {
                   return `
                   <div class="entity-row">
                     <span class="entity-domain">${_esc(domain)}</span>
-                    <span class="entity-id">${_esc(e.entity_id)}${this._listUi.isNew(d.created_at) ? '' : this._newBadge(e.created_at)}</span>
+                    <span class="entity-id">${_entityIdHtml(e.entity_id)}${this._listUi.isNew(d.created_at) ? '' : this._newBadge(e.created_at)}</span>
                     <span class="entity-name">${_esc(e.name || e.original_name || '')}</span>
                     ${inQueue
                       ? '<span class="queued-badge">✓ ' + t.inQueue + '</span><button class="btn btn-sm btn-outline" data-remove-queue="' + _esc(e.entity_id) + '" aria-label="' + _esc(t.removeFromQueue) + '">' + (this._lang==='pl'?'Usuń':'Remove') + '</button>'
@@ -3216,12 +3224,12 @@ class HAEntityRenamer extends HTMLElement {
             const hasImpact = imp && (imp.automations.length || imp.scripts.length || imp.dashboards.length || (imp.scenes||[]).length);
             return `<div style="border:1px solid var(--bento-border,#334155);border-radius:8px;padding:12px;margin-bottom:8px;">
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                <span class="old" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${_esc(r.oldId)}</span>
+                <span class="old" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:12px;">${_entityIdHtml(r.oldId)}</span>
                 <button class="btn btn-sm btn-danger" style="flex-shrink:0;" data-remove-queue="${_esc(r.oldId)}" aria-label="${_esc(t.removeFromQueue)}">✕</button>
               </div>
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 <span style="color:var(--bento-text-secondary,#94A3B8);">→</span>
-                <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? _esc(r.newId) : '<span>' + t.noIdChange + '</span>'}</span>
+                <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:11px;">${r.newId !== r.oldId ? _entityIdHtml(r.newId) : '<span>' + t.noIdChange + '</span>'}</span>
               </div>
               <span class="proposal-source">${r.automatic ? t.automatic : r.source==='prefix' ? (this._lang==='pl'?'Prefiks':'Prefix') : (this._lang==='pl'?'Ręcznie':'Manual')}</span>
               ${r.newName ? '<div style="margin:6px 0 0 24px;min-width:0;overflow-wrap:anywhere;font-size:11px;color:var(--bento-text, var(--primary-text-color, #E2E8F0));">📝 ' + _esc(r.newName) + '</div>' : ''}
