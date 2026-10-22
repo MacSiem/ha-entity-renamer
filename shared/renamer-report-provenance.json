@@ -5,9 +5,10 @@
   "upstream": "../ha-config-auditor/shared (reviewed fixed bytes, update provenance only after review)",
   "files": {
     "shared/ha-tools-ui.js": {
-      "sourceSha256": "029c06206e55abad9aa09dfcf65bb13027ec24ce6a0bfacc45a938891b27254e",
-      "runtimeSha256": "96ecfe3ddf6f8eddaaf06c51ba9b5f9059e46d2dfdf132359579c1730e90e140",
-      "transform": "omit Node test export footer"
+      "sourceSha256": "54ed3b533163c3b9b704f107fa1697f95476d35ab55ba99265718aea85ec9674",
+      "runtimeSha256": "a87de6921cc02faaa3748f82b0e384fcb87466c96b70f39c6a45d3234af5de7b",
+      "transform": "omit Node test export footer",
+      "upstream": "ha-storage-monitor/shared/ha-tools-ui.js @ d8076d697dee82d778ea2c04c41e60d18b9c7012; owner reviewed primaryColors/applyTheme and scoped consumer styling"
     },
     "shared/ha-tools-export.js": {
       "sourceSha256": "1f9e9c5444ec3b6de44eec136f14ae9e7d89dae1002650b33f746ab9633982f1",
