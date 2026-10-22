@@ -92,16 +92,32 @@ def _stage_owned(reader, plan, baseline, proposed):
                 break
             parent = parent.parent
     directories = {item.path: item.entries for item in plan.directories}
+    directory_names = {item.path: None for item in plan.directories}
     def remember_directory(relative):
+        # Include graph directories are complete enumerations. Ancestors and
+        # storage only guard inputs actually used by the checker, including
+        # absent secrets. Unrelated HA logs/traces/backups may change normally.
+        names = None
+        if relative not in directories:
+            names = {'secrets.yaml'}
+            prefix = '' if relative == '.' else relative + '/'
+            names.update(path[len(prefix):].split('/', 1)[0]
+                         for path in paths if path.startswith(prefix))
+            if relative == '.':
+                names.update(_TREES | {'.storage'})
+            elif relative == '.storage':
+                names = set(_STORAGE)
         fd = os.dup(reader.root) if relative == '.' else reader.open(relative, directory=True)
         try:
             with os.scandir(fd) as entries:
                 current = tuple(sorted(
                     (entry.name, (info := entry.stat(follow_symlinks=False)).st_mode,
-                     info.st_dev, info.st_ino) for entry in entries))
+                     info.st_dev, info.st_ino) for entry in entries
+                    if names is None or entry.name in names))
                 if relative in directories and directories[relative] != current:
                     raise YAMLValidationError('validation_graph_changed')
                 directories[relative] = current
+                directory_names[relative] = None if names is None else tuple(sorted(names))
         finally:
             os.close(fd)
     # Track absence as well as presence (new secrets, auxiliary dirs or registry files).
@@ -137,6 +153,7 @@ def _stage_owned(reader, plan, baseline, proposed):
                     else:
                         raise YAMLValidationError('unsafe_validation_input')
             directories[relative] = tuple(sorted(entries))
+            directory_names[relative] = None
         finally:
             os.close(fd)
     try:
@@ -199,7 +216,8 @@ def _stage_owned(reader, plan, baseline, proposed):
                 destination.write_bytes(data)
                 destination.chmod(0o600)
             sources.append((path, digest, info.st_dev, info.st_ino))
-        return tuple(sources), tuple(sorted(directories.items()))
+        return tuple(sources), tuple((path, directories[path], directory_names[path])
+                                     for path in sorted(directories))
     except (OSError, ValueError) as exc:
         if isinstance(exc, YAMLValidationError):
             raise
@@ -214,12 +232,13 @@ def assert_validation_current(receipt):
             raw, info = reader.read(path)
             if (_digest(raw), info.st_dev, info.st_ino) != (digest, device, inode):
                 raise YAMLValidationError('validation_source_changed')
-        for path, expected in receipt.source_directories:
+        for path, expected, names in receipt.source_directories:
             fd = os.dup(reader.root) if path == '.' else reader.open(path, directory=True)
             try:
                 with os.scandir(fd) as entries:
                     current = tuple(sorted((entry.name, (s := entry.stat(follow_symlinks=False)).st_mode,
-                                            s.st_dev, s.st_ino) for entry in entries))
+                                            s.st_dev, s.st_ino) for entry in entries
+                                           if names is None or entry.name in names))
                 if current != expected:
                     raise YAMLValidationError('validation_graph_changed')
             finally:

@@ -41,8 +41,16 @@ class ActivationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(script.inode, written['inode'])
             before, after = parent / 'before', parent / 'after'
             before.mkdir(); after.mkdir()
-            files, _ = await asyncio.to_thread(validation._stage, root, reverse, before, after)
+            files, directories = await asyncio.to_thread(validation._stage, root, reverse, before, after)
             self.assertTrue(any(row[0] == 'scripts.yaml' for row in files))
+            receipt = validation.ValidationReceipt(str(root), files, directories,
+                (), ('script',), (), '2026.10.2')
+            (root / 'home-assistant.log').write_text('normal runtime log')
+            (root / '.storage' / 'trace.saved_traces').write_text('{}')
+            validation.assert_validation_current(receipt)
+            (root / 'secrets.yaml').write_text('new_secret: changed')
+            with self.assertRaisesRegex(validation.YAMLValidationError, 'graph_changed'):
+                validation.assert_validation_current(receipt)
 
     async def test_cancelled_staging_drains_before_caller_can_remove_private_files(self):
         entered, release = asyncio.Event(), asyncio.Event()
