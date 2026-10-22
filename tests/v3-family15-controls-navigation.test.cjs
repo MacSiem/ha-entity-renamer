@@ -36,8 +36,9 @@ function fixture(){
  card.render();
  const native=()=>[...card.shadowRoot.querySelectorAll(NAV+' button['+ATTR+']')];
  const picker=()=>card.shadowRoot.getElementById('ha-tools-tab-picker');
- const resize=width=>{const nav=card.shadowRoot.querySelector(NAV);const target=nav.parentElement;
-  const observer=observers.find(o=>o.targets.has(target));assert.ok(observer,'actual navigation container is observed');
+ // W14 switches below 280px of the card, not its padded inner content box.
+ const resize=width=>{const target=card;
+  const observer=observers.find(o=>o.targets.has(target));assert.ok(observer,'actual card width is observed');
   observer.callback([{target,contentRect:{width}}]);};
  const choose=value=>{const select=picker();select.value=value;select.dispatchEvent(new dom.window.Event('change',{bubbles:true}));};
  return {dom,card,calls,observers,native,picker,resize,choose};
