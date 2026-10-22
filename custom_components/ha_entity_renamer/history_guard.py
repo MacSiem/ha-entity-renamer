@@ -1,7 +1,9 @@
 """Read-only historical continuity fingerprints through native Recorder sessions.
 
-New points beyond captured primary-key ceilings are allowed. Existing points,
-their attributes, short-term statistics and hourly statistics must stay exact.
+New points beyond captured primary-key ceilings are allowed. Existing values,
+change timestamps, attributes and both statistics tables must stay exact.
+HA legitimately advances last_reported_ts on the last unchanged state when the
+entity reports again (including rename); this heartbeat field is not fingerprinted.
 Concurrent retention/purge is a conflict, never silently accepted as migration.
 """
 from __future__ import annotations
@@ -43,7 +45,9 @@ def _read(recorder, state_ids, statistic_ids, expected=None):
                        session.scalar(select(func.max(primary)).where(metadata.in_(ids))))
             count, digest = 0, hashlib.sha256()
             if ceiling is not None:
-                query = select(*model.__table__.columns).where(
+                columns = [column for column in model.__table__.columns
+                           if not (name == 'states' and column.name == 'last_reported_ts')]
+                query = select(*columns).where(
                     metadata.in_(ids), primary <= ceiling).order_by(primary)
                 for row in session.execute(query.execution_options(yield_per=1000)):
                     raw = _encoded(tuple(row))
