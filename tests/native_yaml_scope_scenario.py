@@ -59,7 +59,7 @@ async def run_yaml_scopes(hass, root):
                                               'sequence': yaml.safe_load(steps)}}}
             path = Path(root) / (name + '.yaml')
             path.write_text(yaml.safe_dump(document, sort_keys=False))
-            plan = plan_yaml(root, mapping, roots=(path.name,))
+            plan = plan_yaml(root, mapping, entrypoints=(path.name,))
             assert plan.ready and len(plan.patches) == 1, (name, plan.issues)
             changed = yaml.safe_load(plan.patches[0].proposed_bytes)
             for phase, content in (('before', document), ('after', changed)):
