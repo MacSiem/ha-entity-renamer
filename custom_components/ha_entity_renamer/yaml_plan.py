@@ -288,6 +288,32 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
     def origins(bindings):
         return {origin for bound in bindings.values() if bound for origin in bound[1]}
 
+    def join(environments):
+        """May-values, including undefined/dynamic paths, with bounded provenance.
+
+        A scalar may have several origins: each path still produces one scalar.
+        Missing names and incompatible shapes remain unknown, never an empty
+        known binding. Do not discard origins when precision is lost.
+        """
+        names = set()
+        for environment in environments:
+            charge()
+            names.update(environment)
+        result = {}
+        for name in names:
+            values = [environment.get(name) for environment in environments]
+            possible, shapes = set(), set()
+            for bound in values:
+                charge()
+                shapes.add(bound[0] if bound else 'unknown')
+                if bound:
+                    for origin in bound[1]:
+                        charge()
+                        possible.add(origin)
+            shape = next(iter(shapes)) if len(shapes) == 1 else 'unknown'
+            result[name] = (shape, tuple(sorted(possible))) if possible else None
+        return result
+
     def static(node):
         charge()
         if isinstance(node, ScalarNode) and node.tag == _STR and _ENTITY.fullmatch(node.value):
@@ -388,9 +414,195 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
                 prior = bindings.get(key.value)
                 if prior:
                     unsafe.update(prior[1])
-                bindings[key.value] = None
+                bindings[key.value] = ('unknown', prior[1]) if prior else None
 
-    def sequence(node, bindings):
+    def write_summary(node):
+        """Overapproximate writes, without observing/registering a producer twice.
+
+        HA action variables use update/_assign, including from child scripts.
+        Only the runtime repeat object is local. This summary is used for loop
+        invariants and interference, not as authority to edit YAML literals.
+        """
+        charge()
+        if not isinstance(node, SequenceNode):
+            return {}
+        writes = {}
+        for action in node.value:
+            charge()
+            if not isinstance(action, MappingNode):
+                continue
+            values = pairs(action)
+            definitions = values.get('variables')
+            if isinstance(definitions, MappingNode):
+                for key, child in definitions.value:
+                    charge()
+                    if isinstance(key, ScalarNode) and key.tag == _STR and key.value.isidentifier():
+                        part = static(child)
+                        bound = part[0] if part else None
+                        if key.value in writes:
+                            writes[key.value] = join([{key.value: writes[key.value]},
+                                                      {key.value: bound}])[key.value]
+                        else:
+                            writes[key.value] = bound
+            response = values.get('response_variable')
+            if isinstance(response, ScalarNode):
+                prior = writes.get(response.value)
+                writes[response.value] = ('unknown', prior[1]) if prior else None
+            if 'wait_template' in values or 'wait_for_trigger' in values:
+                prior = writes.get('wait')
+                writes['wait'] = ('unknown', prior[1]) if prior else None
+            children = []
+            for key in ('sequence', 'then', 'else', 'default'):
+                if key in values:
+                    children.append(values[key])
+            choices = values.get('choose')
+            if isinstance(choices, SequenceNode):
+                for choice in choices.value:
+                    charge()
+                    if isinstance(choice, MappingNode) and 'sequence' in pairs(choice):
+                        children.append(pairs(choice)['sequence'])
+            parallel = values.get('parallel')
+            if isinstance(parallel, SequenceNode):
+                # Each parallel entry is one action; explicit sequence actions
+                # are handled recursively by this same summary.
+                children.append(parallel)
+            repeat = values.get('repeat')
+            if isinstance(repeat, MappingNode) and 'sequence' in pairs(repeat):
+                local_writes = write_summary(pairs(repeat)['sequence'])
+                local_writes.pop('repeat', None)
+                for name, bound in local_writes.items():
+                    writes[name] = (join([{name: writes[name]}, {name: bound}])[name]
+                                    if name in writes else bound)
+            for child in children:
+                for name, bound in write_summary(child).items():
+                    writes[name] = (join([{name: writes[name]}, {name: bound}])[name]
+                                    if name in writes else bound)
+        return writes
+
+    def envelope(bindings, writes):
+        # A write may be skipped (condition, disabled action, zero iterations).
+        # Include the entry value even when the syntactic branches are exhaustive.
+        return join([bindings, {**bindings, **writes}])
+
+    def control(action, values, bindings, interference):
+        """Analyze child scripts and their shared outer variable writes once."""
+        kinds = [name for name in ('choose', 'if', 'repeat', 'parallel', 'sequence')
+                 if name in values]
+        kind = kinds[0]
+        allowed = {'choose': {'choose', 'default'}, 'if': {'if', 'then', 'else'},
+                   'repeat': {'repeat'}, 'parallel': {'parallel'},
+                   'sequence': {'sequence'}}[kind]
+        if len(kinds) != 1 or 'variables' in values or 'response_variable' in values:
+            unsafe.update(origins(bindings))
+            issue(action, 'yaml_variable_control_scope_unsupported')
+            scan(action, bindings)
+            return
+        # Action metadata/labels are still consumers, never variable producers.
+        for key, child in action.value:
+            scan(key, bindings)
+            if not isinstance(key, ScalarNode) or key.value not in allowed:
+                scan(child, bindings, isinstance(key, ScalarNode) and key.value in _FIELDS)
+        entry = bindings.copy()
+        exits = [entry]
+
+        def branch(child, environment=None, concurrent=None):
+            local = (entry if environment is None else environment).copy()
+            if not isinstance(child, SequenceNode):
+                issue(child, 'yaml_variable_control_scope_unsupported')
+            sequence(child, local, interference if concurrent is None else concurrent)
+            exits.append(local)
+
+        if kind == 'choose':
+            choices = values['choose']
+            if not isinstance(choices, SequenceNode):
+                unsafe.update(origins(bindings))
+                issue(choices, 'yaml_variable_control_scope_unsupported')
+                scan(choices, bindings)
+            else:
+                for choice in choices.value:
+                    charge()
+                    if not isinstance(choice, MappingNode) or 'sequence' not in pairs(choice):
+                        unsafe.update(origins(bindings))
+                        issue(choice, 'yaml_variable_control_scope_unsupported')
+                        scan(choice, bindings)
+                        continue
+                    for key, child in choice.value:
+                        scan(key, bindings)
+                        if isinstance(key, ScalarNode) and key.value == 'sequence':
+                            branch(child)
+                        else:
+                            scan(child, bindings)
+            if 'default' in values:
+                branch(values['default'])
+        elif kind == 'if':
+            scan(values['if'], bindings)
+            if 'then' not in values:
+                issue(action, 'yaml_variable_control_scope_unsupported')
+                unsafe.update(origins(bindings))
+            for name in ('then', 'else'):
+                if name in values:
+                    branch(values[name])
+        elif kind == 'sequence':
+            branch(values['sequence'])
+        elif kind == 'parallel':
+            children = values['parallel']
+            shared = envelope(entry, write_summary(children))
+            # Another branch may assign between any two actions, even between
+            # this branch's own assignment and its next consumer. Keep the
+            # interference envelope throughout nested child scripts too.
+            concurrent = join([shared, interference]) if interference else shared
+            if not isinstance(children, SequenceNode):
+                branch(children, shared, concurrent)
+            else:
+                for action_node in children.value:
+                    child = SequenceNode(_STANDARD + 'seq', [action_node],
+                                         children.start_mark, children.end_mark)
+                    branch(child, shared, concurrent)
+        else:
+            repeat = values['repeat']
+            if not isinstance(repeat, MappingNode) or 'sequence' not in pairs(repeat):
+                unsafe.update(origins(bindings))
+                issue(repeat, 'yaml_variable_control_scope_unsupported')
+                scan(repeat, bindings)
+            else:
+                repeat_values = pairs(repeat)
+                body = repeat_values['sequence']
+                writes = write_summary(body)
+                writes.pop('repeat', None)
+                invariant = envelope(entry, writes)
+                # HA defines this runtime object locally on every iteration.
+                # It must never inherit a same-named outer static binding.
+                invariant['repeat'] = None
+                for key, child in repeat.value:
+                    scan(key, invariant)
+                    if not isinstance(key, ScalarNode) or key.value != 'sequence':
+                        scan(child, invariant)
+                local_interference = ({name: bound for name, bound in interference.items()
+                                       if name != 'repeat'} if interference else {})
+                branch(body, invariant, local_interference)
+                # No proof for runtime repeat.item/index/etc. Any textual use
+                # gets an explicit block, independently of Jinja sink detection.
+                pending = [repeat]
+                while pending:
+                    current = pending.pop()
+                    charge()
+                    if isinstance(current, ScalarNode):
+                        if (current.tag == _STR and any(t in current.value for t in ('{{', '{%', '{#'))
+                                and re.search(r'\brepeat\b', current.value)):
+                            issue(current, 'yaml_runtime_repeat_variable_unsupported')
+                    elif isinstance(current, SequenceNode):
+                        pending.extend(current.value)
+                    elif isinstance(current, MappingNode):
+                        pending.extend(n for pair in current.value for n in pair)
+                for local in exits[1:]:
+                    if 'repeat' in entry:
+                        local['repeat'] = entry['repeat']
+                    else:
+                        local.pop('repeat', None)
+        bindings.clear()
+        bindings.update(join(exits))
+
+    def sequence(node, bindings, interference=None):
         if not isinstance(node, SequenceNode):
             scan(node, bindings)
             if bindings:
@@ -398,6 +610,8 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
             return
         for action in node.value:
             charge()
+            if interference:
+                bindings.update(join([bindings, interference]))
             if not isinstance(action, MappingNode):
                 scan(action, bindings)
                 continue
@@ -407,28 +621,36 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
                 issue(action, 'yaml_variable_merge_scope_unsupported')
                 scan(action, bindings)
                 continue
-            # Branch/loop/parallel variable propagation requires HA runtime
-            # scoping semantics. Retain every possible origin and block it.
             complex_scope = any(k in values for k in ('choose', 'if', 'repeat', 'parallel', 'sequence'))
             if complex_scope:
-                unsafe.update(origins(bindings))
-                if bindings:
-                    issue(action, 'yaml_variable_control_scope_unsupported')
-                scan(action, bindings)
+                control(action, values, bindings, interference)
                 continue
+            entry = bindings.copy()
             if 'variables' in values:
                 define(values['variables'], bindings)
+                if interference:
+                    bindings.update(join([bindings, interference]))
             for key, child in action.value:
                 if not (isinstance(key, ScalarNode) and key.value == 'variables'):
                     scan(key, bindings)
-                    scan(child, bindings, isinstance(key, ScalarNode) and key.value in _FIELDS)
+                    # enabled is evaluated before this action's assignments.
+                    environment = entry if isinstance(key, ScalarNode) and key.value == 'enabled' else bindings
+                    scan(child, environment, isinstance(key, ScalarNode) and key.value in _FIELDS)
             response = values.get('response_variable')
             if isinstance(response, ScalarNode) and response.value in bindings:
                 prior = bindings[response.value]
                 if prior:
                     unsafe.update(prior[1])
-                bindings[response.value] = None
+                bindings[response.value] = ('unknown', prior[1]) if prior else None
                 issue(response, 'yaml_response_variable_rebinding_unsupported')
+            if ('wait_template' in values or 'wait_for_trigger' in values) and 'wait' in bindings:
+                prior = bindings['wait']
+                if prior:
+                    unsafe.update(prior[1])
+                bindings['wait'] = ('unknown', prior[1]) if prior else None
+                issue(action, 'yaml_runtime_variable_rebinding_unsupported')
+            if 'enabled' in values:
+                bindings.update(join([entry, bindings]))
 
     def scope(node):
         if not isinstance(node, MappingNode):

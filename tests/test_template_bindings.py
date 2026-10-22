@@ -227,5 +227,23 @@ class ExternalYAMLBindingTests(unittest.TestCase):
         self.assertTrue(result[1])
         self.assertIn(self.origin, result[3])
 
+    def test_external_union_of_scalar_origins_is_one_pathwise_scalar(self):
+        from reference_planner import analyze_template_bindings
+        first, second = (-1, 0, 'sensor.a'), (-2, 0, 'sensor.ab')
+        result = analyze_template_bindings('{{ states(ref) }}', MAPPING,
+                                           {'ref': ('scalar', (first, second))})
+        self.assertFalse(result[1])
+        self.assertEqual(result[2], {first, second})
+        self.assertFalse(result[3])
+
+    def test_unknown_external_union_preserves_every_origin_as_unsafe(self):
+        from reference_planner import analyze_template_bindings
+        first, second = (-1, 0, 'sensor.a'), (-2, 0, 'sensor.ab')
+        for source in ('{{ states(ref) }}', '{{ ref }}'):
+            result = analyze_template_bindings(source, MAPPING,
+                                               {'ref': ('unknown', (first, second))})
+            self.assertFalse(result[2])
+            self.assertEqual(result[3], {first, second})
+
 if __name__ == '__main__':
     unittest.main()

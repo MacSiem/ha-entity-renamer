@@ -377,13 +377,11 @@ class YAMLPlannerTests(unittest.TestCase):
         source = "script:\n  first:\n    variables:\n      ref: sensor.foo\n    sequence:\n    - value_template: '{{ states(ref) }}'\n  second:\n    variables:\n      ref: light.old\n    sequence:\n    - value_template: '{{ states(ref) }}'\n"
         self.assert_variable_patch(source)
 
-    def test_yaml_control_scope_retains_unknown_and_origin(self):
-        for branch in ('choose: []', 'if: []', 'repeat: {count: 2, sequence: []}', 'parallel: []'):
+    def test_yaml_empty_control_scopes_preserve_known_readonly_binding(self):
+        for branch in ('choose: []', 'if: []\n      then: []',
+                       'repeat: {count: 2, sequence: []}', 'parallel: []', 'sequence: []'):
             source = "script:\n  demo:\n    variables:\n      ref: sensor.foo\n    sequence:\n    - " + branch + "\n    - value_template: '{{ states(ref) }}'\n"
-            self.put('configuration.yaml', source)
-            plan = self.plan()
-            self.assertIn('yaml_variable_control_scope_unsupported', self.codes(plan))
-            self.assertFalse(plan.patches)
+            self.assert_variable_patch(source)
 
     def test_yaml_variable_caller_include_scope_is_explicitly_unsupported(self):
         self.put('configuration.yaml', "script:\n  demo:\n    variables:\n      ref: sensor.foo\n    sequence: !include steps.yaml\n")
@@ -434,6 +432,286 @@ class YAMLPlannerTests(unittest.TestCase):
         self.assertIn('yaml_response_variable_rebinding_unsupported', self.codes(plan))
         self.assertFalse(plan.patches)
 
+    def control_source(self, steps, definitions='ref: sensor.foo'):
+        from textwrap import dedent, indent
+        return ('script:\n  demo:\n    variables:\n'
+                + indent(definitions + '\n', '      ')
+                + '    sequence:\n' + indent(dedent(steps).strip() + '\n', '    '))
+
+    def assert_control_blocked(self, source, code=None):
+        self.put('configuration.yaml', source)
+        result = self.plan()
+        self.assertFalse(result.ready)
+        if code:
+            self.assertIn(code, self.codes(result))
+        for proof in result.variable_bindings:
+            if proof.entity_id == 'sensor.foo':
+                self.assertFalse(proof.approved)
+        return result
+
+    def test_choose_and_if_union_static_branch_writes_with_entry(self):
+        for steps in ('''
+            - choose:
+              - conditions: []
+                sequence:
+                - variables:
+                    ref: light.old
+              default: []
+            - value_template: '{{ states(ref) }}'
+        ''', '''
+            - if: []
+              then:
+              - variables:
+                  ref: light.old
+              else: []
+            - value_template: '{{ states(ref) }}'
+        '''):
+            result = self.assert_variable_patch(self.control_source(steps))
+            self.assertEqual(len(result.variable_bindings), 2)
+            self.assertTrue(all(p.producer_occurrences == 1 for p in result.variable_bindings))
+
+    def test_branch_defined_variable_is_visible_in_later_steps_when_proven(self):
+        source = self.control_source('''
+            - choose:
+              - conditions: []
+                sequence:
+                - variables:
+                    inner: light.old
+                - value_template: '{{ states(inner) }}'
+            - value_template: '{{ states(ref) }}'
+        ''')
+        self.assert_variable_patch(source)
+
+    def test_branch_defined_name_may_be_undefined_after_join(self):
+        source = self.control_source('''
+            - choose:
+              - conditions: []
+                sequence:
+                - variables:
+                    inner: sensor.foo
+            - value_template: '{{ states(inner) }}'
+        ''', definitions='untouched: 1')
+        self.assert_control_blocked(source)
+
+    def test_dynamic_branch_write_keeps_old_origin_unsafe(self):
+        source = self.control_source('''
+            - value_template: '{{ states(ref) }}'
+            - if: []
+              then:
+              - variables:
+                  ref: '{{ runtime_value }}'
+            - value_template: '{{ states(ref) }}'
+        ''')
+        self.assert_control_blocked(source)
+
+    def test_label_escape_in_one_branch_blocks_shared_origin(self):
+        source = self.control_source('''
+            - if: []
+              then:
+              - value_template: '{{ states(ref) }}'
+              else:
+              - data:
+                  message: '{{ ref }}'
+        ''')
+        self.assert_control_blocked(source)
+
+    def test_shape_mismatch_at_branch_join_retains_both_origins(self):
+        source = self.control_source('''
+            - if: []
+              then:
+              - variables:
+                  ref: [light.old]
+            - value_template: '{{ expand(ref) }}'
+        ''')
+        result = self.assert_control_blocked(source)
+        self.assertEqual(len(result.variable_bindings), 2)
+        self.assertFalse(any(p.approved for p in result.variable_bindings))
+
+    def test_nested_sequence_writes_propagate_through_choose_and_if(self):
+        source = self.control_source('''
+            - choose:
+              - conditions: []
+                sequence:
+                - if: []
+                  then:
+                  - sequence:
+                    - variables:
+                        ref: light.old
+            - value_template: '{{ states(ref) }}'
+        ''')
+        self.assert_variable_patch(source)
+
+    def test_alias_shared_with_branch_label_remains_blocked(self):
+        source = self.control_source('''
+            - if: []
+              then:
+              - value_template: '{{ states(ref) }}'
+              else:
+              - alias: *ref
+        ''', definitions='ref: &ref sensor.foo')
+        self.assert_control_blocked(source)
+
+    def test_readonly_repeat_count_and_while_support_known_outer_reference(self):
+        for header in ('count: 2', 'while: []', 'until: []'):
+            source = self.control_source('''
+                - repeat:
+                    HEADER
+                    sequence:
+                    - value_template: '{{ states(ref) }}'
+            '''.replace('HEADER', header))
+            self.assert_variable_patch(source)
+
+    def test_repeat_invariant_sees_previous_iteration_static_write(self):
+        source = self.control_source('''
+            - repeat:
+                count: 2
+                sequence:
+                - value_template: '{{ states(ref) }}'
+                - variables:
+                    ref: light.old
+            - value_template: '{{ states(ref) }}'
+        ''')
+        self.assert_variable_patch(source)
+
+    def test_repeat_invariant_catches_label_escape_before_later_iteration_write(self):
+        source = self.control_source('''
+            - repeat:
+                count: 2
+                sequence:
+                - data:
+                    message: '{{ ref }}'
+                - variables:
+                    ref: light.old
+                - value_template: '{{ states(ref) }}'
+        ''')
+        result = self.assert_control_blocked(source)
+        self.assertFalse(any(p.approved for p in result.variable_bindings))
+
+    def test_repeat_unknown_write_blocks_old_origin(self):
+        source = self.control_source('''
+            - repeat:
+                count: 2
+                sequence:
+                - variables:
+                    ref: '{{ runtime_value }}'
+            - value_template: '{{ states(ref) }}'
+        ''')
+        self.assert_control_blocked(source)
+
+    def test_runtime_repeat_item_and_index_have_explicit_block(self):
+        for expression in ('states(repeat.item)', 'repeat.index'):
+            source = self.control_source('''
+                - repeat:
+                    count: 2
+                    sequence:
+                    - value_template: '{{ EXPRESSION }}'
+                - value_template: '{{ states(ref) }}'
+            '''.replace('EXPRESSION', expression))
+            self.put('configuration.yaml', source)
+            result = self.plan()
+            self.assertFalse(result.ready)
+            self.assertIn('yaml_runtime_repeat_variable_unsupported', self.codes(result))
+
+    def test_repeat_runtime_object_shadows_and_restores_outer_same_name(self):
+        source = self.control_source('''
+            - repeat:
+                count: 2
+                sequence: []
+            - value_template: '{{ states(repeat) }}'
+        ''', definitions='repeat: sensor.foo')
+        self.assert_variable_patch(source)
+
+    def test_parallel_readonly_branches_support_known_outer_reference(self):
+        source = self.control_source('''
+            - parallel:
+              - value_template: '{{ states(ref) }}'
+              - sequence:
+                - target:
+                    entity_id: '{{ ref }}'
+        ''')
+        self.assert_variable_patch(source)
+
+    def test_parallel_static_writes_union_all_interleavings(self):
+        source = self.control_source('''
+            - parallel:
+              - variables:
+                  ref: light.old
+              - sequence:
+                - value_template: '{{ states(ref) }}'
+            - value_template: '{{ states(ref) }}'
+        ''')
+        self.assert_variable_patch(source)
+
+    def test_parallel_interference_after_own_assignment_catches_sibling_origin_escape(self):
+        source = self.control_source('''
+            - parallel:
+              - sequence:
+                - variables:
+                    ref: sensor.foo
+                - data:
+                    message: '{{ ref }}'
+              - sequence:
+                - variables:
+                    ref: light.old
+                - value_template: '{{ states(ref) }}'
+        ''')
+        result = self.assert_control_blocked(source)
+        self.assertFalse(any(p.approved for p in result.variable_bindings))
+
+    def test_parallel_dynamic_write_blocks_prior_reference_producer(self):
+        source = self.control_source('''
+            - parallel:
+              - variables:
+                  ref: '{{ runtime_value }}'
+              - value_template: '{{ states(ref) }}'
+        ''')
+        self.assert_control_blocked(source)
+
+    def test_disabled_assignment_keeps_entry_value_possible(self):
+        source = self.control_source('''
+            - variables:
+                ref: light.old
+              enabled: false
+            - value_template: '{{ states(ref) }}'
+        ''')
+        self.assert_variable_patch(source)
+
+    def test_enabled_expression_reads_binding_before_assignment(self):
+        source = self.control_source('''
+            - value_template: '{{ states(ref) }}'
+            - variables:
+                ref: light.old
+              enabled: '{{ ref }}'
+            - value_template: '{{ states(ref) }}'
+        ''')
+        self.assert_control_blocked(source)
+
+    def test_parallel_response_write_is_unknown_with_origin_preserved(self):
+        source = self.control_source('''
+            - parallel:
+              - action: example.lookup
+                response_variable: ref
+              - value_template: '{{ states(ref) }}'
+        ''')
+        self.assert_control_blocked(source, 'yaml_response_variable_rebinding_unsupported')
+
+    def test_branch_include_still_fails_closed_for_caller_bindings(self):
+        source = self.control_source('''
+            - if: []
+              then: !include steps.yaml
+            - value_template: '{{ states(ref) }}'
+        ''')
+        self.put('steps.yaml', "- value_template: '{{ states(ref) }}'\n")
+        self.assert_control_blocked(source, 'yaml_variable_include_scope_unsupported')
+
+
+    def test_wait_runtime_overwrite_preserves_origin_and_stays_explicit(self):
+        source = self.control_source("""
+            - value_template: '{{ states(wait) }}'
+            - wait_template: '{{ true }}'
+            - value_template: '{{ states(wait) }}'
+        """, definitions='wait: sensor.foo')
+        self.assert_control_blocked(source, 'yaml_runtime_variable_rebinding_unsupported')
 
 if __name__ == '__main__':
     unittest.main()
