@@ -23,6 +23,32 @@ function fixture() {
   return {dom,card,root:card.shadowRoot,devices,entities};
 }
 
+test('new device has one New marker; only new entities under older devices get their own marker',async()=>{
+  const {dom,card,root,entities}=fixture();
+  try {
+    entities[0].created_at=Date.now()/1000;
+    await card._loadData();card._expandedDevices.add('two');card._expandedDevices.add('ten');card.render();
+    assert.equal(root.querySelector('[data-device-id="two"]').closest('.device-item').querySelectorAll('.new-badge').length,1);
+    assert.equal(root.querySelector('[data-device-id="ten"]').closest('.device-item').querySelectorAll('.new-badge').length,1);
+    card._activeTab='automatic';card._automaticLoaded=true;
+    card._automaticRows=entities.map(e=>({oldId:e.entity_id,newId:e.entity_id+'_new',deviceId:e.device_id}));card.render();
+    assert.equal(root.querySelector('[data-auto-group="two"]').querySelectorAll('.new-badge').length,1);
+    assert.equal(root.querySelector('[data-auto-group="ten"]').querySelectorAll('.new-badge').length,1);
+  } finally {dom.window.close();}
+});
+
+test('all queued proposals expose a secondary disabled action rather than a primary CTA',async()=>{
+  const {dom,card,root,entities}=fixture();
+  try {
+    await card._loadData();card._activeTab='automatic';card._automaticLoaded=true;
+    card._automaticRows=entities.map(e=>({oldId:e.entity_id,newId:e.entity_id+'_new',deviceId:e.device_id}));card.render();
+    root.querySelector('#queueAllAutomatic').click();
+    const button=root.querySelector('#queueAllAutomatic');
+    assert.equal(button.disabled,true);assert.equal(button.classList.contains('btn-primary'),false);
+    assert.equal(button.classList.contains('btn-outline'),true);
+  } finally {dom.window.close();}
+});
+
 test('all views use the HA natural order, including numeric device names',async()=>{
   const {dom,card,root,entities}=fixture();
   try {
