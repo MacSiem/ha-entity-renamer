@@ -283,7 +283,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
         active.add(path)
         candidates: dict[int, tuple[ScalarNode, list[bool]]] = {}
         visiting: set[int] = set()
-        includes_seen: set[int] = set()
+        includes_seen: dict[int, tuple] = {}
         dashboard_paths = set()
 
         def issue(node, code):
@@ -302,9 +302,12 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
             try:
                 if isinstance(node, ScalarNode):
                     if node.tag in _INCLUDE:
+                        include_context = (field, parent_key, lovelace)
                         if id(node) in includes_seen:
+                            if includes_seen[id(node)] != include_context:
+                                raise YAMLPlanError("include alias context conflict")
                             return
-                        includes_seen.add(id(node))
+                        includes_seen[id(node)] = include_context
                         target = str(PurePosixPath(path).parent / _relative(node.value))
                         targets = (target,) if node.tag == '!include' else reader.listing(target)
                         edges.append(IncludeEdge(path, node.start_mark.line + 1, node.tag, target, targets))

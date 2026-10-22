@@ -83,7 +83,7 @@ _CALL = re.compile(
     re.ASCII,
 )
 _STATE = re.compile(
-    r"(?<![\w.])states\.(?P<id>[a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![\w])",
+    r"(?<![\w.])states\s*\.\s*(?P<id>[a-z_][a-z0-9_]*\s*\.\s*[a-z0-9_]+)(?![\w])",
     re.ASCII,
 )
 _DYNAMIC = re.compile(r"\b(?:states|is_state|state_attr|is_state_attr|expand)\s*\(|\bstates\s*\[")
@@ -161,7 +161,7 @@ def plan_references(
         return any(match.group(1) in mapping for match in _TOKEN.finditer(text))
 
     def template(text: str, path: Path) -> str:
-        if re.search(r"{%[-+]?\s*(?:set|macro|import|from|call|include|extends)\b", text):
+        if re.search(r"{%[-+]?\s*(?:set|for|macro|import|from|call|include|extends|with)\b", text):
             markers.append(Marker(path, "unsupported_template_scope", "Template bindings require syntax-aware resolution"))
             return text
         if _EXTERNAL.search(text):
@@ -229,7 +229,7 @@ def plan_references(
                         continue
                     start, end = match.span('id')
                     spans.add((start, end))
-                    old = match.group('id')
+                    old = re.sub(r'\s+', '', match.group('id'))
                     if old in mapping:
                         replacements.append((block_start + start, block_start + end, mapping[old]))
             unresolved = False
