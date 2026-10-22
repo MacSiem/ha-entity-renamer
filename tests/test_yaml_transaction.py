@@ -164,8 +164,30 @@ class Regressions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.reload_count, 0)
 
     async def test_apply_and_cas_rollback_with_new_inodes(self):
-        result = await self.coordinator.apply(self.plan, self.plan.fingerprint, 'op')
-        self.assertEqual(result.status, 'applied')
+        original_fence = module._assert_sources
+        failures = []
+        def observed_fence(change, after_paths, restored=False):
+            try:
+                return original_fence(change, after_paths, restored)
+            except Exception as error:
+                files = []
+                for row in self.rows:
+                    path = self.root / row.path
+                    info = path.stat()
+                    raw = path.read_bytes()
+                    files.append((row.path, (row.device, row.inode),
+                                  (info.st_dev, info.st_ino), raw == row.before, raw == row.after))
+                directories = []
+                for path, expected, names in change.receipt.source_directories:
+                    parent = self.root if path == '.' else self.root / path
+                    actual = tuple(sorted((p.name, (s := p.stat()).st_mode, s.st_dev, s.st_ino)
+                        for p in parent.iterdir() if names is None or p.name in names))
+                    directories.append((path, expected, actual))
+                failures.append((str(error), sorted(after_paths), restored, files, directories))
+                raise
+        with patch.object(module, '_assert_sources', observed_fence):
+            result = await self.coordinator.apply(self.plan, self.plan.fingerprint, 'op')
+        self.assertEqual(result.status, 'applied', (result.reason, failures))
         self.assertEqual(self.reload_count, 1)
         self.assertEqual(self.observer.inventory_calls, [False])
         result = await self.coordinator.rollback('op')
