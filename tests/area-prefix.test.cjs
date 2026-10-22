@@ -40,3 +40,32 @@ test('late area response is discarded after account or selected device changes',
   }finally{dom.window.close();}
  }
 });
+
+test('Clear invalidates an outstanding area proposal request',async()=>{
+ const {dom,card}=fixture();try {
+  card._addToQueue('sensor.temperature','sensor.authored');
+  let resolve;card._hass.callWS=()=>new Promise(r=>resolve=r);
+  const pending=card._addAreaPrefix();card._clearQueue();
+  resolve([{area_id:'living',name:'Salon'},{area_id:'bath',name:'Łazienka'}]);await pending;
+  assert.equal(card._renameQueue.length,0,'Clear must remain effective');
+ }finally{dom.window.close();}
+});
+test('impact analysis supersedes area lookup without a false added confirmation',async()=>{
+ for(const finishImpactFirst of [false,true]) {
+  const {dom,card}=fixture();try {
+   card._addToQueue('sensor.temperature','sensor.authored');
+   let areaResolve,impactResolve;
+   card._hass.callWS=msg=>{
+    if(msg.type==='config/area_registry/list')return new Promise(r=>areaResolve=r);
+    if(msg.type==='search/related')return new Promise(r=>impactResolve=r);
+    return Promise.resolve(msg.type==='lovelace/dashboards/list'?[]:{});
+   };
+   const area=card._addAreaPrefix();const impact=card._analyzeImpact();
+   if(finishImpactFirst){impactResolve({});await impact;}
+   areaResolve([{area_id:'living',name:'Salon'}]);await area;
+   assert.equal(card._renameQueue.length,1);
+   assert.doesNotMatch(card._message?.text||'',/Area proposals added/);
+   if(!finishImpactFirst){impactResolve({});await impact;}
+  }finally{dom.window.close();}
+ }
+});
