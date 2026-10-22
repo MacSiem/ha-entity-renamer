@@ -36,21 +36,31 @@ class ActivationTests(unittest.IsolatedAsyncioTestCase):
             snapshots = {row.path: row for row in forward.files}
             patch = forward.patches[0]
             written = await asyncio.to_thread(apply_file_patch, root, patch, snapshots[patch.path], 'stage_forward')
-            reverse = plan_yaml(root, {'sensor.new': 'sensor.old'})
-            script = next(row for row in reverse.files if row.path == 'scripts.yaml')
-            self.assertEqual(script.inode, written['inode'])
-            before, after = parent / 'before', parent / 'after'
-            before.mkdir(); after.mkdir()
-            files, directories = await asyncio.to_thread(validation._stage, root, reverse, before, after)
-            self.assertTrue(any(row[0] == 'scripts.yaml' for row in files))
-            # Source identity changes after capture must always fail closed.
-            replacement = root / 'replacement.yaml'
-            replacement.write_bytes((root / 'scripts.yaml').read_bytes())
-            replacement.replace(root / 'scripts.yaml')
-            receipt = validation.ValidationReceipt(str(root), files, directories,
-                (), ('script',), (), '2026.10.2')
-            with self.assertRaisesRegex(validation.YAMLValidationError, 'source_changed'):
-                validation.assert_validation_current(receipt)
+            # Docker's mounted filesystem can refresh lookup identities after
+            # the final handle closes. The reverse plan is an independent
+            # snapshot; pin its own source through staging, not the old writer's
+            # historical inode. Foreign replacements must still fail below.
+            source_pin = os.open(root / 'scripts.yaml', os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                reverse = plan_yaml(root, {'sensor.new': 'sensor.old'})
+                script = next(row for row in reverse.files if row.path == 'scripts.yaml')
+                self.assertEqual(script.sha256, written['sha256'])
+                self.assertEqual(script.device, written['device'])
+                self.assertEqual(script.inode, os.fstat(source_pin).st_ino)
+                before, after = parent / 'before', parent / 'after'
+                before.mkdir(); after.mkdir()
+                files, directories = await asyncio.to_thread(validation._stage, root, reverse, before, after)
+                self.assertTrue(any(row[0] == 'scripts.yaml' for row in files))
+                # Source identity changes after capture must always fail closed.
+                replacement = root / 'replacement.yaml'
+                replacement.write_bytes((root / 'scripts.yaml').read_bytes())
+                replacement.replace(root / 'scripts.yaml')
+                receipt = validation.ValidationReceipt(str(root), files, directories,
+                    (), ('script',), (), '2026.10.2')
+                with self.assertRaisesRegex(validation.YAMLValidationError, 'source_changed'):
+                    validation.assert_validation_current(receipt)
+            finally:
+                os.close(source_pin)
 
     async def test_unrelated_runtime_files_do_not_invalidate_actual_validator_inputs(self):
         from custom_components.ha_entity_renamer.yaml_plan import plan_yaml
