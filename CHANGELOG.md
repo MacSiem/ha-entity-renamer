@@ -5,6 +5,7 @@
 - Keep confirmation button labels whole at narrow widths (GitHub #9), use theme-aware primary contrast and neutral removal actions.
 - Keep tabs and filters in one horizontally scrollable row with keyboard navigation; use one expand/collapse control and avoid repeated New badges within new devices.
 - Wrap entity IDs only at domain and underscore boundaries; increase small text and constrain wide content.
+- Place friendly names above IDs on narrow cards and keep statistic values separate from their labels, including the New filter.
 - Add account-scoped, collapsible help and visual configuration for default/visible tabs, help and support.
 - Undo clearing a draft queue for eight seconds without overwriting newer proposals.
 - Suggest area prefixes in the local queue, respecting entity area overrides and preserving existing proposals. Registry writes still require administrator review and confirmation.

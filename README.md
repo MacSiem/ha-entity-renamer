@@ -76,13 +76,16 @@ Requires **Home Assistant 2025.6 or newer** for the automatic ID preview.
 
 1. Open HACS and search for **Entity Renamer** in the **Dashboard** category.
 2. Download the latest release and reload your browser.
-3. Add a manual card using the configuration below.
+3. Open your dashboard, choose **Edit dashboard → Add card → By card**, and search for **Entity Renamer**.
+4. Select the card, review its live preview and choose **Save**. No YAML or entity selection is required.
 
 If the repository is unavailable in your HACS catalogue, add
 `https://github.com/MacSiem/ha-entity-renamer` as a custom repository in
 category **Dashboard** (Lovelace plugin).
 
 ## Quick start
+
+The card picker opens the visual editor with working defaults. Optional YAML configuration:
 
 ```yaml
 type: custom:ha-entity-renamer
