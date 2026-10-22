@@ -37,6 +37,9 @@ class Step:
     after_revision: str
     # Opaque LOCAL durable prepared patch/backup reference, never telemetry.
     prepared_ref: str
+    # Explicit preceding steps whose native listeners may fully satisfy this
+    # step. AFTER still requires the adapter's independent durable/runtime proof.
+    caused_by: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,10 +65,16 @@ class Plan:
                 or not {s.adapter for s in self.steps}.issubset(self.verification_adapters)
                 or not self.steps or len({s.key for s in self.steps}) != len(self.steps)):
             raise Refused("Incomplete plan coverage")
+        preceding = set()
         for step in self.steps:
             if not all((step.key, step.adapter, step.identity, step.before_revision,
                         step.after_revision, step.prepared_ref)):
                 raise Refused("Incomplete prepared step")
+            if (type(step.caused_by) is not tuple or any(type(k) is not str for k in step.caused_by)
+                    or len(set(step.caused_by)) != len(step.caused_by)
+                    or not set(step.caused_by) <= preceding):
+                raise Refused("Invalid native effect dependency")
+            preceding.add(step.key)
             if step.before_revision == step.after_revision:
                 raise Refused("Step requires distinguishable revisions")
 
@@ -207,6 +216,12 @@ class Coordinator:
     async def _unknown(self, record: Record, reason: str) -> Record:
         return await self._save(replace(record, status="unknown", reason=reason))
 
+    @staticmethod
+    def _native_effect_proven(record: Record, step: Step) -> bool:
+        verified = {item.key for item, phase in zip(record.plan.steps, record.phases)
+                    if phase == "verified"}
+        return bool(step.caused_by) and set(step.caused_by) <= verified
+
     async def _forward(self, record: Record) -> Record:
         # Recovery must validate ALL revisions again before any resumed effect.
         for index, step in enumerate(record.plan.steps):
@@ -221,6 +236,11 @@ class Coordinator:
             adapter = self._adapter(step)
             position = await adapter.inspect(step)
             self.guard()
+            if position == Position.AFTER and self._native_effect_proven(record, step):
+                # The initiating step already has a durable intent and verified
+                # outcome. Record the observed native result without replaying it.
+                record = await self._phase(record, index, "verified")
+                continue
             if position != Position.BEFORE:
                 return await self._unknown(record, "revision_conflict")
             record = await self._phase(record, index, "intent")
@@ -282,7 +302,8 @@ class Coordinator:
                 elif phase == "undone":
                     if position != Position.BEFORE:
                         return await self._unknown(record, "compensation_conflict")
-                elif position == Position.AFTER and phase in ("intent", "verified"):
+                elif (position == Position.AFTER and (phase in ("intent", "verified")
+                      or (phase == "pending" and not undoing and self._native_effect_proven(record, step)))):
                     record = await self._phase(record, index, "verified")
                 elif position == Position.BEFORE and phase in ("pending", "intent"):
                     record = await self._phase(record, index, "pending")

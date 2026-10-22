@@ -120,6 +120,53 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         selected = plan_ or self.plan
         return await self.coordinator.apply(selected, selected.fingerprint, operation)
 
+    def cascading(self):
+        self.plan = replace(self.plan, steps=(self.plan.steps[0],
+            replace(self.plan.steps[1], caused_by=('one',))))
+        original = self.adapter.apply
+        async def effect(step, guard):
+            try:
+                await original(step, guard)
+            finally:
+                if step.key == 'one' and self.adapter.positions.get('one') == tx.Position.AFTER:
+                    self.adapter.positions['two'] = tx.Position.AFTER
+        self.adapter.apply = effect
+
+    async def test_declared_native_listener_result_is_not_replayed(self):
+        self.cascading()
+        self.assertEqual('applied', (await self.apply()).status)
+        self.assertEqual(['one'], self.adapter.effects)
+        self.assertEqual(('verified', 'verified'), self.journal.records['op'].phases)
+
+    async def test_lost_ack_recovers_declared_listener_without_replay(self):
+        self.cascading()
+        self.adapter.fail_key, self.adapter.lost_ack = 'one', True
+        self.assertEqual('unknown', (await self.apply()).status)
+        self.assertEqual('ready', (await self.coordinator.reconcile('op')).status)
+        self.assertEqual('applied', (await self.coordinator.resume('op')).status)
+        self.assertEqual(['one'], self.adapter.effects)
+
+    async def test_preexisting_after_is_not_a_native_listener_proof(self):
+        self.cascading()
+        self.adapter.positions['two'] = tx.Position.AFTER
+        with self.assertRaises(tx.Refused):
+            await self.apply()
+        self.assertFalse(self.adapter.effects)
+
+    async def test_undeclared_cascade_remains_unknown(self):
+        self.cascading()
+        self.plan = replace(self.plan, steps=(self.plan.steps[0],
+            replace(self.plan.steps[1], caused_by=())))
+        self.assertEqual('unknown', (await self.apply()).status)
+        self.assertEqual(['one'], self.adapter.effects)
+
+    def test_cascade_dependencies_must_precede_consumer(self):
+        for causes in [('two',), ('missing',), ('one', 'one')]:
+            bad = replace(self.plan, steps=(self.plan.steps[0],
+                replace(self.plan.steps[1], caused_by=causes)))
+            with self.assertRaises(tx.Refused):
+                bad.validate()
+
     async def test_success_and_idempotent_retry_after_restart(self):
         result = await self.apply()
         self.assertEqual('applied', result.status)

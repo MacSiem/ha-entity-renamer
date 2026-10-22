@@ -24,7 +24,15 @@ def decode(value):
             raise ValueError('invalid_journal_operation')
         data = dict(raw)
         plan_data = dict(data.pop('plan'))
-        plan_data['steps'] = tuple(Step(**step) for step in plan_data['steps'])
+        steps = []
+        for raw_step in plan_data['steps']:
+            step_data = dict(raw_step)
+            causes = step_data.get('caused_by', [])
+            if type(causes) is not list or any(type(key) is not str for key in causes):
+                raise ValueError('invalid_journal_native_dependencies')
+            step_data['caused_by'] = tuple(causes)
+            steps.append(Step(**step_data))
+        plan_data['steps'] = tuple(steps)
         for field in ('required_scopes', 'covered_scopes', 'verification_adapters'):
             if type(plan_data[field]) is not list or any(type(item) is not str for item in plan_data[field]):
                 raise ValueError('invalid_journal_plan')
