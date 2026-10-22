@@ -215,6 +215,18 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                 if bound:
                     charge(len(bound[1]))
                 return bound
+            if isinstance(node, (nodes.Getattr, nodes.Getitem)) and isinstance(node.node, nodes.Name):
+                bound = bindings.get(node.node.name)
+                attribute = (node.attr if isinstance(node, nodes.Getattr) else
+                             node.arg.value if isinstance(node.arg, nodes.Const)
+                             and type(node.arg.value) is str else None)
+                if bound and bound[0] == 'runtime_repeat_item' and attribute == 'item':
+                    return ('scalar', bound[1])
+            if (isinstance(node, nodes.Filter) and node.name == 'list'
+                    and not (node.args or node.kwargs or node.dyn_args or node.dyn_kwargs)):
+                bound = value(node.node, bindings)
+                if bound and bound[0] in ('keys', 'list'):
+                    return ('list', bound[1])
             if (isinstance(node, nodes.Call) and isinstance(node.node, nodes.Getattr)
                     and node.node.attr in ('keys', 'items')
                     and not (node.args or node.kwargs or node.dyn_args or node.dyn_kwargs)):
@@ -268,16 +280,19 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
             # and flags carry no entity provenance; item/dynamic access may.
             if isinstance(node, (nodes.Getattr, nodes.Getitem)) and isinstance(node.node, nodes.Name):
                 bound = bindings.get(node.node.name)
-                if bound and bound[0] == 'runtime_repeat':
+                if bound and bound[0] in ('runtime_repeat', 'runtime_repeat_item'):
                     attribute = (node.attr if isinstance(node, nodes.Getattr) else
                                  node.arg.value if isinstance(node.arg, nodes.Const)
                                  and type(node.arg.value) is str else None)
-                    if attribute not in {'index', 'first', 'last'}:
+                    if attribute == 'item' and bound[0] == 'runtime_repeat_item':
+                        escape(('scalar', bound[1]))
+                    elif attribute not in {'index', 'first', 'last'}:
                         mark('unsupported_runtime_repeat', 'Unproven runtime repeat item or access')
                     return
             if isinstance(node, nodes.Name):
                 bound = bindings.get(node.name)
-                if bound and bound[0] == 'runtime_repeat':
+                if bound and bound[0] in ('runtime_repeat', 'runtime_repeat_item'):
+                    escape(bound)
                     mark('unsupported_runtime_repeat', 'Runtime repeat object escapes counter access')
                     return
             if (isinstance(node, nodes.Getattr) and isinstance(node.node, nodes.Name)

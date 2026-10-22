@@ -401,6 +401,24 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
                 scan(child, bindings, reference_fields and isinstance(key, ScalarNode) and key.value in _FIELDS,
                      ancestry, reference_fields)
 
+    def template_alias(node, bindings):
+        if not (isinstance(node, ScalarNode) and node.tag == _STR and '{{' in node.value):
+            return None
+        alias = analyze_template_alias(node.value, bindings, max_nodes=max_nodes)
+        if not alias:
+            return None
+        observed[id(node)] = observed.get(id(node), 0) + 1
+        previous = templates.get(id(node))
+        review = previous[1] if previous else []
+        if review:
+            unsafe.update(alias[1])
+            issue(node, 'yaml_template_alias_scope_conflict')
+        templates[id(node)] = (node.value, review, (previous[2] if previous else 0) + 1,
+                               set(alias[1]) | (previous[3] if previous else set()))
+        for origin in alias[1]:
+            record(origin, 'yaml_template_alias')
+        return alias
+
     def define(node, bindings):
         if not isinstance(node, MappingNode) or node.tag != _STANDARD + 'map':
             scan(node, bindings)
@@ -414,22 +432,9 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
                 scan(child, bindings)
                 continue
             part = static(child)
-            alias = (analyze_template_alias(child.value, bindings, max_nodes=max_nodes)
-                     if isinstance(child, ScalarNode) and child.tag == _STR
-                     and '{{' in child.value else None)
+            alias = template_alias(child, bindings)
             if alias:
-                observed[id(child)] = observed.get(id(child), 0) + 1
-                previous = templates.get(id(child))
-                review = previous[1] if previous else []
-                if review:
-                    unsafe.update(alias[1])
-                    issue(child, 'yaml_template_alias_scope_conflict')
-                templates[id(child)] = (child.value, review,
-                    (previous[2] if previous else 0) + 1,
-                    set(alias[1]) | (previous[3] if previous else set()))
                 bindings[key.value] = alias
-                for origin in alias[1]:
-                    record(origin, 'yaml_template_alias')
             elif part:
                 bound, nodes = part
                 for producer in nodes:
@@ -603,11 +608,21 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
                 invariant = envelope(entry, writes)
                 # HA defines this runtime object locally on every iteration.
                 # It must never inherit a same-named outer static binding.
-                invariant['repeat'] = ('runtime_repeat', ())
+                items = repeat_values.get('for_each')
+                item_part = static(items) if items is not None else None
+                item_bound = item_part[0] if item_part else (template_alias(items, entry) if items is not None else None)
+                known_items = item_bound is not None and item_bound[0] == 'list'
+                if known_items and item_part:
+                    for producer in item_part[1]:
+                        producers[id(producer)] = producers.get(id(producer), 0) + 1
+                invariant['repeat'] = (('runtime_repeat_item', item_bound[1])
+                                       if known_items else ('runtime_repeat', ()))
                 for key, child in repeat.value:
                     scan(key, invariant)
-                    if not isinstance(key, ScalarNode) or key.value != 'sequence':
-                        scan(child, invariant)
+                    if isinstance(key, ScalarNode) and (key.value == 'sequence'
+                            or (key.value == 'for_each' and known_items)):
+                        continue
+                    scan(child, invariant)
                 local_interference = ({name: bound for name, bound in interference.items()
                                        if name != 'repeat'} if interference else {})
                 branch(body, invariant, local_interference)

@@ -93,12 +93,25 @@ async def run_yaml_scopes(hass, root):
   data:
     value: '{% for e in copied %}{{ states(e) }};{% endfor %}'
 """
+    for name, items in (('repeat_items', '[sensor.foo, light.old]'),
+                        ('repeat_items_alias', "'{{ refs }}'"),
+                        ('repeat_items_keys', "'{{ entities|list }}'")):
+        cases[name] = """
+- repeat:
+    for_each: ITEMS
+    sequence:
+    - action: renamer_probe.capture
+      data:
+        value: '{{ repeat.index }}:{{ states(repeat.item) }}'
+""".replace('ITEMS', items)
     expected = {'map_items': ['42|Sensor;on|Light;'], 'choose_if': ['on'],
                 'jinja_branch_true': ['42'], 'jinja_branch_false': ['on'],
                 'jinja_with': ['42'], 'jinja_do': ['42'], 'jinja_loopcontrols': ['on'],
                 'jinja_namespace': ['42'],
                 'repeat': ['42', 'on'], 'parallel': ['42', '42'],
-                'repeat_counters': ['1:True:False:42', '2:False:True:42'], 'map_lookup': ['Sensor'], 'scalar_alias': ['42'], 'list_alias': ['42;on;']}
+                'repeat_counters': ['1:True:False:42', '2:False:True:42'], 'map_lookup': ['Sensor'], 'scalar_alias': ['42'], 'list_alias': ['42;on;'],
+                'repeat_items': ['1:42', '2:on'], 'repeat_items_alias': ['1:42', '2:on'],
+                'repeat_items_keys': ['1:42', '2:on']}
     captured = []
 
     async def capture(call):
@@ -110,9 +123,9 @@ async def run_yaml_scopes(hass, root):
         for name, steps in cases.items():
             variables = ({'entities': {'sensor.foo': {'label': 'Sensor'},
                                         'light.old': {'label': 'Light'}}}
-                         if name in ('map_items', 'map_lookup') else
-                         {} if name.startswith('jinja_') else
-                         {'refs': ['sensor.foo', 'light.old']} if name == 'list_alias' else
+                         if name in ('map_items', 'map_lookup', 'repeat_items_keys') else
+                         {} if name.startswith('jinja_') or name == 'repeat_items' else
+                         {'refs': ['sensor.foo', 'light.old']} if name in ('list_alias', 'repeat_items_alias') else
                          {'ref': 'sensor.foo'})
             document = {'script': {'fixture': {'variables': variables,
                                               'sequence': yaml.safe_load(steps)}}}
