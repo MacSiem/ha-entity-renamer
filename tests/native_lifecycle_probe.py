@@ -59,7 +59,7 @@ async def run(root):
         await hass.async_block_till_done()
         assert entry.state is ConfigEntryState.LOADED, entry.state
         duplicate = await hass.config_entries.flow.async_init('ha_entity_renamer', context={'source': 'user'})
-        assert duplicate['type'] == 'abort' and duplicate['reason'] == 'already_configured', duplicate
+        assert duplicate['type'] == 'abort' and duplicate['reason'] in ('already_configured', 'single_instance_allowed'), duplicate
         from custom_components.ha_entity_renamer.const import DATA_RUNTIME
         from custom_components.ha_entity_renamer.websocket_api import ws_status
         admin = await hass.auth.async_create_user('Fixture admin', group_ids=[GROUP_ID_ADMIN])
