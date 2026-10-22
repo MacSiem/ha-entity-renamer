@@ -186,6 +186,31 @@ class TemplateBindingsTest(unittest.TestCase):
 
 @requires_jinja
 class ExternalYAMLBindingTests(unittest.TestCase):
+    def test_static_map_keys_and_items_preserve_key_provenance(self):
+        for source in ('{% for e in refs.keys() %}{{ states(e) }}{% endfor %}',
+                       '{% for e, meta in refs.items() %}{{ states(e) }} {{ meta.label }}{% endfor %}',
+                       '{{ expand(refs.keys()) }}'):
+            result = self.analyze(source, shape='keys')
+            self.assertFalse(result[1], source)
+            self.assertEqual(result[2], {self.origin})
+            self.assertFalse(result[3])
+
+    def test_map_items_key_escape_and_unknown_metadata_sinks_block(self):
+        for source in ('{% for e, meta in refs.items() %}{{ states(e) }} {{ e }}{% endfor %}',
+                       '{% for e, meta in refs.items() %}{{ states(e) }} {{ loop.previtem }}{% endfor %}',
+                       '{% for e, meta in refs.items() %}{{ states(meta.entity) }}{% endfor %}',
+                       '{% for e, e in refs.items() %}{{ states(e) }}{% endfor %}',
+                       '{{ refs.items() }}'):
+            result = self.analyze(source, shape='keys')
+            self.assertIn(self.origin, result[3], source)
+
+    def test_items_method_on_non_map_or_with_arguments_is_unknown(self):
+        for shape in ('scalar', 'list'):
+            result = self.analyze('{% for e, meta in refs.items() %}{{ states(e) }}{% endfor %}', shape=shape)
+            self.assertIn(self.origin, result[3])
+        result = self.analyze('{% for e in refs.keys(1) %}{{ states(e) }}{% endfor %}', shape='keys')
+        self.assertIn(self.origin, result[3])
+
     def analyze(self, source, *, shape='scalar', field=False):
         from reference_planner import analyze_template_bindings
         self.origin = (-1, 0, 'sensor.a')

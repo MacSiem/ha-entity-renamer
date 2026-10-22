@@ -211,6 +211,12 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                 if bound:
                     charge(len(bound[1]))
                 return bound
+            if (isinstance(node, nodes.Call) and isinstance(node.node, nodes.Getattr)
+                    and node.node.attr in ('keys', 'items')
+                    and not (node.args or node.kwargs or node.dyn_args or node.dyn_kwargs)):
+                bound = value(node.node.node, bindings)
+                if bound and bound[0] == 'keys':
+                    return ('list' if node.node.attr == 'keys' else 'items', bound[1])
             if isinstance(node, (nodes.List, nodes.Tuple)):
                 values = [value(item, bindings) for item in node.items]
                 if values and all(item is not None and item[0] == 'scalar' for item in values):
@@ -368,6 +374,20 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                     supported = (bound is not None and bound[0] in ('list', 'keys')
                                  and isinstance(node.target, nodes.Name)
                                  and node.test is None and not node.recursive)
+                    item_pair = (bound is not None and bound[0] == 'items'
+                                 and isinstance(node.target, nodes.Tuple)
+                                 and len(node.target.items) == 2
+                                 and all(isinstance(item, nodes.Name) for item in node.target.items)
+                                 and node.test is None and not node.recursive)
+                    if item_pair:
+                        # Only YAML map keys have proven entity provenance.
+                        # Metadata is deliberately unknown and cannot inherit it.
+                        local[node.target.items[0].name] = ('scalar', bound[1])
+                        local[node.target.items[1].name] = None
+                        local['loop'] = bound
+                        statements(node.body, local)
+                        statements(node.else_, bindings.copy())
+                        continue
                     if supported:
                         local[node.target.name] = ('scalar', bound[1])
                         # previtem/nextitem expose iterable values too. Treat all
