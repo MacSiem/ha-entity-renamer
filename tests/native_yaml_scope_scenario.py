@@ -12,6 +12,11 @@ async def run_yaml_scopes(hass, root):
     from custom_components.ha_entity_renamer.yaml_plan import plan_yaml
 
     cases = {
+        'map_items': '''
+- action: renamer_probe.capture
+  data:
+    value: '{% for e, meta in entities.items() %}{{ states(e) }}|{{ meta.label }};{% endfor %}'
+''',
         'choose_if': '''
 - choose:
   - conditions: '{{ true }}'
@@ -45,7 +50,8 @@ async def run_yaml_scopes(hass, root):
         value: '{{ states(ref) }}'
 ''',
     }
-    expected = {'choose_if': ['on'], 'repeat': ['42', 'on'], 'parallel': ['42', '42']}
+    expected = {'map_items': ['42|Sensor;on|Light;'], 'choose_if': ['on'],
+                'repeat': ['42', 'on'], 'parallel': ['42', '42']}
     captured = []
 
     async def capture(call):
@@ -55,7 +61,10 @@ async def run_yaml_scopes(hass, root):
     mapping = {'sensor.foo': 'sensor.new', 'light.old': 'light.new'}
     try:
         for name, steps in cases.items():
-            document = {'script': {'fixture': {'variables': {'ref': 'sensor.foo'},
+            variables = ({'entities': {'sensor.foo': {'label': 'Sensor'},
+                                        'light.old': {'label': 'Light'}}}
+                         if name == 'map_items' else {'ref': 'sensor.foo'})
+            document = {'script': {'fixture': {'variables': variables,
                                               'sequence': yaml.safe_load(steps)}}}
             path = Path(root) / (name + '.yaml')
             path.write_text(yaml.safe_dump(document, sort_keys=False))
