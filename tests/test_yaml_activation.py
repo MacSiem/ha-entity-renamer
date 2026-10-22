@@ -24,6 +24,26 @@ class ActivationTests(unittest.IsolatedAsyncioTestCase):
     def receipt(self, domains=('automation', 'script'), unsupported=()):
         return validation.ValidationReceipt('/unused', (), (), (), domains, unsupported, '2025.6.0')
 
+    async def test_forward_file_write_and_new_reverse_plan_keep_independent_source_identity(self):
+        from custom_components.ha_entity_renamer.yaml_plan import plan_yaml
+        from custom_components.ha_entity_renamer.file_mutations import apply_file_patch
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = parent / 'config'; root.mkdir(); (root / '.storage').mkdir()
+            (root / 'configuration.yaml').write_text('script: !include scripts.yaml\n')
+            (root / 'scripts.yaml').write_text('fixture:\n  sequence:\n    - action: homeassistant.update_entity\n      target:\n        entity_id: sensor.old\n')
+            forward = plan_yaml(root, {'sensor.old': 'sensor.new'})
+            snapshots = {row.path: row for row in forward.files}
+            patch = forward.patches[0]
+            written = apply_file_patch(root, patch, snapshots[patch.path], 'stage_forward')
+            reverse = plan_yaml(root, {'sensor.new': 'sensor.old'})
+            script = next(row for row in reverse.files if row.path == 'scripts.yaml')
+            self.assertEqual(script.inode, written['inode'])
+            before, after = parent / 'before', parent / 'after'
+            before.mkdir(); after.mkdir()
+            files, _ = validation._stage(root, reverse, before, after)
+            self.assertTrue(any(row[0] == 'scripts.yaml' for row in files))
+
     async def test_cancelled_staging_drains_before_caller_can_remove_private_files(self):
         entered, release = asyncio.Event(), asyncio.Event()
         finished = []
