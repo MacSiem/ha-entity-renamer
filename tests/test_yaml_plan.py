@@ -416,6 +416,36 @@ class YAMLPlannerTests(unittest.TestCase):
         proof = plan.variable_bindings[0]
         self.assertGreater(proof.yaml_occurrences, proof.accounted_occurrences)
 
+    def test_template_variable_alias_preserves_scalar_and_list_origins(self):
+        for initial, sink in (('sensor.foo', 'states(copied)'),
+                              ('[sensor.foo, light.old]', 'expand(copied)|list')):
+            source = """script:
+  demo:
+    variables:
+      ref: INITIAL
+    sequence:
+    - variables:
+        copied: '{{ ref }}'
+    - value_template: '{{ SINK }}'
+""".replace('INITIAL', initial).replace('SINK', sink)
+            self.assert_variable_patch(source)
+
+    def test_template_variable_alias_used_as_label_still_blocks_producer(self):
+        source = """script:
+  demo:
+    variables:
+      ref: sensor.foo
+    sequence:
+    - variables:
+        copied: '{{ ref }}'
+    - data:
+        message: '{{ copied }}'
+"""
+        self.put('configuration.yaml', source)
+        result = self.plan()
+        self.assertFalse(result.ready)
+        self.assertFalse(result.patches)
+
     def test_yaml_variable_rebinding_has_separate_origins(self):
         source = "script:\n  demo:\n    variables:\n      ref: sensor.foo\n    sequence:\n    - value_template: '{{ states(ref) }}'\n    - variables:\n        ref: light.old\n    - value_template: '{{ states(ref) }}'\n"
         self.assert_variable_patch(source)
