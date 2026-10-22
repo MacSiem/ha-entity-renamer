@@ -86,13 +86,17 @@ _STATE = re.compile(
     r"(?<![\w.])states\s*\.\s*(?P<id>[a-z_][a-z0-9_]*\s*\.\s*[a-z0-9_]+)(?![\w])",
     re.ASCII,
 )
-_DYNAMIC = re.compile(r"\b(?:states|is_state|state_attr|is_state_attr|expand)\s*\(|\bstates\s*\[")
+_DYNAMIC = re.compile(r"\b(?:states|is_state|state_attr|is_state_attr|expand)\s*\(|\bstates\s*(?:\[|\.\s*[a-z_][a-z0-9_]*\s*\[)")
 _BRACKET = re.compile(
     r"(?<![\w.])states\s*\[\s*(?P<quote>['\"])(?P<id>[a-z_][a-z0-9_]*\.[a-z0-9_]+)(?P=quote)\s*\]",
     re.ASCII,
 )
 _EXPAND = re.compile(r"(?<![\w.])expand\s*\(\s*(?P<args>[^()]*)\)", re.ASCII)
 _ENTITY_LITERAL = re.compile(r"(?P<quote>['\"])(?P<id>[a-z_][a-z0-9_]*\.[a-z0-9_]+)(?P=quote)", re.ASCII)
+_SPLIT_STATE = re.compile(
+    r"(?<![\w.])states\s*(?:\.\s*(?P<domain>[a-z_][a-z0-9_]*)|"
+    r"\[\s*(?P<dq>['\"])(?P<bracket_domain>[a-z_][a-z0-9_]*)(?P=dq)\s*\])"
+    r"\s*\[\s*(?P<oq>['\"])(?P<object>[a-z0-9_]+)(?P=oq)\s*\]", re.ASCII)
 # A bounded scheme suffix also catches long schemes without quadratic retries
 # against a very long alphabetic string that contains no colon.
 _EXTERNAL = re.compile(r"(?:[a-z][a-z0-9+.-]{0,31}://|javascript:|<script\b)", re.I)
@@ -266,6 +270,14 @@ def plan_references(
                     old = re.sub(r'\s+', '', match.group('id'))
                     if old in mapping:
                         replacements.append((block_start + start, block_start + end, mapping[old]))
+            for match in _SPLIT_STATE.finditer(expression):
+                if inside_string(match.start()):
+                    continue
+                recognized_calls.add(match.start())
+                old = (match.group('domain') or match.group('bracket_domain')) + '.' + match.group('object')
+                if old in mapping:
+                    start, end = match.span('object')
+                    replacements.append((block_start + start, block_start + end, mapping[old].split('.', 1)[1]))
             # expand accepts multiple entities or a literal list. Validate the
             # complete argument grammar before rewriting any of its literals;
             # an arbitrary string/list expression is not a static reference.

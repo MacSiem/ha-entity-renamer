@@ -22,6 +22,19 @@ def jinja(path=()):
 
 
 class ReferencePlannerTest(unittest.TestCase):
+    def test_split_static_state_access(self):
+        for source in ("{{ states.sensor['a'].state }}", "{{ states['sensor']['a'].state }}",
+                       '''{{ states [ "sensor" ] [ 'a' ] }}'''):
+            plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+            self.assertEqual(plan.value, source.replace("'a'", "'b'"))
+            self.assertFalse(plan.markers, plan.markers)
+
+    def test_split_dynamic_state_access_is_blocked_without_full_id(self):
+        for source in ("{{ states.sensor[variable] }}", "{{ states['sensor'][variable] }}"):
+            plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+            self.assertEqual(plan.value, source)
+            self.assertIn('dynamic_reference', [m.code for m in plan.markers])
+
     def test_local_binding_preserves_global_static_reference_migration(self):
         for source in ("{% set reading = states('sensor.a') %}{{ reading }}",
                        "{% for item in items %}{{ states('sensor.a') }}{% endfor %}",
