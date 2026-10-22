@@ -3092,6 +3092,17 @@ class HAEntityRenamer extends HTMLElement {
         .card { max-width:1200px;margin-inline:auto;font-size:14px;line-height:1.5; }
         .device-name,.entity-name,.btn,.list-toolbar input,.list-toolbar select { font-size:14px; }
         .registry-id { display:inline-block;max-width:100%;min-width:0;overflow-x:auto;vertical-align:bottom;white-space:normal;word-break:normal;overflow-wrap:normal;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
+        .stat-card .num,.stat-card .label { display:block; }
+        .stats-row .stat-card { min-width:0; }
+        @container (max-width:500px) {
+          .stats-row { grid-template-columns:repeat(2,minmax(0,1fr)); }
+          .entity-row { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px; }
+          .entity-row .entity-name { grid-column:1;grid-row:1;min-width:0;overflow-wrap:anywhere; }
+          .entity-row .entity-id { grid-column:1;grid-row:2;min-width:0;word-break:normal; }
+          .entity-row .entity-domain { display:none; }
+          .entity-row > .btn { grid-column:2;grid-row:1 / span 2; }
+          .entity-row > .queued-badge { grid-column:1;grid-row:3;justify-self:start; }
+        }
         .automatic-target { display:flex;align-items:baseline;gap:4px; }
         .automatic-target code { min-width:0;flex:1; }
         .confirm-dialog code { min-width:0;max-width:100%; }
@@ -3165,7 +3176,7 @@ class HAEntityRenamer extends HTMLElement {
     const draft = this._entityEditor;
     return `<form id="entityEditForm" aria-labelledby="entityEditHeading" style="margin:16px 0;padding:16px;border:1px solid var(--bento-border,var(--divider-color,#ddd));border-radius:12px;min-width:0;">
       <h2 id="entityEditHeading" style="font-size:16px;margin:0 0 8px;">${t.editEntity}</h2>
-      <p style="overflow-wrap:anywhere;margin:0 0 12px;">${_esc(draft.oldId)}</p>
+      <p style="min-width:0;margin:0 0 12px;">${_entityIdHtml(draft.oldId)}</p>
       <label for="entityEditObjectId" style="display:block;">${t.newEntity}</label>
       <input id="entityEditObjectId" data-family-draft-context="${_esc(draft.oldId)}" type="text" value="${_esc(draft.objectIdDraft)}" style="display:block;width:100%;min-width:0;box-sizing:border-box;margin:6px 0 12px;" ${this._loading ? 'disabled' : ''}>
       <label for="entityEditName" style="display:block;">${t.newFriendly}</label>
@@ -3292,9 +3303,9 @@ class HAEntityRenamer extends HTMLElement {
                   const inQueue = this._renameQueue.some(r => r.oldId === e.entity_id);
                   return `
                   <div class="entity-row">
+                    <span class="entity-name">${_esc(e.name || e.original_name || '')}</span>
                     <span class="entity-domain">${_esc(domain)}</span>
                     <span class="entity-id">${_entityIdHtml(e.entity_id)}${this._listUi.isNew(d.created_at) ? '' : this._newBadge(e.created_at)}</span>
-                    <span class="entity-name">${_esc(e.name || e.original_name || '')}</span>
                     ${inQueue
                       ? '<span class="queued-badge">✓ ' + t.inQueue + '</span><button class="btn btn-sm btn-outline" data-remove-queue="' + _esc(e.entity_id) + '" aria-label="' + _esc(t.removeFromQueue) + '">' + (this._lang==='pl'?'Usuń':'Remove') + '</button>'
                       : `<button class="btn btn-sm btn-outline" data-add-single="${_esc(e.entity_id)}">+ ${t.queue}</button>`
@@ -3393,7 +3404,7 @@ class HAEntityRenamer extends HTMLElement {
             <span class="log-time">${_esc(this._formatUi.dateTime(l.completedAt || l.attemptedAt) || String(l.time || '—') + (this._lang==='pl'?' · data nieznana':' · date unknown'))}</span>
             ${this._formatUi.dateTime(l.completedAt || l.attemptedAt) ? `<details><summary>${this._lang==='pl'?'Szczegóły czasu':'Time details'}</summary>UTC: <code>${_esc(l.completedAt || l.attemptedAt)}</code> · ${this._lang==='pl'?'Strefa wyświetlania':'Display time zone'}: ${_esc(this._formatUi.timeZone)}</details>`:''}
             <span class="${resultState === 'success' ? 'log-ok' : resultState === 'error' ? 'log-err' : ''}">
-              ${ui.statusHtml(resultState)} ${_esc(l.oldId)} → ${_esc(l.newId)}
+              ${ui.statusHtml(resultState)} ${_entityIdHtml(l.oldId)} → ${_entityIdHtml(l.newId)}
             </span>
             ${l.error ? `<br><small style="color:#FCA5A5">${_esc(l.error)}</small>` : ''}
             ${this._dashboardCoverageHtml(imp)}
