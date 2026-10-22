@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 NAMES = ('reference_planner', 'persistence', 'dashboard_plan', 'lovelace_native',
          'recorder_guard', 'native_registry', 'energy_plan', 'energy_native',
          'transaction', 'journal', 'helper_plan', 'helper_native', 'helper_persistence',
-         'prepared', 'helper_transaction', 'helper_observers', 'native_adapters', 'history_guard', 'native_name_observers')
+         'prepared', 'helper_transaction', 'helper_observers', 'native_adapters', 'history_guard', 'native_name_observers',
+         'yaml_plan', 'file_mutations', 'yaml_validation', 'yaml_transaction')
 sources = {name: (ROOT / 'custom_components/ha_entity_renamer' / (name + '.py')).read_text()
            for name in NAMES}
 sources['native_helper_runtime_scenario'] = (ROOT / 'tests/native_helper_runtime_scenario.py').read_text()
