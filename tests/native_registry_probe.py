@@ -61,8 +61,13 @@ async def run(root):
                             'auto_purge': False, 'auto_repack': False},
               'http': {'server_port': 0}}
     try:
-        await er.async_load(hass)
-        await dr.async_load(hass)
+        from homeassistant import loader
+        from homeassistant.bootstrap import async_load_base_functionality
+        from homeassistant.config_entries import ConfigEntries
+        loader.async_setup(hass)
+        hass.config_entries = ConfigEntries(hass, config)
+        await loader.async_get_custom_components(hass)
+        assert await async_load_base_functionality(hass)
         assert await async_setup_component(hass, 'recorder', config)
         component = EntityComponent(logging.getLogger('probe'), 'sensor', hass, timedelta(seconds=60))
         meter = Meter()
