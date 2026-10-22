@@ -251,14 +251,24 @@ def _assert_sources(change, after_paths, restored=False):
                     actual = tuple(sorted((entry.name, (s := entry.stat(follow_symlinks=False)).st_mode,
                                            s.st_dev, s.st_ino) for entry in entries
                                           if names is None or entry.name in names))
+                actual_entries = {name: (mode, dev, ino) for name, mode, dev, ino in actual}
                 adjusted = []
                 for name, mode, dev, ino in expected:
                     child = name if path == '.' else path + '/' + name
                     if child in owned:
-                        actual_mode, actual_dev, actual_ino = owned[child]
-                        if (actual_mode, actual_dev) != (mode, dev):
+                        actual_mode, actual_dev, _ = owned[child]
+                        entry = actual_entries.get(name)
+                        if ((actual_mode, actual_dev) != (mode, dev)
+                                or entry is None or entry[:2] != (mode, dev)):
                             raise Refused('yaml_owned_metadata_conflict')
-                        ino = actual_ino
+                        # Owned bytes have already been read through anchored
+                        # nofollow descriptors. Their replacement inode is not
+                        # an original CAS identity. Directory membership uses
+                        # the identity observed by that directory enumeration;
+                        # do not compare it to a different cached descriptor
+                        # identity after our replace. Unchanged sources retain
+                        # the exact original device/inode/hash checks above.
+                        ino = entry[2]
                     adjusted.append((name, mode, dev, ino))
                 if actual != tuple(sorted(adjusted)):
                     raise Refused('yaml_validation_graph_conflict')

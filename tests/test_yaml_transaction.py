@@ -220,6 +220,26 @@ class Regressions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.root / self.rows[1].path).read_bytes(), b'foreign after\n')
         self.assertEqual((self.root / self.rows[0].path).read_bytes(), self.rows[0].after)
 
+    async def test_foreign_permission_change_after_apply_is_not_compensated(self):
+        result = await self.coordinator.apply(self.plan, self.plan.fingerprint, 'op')
+        self.assertEqual(result.status, 'applied')
+        path = self.root / self.rows[0].path
+        path.chmod(0o640)
+        self.assertEqual(await self.adapter.inspect(self.step), transaction.Position.UNKNOWN)
+        result = await self.coordinator.rollback('op')
+        self.assertEqual(result.status, 'unknown')
+        self.assertEqual(path.read_bytes(), self.rows[0].after)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+
+    async def test_full_include_membership_rejects_new_foreign_file(self):
+        from dataclasses import replace
+        path, entries, _ = self.change.receipt.source_directories[0]
+        receipt = replace(self.change.receipt, source_directories=((path, entries, None),))
+        change = replace(self.change, receipt=receipt)
+        (self.root / 'foreign.yaml').write_bytes(b'foreign config\n')
+        with self.assertRaises(transaction.Refused):
+            module._assert_sources(change, set())
+
     async def test_partial_write_is_unknown_no_replay(self):
         original = module.apply_file_patch
         calls = []
