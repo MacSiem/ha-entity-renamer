@@ -112,7 +112,8 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
     offsets.append(len(original_text))
     text = ''.join(normalized)
     try:
-        env = Environment(keep_trailing_newline=True)
+        env = Environment(keep_trailing_newline=True,
+                          extensions=('jinja2.ext.loopcontrols', 'jinja2.ext.do'))
         raw = []
         cursor = 0
         cap = min(max_nodes, 10000)
@@ -160,7 +161,8 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                     result.source_span = spans[id(tokens[position + 1])]
                 return result
 
-        # A fresh environment without extensions: no extension parser callbacks.
+        # Only Jinja's built-in loopcontrol/do parsers, also enabled by HA.
+        # No integration/user extension callbacks and no compilation/rendering.
         env._tokenize = lambda *args, **kwargs: TokenStream(tokens, None, None)
         tree = SpannedParser(env, text).parse()
         count = 0
@@ -176,7 +178,7 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
 
         globals_ = {'states', 'is_state', 'state_attr', 'is_state_attr', 'expand'}
         unsupported = (nodes.Macro, nodes.Import, nodes.FromImport, nodes.CallBlock,
-                       nodes.Include, nodes.Extends, nodes.With, nodes.NSRef,
+                       nodes.Include, nodes.Extends, nodes.NSRef,
                        nodes.Block, nodes.FilterBlock)
         for node in all_nodes:
             if isinstance(node, unsupported):
@@ -260,6 +262,12 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
 
         def expression(node, bindings):
             charge()
+            if (isinstance(node, nodes.Getattr) and isinstance(node.node, nodes.Name)
+                    and node.node.name == 'loop' and bindings.get('loop')
+                    and bindings['loop'][0] == 'loop'
+                    and node.attr in {'index', 'index0', 'revindex', 'revindex0',
+                                      'first', 'last', 'length', 'depth', 'depth0'}):
+                return  # Loop counters/flags do not expose iterable entity IDs.
             if isinstance(node, nodes.Call):
                 name = node.node.name if isinstance(node.node, nodes.Name) else None
                 if name in globals_:
@@ -384,7 +392,7 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                         # Metadata is deliberately unknown and cannot inherit it.
                         local[node.target.items[0].name] = ('scalar', bound[1])
                         local[node.target.items[1].name] = None
-                        local['loop'] = bound
+                        local['loop'] = ('loop', bound[1])
                         statements(node.body, local)
                         statements(node.else_, bindings.copy())
                         continue
@@ -392,7 +400,7 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                         local[node.target.name] = ('scalar', bound[1])
                         # previtem/nextitem expose iterable values too. Treat all
                         # loop metadata uses conservatively as origin escapes.
-                        local['loop'] = bound
+                        local['loop'] = ('loop', bound[1])
                     else:
                         expression(node.iter, bindings)
                         targets = [node.target] + list(node.target.find_all(nodes.Name))
@@ -432,6 +440,20 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                                 origins.update(bound[1])
                         shape = next(iter(shapes)) if len(shapes) == 1 else 'unknown'
                         bindings[name] = (shape, tuple(sorted(origins))) if origins else None
+                elif isinstance(node, nodes.With):
+                    local = bindings.copy()
+                    for target, item in zip(node.targets, node.values):
+                        # Jinja evaluates every RHS against the outer scope.
+                        bound = value(item, bindings)
+                        if bound is None:
+                            expression(item, bindings)
+                        if isinstance(target, nodes.Name):
+                            local[target.name] = bound
+                        else:
+                            if bound:
+                                escape(bound)
+                            mark('unsupported_template_scope', 'Unsupported with target')
+                    statements(node.body, local)
                 elif isinstance(node, nodes.Scope):
                     statements(node.body, bindings.copy())
                 else:

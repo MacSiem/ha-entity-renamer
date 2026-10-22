@@ -56,8 +56,16 @@ async def run_yaml_scopes(hass, root):
             "      {% if " + branch + " %}{% set e='sensor.foo' %}"
             "{% elif true %}{% set e='light.old' %}"
             "{% else %}{% set e='sensor.foo' %}{% endif %}{{ states(e) }}\n")
+    cases['jinja_with'] = ("- action: renamer_probe.capture\n  data:\n    value: >-\n"
+        "      {% with e='sensor.foo' %}{{ states(e) }}{% endwith %}\n")
+    cases['jinja_do'] = ("- action: renamer_probe.capture\n  data:\n    value: >-\n"
+        "      {% set e='sensor.foo' %}{% do states(e) %}{{ states(e) }}\n")
+    cases['jinja_loopcontrols'] = ("- action: renamer_probe.capture\n  data:\n    value: >-\n"
+        "      {% for e in ['sensor.foo','light.old'] %}"
+        "{% if loop.first %}{% continue %}{% endif %}{{ states(e) }}{% break %}{% endfor %}\n")
     expected = {'map_items': ['42|Sensor;on|Light;'], 'choose_if': ['on'],
                 'jinja_branch_true': ['42'], 'jinja_branch_false': ['on'],
+                'jinja_with': ['42'], 'jinja_do': ['42'], 'jinja_loopcontrols': ['on'],
                 'repeat': ['42', 'on'], 'parallel': ['42', '42']}
     captured = []
 
@@ -71,7 +79,7 @@ async def run_yaml_scopes(hass, root):
             variables = ({'entities': {'sensor.foo': {'label': 'Sensor'},
                                         'light.old': {'label': 'Light'}}}
                          if name == 'map_items' else
-                         {} if name.startswith('jinja_branch_') else {'ref': 'sensor.foo'})
+                         {} if name.startswith('jinja_') else {'ref': 'sensor.foo'})
             document = {'script': {'fixture': {'variables': variables,
                                               'sequence': yaml.safe_load(steps)}}}
             path = Path(root) / (name + '.yaml')

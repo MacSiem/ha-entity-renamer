@@ -104,8 +104,38 @@ class TemplateBindingsTest(unittest.TestCase):
                                 'unsupported_reference')
 
     def test_loop_label_and_loop_previtem_escape_block(self):
-        for use in ['{{ e }}', '{{ loop.previtem }}', '{{ loop.index }}']:
+        for use in ['{{ e }}', '{{ loop.previtem }}', '{{ loop.nextitem }}']:
             self.assert_blocked("{% for e in ['sensor.a'] %}{{ states(e) }}" + use + '{% endfor %}')
+
+    def test_native_loopcontrols_and_safe_counter_attributes(self):
+        source = ("{% for e in ['sensor.a','sensor.c'] %}"
+                  "{% if loop.first %}{% continue %}{% endif %}"
+                  "{{ states(e) }}{% break %}{% endfor %}")
+        self.assert_migrates(source, source.replace("'sensor.a'", "'sensor.b'"))
+        for attribute in ('index', 'index0', 'revindex', 'revindex0',
+                          'first', 'last', 'length', 'depth', 'depth0'):
+            source = ("{% for e in ['sensor.a'] %}{{ loop." + attribute
+                      + " }}{{ states(e) }}{% endfor %}")
+            self.assert_migrates(source, source.replace("'sensor.a'", "'sensor.b'"))
+
+    def test_do_statement_consumes_only_proven_ha_calls(self):
+        source = "{% set e='sensor.a' %}{% do states(e) %}{{ states(e) }}"
+        self.assert_migrates(source, source.replace("'sensor.a'", "'sensor.b'"))
+        self.assert_blocked("{% set e='sensor.a' %}{% do custom(e) %}{{ states(e) }}",
+                            'unsupported_reference')
+
+    def test_with_uses_outer_rhs_and_never_leaks_local_bindings(self):
+        source = ("{% set e='sensor.c' %}{% with e='sensor.a', alias=e %}"
+                  "{{ states(e) }}{{ states(alias) }}{% endwith %}{{ states(e) }}")
+        self.assert_migrates(source, source.replace("'sensor.a'", "'sensor.b'"))
+        source = "{% with e='sensor.a', alias=e %}{{ states(alias) }}{% endwith %}"
+        self.assert_blocked(source, 'dynamic_reference')
+        self.assert_blocked("{% with e='sensor.a' %}{{ states(e) }}{{ e }}{% endwith %}",
+                            'unsupported_reference')
+
+    def test_loop_name_bound_to_entity_values_is_not_native_loop_metadata(self):
+        source = "{% set loop=['sensor.a'] %}{{ expand(loop) }}{{ loop.index }}"
+        self.assert_blocked(source, 'unsupported_reference')
 
     def test_branch_merge_is_unknown_and_dynamic_rebind_remains_blocked(self):
         for source in ["{% set e='sensor.a' %}{% if flag %}{% set e=other %}{% endif %}{{ states(e) }}",
