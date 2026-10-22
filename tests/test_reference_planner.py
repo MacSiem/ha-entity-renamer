@@ -22,6 +22,23 @@ def jinja(path=()):
 
 
 class ReferencePlannerTest(unittest.TestCase):
+    def test_local_binding_preserves_global_static_reference_migration(self):
+        for source in ("{% set reading = states('sensor.a') %}{{ reading }}",
+                       "{% for item in items %}{{ states('sensor.a') }}{% endfor %}",
+                       "{% set text %}{{ states.sensor.a.state }}{% endset %}{{ text }}",
+                       "{% for key, value in items %}{{ states('sensor.a') }}{% endfor %}"):
+            plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+            self.assertFalse(plan.markers, plan.markers)
+            self.assertEqual(plan.value, source.replace('sensor.a', 'sensor.b'))
+
+    def test_binding_shadowing_and_namespace_assignment_are_blocked(self):
+        for source in ("{% set foo, states = pair %}{{ states('sensor.a') }}",
+                       "{% set ns.states = lookup %}{{ states('sensor.a') }}",
+                       "{% for foo, expand in pairs %}{{ expand('sensor.a') }}{% endfor %}"):
+            plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+            self.assertEqual(plan.value, source)
+            self.assertIn('unsupported_template_scope', [m.code for m in plan.markers])
+
     def test_static_bracket_reference_preserves_attribute_and_format(self):
         source = "{{ states [ 'sensor.a' ].state }}"
         plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())

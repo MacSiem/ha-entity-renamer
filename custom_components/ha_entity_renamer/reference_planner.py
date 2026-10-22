@@ -167,7 +167,7 @@ def plan_references(
         return any(match.group(1) in mapping for match in _TOKEN.finditer(text))
 
     def template(text: str, path: Path) -> str:
-        if re.search(r"{%[-+]?\s*(?:set|for|macro|import|from|call|include|extends|with)\b", text):
+        if re.search(r"{%[-+]?\s*(?:macro|import|from|call|include|extends|with)\b", text):
             markers.append(Marker(path, "unsupported_template_scope", "Template bindings require syntax-aware resolution"))
             return text
         if _EXTERNAL.search(text):
@@ -199,6 +199,29 @@ def plan_references(
                 return text
             blocks.append((opening.start(), text[opening.start():end + 2]))
             cursor = end + 2
+        # Plain local assignments/loop variables do not change HA's global
+        # lookup functions. Permit those bindings only when their complete
+        # target grammar is known and none shadows a recognized HA global.
+        # Imports/macros/namespace assignments remain separate unsupported scope.
+        globals_used = {'states', 'is_state', 'state_attr', 'is_state_attr', 'expand'}
+        for _, expression in blocks:
+            binding = re.match(r"{%[-+]?\s*(set|for)\b(?P<rest>.*)", expression, re.S)
+            if binding is None:
+                continue
+            rest = binding.group('rest')
+            target = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*(.*)", rest, re.S)
+            valid = target is not None
+            if target:
+                names = {name.strip() for name in target.group(1).split(',')}
+                suffix = target.group(2)
+                valid = not names.intersection(globals_used)
+                if binding.group(1) == 'for':
+                    valid &= bool(re.match(r'in\b', suffix))
+                else:
+                    valid &= suffix.startswith('=') or bool(re.fullmatch(r'[-+]?%}', suffix.strip()))
+            if not valid:
+                markers.append(Marker(path, 'unsupported_template_scope', 'Unknown or shadowing template binding'))
+                return text
         if not blocks:
             if mentions_source(text):
                 markers.append(Marker(path, "unsupported_reference", "Non-Jinja text left unchanged"))
