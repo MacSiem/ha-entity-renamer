@@ -63,6 +63,11 @@ def points(recorder, metadata_id, ceiling=None):
         if ceiling is not None: query = query.where(States.state_id <= ceiling)
         return [tuple(row) for row in session.execute(query.order_by(States.state_id))]
 
+def state_content(recorder, metadata_id, ceiling):
+    with session_scope(session=recorder.get_session(), read_only=True) as session:
+        rows = session.execute(select(States).where(States.metadata_id == metadata_id, States.state_id <= ceiling)).scalars()
+        return {row.state_id: {column.name: getattr(row, column.name) for column in States.__table__.columns} for row in rows}
+
 async def run(root):
     os.chdir(root)
     hass = HomeAssistant(root)
@@ -115,6 +120,7 @@ async def run(root):
         ceiling = history[-1][0]
         historical = NativeHistoryGuard(guard)
         historical_before = await historical.capture(mapping)
+        state_before = await recorder.async_add_executor_job(state_content, recorder, metadata_id, ceiling)
         assert historical_before['content']['hourly']['count'] == 2
         assert historical_before['content']['attributes']['count'] >= 1
         linked = None
@@ -134,7 +140,12 @@ async def run(root):
         assert meter.entity_id == mapping[old]
         assert registry.async_get(mapping[old]).id == entry.id
         assert await recorder.async_add_executor_job(points, recorder, metadata_id, ceiling) == history
-        assert await historical.verify(historical_before)
+        if not await historical.verify(historical_before):
+            from migration_probe.history_guard import _read
+            check = await recorder.async_add_executor_job(_read, recorder, historical_before['state_ids'], historical_before['statistic_ids'], historical_before['content'])
+            state_after = await recorder.async_add_executor_job(state_content, recorder, metadata_id, ceiling)
+            print({'history_tables_equal': {k: check[k] == v for k,v in historical_before['content'].items()}, 'state_changed_columns': [(key, [column for column,value in row.items() if state_after.get(key, {}).get(column) != value]) for key,row in state_before.items()]}, flush=True)
+            raise AssertionError('Historical content changed')
         meter._attr_native_value = 43
         meter.async_write_ha_state()
         await guard.snapshot(mapping)
