@@ -8,8 +8,9 @@
 <button id="open">Open confirmation</button>
 <p>Synthetic entities only. Registry writes: <output id="writes">0</output></p>
 <main><ha-entity-renamer></ha-entity-renamer></main>
-<script src="../ha-entity-renamer.js?confirmation-layout=222-theme"></script>
-<script>
+<script type="module">
+// Always exercise current local bytes when manually reloading this fixture.
+await import('../ha-entity-renamer.js?confirmation-layout='+Date.now());
 const card=document.querySelector('ha-entity-renamer');
 const entries=[{id:'qa-entry',entity_id:'sensor.qa_before',device_id:'qa-device',unique_id:'qa',platform:'mqtt'}];
 const devices=[{id:'qa-device',name:'Synthetic QA'}];
