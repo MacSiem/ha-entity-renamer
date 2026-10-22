@@ -76,9 +76,12 @@ class NativeRecorderGuard:
 
     def __init__(self, hass):
         from homeassistant.components.recorder import get_instance
+        self.hass = hass
         self.instance = get_instance(hass)
 
     async def snapshot(self, mapping):
+        # Registry callbacks must enqueue migration work before the commit barrier.
+        await self.hass.async_block_till_done()
         await self.instance.async_block_till_done()
         ids = tuple(sorted(set(mapping) | set(mapping.values())))
         return await self.instance.async_add_executor_job(partial(_read, self.instance, ids))
