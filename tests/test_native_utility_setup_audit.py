@@ -54,20 +54,22 @@ class NativeUtilitySetupAuditProbe(unittest.IsolatedAsyncioTestCase):
                 if code is writer_code and local.get('self') is self.f.entity:
                     if action == 'call':
                         target = self.f.entity.async_get(local['entity_id'])
-                        active[id(frame)] = {'before': row(target),
-                            'callers': ancestors(frame)}
+                        value = {'before': row(target), 'callers': ancestors(frame),
+                                 'frame_id': id(frame)}
+                        calls.append(value)  # Native writes may synchronously nest.
+                        active[id(frame)] = value
                     elif action == 'return':
                         value = active.pop(id(frame))
                         value['after'] = row(result)
                         value['manager'] = row(self.f.entity.async_get(result.entity_id))
                         value['return_uuid'] = result.id
-                        calls.append(value)
                 elif code is fire_code and action == 'call':
                     if local.get('event_type') == 'entity_registry_updated':
                         data = local.get('event_data')
                         parent = frame.f_back
                         if parent is not None and parent.f_code is writer_code:
-                            emitted[id(data)] = (data, deepcopy(data), id(parent))
+                            emitted[id(data)] = (data, deepcopy(data), id(parent),
+                                row(self.f.entity.async_get(data['entity_id'])))
                 elif code is event_code and action == 'call':
                     if local.get('event_type') == 'entity_registry_updated':
                         data = local.get('data')
@@ -90,7 +92,15 @@ class NativeUtilitySetupAuditProbe(unittest.IsolatedAsyncioTestCase):
         previous = original
         for call in calls:
             self.assertEqual(call['before'], previous)
-            self.assertEqual(call['after'], call['manager'])
+            matching = [item for item in emitted.values() if item[2] == call['frame_id']]
+            if call['before'] != call['after']:
+                self.assertEqual(len(matching), 1)
+                self.assertEqual(call['after'], matching[0][3])
+            else:
+                self.assertEqual(matching, [])
+            # Nested synchronous registry callbacks may have committed a later
+            # audited row before this outer native function returns.
+            self.assertEqual(call['manager']['id'], helper_uuid)
             self.assertEqual(call['return_uuid'], helper_uuid)
             previous = call['after']
         self.assertEqual(previous, row(self.f.entity.async_get(helper_id)))
@@ -100,7 +110,7 @@ class NativeUtilitySetupAuditProbe(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(emitted)
         self.assertTrue(events)
         self.assertEqual(len(events), len(emitted))
-        self.assertTrue(all(data == saved for data, saved, _ in emitted.values()))
+        self.assertTrue(all(data == saved for data, saved, _, _ in emitted.values()))
         # Persist only a compact synthetic diagnostic. Lineage is observed here;
         # no claim that these callers form a sufficient authorization contract.
         print(json.dumps({'probe': 'native_utility_setup_calls',
