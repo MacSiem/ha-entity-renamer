@@ -62,7 +62,7 @@ def stored_lifecycle_plan(store, root_id):
         binding = root['binding']
         operation = binding['operation_id']
         if (row['digest'] != _digest(root) or root['kind'] != 'helper_lifecycle_root'
-                or root['schema'] != 1):
+                or type(root['schema']) is not int or root['schema'] not in (1, 2)):
             _fail('root_binding_mismatch')
         raw_plan = binding['plan']
         record = {'operation_id': operation, 'plan': raw_plan, 'status': 'prepared',
@@ -136,7 +136,7 @@ class NativeHelperLifecycle:
     def __init__(self, store, manager, operation_id, plan, receipt, prepared_digests,
                  *, guard, verify_original_native_inputs, settle,
                  verify_inactive, verify_runtime, verify_accepted_native_chain,
-                 source_authorization=None):
+                 source_authorization=None, runtime_baselines=None):
         if (type(store) is not RegistryReceiptStore or type(plan) is not Plan
                 or type(operation_id) is not str or not operation_id):
             _fail('binding_invalid')
@@ -155,6 +155,7 @@ class NativeHelperLifecycle:
             _fail('preparation_binding_invalid')
         ids = set()
         self.expected_metadata = {}
+        self.helper_changes = {}
         for step in plan.steps:
             if step.adapter != 'helpers':
                 continue
@@ -173,6 +174,9 @@ class NativeHelperLifecycle:
             if key in self.expected_metadata and self.expected_metadata[key] != metadata:
                 _fail('preparation_activation_conflict')
             self.expected_metadata[key] = metadata
+            if key in self.helper_changes:
+                _fail('duplicate_helper_preparation')
+            self.helper_changes[key] = change
             ids.add(key)
         if not ids:
             _fail('helpers_required')
@@ -201,10 +205,59 @@ class NativeHelperLifecycle:
             # Its independent root preserves the first activation history.
             self.binding['source_authorization'] = asdict(source_authorization)
             self.root_id = _id(['helper_lifecycle_rollback', self.binding])
+        if runtime_baselines is not None and type(runtime_baselines) is not tuple:
+            _fail('runtime_baseline_type')
+        self._runtime_baselines = runtime_baselines
         self.root = None
         self.writable = False
         self.failed = False
         self.lock = asyncio.Lock()
+
+    def runtime_baselines(self):
+        """Immutable historical observations; readback never grants write access."""
+        return self._runtime_baselines or ()
+
+    def _bind_runtime_baselines(self, original, values):
+        from .utility_meter_observers import (encode_runtime_baseline,
+            verify_baseline_binding)
+        from .native_registry import PreparedRegistryChange
+        required = {row['entry_id'] for row in original
+                    if row['domain'] == 'utility_meter' and row['state'] == 'loaded'}
+        encoded, seen = [], set()
+        for value in values:
+            document = encode_runtime_baseline(value)
+            key, payload = value.entry_id, document['payload']
+            if key not in required or key in seen or payload['core'] != self.receipt.version:
+                _fail('runtime_baseline_scope')
+            change = self.helper_changes[key]
+            verify_baseline_binding(value, change.before, change.after)
+            # Authenticate the source's physical identity and exact rename using
+            # ORIGINAL immutable registry preparations, not a current row capture.
+            matches = []
+            for step in self.plan.steps:
+                if step.adapter != 'registry':
+                    continue
+                candidate = decode_change(self.store.preparations.resolve(
+                    step.prepared_ref, self.binding['preparations'][step.prepared_ref]))
+                if type(candidate) is not PreparedRegistryChange or candidate.kind != 'entity':
+                    continue
+                before, after = candidate.before, candidate.after
+                fields = ('id', 'unique_id', 'platform', 'config_entry_id', 'config_subentry_id')
+                if (candidate.identity == payload['source_identity'][0]
+                        and [before.get(f) for f in fields] == payload['source_identity']
+                        and [after.get(f) for f in fields] == payload['source_identity']
+                        and before.get('entity_id') == payload['source_before']
+                        and after.get('entity_id') == payload['source_after']
+                        and (candidate.identity, candidate.before_revision, candidate.after_revision)
+                            == (step.identity, step.before_revision, step.after_revision)):
+                    matches.append(candidate)
+            if len(matches) != 1:
+                _fail('runtime_baseline_registry_binding')
+            seen.add(key)
+            encoded.append(document)
+        if seen != required:
+            _fail('runtime_baseline_required')
+        return sorted(encoded, key=lambda row: row['entry_id'])
 
     def _authorize(self):
         if self.guard() is False:
@@ -247,8 +300,23 @@ class NativeHelperLifecycle:
         await obj._original()
         if original != [_activation(obj.manager, key) for key in obj.ids]:
             _fail('activation_changed')
-        obj.root = {'kind': 'helper_lifecycle_root', 'schema': 1,
+        values = obj._runtime_baselines or ()
+        encoded = obj._bind_runtime_baselines(original, values)
+        obj._runtime_baselines = tuple(sorted(values, key=lambda value: value.entry_id))
+        obj.root = {'kind': 'helper_lifecycle_root', 'schema': 2 if encoded else 1,
                     'binding': obj.binding, 'original': original}
+        if encoded:
+            obj.root['runtime_baselines'] = encoded
+        if obj.source_authorization is not None and encoded:
+            # Reverse uses the first durable forward observation. A newly captured
+            # counter cannot replace A0/S0 even with the same configuration Plan.
+            forward = obj._read(_id(['helper_lifecycle', obj.operation_id, obj.plan.fingerprint]))
+            binding = {k: v for k, v in obj.binding.items() if k != 'source_authorization'}
+            if (not forward or forward.get('kind') != 'helper_lifecycle_root'
+                    or forward.get('schema') != 2 or forward.get('binding') != binding
+                    or forward.get('original') != original
+                    or forward.get('runtime_baselines') != encoded):
+                _fail('original_runtime_baseline_required')
         await obj.store.create(obj.root_id, obj.root)
         # Loss of root ACK cannot produce a writable object.
         obj._authorize()
@@ -260,9 +328,10 @@ class NativeHelperLifecycle:
         obj = cls(*args, **kwargs)
         obj.root = obj._read(obj.root_id)
         if (type(obj.root) is not dict
-                or set(obj.root) != {'kind', 'schema', 'binding', 'original'}
+                or set(obj.root) != ({'kind', 'schema', 'binding', 'original'} |
+                    ({'runtime_baselines'} if obj.root.get('schema') == 2 else set()))
                 or obj.root['kind'] != 'helper_lifecycle_root'
-                or type(obj.root['schema']) is not int or obj.root['schema'] != 1
+                or type(obj.root['schema']) is not int or obj.root['schema'] not in (1, 2)
                 or obj.root['binding'] != obj.binding
                 or type(obj.root['original']) is not list
                 or [row.get('entry_id') for row in obj.root['original']] != list(obj.ids)):
@@ -279,6 +348,16 @@ class NativeHelperLifecycle:
                 _fail('root_activation_invalid')
             if {field: row[field] for field in obj.expected_metadata[row['entry_id']]} != obj.expected_metadata[row['entry_id']]:
                 _fail('preparation_activation_conflict')
+        from .utility_meter_observers import decode_runtime_baseline
+        raw = obj.root.get('runtime_baselines', [])
+        if type(raw) is not list or (obj.root['schema'] == 2 and not raw):
+            _fail('runtime_baseline_layout')
+        values = tuple(decode_runtime_baseline(row) for row in raw)
+        if obj._bind_runtime_baselines(obj.root['original'], values) != raw:
+            _fail('runtime_baseline_binding')
+        if obj._runtime_baselines is not None and obj._runtime_baselines != values:
+            _fail('runtime_baseline_conflict')
+        obj._runtime_baselines = values
         obj.inspect()  # Validate graph, including dangling intents.
         return obj
 
