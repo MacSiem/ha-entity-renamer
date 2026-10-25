@@ -372,6 +372,11 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         row = self.entity.async_get_or_create('sensor', 'input_boolean', 'audit-only',
             suggested_object_id='baseline_audit_only', config_entry=self.entry,
             disabled_by=er.RegistryEntryDisabler.USER)
+        self.entity.async_get_or_create('sensor', 'input_boolean', 'audit-untouched',
+            suggested_object_id='baseline_audit_untouched', config_entry=self.entry,
+            disabled_by=er.RegistryEntryDisabler.USER)
+        await self.entity._store.async_save(self.entity._data_to_save())
+        source_raw = Path(self.entity._store.path).read_bytes()
         io = native.NativeRegistryIO(self.hass)
         before = next(r for r in io.document('entity')['entities'] if r['id'] == row.id)
         after = dict(before, entity_id='sensor.baseline_renamed')
@@ -384,12 +389,26 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stamp.identity, row.id)
         self.assertEqual(stamp.kind, 'entity')
         self.assertEqual(observed['entity_id'], after['entity_id'])
+        await self.entity._store.async_save(self.entity._data_to_save())
+        result_raw = Path(self.entity._store.path).read_bytes()
+        transition = importlib.import_module(PACKAGE + '.native_registry_transition')
+        def prove(source, result, stamp, direction):
+            audit = transition.NativeRegistryEffectAudit('entity', row.id, direction,
+                digest(source), digest(result), transition.prepared_registry_digest(change),
+                json.loads(stamp.before_json)['modified_at'],
+                json.loads(stamp.after_json)['modified_at'])
+            return transition.validate_registry_transition(source, result, change,
+                version=self.version, direction=direction, native_effect_audit=audit)
+        prove(source_raw, result_raw, stamp, 'forward')
         reverse = io.mutate(change, before)
         self.assertEqual(json.loads(reverse.before_json), observed)
         restored = next(r for r in io.document('entity')['entities'] if r['id'] == row.id)
         self.assertEqual(json.loads(reverse.after_json), restored)
         self.assertEqual(restored['entity_id'], before['entity_id'])
         self.assertEqual(restored['id'], before['id'])
+        await self.entity._store.async_save(self.entity._data_to_save())
+        reverse_raw = Path(self.entity._store.path).read_bytes()
+        prove(result_raw, reverse_raw, reverse, 'reverse')
 
     async def test_native_prepared_store_and_journal_reopen_preserve_full_baseline(self):
         prepared = importlib.import_module(PACKAGE + '.prepared')
