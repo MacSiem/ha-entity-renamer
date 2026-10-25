@@ -632,6 +632,16 @@ class ReceiptedOwnHelperMixedYAMLNativeTests(ReceiptedOwnHelperNativeTests):
                 hass, resolver, locks, yaml_runtime, chain, observe, journal.load, quiescent,
                 context=Context(), full_verify=lambda _: verify_yaml(tx.Position.AFTER),
                 full_verify_rollback=lambda _: verify_yaml(tx.Position.BEFORE))
+            effect_errors = []
+            actual_yaml_apply = yaml_adapter.apply
+            async def diagnosed_yaml_apply(step, guard):
+                try:
+                    return await actual_yaml_apply(step, guard)
+                except Exception as error:
+                    # Observe a refused real call; never manufacture its result.
+                    effect_errors.append((type(error).__name__, str(error)))
+                    raise
+            yaml_adapter.apply = diagnosed_yaml_apply
             coordinator = tx.Coordinator({'registry': registry, 'yaml': yaml_adapter}, journal,
                 quiescent, required_scopes=('registry', 'yaml'))
 
@@ -700,7 +710,7 @@ class ReceiptedOwnHelperMixedYAMLNativeTests(ReceiptedOwnHelperNativeTests):
                 record = (await coordinator.rollback(life.operation_id) if reverse else
                     await coordinator.apply(life.plan, life.plan.fingerprint, life.operation_id))
                 self.assertEqual(record.status, 'rolled_back' if reverse else 'applied',
-                    (record.status, record.reason, record.phases))
+                    (record.status, record.reason, record.phases, effect_errors))
                 self.assertEqual(record.phases, ('undone', 'undone') if reverse else
                     ('verified', 'verified'))
                 # Both effects are actual accepted native returns in one ledger.
