@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import re
+import sys
 
 PINS = ('2025.6.0', '2026.10.2')
 MAX_BYTES = 1024 * 1024
@@ -226,6 +227,9 @@ def _native_tree(value, api):
                 visit(child, depth + 1)
         elif kind is fragment:
             _tree(_parse(json_bytes(item)))
+        elif isinstance(item, str):
+            # Native JSON encodes the underlying string; never call __str__.
+            _tree(str.__str__(item))
         elif kind is datetime or (api[0] == '2026.10.2' and kind in (date, time)):
             pass
         else:
@@ -237,7 +241,19 @@ def _capture(stored, api):
     _, _, State, json_bytes, _, StoredState, _, ExtraStoredData, _ = api
     _require(type(stored) is StoredState and type(stored.state) is State,
              'native_stored_state_type')
-    _require(stored.extra_data is None or isinstance(stored.extra_data, ExtraStoredData),
+    # Only exact installed native classes may run conversion. Do not import a
+    # component merely to admit a payload, or invoke a foreign subclass.
+    known = {api[6]}
+    for module_name, class_name in (
+        ('homeassistant.components.sensor', 'SensorExtraStoredData'),
+        ('homeassistant.components.utility_meter.sensor', 'UtilitySensorExtraStoredData'),
+        ('homeassistant.components.integration.sensor', 'IntegrationSensorExtraStoredData'),
+    ):
+        module = sys.modules.get(module_name)
+        native_class = None if module is None else vars(module).get(class_name)
+        if isinstance(native_class, type) and issubclass(native_class, ExtraStoredData):
+            known.add(native_class)
+    _require(stored.extra_data is None or type(stored.extra_data) in known,
              'native_extra_data_type')
     _require(stored.extra_data is None or bool(stored.extra_data),
              'native_falsey_extra_data_unsupported')

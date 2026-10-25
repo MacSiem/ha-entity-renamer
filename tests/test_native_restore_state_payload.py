@@ -250,7 +250,10 @@ class ActualUtilityPayloadTests(unittest.IsolatedAsyncioTestCase):
         restored = codec.materialize(codec.deserialize(codec.serialize(payload)))
         self.assertIs(data.last_states[old], stored)
         self.assertNotIn('sensor.actual_utility_renamed', data.last_states)
-        self.assertEqual(Decimal(restored.extra_data.as_dict()['native_value']), Decimal('11'))
+        from homeassistant.components.sensor import SensorExtraStoredData
+        decoded = SensorExtraStoredData.from_dict(restored.extra_data.as_dict())
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded.native_value, Decimal('11'))
         self.assertEqual(Decimal(restored.extra_data.as_dict()['last_valid_state']), Decimal('111'))
         codec.assert_only_entity_id_changed(json.loads(payload.before_json),
             json.loads(payload.after_json), old, 'sensor.actual_utility_renamed')
