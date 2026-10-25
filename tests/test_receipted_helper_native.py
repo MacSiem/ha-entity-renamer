@@ -234,6 +234,13 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         async def runtime(entry_id, activation, authorization):
             self.assertEqual(entry_id, helper.entry_id)
             self.assertEqual(activation['state'], 'loaded')
+            if utility:
+                current_rows = loaded_observer._rows(entry_id)
+                expected_rows = loaded_observer.helper_rows[entry_id]
+                self.assertEqual(current_rows, expected_rows, {
+                    key: (expected_rows[0].get(key), current_rows[0].get(key))
+                    for key in set(current_rows[0]) | set(expected_rows[0])
+                    if expected_rows[0].get(key) != current_rows[0].get(key)})
             await loaded_observer.verify_runtime(helper_change.after
                 if authorization.status == 'applied' else helper_change.before)
             return True
