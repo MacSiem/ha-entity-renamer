@@ -78,6 +78,14 @@ class Harness:
 
 
 class HelperLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cached_original_activation_cannot_override_durable_root(self):
+        h = await Harness().initialize(self)
+        h.obj.root['original'][0]['state'] = (
+            'not_loaded' if h.obj.root['original'][0]['state'] == 'loaded' else 'loaded')
+        with self.assertRaisesRegex(module.HelperLifecycleError, 'root_binding_mismatch'):
+            await h.obj.quiesce()
+        self.assertEqual(h.calls, [])
+
     async def test_only_originally_loaded_restored_and_no_original_refresh(self):
         h = await Harness().initialize(self)
         await h.obj.quiesce()
