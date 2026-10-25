@@ -318,6 +318,7 @@ class NativeHelperLifecycle:
         self.writable = False
         self.failed = False
         self.lock = asyncio.Lock()
+        self._unload_witnesses = {}  # ephemeral native State identity, never reopened
 
     def runtime_baselines(self):
         """Immutable historical observations; readback never grants write access."""
@@ -484,6 +485,42 @@ class NativeHelperLifecycle:
         obj.inspect()  # Validate graph, including dangling intents.
         return obj
 
+    def _validate_unload_data(self, entry_id, encoded):
+        from .native_utility_unload_audit import decode_unload_audit, _payload
+        data = decode_unload_audit(encoded)
+        doc = _payload(data)
+        change = self.own_registry_changes.get(entry_id)
+        if change is None or data.entry_id != entry_id or doc['core'] != self.receipt.version:
+            _fail('native_unload_scope')
+        expected = change.after if self.source_authorization is not None else change.before
+        actual = doc['source_row']
+        # Reverse modified_at belongs to the already accepted forward native
+        # effect. Its exact value is fenced by _original()/source_authorization;
+        # all other fields remain the ORIGINAL prepared projection.
+        ignored = {'modified_at'} if self.source_authorization is not None else set()
+        if ({k: v for k, v in actual.items() if k not in ignored}
+                != {k: v for k, v in expected.items() if k not in ignored}):
+            _fail('native_unload_original_row')
+        return data
+
+    def verify_live_unload_state(self, entry_id, unload_reference, actual_state):
+        """Same live unload only. Durable/reopened JSON cannot recreate State proof."""
+        if not self.writable or self.failed or entry_id not in self._unload_witnesses:
+            _fail('live_native_unload_required')
+        self.require_quiescent()
+        slot = self._slot('unload', entry_id, 'receipt')
+        receipt = self.store.read(slot)
+        if (receipt is None or tuple(unload_reference) != (slot, receipt['digest'])
+                or receipt['digest'] != _digest(receipt['payload'])):
+            _fail('native_unload_receipt_binding')
+        intent_ref, witness = self._unload_witnesses[entry_id]
+        if receipt['payload']['intent'] != intent_ref[1]:
+            _fail('native_unload_intent_binding')
+        data = self._validate_unload_data(entry_id, receipt['payload']['native_unload'])
+        return witness.check_live(hass=self.manager.hass,
+            entry=self.manager.async_get_entry(entry_id), lease=self.activation_lease,
+            actual_state=actual_state, expected_data=data)
+
     def _expected_activation(self, original, state):
         return dict(original, state=state)
 
@@ -543,6 +580,9 @@ class NativeHelperLifecycle:
                             or type(effect[1]) is not str or not re.fullmatch(r'[0-9a-f]{64}', effect[1])):
                         _fail('native_setup_effect_required')
                     expected_receipt['native_effect'] = effect
+                if stage == 'unload' and original['state'] == 'loaded' and key in self.own_registry_changes:
+                    self._validate_unload_data(key, receipt.get('native_unload'))
+                    expected_receipt['native_unload'] = receipt['native_unload']
                 if receipt != expected_receipt:
                     _fail('receipt_binding_mismatch')
                 previous = _digest(receipt)
@@ -626,6 +666,10 @@ class NativeHelperLifecycle:
         audited_setup = stage == 'setup' and active and original['domain'] == 'utility_meter'
         if audited_setup and not callable(self.setup_effect):
             _fail('installed_setup_effect_required')
+        audited_unload = stage == 'unload' and active and key in self.own_registry_changes
+        if audited_unload and self.activation_lease is None:
+            _fail('native_activation_lease_required')
+        unload_witness = None
         effect_reference = None
         previous = self.inspect()['head']
         intent = {'kind': 'helper_lifecycle_intent', 'root': self.root_id,
@@ -649,6 +693,25 @@ class NativeHelperLifecycle:
                         or type(effect_reference[1]) is not str
                         or not re.fullmatch(r'[0-9a-f]{64}', effect_reference[1])):
                     _fail('native_setup_effect_required')
+            elif audited_unload:
+                from .native_utility_unload_audit import NativeUtilityUnloadAudit, _row
+                from homeassistant.helpers import entity_registry as er
+                change = self.own_registry_changes[key]
+                source = change.after if self.source_authorization is not None else change.before
+                native_row = er.async_get(self.manager.hass).async_get(source['entity_id'])
+                if native_row is None:
+                    _fail('native_unload_original_row')
+                # This actual object is selected only after the independent
+                # full-three ORIGINAL/accepted fence above, never as a new baseline.
+                actual = _row(native_row)
+                ignored = {'modified_at'} if self.source_authorization is not None else set()
+                if ({k: v for k, v in actual.items() if k not in ignored}
+                        != {k: v for k, v in source.items() if k not in ignored}):
+                    _fail('native_unload_original_row')
+                audit = NativeUtilityUnloadAudit(self.manager.hass,
+                    self.manager.async_get_entry(key), actual, guard=self._authorize)
+                unload_witness = await audit.async_unload(self.activation_lease)
+                self._unload_witnesses[key] = (intent_reference, unload_witness)
             else:
                 manager = self.activation_lease or self.manager
                 api = manager.async_unload if stage == 'unload' else manager.async_setup
@@ -681,6 +744,14 @@ class NativeHelperLifecycle:
                    'state': 'not_loaded' if stage == 'unload' else original['state']}
         if effect_reference is not None:
             receipt['native_effect'] = list(effect_reference)
+        if unload_witness is not None:
+            from .native_utility_unload_audit import encode_unload_audit
+            receipt['native_unload'] = encode_unload_audit(unload_witness.data)
+            self._validate_unload_data(key, receipt['native_unload'])
+            unload_witness.check_live(hass=self.manager.hass,
+                entry=self.manager.async_get_entry(key), lease=self.activation_lease,
+                actual_state=self.manager.hass.states.get(actual['entity_id']),
+                expected_data=unload_witness.data)
         await self.store.create(self._slot(stage, key, 'receipt'), receipt)
         self._authorize()
 
