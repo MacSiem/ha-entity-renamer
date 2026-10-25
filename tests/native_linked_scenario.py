@@ -84,8 +84,28 @@ async def make_linked(hass, bridge, registry_change, history_check, helpers=Fals
         actual = await energy.read()
         return actual.value == (energy_change.after if forward else energy_change.before.value)
 
+    class ContextualRegistryAdapter(RegistryTransactionAdapter):
+        """Exercise the real Coordinator context against independent disk reads."""
+        def bind_phase_context(self, context):
+            self.context = context
+
+        async def check_intent(self, step, direction):
+            self.context.require_effect(step, direction)
+            fresh_log = native_journal(hass)
+            await fresh_log.initialize()
+            actual = await fresh_log.load(self.context.record.operation_id)
+            assert actual == self.context.record, 'phase snapshot differs from durable journal'
+
+        async def apply(self, step, guard):
+            await self.check_intent(step, 'forward')
+            await super().apply(step, guard)
+
+        async def compensate(self, step, guard):
+            await self.check_intent(step, 'rollback')
+            await super().compensate(step, guard)
+
     adapters = {
-        'registry': RegistryTransactionAdapter(bridge, resolve,
+        'registry': ContextualRegistryAdapter(bridge, resolve,
             lambda p: registry_verify(p, True), lambda p: registry_verify(p, False)),
         'dashboard': LovelaceTransactionAdapter(lovelace, resolve,
             lambda p: dashboard_verify(p, True), lambda p: dashboard_verify(p, False)),
