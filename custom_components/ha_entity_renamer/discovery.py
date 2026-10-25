@@ -146,6 +146,8 @@ async def async_discover(hass, proposal, guard):
     from .helper_native import inventory
     from .yaml_plan import plan_yaml
     from .native_input_baseline import _drained
+    from .recorder_guard import NativeRecorderGuard, prepare as recorder_preflight
+    from .history_guard import NativeHistoryGuard
     proposal_json, manifest = _proposal(proposal)
     mapping = {row.old_id: row.new_id for row in manifest.entities if row.old_id != row.new_id}
     families = {name: _unknown(name, 'source_inventory_unavailable') for name in FAMILIES}
@@ -198,6 +200,39 @@ async def async_discover(hass, proposal, guard):
         families['yaml_sources'] = _unknown('yaml_sources', 'read_access_denied', denied=True)
     except (ValueError, OSError):
         families['yaml_sources'] = _unknown('yaml_sources', 'yaml_graph_unavailable')
+    guard()
+    try:
+        recorder = NativeRecorderGuard(hass)
+        history = NativeHistoryGuard(recorder)
+        metadata = await recorder.snapshot(mapping)
+        guard()
+        recorder_preflight(mapping, metadata)
+        historical = await history.capture(mapping)
+        guard()
+        fresh_metadata = await recorder.snapshot(mapping)
+        guard()
+        unchanged = await history.verify(historical)
+        guard()
+        if fresh_metadata != metadata or unchanged is not True:
+            raise ValueError('history_changed')
+        # This is explicitly the mapping's old+new metadata scope, not a claim
+        # to enumerate every Recorder series in the installation.
+        scope = sorted(set(mapping) | set(mapping.values()))
+        for name, section, stable_key in (
+                ('history', 'states', 'metadata_id'),
+                ('statistics', 'statistics', 'id')):
+            rows = metadata[section]
+            families[name] = _family(name,
+                {'scope_entity_ids': scope, 'metadata': rows,
+                 'history_snapshot': historical},
+                [(source, section + ':' + str(row[stable_key]), _sha(_json(row)))
+                 for source, row in rows.items()])
+    except PermissionError:
+        for name in ('history', 'statistics'):
+            families[name] = _unknown(name, 'read_access_denied', denied=True)
+    except (ValueError, OSError, KeyError, TypeError, RuntimeError):
+        for name in ('history', 'statistics'):
+            families[name] = _unknown(name, 'recorder_scope_unavailable')
     guard()
     # A member added during any await invalidates every native family, even
     # when it was not a changed target. Never learn a replacement snapshot.

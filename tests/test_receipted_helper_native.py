@@ -108,6 +108,17 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             self.assertTrue(await async_setup_component(hass, 'script',
                 await async_hass_config_yaml(hass)))
             await self._flush_documents()
+            discovery = importlib.import_module(fixtures.PACKAGE + '.discovery')
+            discovered = await discovery.async_discover(hass,
+                {'entities': [{'entity_id': old, 'proposed_entity_id': new,
+                               'device_id': f.entity.async_get(old).device_id}]}, lambda: None)
+            families = {row.name: row for row in discovered.families}
+            for family in ('entity_registry', 'device_registry', 'config_entries',
+                           'history', 'statistics'):
+                self.assertEqual(families[family].status, 'COMPLETE', families[family].reason)
+            historical_scope = json.loads(families['history'].payload_json)
+            self.assertEqual(historical_scope['scope_entity_ids'], sorted((old, new)))
+            self.assertFalse(discovery.compose_preview(discovered)['migration_ready'])
         yaml_plan = importlib.import_module(fixtures.PACKAGE + '.yaml_plan')
         proposed_yaml = yaml_plan.plan_yaml(f.root, {old: new})
         self.assertTrue(proposed_yaml.ready, proposed_yaml.issues)
