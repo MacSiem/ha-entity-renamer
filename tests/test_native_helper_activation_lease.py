@@ -243,6 +243,19 @@ class NativeActivationLeaseTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Refusal, 'not_owned'):
             stale.check()
 
+    async def test_native_child_task_can_check_facts_but_cannot_write(self):
+        entry = await self.helper()
+        async with await self.acquire(entry) as lease:
+            async def child():
+                lease.check()
+                self.assertEqual(lease.entry_ids, (entry.entry_id,))
+                with self.assertRaisesRegex(Refusal, 'runtime_changed'):
+                    await lease.async_unload(entry.entry_id)
+                with self.assertRaisesRegex(Refusal, 'runtime_changed'):
+                    lease.release()
+            await asyncio.create_task(child())
+            self.assertTrue(entry.setup_lock.locked())
+
     async def test_different_task_cannot_use_live_token(self):
         entry = await self.helper(disabled=True)
         async with await self.acquire(entry) as lease:

@@ -96,7 +96,8 @@ class NativeHelperSetupEffects:
         io = NativeRegistryIO(self.hass)
         with NativeUtilitySetupAudit(self.hass, baseline, snapshot, source_rows,
                 guard=lambda: self._scope(lifecycle)) as collector:
-            _need(await self.hass.config_entries.async_setup(entry_id) is True)
+            manager = lifecycle.activation_lease or self.hass.config_entries
+            _need(await manager.async_setup(entry_id) is True)
             self._scope(lifecycle)
             _need(await lifecycle.settle() is not False)
             self._scope(lifecycle)

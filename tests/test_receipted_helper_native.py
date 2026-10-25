@@ -46,6 +46,14 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                 self.assertTrue(editor.async_setup(hass))
 
     async def test_threshold_supported_unload_own_mutations_setup_and_reverse(self):
+        self.activation_lease = None
+        try:
+            await self._run_receipted_migration()
+        finally:
+            if self.activation_lease is not None:
+                self.activation_lease.release()
+
+    async def _run_receipted_migration(self):
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.config_entries import ConfigEntry, ConfigEntryState
         ConfigFlowHandler = importlib.import_module(
@@ -266,7 +274,10 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         lifecycle_store = lm.native_helper_lifecycle_store(hass, preparations)
         await lifecycle_store.initialize()
         lifecycle_args = (lifecycle_store, hass.config_entries, operation, plan, receipt, digests)
-        lifecycle_callbacks = dict(guard=lambda: None, verify_original_native_inputs=original_source,
+        lease_module = importlib.import_module(fixtures.PACKAGE + '.native_helper_activation_lease')
+        self.activation_lease = await lease_module.NativeHelperActivationLease.acquire(
+            hass, hass.config_entries, (helper,), guard=lambda: None)
+        lifecycle_callbacks = dict(activation_lease=self.activation_lease, guard=lambda: None, verify_original_native_inputs=original_source,
             settle=hass.async_block_till_done, verify_inactive=verify_inactive,
             verify_runtime=runtime, verify_accepted_native_chain=accepted_source)
         if utility:

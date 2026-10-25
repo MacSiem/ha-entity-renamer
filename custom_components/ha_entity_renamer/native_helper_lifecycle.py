@@ -176,7 +176,8 @@ class NativeHelperLifecycle:
     def __init__(self, store, manager, operation_id, plan, receipt, prepared_digests,
                  *, guard, verify_original_native_inputs, settle,
                  verify_inactive, verify_runtime, verify_accepted_native_chain,
-                 source_authorization=None, runtime_baselines=None, setup_effect=None):
+                 source_authorization=None, runtime_baselines=None, setup_effect=None,
+                 activation_lease=None):
         if (type(store) is not RegistryReceiptStore or type(plan) is not Plan
                 or type(operation_id) is not str or not operation_id):
             _fail('binding_invalid')
@@ -221,6 +222,13 @@ class NativeHelperLifecycle:
         if not ids:
             _fail('helpers_required')
         self.ids = tuple(sorted(ids))
+        if activation_lease is not None:
+            from .native_helper_activation_lease import NativeHelperActivationLease
+            if (type(activation_lease) is not NativeHelperActivationLease
+                    or activation_lease.manager is not manager
+                    or activation_lease.entry_ids != self.ids):
+                _fail('native_activation_lease_binding')
+        self.activation_lease = activation_lease
         self.store, self.manager = store, manager
         self.operation_id, self.plan, self.receipt = operation_id, plan, receipt
         self.guard = guard
@@ -303,6 +311,8 @@ class NativeHelperLifecycle:
         return sorted(encoded, key=lambda row: row['entry_id'])
 
     def _authorize(self):
+        if self.activation_lease is not None:
+            self.activation_lease.check()
         if self.guard() is False:
             _fail('authorization_rejected')
 
@@ -570,7 +580,8 @@ class NativeHelperLifecycle:
                         or not re.fullmatch(r'[0-9a-f]{64}', effect_reference[1])):
                     _fail('native_setup_effect_required')
             else:
-                api = self.manager.async_unload if stage == 'unload' else self.manager.async_setup
+                manager = self.activation_lease or self.manager
+                api = manager.async_unload if stage == 'unload' else manager.async_setup
                 if await api(key) is not True:
                     _fail('native_call_unconfirmed')
             self._authorize()
