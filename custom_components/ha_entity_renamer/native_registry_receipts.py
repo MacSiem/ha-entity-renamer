@@ -260,6 +260,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         self.writable = False
         self.active = None
         self._cache = None  # Derived only from acknowledged immutable durable refs.
+        self._setup_history = []
+        self._setup_positions = {}
 
     @classmethod
     async def start(cls, store: RegistryReceiptStore, operation_id: str, plan: Plan,
@@ -511,6 +513,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         states, completed = self._initial(), {}
         yaml_sources = self._initial_sources() if self.yaml_index is not None else None
         head, sequence, pending = self.root_digest, 0, None
+        self._setup_history = []
+        self._setup_positions = {head: {}}
         events = []
         self.store._ready()
         for key, row in self.store.rows.items():
@@ -519,12 +523,47 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 events.append((key, row))
         while events:
             intents = [(key, row) for key, row in events
-                       if row['payload'].get('kind') in ('registry_intent', 'yaml_intent')
+                       if row['payload'].get('kind') in ('registry_intent', 'yaml_intent', 'helper_setup_intent')
                        and row['payload'].get('sequence') == sequence]
             if len(intents) != 1:
                 _fail('chain_graph_invalid')
             ikey, irow = intents[0]
             intent = irow['payload']
+            if intent['kind'] == 'helper_setup_intent':
+                from .native_helper_setup_receipts import (validate_intent,
+                    setup_slot, fold_receipt)
+                validate_intent(self, intent, ikey, states, head, sequence,
+                                completed, self._setup_history)
+                events.remove((ikey, irow))
+                rkey = setup_slot(self, 'receipt', intent['activation'])
+                matches = [(key, row) for key, row in events if key == rkey]
+                if not matches:
+                    pending = (ikey, irow['digest'])
+                    if events:
+                        _fail('unresolved_chain_fork')
+                    break
+                if len(matches) != 1:
+                    _fail('chain_graph_invalid')
+                _, rrow = matches[0]
+                receipt = rrow['payload']
+                if (receipt.get('kind') != 'helper_setup_receipt'
+                        or receipt.get('intent') != [ikey, irow['digest']]
+                        or receipt.get('binding') != intent['binding']
+                        or receipt.get('chain') != self.root_id
+                        or type(receipt.get('sequence')) is not int
+                        or receipt['sequence'] != sequence
+                        or receipt.get('source_chain') != head):
+                    _fail('receipt_binding_mismatch')
+                states = fold_receipt(self, states, intent, receipt)
+                if yaml_sources is not None:
+                    for native_key, native_value in states.items():
+                        yaml_sources['.storage/' + native_key][:4] = [
+                            native_value['sha256'], *native_value['identity']]
+                events.remove((rkey, rrow))
+                head, sequence = rrow['digest'], sequence + 1
+                self._setup_history.append((head, receipt))
+                self._setup_positions[head] = dict(completed)
+                continue
             binding = intent['binding']
             index, direction = binding['index'], binding['direction']
             if (type(index) is not int or not 0 <= index < len(self.plan.steps)
@@ -574,6 +613,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             completed[index] = direction
             events.remove((rkey, rrow))
             head, sequence = rrow['digest'], sequence + 1
+            self._setup_history.append((head, receipt))
+            self._setup_positions[head] = dict(completed)
         return self._remember((states, head, sequence, completed, pending))
 
     def _historical_context(self, binding):
@@ -789,9 +830,29 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         ref = await self.store.create(self._slot('receipt', context.index,
                                                 context.record.direction), payload)
         self.active = None
-        self._remember((result_states, ref[1], sequence + 1,
-                        {**completed, context.index: binding['direction']}, None))
+        next_completed = {**completed, context.index: binding['direction']}
+        self._setup_history.append((ref[1], payload))
+        self._setup_positions[ref[1]] = dict(next_completed)
+        # Preserve the existing validated-prefix cache: each ordinary completion
+        # must not replay every prior multi-MiB document solely to update history.
+        self._remember((result_states, ref[1], sequence + 1, next_completed, None))
         return ref
+
+    async def begin_helper_setup(self, context, observations, *, lifecycle, entry_id):
+        from .native_helper_setup_receipts import begin
+        return await begin(self, context, observations, lifecycle=lifecycle, entry_id=entry_id)
+
+    def verify_helper_setup_source(self, intent, context, observations):
+        from .native_helper_setup_receipts import verify_source
+        return verify_source(self, intent, context, observations)
+
+    async def complete_helper_setup(self, intent, context, before, after, *, audit):
+        from .native_helper_setup_receipts import complete
+        return await complete(self, intent, context, before, after, audit=audit)
+
+    def verify_setup_authorization(self, authorization):
+        from .native_helper_setup_receipts import verify_authorization
+        return verify_authorization(self, authorization)
 
     def _initial_sources(self):
         return initial_sources(self.original_receipt,
