@@ -106,6 +106,29 @@ class NativeDiscoveryFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(family.status, 'UNKNOWN')
         self.assertEqual(self.f.entity.async_get(self.f.other.entity_id).name, 'Foreign retained name')
 
+    async def test_yaml_edit_during_last_native_await_invalidates_first_graph(self):
+        source = importlib.import_module(backend.__name__ + '.native_discovery_inputs')
+        observe = source.async_observe_discovery_inputs
+        calls = 0
+        async def late_edit(*args, **kwargs):
+            nonlocal calls
+            result = await observe(*args, **kwargs)
+            calls += 1
+            if calls == 2:
+                (self.f.root / 'configuration.yaml').write_text(
+                    'script: {}\n# foreign late edit retained\n')
+            return result
+        with patch.object(source, 'async_observe_discovery_inputs', late_edit):
+            capture = await self.discover()
+        self.assertEqual(calls, 2)
+        family = next(row for row in capture.families if row.name == 'yaml_sources')
+        self.assertEqual(family.status, 'UNKNOWN')
+        self.assertEqual(family.reason, 'source_changed_during_capture')
+        self.assertIn('source_changed_during_capture', capture.conflicts)
+        self.assertIn('foreign late edit retained',
+                      (self.f.root / 'configuration.yaml').read_text())
+        self.assertFalse(subject.compose_preview(capture)['migration_ready'])
+
     async def test_native_permission_denied_and_missing_evidence_are_distinct(self):
         source = importlib.import_module(backend.__name__ + '.native_discovery_inputs')
         for error, status in ((PermissionError('private'), 'DENIED'), (ValueError('private'), 'UNKNOWN')):
