@@ -58,10 +58,18 @@ def validate_yaml_metadata(original, change, metadata):
 
 
 def _assert_backup_membership(original, change):
-    """Reject observed new backup members BEFORE an effect, never allowlist them."""
+    """Preflight all output membership against ORIGINAL evidence, no allowlist."""
     from .yaml_transaction import _digest
     scoped = {path: (entries, names) for path, entries, names in original.source_directories}
-    targets = [('.storage', 'ha_entity_renamer_backups')]
+    pending = '.storage/ha_entity_renamer_pending'
+    # Random staging names cannot be proven absent from a selectively observed
+    # output directory. Keep the entire private output scope outside the graph.
+    if (any(path == pending or path.startswith(pending + '/')
+            for path, *_ in original.source_files)
+            or any(path == pending or path.startswith(pending + '/') for path in scoped)):
+        _fail('yaml_staging_membership_unprepared')
+    targets = [('.storage', 'ha_entity_renamer_backups'),
+               ('.storage', 'ha_entity_renamer_pending')]
     for reverse in (False, True):
         for row in change.files:
             operation = 'yaml_' + _digest((change.identity, row.path, reverse))[:64]
