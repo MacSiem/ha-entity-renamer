@@ -24,7 +24,7 @@ class Disk:
         return copy.deepcopy(self.payload), self.payload is not None
 
     async def save(self, payload):
-        self.payload = copy.deepcopy(payload)
+        self.payload = json.loads(json.dumps(payload, allow_nan=False))
         if self.fail:
             raise OSError('synthetic lost acknowledgment')
 
