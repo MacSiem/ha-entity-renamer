@@ -31,7 +31,6 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
     _flush_documents = quiescence.NativeHelperQuiescenceTests._flush_documents
     _validate_own_probe = mixed.ReceiptedOwnHelperMixedYAMLNativeTests._validate_own_probe
     _prepare_own_plan = mixed.ReceiptedOwnHelperMixedYAMLNativeTests._prepare_own_plan
-    _assert_script = mixed.ReceiptedOwnHelperMixedYAMLNativeTests._assert_script
     _prepare_own_change = utility_test.ReceiptedOwnHelperNativeTests._prepare_own_change
     prepare = integration.NativeIntegrationTransferTests.prepare
     current = integration.NativeIntegrationTransferTests.current
@@ -44,6 +43,22 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].id, self.uuid)
         self.assertIn(rows[0].entity_id, (self.old_helper, self.target))
+
+    async def _assert_script(self, expected):
+        from decimal import InvalidOperation
+        from homeassistant.core import Context
+        self.script_values.clear()
+        await self.f.hass.services.async_call('script', 'own_id_probe', {},
+            blocking=True, context=Context())
+        self.assertEqual(len(self.script_values), 1)
+        # Native script templates coerce numeric strings (0.00 becomes 0.0).
+        # Exact accumulator/last_valid tuples are asserted separately below.
+        try:
+            actual, wanted = Decimal(self.script_values[0]), Decimal(expected)
+        except InvalidOperation:
+            self.assertEqual(self.script_values, [expected])
+        else:
+            self.assertEqual(actual, wanted)
 
     async def _configure_own_probe(self, hass, root):
         from homeassistant.config import async_hass_config_yaml
