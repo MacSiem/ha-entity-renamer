@@ -1,6 +1,8 @@
 """Actual typed escrow and own placeholder consumer. Not full migration acceptance."""
 import importlib
+import asyncio
 import json
+import sys
 from decimal import Decimal
 from pathlib import Path
 import unittest
@@ -14,6 +16,7 @@ p = importlib.import_module(base.PACKAGE + '.native_helper_placeholder_effect')
 class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
     use_adapter = False
     gap_during_unload = False
+    source_advance_phase = None
     asyncSetUp = base.OwnHelperUnloadLifecycleTests.asyncSetUp
     _before_start = base.OwnHelperUnloadLifecycleTests._before_start
     _fixture = base.OwnHelperUnloadLifecycleTests._fixture
@@ -267,11 +270,25 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
                 observed = await observe()
                 chain.expected(tx.PhaseContext(record, 0), observed)
                 return chain.verify_setup_authorization(auth)
+            runtime_calls = 0
             async def runtime(entry_id, original, auth):
+                nonlocal runtime_calls
+                runtime_calls += 1
                 self.assertEqual(entry_id, self.entry.entry_id)
                 self.assertEqual(original['state'], 'loaded')
                 self.assertTrue(await self.own_observer.verify_runtime(
                     life.helper_snapshots[entry_id][0]))
+                if self.source_advance_phase == 'late_invalid' and runtime_calls == 2:
+                    # Real producer writes after setup effects and the lifecycle
+                    # receipt, inside the final runtime verification await.
+                    await self._emit('111', unit='Wh')
+                    await self._emit('111', unit='kWh')
+                    gm = importlib.import_module(base.PACKAGE + '.native_utility_source_gap')
+                    with self.assertRaises(gm.UtilitySourceGapError):
+                        gap.check()
+                    # Current coherence cannot erase the observed invalid stream.
+                    self.assertTrue(await self.own_observer.verify_runtime(
+                        life.helper_snapshots[entry_id][0]))
                 return True
             life.verify_accepted_native_chain = accepted_source
             life.verify_runtime = runtime
@@ -282,14 +299,58 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
             head = chain.expected(tx.PhaseContext(record, 0), await observe())
             authorization = base.lm.RestoreAuthorization(life.operation_id,
                 life.plan.fingerprint, head, 'applied')
+            if self.source_advance_phase == 'late_invalid':
+                gm = importlib.import_module(base.PACKAGE + '.native_utility_source_gap')
+                with self.assertRaises(gm.UtilitySourceGapError):
+                    await life.restore(authorization)
+                self.assertTrue(life.failed)
+                self.assertFalse(life._source_gaps)
+                self.assertEqual(runtime_calls, 2)
+                return
+            pending_source = []
+            if self.source_advance_phase in ('setup', 'flush'):
+                original_settle = life.settle
+                owner_task = asyncio.current_task()
+                emitted = False
+                async def advance():
+                    collector = sys.getprofile().__self__
+                    self.assertEqual(collector._sealed, self.source_advance_phase == 'flush')
+                    if self.source_advance_phase == 'flush':
+                        frames = []
+                        current = owner_task.get_coro()
+                        while current is not None:
+                            frames.append(getattr(current, 'cr_code', None))
+                            current = getattr(current, 'cr_await', None)
+                        self.assertIn(modules['native_registry'].NativeRegistryIO.flush.__code__, frames)
+                    await self._emit('119')
+                async def settle_with_source():
+                    nonlocal emitted
+                    result = await original_settle()
+                    if not emitted:
+                        emitted = True
+                        self.assertEqual(self.entry.state.value, 'loaded')
+                        self.assertIsNotNone(chain.active)
+                        if self.source_advance_phase == 'setup':
+                            await advance()
+                        else:
+                            hass.loop.call_soon(lambda: pending_source.append(
+                                hass.async_create_task(advance())))
+                    return result
+                life.settle = settle_with_source
             await life.restore(authorization)
+            for task in pending_source:
+                await task
+            if self.source_advance_phase in ('setup', 'flush'):
+                self.assertTrue(emitted)
+                self.assertFalse(life._source_gap_data[self.entry.entry_id].native_call)
             self.assertTrue(life.inspect()['activation_receipts_complete'])
             self.assertTrue(chain.verify_setup_authorization(authorization))
             from homeassistant.helpers.entity_platform import async_get_platforms
             entity, = [e for platform in async_get_platforms(hass, 'utility_meter')
                        if platform.config_entry is self.entry for e in platform.entities.values()]
             self.assertEqual(entity.entity_id, self.target)
-            self.assertEqual(entity.native_value, Decimal('19' if self.gap_during_unload else '11'))
+            self.assertEqual(entity.native_value, Decimal('19' if self.gap_during_unload
+                or self.source_advance_phase else '11'))
             await self._emit('119')
             self.assertEqual(entity.native_value, Decimal('19'))
             self.assertTrue(await self.own_observer.verify_runtime(life.helper_snapshots[self.entry.entry_id][0]))
@@ -384,3 +445,15 @@ class ReceiptedOwnHelperNativeTests(OwnHelperPlaceholderNativeTests):
 @unittest.skipUnless(base.fixture.fixtures.HAS_HA, 'requires actual pinned HA')
 class ReceiptedOwnHelperGapNativeTests(ReceiptedOwnHelperNativeTests):
     gap_during_unload = True
+
+
+class ReceiptedOwnHelperSetupSourceNativeTests(ReceiptedOwnHelperNativeTests):
+    source_advance_phase = 'setup'
+
+
+class ReceiptedOwnHelperFlushSourceNativeTests(ReceiptedOwnHelperNativeTests):
+    source_advance_phase = 'flush'
+
+
+class ReceiptedOwnHelperLateInvalidSourceNativeTests(ReceiptedOwnHelperNativeTests):
+    source_advance_phase = 'late_invalid'
