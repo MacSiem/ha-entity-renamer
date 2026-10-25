@@ -11,6 +11,10 @@ class NativeReceiptedUtilitySourceGapTests(NativeReceiptedUtilityTests):
     source_gap_during_unload = True
 
 
+class NativeReceiptedUtilitySourceGapDuringRenameTests(NativeReceiptedUtilitySourceGapTests):
+    source_gap_during_rename = True
+
+
 class NativeUtilityRootAckLossTests(NativeReceiptedUtilityTests):
     lifecycle_save_fault = 'root'
 

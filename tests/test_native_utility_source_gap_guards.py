@@ -159,4 +159,3 @@ class NativeMappedUtilitySourceGapGuardTests(NativeUtilitySourceGapGuardTests):
             self.gap.close()
             self.assertIsNone(sys.monitoring.get_tool(key))
             self.assertIs(sys.getprofile(), profile)
-

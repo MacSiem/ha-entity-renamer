@@ -122,6 +122,19 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         proof = (m['helper_observers'].RegistryMappingProof(old, new, source_uuid),)
         loaded_observer = await m['helper_observers'].NativeHelperObservers.capture(
             hass, (original_snapshot,), proof)
+        if getattr(self, 'source_gap_during_rename', False):
+            from homeassistant.core import callback
+            @callback
+            def source_recreated(event):
+                data = event.data
+                if (data.get('entity_id') in (old, new) and data.get('old_state') is None
+                        and data.get('new_state') is not None
+                        and meter.entity_id == data['entity_id']):
+                    # An actual producer write nested inside native creation
+                    # dispatch; 2026 must enqueue its state_changed notification.
+                    meter._attr_native_value = 49 if data['entity_id'] == new else 55
+                    meter.async_write_ha_state()
+            self.addCleanup(hass.bus.async_listen('state_changed', source_recreated))
         # Produce the ORIGINAL receipt with the real isolated native checker.
         # The inner migration below covers registry/helpers only; YAML remains
         # unchanged and its independently projected proposal stays pinned.
@@ -505,6 +518,11 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             self.assertEqual(f.entity.async_get(helper_row.entity_id).id, helper_row.id)
             stimuli = (((48, '7'), (52, '11')) if snapshot == helper_change.after else
                        ((54, '13'), (56, '15'))) if utility else ((43, 'on'), (41, 'off'))
+            if getattr(self, 'source_gap_during_rename', False):
+                self.assertEqual(hass.states.get(helper_row.entity_id).state,
+                    '8' if snapshot == helper_change.after else '14')
+                stimuli = ((50, '9'), (52, '11')) if snapshot == helper_change.after else (
+                    (55, '14'), (56, '15'))
             for value, expected in stimuli:
                 meter._attr_native_value = value
                 meter.async_write_ha_state()
