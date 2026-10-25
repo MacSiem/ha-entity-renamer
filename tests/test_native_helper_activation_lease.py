@@ -271,6 +271,14 @@ class NativeActivationLeaseTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.create_task(child())
             self.assertTrue(entry.setup_lock.locked())
 
+    async def test_sync_yaml_worker_can_check_facts_but_cannot_release(self):
+        entry = await self.helper(disabled=True)
+        async with await self.acquire(entry) as lease:
+            await asyncio.to_thread(lease.check)
+            with self.assertRaisesRegex(Refusal, 'runtime_changed'):
+                await asyncio.to_thread(lease.release)
+            self.assertTrue(entry.setup_lock.locked())
+
     async def test_different_task_cannot_use_live_token(self):
         entry = await self.helper(disabled=True)
         async with await self.acquire(entry) as lease:

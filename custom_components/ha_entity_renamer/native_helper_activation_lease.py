@@ -52,7 +52,8 @@ class NativeHelperActivationLease:
     partial-lock waiting, event-loop callback or native API call can intervene.
     check() proves this live scope's acquisitions, manager/entry/lock identities,
     event loop, live owning task and supplied synchronous runtime/admin guard.
-    Read-only checks may run in native child tasks; API/cleanup remain owner-only.
+    Read-only checks may run in native child tasks and synchronous IO workers;
+    API/cleanup remain owner-task-only.
 
     The guard is required installed IO; test no-op guards prove choreography only.
     The object grants no migration authority. Ownership lasts from acquisition
@@ -142,8 +143,12 @@ class NativeHelperActivationLease:
     def _binding(self) -> None:
         from homeassistant.const import __version__
         _authorize(self._guard)
-        if (self._task.done()
-                or asyncio.get_running_loop() is not self._loop
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None  # Existing guarded YAML IO checks run in executor.
+        if (self._task.done() or self._loop.is_closed() or not self._loop.is_running()
+                or (current_loop is not None and current_loop is not self._loop)
                 or __version__ != self._core
                 or self._hass.loop is not self._loop
                 or self._hass.config_entries is not self._manager
@@ -198,7 +203,11 @@ class NativeHelperActivationLease:
         return result
 
     def _task_check(self) -> None:
-        if (asyncio.current_task() is not self._task
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            _fail('runtime_changed')
+        if (current_task is not self._task
                 or asyncio.get_running_loop() is not self._loop):
             _fail('runtime_changed')
 
