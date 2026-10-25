@@ -101,6 +101,13 @@ def _hash(value):
                                     ensure_ascii=True, allow_nan=False).encode()).hexdigest()
 
 
+def source_graph_digest(plan: Plan) -> str:
+    """Same immutable graph binding for extraction and its native consumer."""
+    return _hash({'root': 'configuration.yaml', 'files': [asdict(x) for x in plan.files],
+                  'directories': [asdict(x) for x in plan.directories],
+                  'edges': [asdict(x) for x in plan.edges]})
+
+
 @dataclass(frozen=True)
 class _Ref:
     path: str
@@ -149,9 +156,7 @@ def extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
         raise SourceLedgerError('source_bundle_parse') from None
     if len(trees) > limits.max_files:
         raise SourceLedgerError('source_inventory_limit')
-    graph_hash = _hash({'root': 'configuration.yaml', 'files': [asdict(x) for x in plan.files],
-                        'directories': [asdict(x) for x in plan.directories],
-                        'edges': [asdict(x) for x in plan.edges]})
+    graph_hash = source_graph_digest(plan)
     findings, definitions = [], []
     work = 0
 

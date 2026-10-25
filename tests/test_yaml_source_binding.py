@@ -60,6 +60,7 @@ class SourceEvidenceBindingTests(unittest.TestCase):
         receipt, plan, ledger, native = self.fixture()
         variants = []
         for domains in ([], native['domains'][:1], native['domains'] * 2,
+                        [['automation', 'd' * 64, []], ['script', 'a' * 64, []]],
                         [['unknown', 'a' * 64, []], native['domains'][1]],
                         [['automation', 'd' * 64, []], ['script', 'a' * 64,
                             [['one', 'b' * 64, 'c' * 64]] * 2]],
