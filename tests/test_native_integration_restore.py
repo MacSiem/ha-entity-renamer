@@ -6,7 +6,8 @@ Core performs the unload/setup and restore through its own lifecycle.
 from datetime import timedelta
 from decimal import Decimal
 import logging
-from types import MappingProxyType
+from pathlib import Path
+from types import MappingProxyType, SimpleNamespace
 import unittest
 
 import test_native_input_baseline as fixture
@@ -15,19 +16,30 @@ import test_native_input_baseline as fixture
 @unittest.skipUnless(fixture.HAS_HA, 'native HA dependencies required')
 class NativeIntegrationRestoreTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.f = fixture.NativeBaselineTests('test_actual_native_serialization_and_store_full_baseline')
-        await self.f.asyncSetUp()
-        self.addAsyncCleanup(self.f.asyncTearDown)
+        from homeassistant import loader
+        from homeassistant.bootstrap import async_load_base_functionality
+        from homeassistant.config_entries import ConfigEntries
+        from homeassistant.core import HomeAssistant
+        directory = fixture.scratch()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name).resolve()
+        (root / 'configuration.yaml').write_bytes(b'script: {}\n')
+        hass = HomeAssistant(str(root))
+        self.addAsyncCleanup(hass.async_stop, force=True)
+        loader.async_setup(hass)
+        hass.config_entries = ConfigEntries(hass, {})
+        await loader.async_get_custom_components(hass)
+        self.assertIsNot(await async_load_base_functionality(hass), False)
+        await hass.async_start()
+        self.f = SimpleNamespace(hass=hass)
 
     async def test_native_rounded_restore_cannot_prove_full_precision_continuity(self):
-        from homeassistant.bootstrap import async_load_base_functionality
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.components.integration.config_flow import ConfigFlowHandler
         from homeassistant.config_entries import ConfigEntry
         from homeassistant.helpers.entity_component import EntityComponent
         from homeassistant.helpers import entity_platform as ep
         hass = self.f.hass
-        self.assertIsNot(await async_load_base_functionality(hass), False)
         class Producer(SensorEntity):
             _attr_name = 'Integration restore producer'
             _attr_unique_id = 'integration-restore-producer'
