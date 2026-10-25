@@ -32,7 +32,24 @@ class NativeIntegrationContinuityTests(unittest.IsolatedAsyncioTestCase):
     async def test_retained_native_callback_consumes_real_gap_report_once(self):
         await self._run(gap_report=True)
 
-    async def _run(self, *, gap_report):
+    async def test_mutated_actual_changed_old_state_refuses_transfer(self):
+        await self._run(gap_report=False, regression='old_state')
+
+    async def test_mutated_actual_report_old_timestamp_refuses_transfer(self):
+        await self._run(gap_report=False, regression='old_last_reported')
+
+    async def test_mutated_actual_report_new_timestamp_refuses_transfer(self):
+        if importlib.import_module('homeassistant.const').__version__ != '2026.10.2':
+            self.skipTest('minimum native handler has no explicit last_reported input')
+        await self._run(gap_report=False, regression='last_reported')
+
+    async def test_duplicate_actual_unsubscribe_still_releases_owned_resources(self):
+        await self._run(gap_report=False, regression='partial_unsubscribe')
+
+    async def test_emission_close_error_still_releases_owned_monitor(self):
+        await self._run(gap_report=False, regression='emission_close')
+
+    async def _run(self, *, gap_report, regression=None):
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.components.integration.config_flow import ConfigFlowHandler
         from homeassistant.config_entries import ConfigEntry
@@ -40,7 +57,8 @@ class NativeIntegrationContinuityTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.helpers import entity_registry as er
         from homeassistant.helpers.entity_component import EntityComponent
         from homeassistant.helpers.entity_platform import async_get_platforms
-        from homeassistant.helpers.event import async_track_state_change_event
+        from homeassistant.helpers.event import (
+            async_track_state_change_event, async_track_state_report_event)
         activation = importlib.import_module(fixture.PACKAGE + '.native_helper_activation_lease')
         prepared = importlib.import_module(fixture.PACKAGE + '.prepared')
         lifecycle = importlib.import_module(fixture.PACKAGE + '.native_helper_lifecycle')
@@ -106,6 +124,35 @@ class NativeIntegrationContinuityTests(unittest.IsolatedAsyncioTestCase):
         lease = await activation.NativeHelperActivationLease.acquire(
             hass, hass.config_entries, (entry,), guard=guard)
         scope = None
+        emergency = None
+        mutation_unsubscribe = None
+        mutation = {'armed': False, 'seen': []}
+        # Freeze only a genuine producer timestamp. No synthesized clock input.
+        original_reported = hass.states.get(producer.entity_id).last_reported
+        if regression == 'old_state':
+            class OtherProducer(Producer):
+                _attr_name = 'Continuity independent endpoint'
+                _attr_unique_id = 'continuity-independent-endpoint'
+                _attr_native_value = Decimal('999')
+            other = OtherProducer()
+            await component.async_add_entities([other])
+            other_state = hass.states.get(other.entity_id)
+            self.assertIsNotNone(other_state)
+            self.assertNotEqual(other_state.state, hass.states.get(producer.entity_id).state)
+        if regression in ('old_state', 'old_last_reported', 'last_reported'):
+            @callback
+            def mutate_actual_event(event):
+                if not mutation['armed']:
+                    return
+                data = event.data
+                replacement = other_state if regression == 'old_state' else original_reported
+                mutation['seen'].append((event, data[regression], replacement))
+                data[regression] = replacement
+            track = (async_track_state_change_event if regression == 'old_state'
+                     else async_track_state_report_event)
+            # Real keyed listener registered BEFORE the product bridge. Native
+            # emission/dispatch and the Event itself are never replaced.
+            mutation_unsubscribe = track(hass, producer.entity_id, mutate_actual_event)
         first_new_states = []
         profile = __import__('sys').getprofile()
         @callback
@@ -122,6 +169,67 @@ class NativeIntegrationContinuityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(entry.state.value, 'not_loaded')
             placeholder = hass.states.get(old.entity_id)
             self.assertEqual(placeholder.state, 'unavailable')
+            if regression is not None:
+                emergency = self._capture_cleanup(scope)
+                if regression in ('old_state', 'old_last_reported', 'last_reported'):
+                    if regression != 'old_state':
+                        # First real same-value report moves native arithmetic
+                        # from TimeElapsed to StateEvent, on both pinned Core.
+                        producer.async_write_ha_state()
+                        await hass.async_block_till_done()
+                        self.assertEqual(old._last_integration_trigger.name, 'StateEvent')
+                        self.assertGreater(hass.states.get(producer.entity_id).last_reported,
+                                           original_reported)
+                    mutation['armed'] = True
+                    if regression == 'old_state':
+                        producer._attr_native_value = Decimal('11')
+                    producer.async_write_ha_state()
+                    await hass.async_block_till_done()
+                    self.assertEqual(len(mutation['seen']), 1)
+                    event, original, replacement = mutation['seen'][0]
+                    if regression == 'old_state':
+                        self.assertIs(replacement, hass.states.get(other.entity_id))
+                        self.assertIsNot(original, replacement)
+                        self.assertEqual(original.entity_id, producer.entity_id)
+                    else:
+                        self.assertGreater(original, replacement)
+                    self.assertIs(event.data[regression], replacement)
+                    # Baseline wrongly accepts the same authentic Event after
+                    # its unchecked arithmetic input has been changed.
+                    with self.assertRaises(ValueError):
+                        await scope.setup()
+                    self.assertIsNotNone(scope._error)
+                    self.assertIsNone(scope._transferred)
+                    self.assertIsNone(scope._new)
+                    self.assertFalse(hasattr(scope, 'receipt'))
+                    self.assertFalse(any(
+                        store.read(key)['payload'].get('kind') == 'integration_clock_receipt'
+                        for key in store.rows))
+                    self.assertEqual(entry.state.value, 'not_loaded')
+                elif regression == 'partial_unsubscribe':
+                    # Actual native removal succeeds once. Retain that exact
+                    # unsubscribe in the product list, as after a partial cut.
+                    scope._unsubscribes[0]()
+                    with self.assertRaisesRegex(ValueError, r'list\.remove'):
+                        scope.close()
+                    self._assert_owned_resources_released(scope, emergency)
+                else:
+                    emissions = scope._emissions
+                    original_close = emissions.close
+                    def close_then_raise():
+                        original_close()
+                        raise RuntimeError('regression_emission_close_after_release')
+                    # Only this Renamer witness instance is wrapped; HA/native
+                    # functions and all native event/timer writers are intact.
+                    emissions.close = close_then_raise
+                    try:
+                        with self.assertRaisesRegex(RuntimeError,
+                                'regression_emission_close_after_release'):
+                            scope.close()
+                        self._assert_owned_resources_released(scope, emergency)
+                    finally:
+                        emissions.close = original_close
+                return
             if gap_report:
                 before_report = old._state
                 producer.async_write_ha_state()  # Real same-value state_reported.
@@ -178,6 +286,71 @@ class NativeIntegrationContinuityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertGreaterEqual(anchor_before, initial_anchor)
         finally:
             unsubscribe()
-            if scope is not None:
-                scope.close()
-            lease.release()
+            if mutation_unsubscribe is not None:
+                mutation_unsubscribe()
+            try:
+                if scope is not None:
+                    if regression is None:
+                        scope.close()
+                    else:
+                        # Runs AFTER the negative assertions, including RED.
+                        self._cleanup_regression(scope, emergency)
+            finally:
+                lease.release()
+
+    def _capture_cleanup(self, scope):
+        emissions = importlib.import_module(fixture.PACKAGE + '.native_utility_source_emissions')
+        return {
+            'handle': scope._timer(scope.old)[0],
+            'unsubscribes': tuple(scope._unsubscribes),
+            'tool': scope._tool,
+            'watched': tuple(scope._watched),
+            'emissions_close': scope._emissions.close,
+            'emission_tool': emissions._tool,
+        }
+
+    def _assert_owned_resources_released(self, scope, owned):
+        monitor = __import__('sys').monitoring
+        with self.subTest(resource='retained_native_timer'):
+            self.assertTrue(owned['handle'].cancelled())
+        for kind, key in (('changed', scope.event._TRACK_STATE_CHANGE_DATA),
+                          ('reported', scope.event._TRACK_STATE_REPORT_DATA)):
+            tracker = scope.hass.data.get(key)
+            targets = ([] if tracker is None else
+                       [job.target for job in tracker.callbacks.get(scope.source, ())])
+            with self.subTest(resource='bridge_' + kind):
+                self.assertNotIn(scope._bridges[kind], targets)
+        for name in ('tool', 'emission_tool'):
+            with self.subTest(resource=name):
+                self.assertIsNone(monitor.get_tool(owned[name]))
+
+    def _cleanup_regression(self, scope, owned):
+        # A broken baseline must not leak process-global monitor slots or an
+        # orphaned retained timer into later tests. None of these operations
+        # supplies authority, arithmetic, native fields or a successful oracle.
+        try:
+            scope.close()
+        except (ValueError, RuntimeError):
+            pass
+        if owned is None:
+            return
+        # Reports may have naturally rearmed a newer retained native handle.
+        if scope._retained:
+            handle = getattr(scope.old._max_sub_interval_exceeded_callback, '__self__', None)
+            if isinstance(handle, asyncio.TimerHandle):
+                handle.cancel()
+        owned['handle'].cancel()
+        for unsubscribe in owned['unsubscribes']:
+            try:
+                unsubscribe()
+            except (ValueError, KeyError):
+                pass  # An already-removed native keyed job, cleanup only.
+        owned['emissions_close']()
+        monitor = __import__('sys').monitoring
+        tool = owned['tool']
+        if monitor.get_tool(tool) == continuity._NAME:
+            for code in owned['watched']:
+                monitor.set_local_events(tool, code, 0)
+            monitor.register_callback(tool, monitor.events.PY_START, None)
+            monitor.register_callback(tool, monitor.events.PY_RETURN, None)
+            monitor.free_tool_id(tool)
