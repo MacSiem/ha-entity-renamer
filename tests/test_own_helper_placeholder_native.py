@@ -111,9 +111,28 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
                     adapter.bind_phase_context(context)
                     self.assertTrue(callable(getattr(adapter, 'bind_own_helper_escrow', None)),
                         'receipted adapter has no live own-helper escrow binding')
-                    adapter.bind_own_helper_escrow(escrow, token, source_fence=durable_source_fence)
                     method = adapter.apply if context.record.direction == 'forward' else adapter.compensate
+                    rows_before = dict(chain.store.rows)
+                    native_before = io.document('entity')
+                    with self.assertRaisesRegex(tx.Refused, 'own_helper_effect_required'):
+                        await method(context.step, self.guard)
+                    from dataclasses import replace
+                    for foreign_token in (replace(token), getattr(self, 'previous_escrow_token', None)):
+                        with self.subTest(token=foreign_token), self.assertRaisesRegex(
+                                tx.Refused, 'own_helper_live_escrow_required'):
+                            adapter.bind_own_helper_escrow(escrow, foreign_token,
+                                source_fence=durable_source_fence)
+                    async def deferred_fence(actual_context):
+                        durable_source_fence(actual_context)
+                    adapter.bind_own_helper_escrow(escrow, token, source_fence=deferred_fence)
+                    with self.assertRaisesRegex(tx.Refused, 'synchronous_source_fence_required'):
+                        await method(context.step, self.guard)
+                    self.assertIsNone(chain.active)
+                    self.assertEqual(chain.store.rows, rows_before)
+                    self.assertEqual(io.document('entity'), native_before)
+                    adapter.bind_own_helper_escrow(escrow, token, source_fence=durable_source_fence)
                     mutation = await method(context.step, self.guard)
+                    self.previous_escrow_token = token
                     slot = chain._slot('receipt', context.index, context.record.direction)
                     row = chain.store.read(slot)
                     self.assertIsNotNone(row)
