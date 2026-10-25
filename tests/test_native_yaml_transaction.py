@@ -128,13 +128,13 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         return self.record
 
-    async def native_observer(self, state):
-        assert self.locks.held or not self.f['chain'].active
+    async def native_observer(self, state, chain):
+        assert self.locks.held or not chain.active
         state._bound(self.f['receipt'])
         await asyncio.sleep(0)
         files = tuple(base.baseline.NativeInputFile(row.key, row.raw, row.identity,
             base.baseline._json(json.loads(row.raw)['data'])) for row in self.native)
-        return observation.NativeInputObservation(self.f['chain'].baseline.receipt_json,
+        return observation.NativeInputObservation(chain.baseline.receipt_json,
                                                   self.f['receipt'].version, files)
 
     async def full_verify(self, plan):
@@ -144,7 +144,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     def make_adapter(self, chain):
         return adapter_module.ReceiptedYAMLTransactionAdapter(self.hass,
             lambda ref: self.f['yaml'], self.locks, self.observer, chain,
-            self.native_observer, self.load, lambda: None, context=None,
+            lambda state: self.native_observer(state, chain), self.load, lambda: None, context=None,
             full_verify=self.full_verify, full_verify_rollback=self.full_verify,
             runtime_version=self.f['receipt'].version)
 
