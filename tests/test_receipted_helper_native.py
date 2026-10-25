@@ -2,7 +2,7 @@
 
 Current Core only: installed helper runtime observers/persistence intentionally
 refuse older layouts. No running QA API/config, endpoint or readiness claim.
-Lifecycle intents/recovery belong to the enclosing operation, not this probe.
+Lifecycle uses separate real private Stores in both forward and reverse cycles.
 """
 from dataclasses import replace
 from datetime import timedelta
@@ -40,7 +40,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             'native_registry', 'native_registry_receipts', 'native_registry_transaction',
             'native_helper_transaction', 'native_input_observation', 'helper_native',
             'helper_transaction', 'helper_observers', 'prepared', 'journal', 'transaction',
-            'recorder_guard', 'history_guard')}
+            'recorder_guard', 'history_guard', 'native_helper_lifecycle')}
         nr, rr, prep, tx = (m[k] for k in ('native_registry', 'native_registry_receipts',
                                           'prepared', 'transaction'))
         class Meter(SensorEntity):
@@ -83,13 +83,6 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                 for relative, entries, selected in receipt.source_directories))
         original = await fixtures.baseline.async_capture_native_input_baseline(
             hass, receipt, guard=lambda: None)
-        self.assertTrue(await hass.config_entries.async_unload(helper.entry_id))
-        await hass.async_block_till_done()
-        fixtures.validation.assert_validation_current(receipt)
-        self.assertEqual(await fixtures.baseline.async_capture_native_input_baseline(
-            hass, receipt, guard=lambda: None), original)
-        inactive = await m['helper_observers'].NativeHelperObservers.capture(
-            hass, (original_snapshot,), proof)
         preparations = prep.native_prepared_store(hass)
         await preparations.initialize()
         inputs = await preparations.create_native_inputs('helper-original-inputs', original)
@@ -116,6 +109,56 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         operation = 'mixed-helper-native-operation'
         chain = await rr.RegistryReceiptChain.start(store, operation, plan, receipt, digests)
         bridge = nr.NativeRegistryBridge(io, recorder, native_images=chain.accepted_documents)
+        async def observe():
+            return await m['native_input_observation'].async_observe_native_inputs(
+                hass, receipt, guard=lambda: None)
+        async def original_source(reference, original_receipt):
+            self.assertEqual((reference, original_receipt), (inputs, receipt))
+            fixtures.validation.assert_validation_current(receipt)
+            return (await fixtures.baseline.async_capture_native_input_baseline(
+                hass, receipt, guard=lambda: None)) == original
+        expected_config = original_snapshot
+        async def verify_inactive(entry_id):
+            from homeassistant.helpers import entity_platform as ep
+            self.assertEqual(entry_id, helper.entry_id)
+            self.assertIs(helper.state, ConfigEntryState.NOT_LOADED)
+            self.assertFalse(any(platform.entities for platform in
+                ep.async_get_platforms(hass, 'threshold') if platform.config_entry is helper))
+            self.assertFalse(helper.update_listeners)
+            self.assertEqual(m['helper_native'].read_entry(hass, entry_id), expected_config)
+            self.assertEqual(f.entity.async_get(helper_row.entity_id).id, helper_row.id)
+            return True
+        async def accepted_source(authorization):
+            record = await log.load(operation)
+            self.assertIsNotNone(record)
+            self.assertEqual(authorization.operation_id, operation)
+            self.assertEqual(authorization.fingerprint, plan.fingerprint)
+            self.assertEqual(authorization.status, record.status)
+            phase = 'verified' if record.status == 'applied' else 'undone'
+            self.assertEqual(record.phases, (phase,) * len(plan.steps))
+            observed = await observe()
+            head = chain.expected(tx.PhaseContext(record, 0), tuple(
+                rr.RegistryRawObservation(item.key, item.raw, item.identity) for item in observed.files))
+            return head == authorization.head
+        async def runtime(entry_id, activation, authorization):
+            self.assertEqual(entry_id, helper.entry_id)
+            self.assertEqual(activation['state'], 'loaded')
+            await loaded_observer.verify_runtime(helper_change.after
+                if authorization.status == 'applied' else helper_change.before)
+            return True
+        lm = m['native_helper_lifecycle']
+        lifecycle_store = lm.native_helper_lifecycle_store(hass, preparations)
+        await lifecycle_store.initialize()
+        lifecycle_args = (lifecycle_store, hass.config_entries, operation, plan, receipt, digests)
+        lifecycle_callbacks = dict(guard=lambda: None, verify_original_native_inputs=original_source,
+            settle=hass.async_block_till_done, verify_inactive=verify_inactive,
+            verify_runtime=runtime, verify_accepted_native_chain=accepted_source)
+        lifecycle = await lm.NativeHelperLifecycle.start(*lifecycle_args, **lifecycle_callbacks)
+        await lifecycle.quiesce()
+        inactive = await m['helper_observers'].NativeHelperObservers.capture(
+            hass, (original_snapshot,), proof)
+        def guarded_quiescence():
+            lifecycle.require_quiescent()
         resolver = lambda ref: prep.decode_change(preparations.resolve(ref, digests[ref]))
         native = m['helper_transaction'].HelperTransactionAdapter(hass, resolver,
             resolve_step=lambda key: next(step for step in steps if step.key == key),
@@ -123,9 +166,6 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             verify_activation=inactive.verify_activation, verify_runtime=inactive.verify_runtime,
             verify_inventory=inactive.verify_inventory,
             verify_original_inventory=inactive.verify_original_inventory)
-        async def observe():
-            return await m['native_input_observation'].async_observe_native_inputs(
-                hass, receipt, guard=lambda: None)
         async def verify(direction):
             self.assertTrue(await history.verify(historical))
             if (await bridge.inspect(registry_change)).position != direction:
@@ -134,7 +174,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                         else inactive.verify_original_inventory)
             return await callback(plan)
         adapter = m['native_helper_transaction'].ReceiptedHelperTransactionAdapter(
-            native, chain, observe, log.load, lambda: None,
+            native, chain, observe, log.load, guarded_quiescence,
             full_verify=lambda _: verify('after'), full_verify_rollback=lambda _: verify('before'))
         registry = m['native_registry_transaction'].ReceiptedRegistryTransactionAdapter(
             bridge, resolver, chain, observe, log.load, adapter.guard,
@@ -160,8 +200,14 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         def helper_call(*args, **kwargs):
             intents(1)
             return original_helper(*args, **kwargs)
+        async def authorization():
+            record = await log.load(operation)
+            observed = await observe()
+            head = chain.expected(tx.PhaseContext(record, 0), tuple(
+                rr.RegistryRawObservation(item.key, item.raw, item.identity) for item in observed.files))
+            return lm.RestoreAuthorization(operation, plan.fingerprint, head, record.status)
         async def restore_and_stimulate(snapshot):
-            self.assertTrue(await hass.config_entries.async_setup(helper.entry_id))
+            await lifecycle.restore(await authorization())
             await loaded_observer.verify_runtime(snapshot)
             self.assertEqual(f.entity.async_get(helper_row.entity_id).id, helper_row.id)
             for value, expected in ((43, 'on'), (41, 'off')):
@@ -186,13 +232,19 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             fresh_chain.expected(tx.PhaseContext(await log.load(operation), 0), tuple(
                 rr.RegistryRawObservation(item.key, item.raw, item.identity) for item in observed.files))
             await restore_and_stimulate(helper_change.after)
-            self.assertTrue(await hass.config_entries.async_unload(helper.entry_id))
-            await hass.async_block_till_done()
+            # A separate durable cycle starts from the accepted forward head;
+            # it cannot mint a new baseline from post-migration current inputs.
+            expected_config = helper_change.after
+            forward_authorization = await authorization()
+            lifecycle = await lm.NativeHelperLifecycle.start(*lifecycle_args,
+                **lifecycle_callbacks, source_authorization=forward_authorization)
+            await lifecycle.quiesce()
             self.assertIs(helper.state, ConfigEntryState.NOT_LOADED)
             restored = await coordinator.rollback(operation)
             self.assertEqual(restored.status, 'rolled_back', (restored.reason, restored.phases))
             self.assertEqual(calls, [(0, 'forward'), (1, 'forward'),
                                      (1, 'rollback'), (0, 'rollback')])
+            expected_config = helper_change.before
             await restore_and_stimulate(helper_change.before)
         self.assertIs(component.get_entity(old), meter)
         self.assertEqual(f.entity.async_get(old).id, source_uuid)
