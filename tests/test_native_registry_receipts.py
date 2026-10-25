@@ -361,6 +361,29 @@ class RegistryReceiptTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ValueError):
                     await reopened(f)
 
+    async def test_reopen_revalidates_semantic_delta_not_just_stored_digests(self):
+        # Model a malformed persisted receipt from a faulty writer. Even with
+        # internally consistent hashes, immutable preparation still limits it.
+        f = await fixture()
+        ctx = context(f, 0, ['intent', 'pending', 'pending'])
+        intent = await f['chain'].begin(ctx, f['observations'])
+        result, mutation, audit = effect(f['observations'], f['changes'][0])
+        ref = await f['chain'].complete(intent, ctx, f['observations'], result,
+                                      mutation=mutation, audit=audit)
+        row = f['sidecar_disk'].value['events'][ref[0]]
+        payload = row['payload']
+        document = json.loads(result[0].raw)
+        target = next(r for r in document['data']['entities'] if r['id'] == 'one')
+        target['opaque'] = {'foreign': True}
+        payload['mutation']['after_json'] = json.dumps(target)
+        summary = payload['result'][receipts.KEYS[0]]
+        summary['document_sha256'] = sha(transition._json(document))
+        summary['sha256'] = sha(raw(document))
+        payload['audit']['result_sha256'] = summary['sha256']
+        row['digest'] = prepared.canonical(payload)[1]
+        with self.assertRaises(ValueError):
+            await reopened(f)
+
 
 if __name__ == '__main__':
     unittest.main()
