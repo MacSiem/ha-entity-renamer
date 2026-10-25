@@ -223,6 +223,11 @@ class Regressions(unittest.IsolatedAsyncioTestCase):
             path = self.root / args[1].path
             before, source = path.read_bytes(), path.stat()
             result = original(*args)
+            # Retain this fixture's replaced inode across the next call. The
+            # mounted test filesystem can refresh lookup identity when the last
+            # descriptor closes; a call stamp does not authorize that drift.
+            result_pin = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            self.addCleanup(os.close, result_pin)
             after, final = path.read_bytes(), path.stat()
             self.assertEqual(result['before_sha256'], hashlib.sha256(before).hexdigest())
             self.assertEqual(result['after_sha256'], hashlib.sha256(after).hexdigest())
@@ -248,7 +253,8 @@ class Regressions(unittest.IsolatedAsyncioTestCase):
         by_path = {r['path']: r for r in forward}
         for returned in reverse:
             previous = by_path[returned['path']]
-            self.assertEqual(returned['before_identity'], previous['after_identity'])
+            self.assertEqual(returned['before_identity'], previous['after_identity'],
+                [(r['path'], r['before_identity'], r['after_identity']) for r in calls])
             self.assertEqual(returned['before_sha256'], previous['after_sha256'])
             self.assertEqual(returned['after_sha256'], previous['before_sha256'])
         self.assertEqual(self.reload_count, 2)
