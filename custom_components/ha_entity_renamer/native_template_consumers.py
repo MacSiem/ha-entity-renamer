@@ -110,6 +110,12 @@ class _Native:
         self.hass, self.version = hass, __version__
         self.root = Path(import_module('homeassistant').__file__).resolve().parent
         self.pins = {**_SOURCES[__version__], **_PINS[__version__]}
+        from homeassistant.helpers.template import RenderInfo
+        self.render_module = import_module(RenderInfo.__module__)
+        self.pins.update({'helpers/template.py':
+            '2e4afdb3e16a7e6339bd72966a5d9a6d1bff5e7c602797e20118a1a191944bf7'}
+            if __version__ == '2025.6.0' else {'helpers/template/render_info.py':
+            '259fba6cd34246e9a022dd67e9b9a5f5a041a307637b9cc15c74b7afd5249ca9'})
         self.sensor = (sensor.SensorTemplate if __version__ == '2025.6.0'
                        else sensor.StateSensorEntity)
         self.refs = [(self.sensor, '__init__'), (te.TemplateEntity, '__init__'),
@@ -133,6 +139,8 @@ class _Native:
         else:
             self.refs += [(te.TemplateEntity, 'setup_state_template'),
                           (sensor.AbstractTemplateSensor, '_validate_state')]
+        self.refs += [(RenderInfo, '_filter_entities'), (RenderInfo, '_freeze'),
+                      (self.render_module, '_false')]
         self.methods, self.codes = prove_methods(self.root, self.pins, self.refs)
 
     def bindings(self):
@@ -234,6 +242,9 @@ def _registration(native, entity, template):
           and not render.domains_lifecycle and not render.has_time
           and render.rate_limit is None and bool(render.entities),
           'native_dependencies_unverified')
+    _need(_bound(render.filter, render, RenderInfo._filter_entities)
+          and render.filter_lifecycle is native.render_module._false,
+          'native_render_predicate_changed')
     filtered = info._track_state_changes
     _need(type(filtered) is event._TrackStateChangeFiltered and filtered.hass is hass
           and _bound(filtered._action, info, event.TrackTemplateResultInfo._refresh)
@@ -275,7 +286,8 @@ def _registration(native, entity, template):
     _need(sum(_bound(callback, info, event.TrackTemplateResultInfo.async_remove)
               for callback in entity._on_remove) == 1, 'native_cleanup_owner_changed')
     token = (id(entity), id(template), id(info), id(info._job), id(tracks[0]),
-             id(variables), id(info._info), id(render), id(filtered), id(states),
+             id(variables), id(info._info), id(render), id(render.filter),
+             id(render.filter_lifecycle), id(filtered), id(states),
              id(filtered._action_as_hassjob), id(remove), id(job), id(callbacks), bus_token)
     return dependencies, token
 
@@ -464,8 +476,12 @@ async def async_observe_template_consumers(hass, receipt, evidence, *, guard):
     first = _sample(native, evidence, observed)
     await asyncio.sleep(0)
     check()
-    await _settled_executor(hass, assert_validation_current, receipt)
-    await _settled_executor(hass, native.sources)
+    def final_sources():
+        native.sources()
+        # ORIGINAL physical sources close every preceding executor await.
+        # The event-loop suffix compares guards/managers/bindings synchronously.
+        assert_validation_current(receipt)
+    await _settled_executor(hass, final_sources)
     check()
     assert_discovery_managers_current(hass, observed, guard=check)
     native.bindings()
