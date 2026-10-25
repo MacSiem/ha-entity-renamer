@@ -19,7 +19,7 @@ class NativeUtilitySetupAuditProbe(unittest.IsolatedAsyncioTestCase):
     _emit = fixture.ActualUtilityMeterObserverTests._emit
 
     async def test_actual_native_call_return_and_event_identity_can_be_observed(self):
-        from homeassistant.core import Event, EventBus
+        from homeassistant.core import Event, EventBus, callback
         from homeassistant.helpers import entity_registry as er
         from homeassistant.helpers.json import _orjson_bytes_default_encoder
         observer = await self._fixture()
@@ -78,6 +78,11 @@ class NativeUtilitySetupAuditProbe(unittest.IsolatedAsyncioTestCase):
             except BaseException as error:
                 # A profiler exception must not alter execution of the HA writer.
                 errors.append(type(error).__name__)
+        observed_events = []
+        @callback
+        def observe_event(event):
+            observed_events.append(event)
+        unsubscribe = hass.bus.async_listen('entity_registry_updated', observe_event)
         sys.setprofile(profile)
         try:
             self.assertTrue(await hass.config_entries.async_setup(self.entry.entry_id))
@@ -85,6 +90,7 @@ class NativeUtilitySetupAuditProbe(unittest.IsolatedAsyncioTestCase):
             self.assertIs(sys.getprofile(), profile)
         finally:
             sys.setprofile(None)
+            unsubscribe()
         self.assertIsNone(sys.getprofile())
         self.assertEqual(errors, [])
         self.assertFalse(active)
@@ -110,6 +116,7 @@ class NativeUtilitySetupAuditProbe(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(emitted)
         self.assertTrue(events)
         self.assertEqual(len(events), len(emitted))
+        self.assertEqual({id(event) for event in observed_events}, set(events))
         self.assertTrue(all(data == saved for data, saved, _, _ in emitted.values()))
         # Persist only a compact synthetic diagnostic. Lineage is observed here;
         # no claim that these callers form a sufficient authorization contract.
