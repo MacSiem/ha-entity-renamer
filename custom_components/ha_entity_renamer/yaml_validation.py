@@ -321,7 +321,8 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
             if with_sources:
                 from .yaml_source_binding import seal_original_sources
                 evidence = seal_original_sources(receipt, plan, staged[2], result['source_runtime'],
-                    template_ledger=staged[3], template_native=result['template_sources'])
+                    template_ledger=staged[3], template_native=result['template_sources'],
+                    template_candidate_native=result['template_candidate_sources'])
                 return receipt, evidence
             return receipt
     except (OSError, TimeoutError):

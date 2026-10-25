@@ -311,13 +311,16 @@ async def check(before_root, proposed_root, *, with_sources=False):
     template_sources = {} if with_sources else None
     old_runtime = await _expected_runtime(before_root, original_domains,
         source_rows=source_rows, template_sources=template_sources)
-    new_runtime = await _expected_runtime(proposed_root, changed)
+    candidate_templates = {} if with_sources else None
+    new_runtime = await _expected_runtime(proposed_root, changed,
+        template_sources=candidate_templates)
     result = {'status': 'valid', 'version': __version__, 'changed_domains': changed,
               'unsupported_domains': unsupported,
               'runtime_expected': [(domain, old_runtime.get(domain), new_runtime.get(domain))
                                    for domain in changed]}
     if with_sources:
         result['template_sources'] = template_sources
+        result['template_candidate_sources'] = candidate_templates
         result['source_runtime'] = {'version': __version__, 'domains': [
             [domain, old_runtime.get(domain), source_rows.get(domain)]
             for domain in ('automation', 'script')]}

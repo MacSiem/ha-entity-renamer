@@ -73,3 +73,54 @@ def seal_template_sources(receipt, ledger, native):
                   for row in ledger.definitions) and keys == expected)
     return OriginalTemplateSources(ledger, projection,
         tuple(tuple(row) for row in rows), matched)
+
+
+@dataclass(frozen=True)
+class CandidateTemplateSources:
+    """Private proposed checker output, bound to the immutable ORIGINAL receipt.
+
+    No live state is learned. This does not authorize an effect or make Template
+    activation supported. Source identities must be unchanged by this proposal.
+    """
+    original_receipt_json: bytes
+    original_sources_sha256: str
+    proposed_files: tuple[tuple[str, str], ...]
+    sources: OriginalTemplateSources
+
+    @property
+    def sha256(self):
+        return hashlib.sha256(json.dumps([
+            self.original_receipt_json.decode('utf-8'), self.original_sources_sha256,
+            self.proposed_files, self.sources.sha256], sort_keys=True,
+            separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+    @property
+    def migration_ready(self):
+        return False
+
+    def assert_original(self, receipt, original):
+        from .native_input_baseline import _receipt_bytes
+        _need(type(original) is OriginalTemplateSources
+              and self.original_receipt_json == _receipt_bytes(receipt)
+              and self.original_sources_sha256 == original.sha256
+              and self.proposed_files == receipt.proposed_files
+              and self.sources.ledger == original.ledger)
+
+
+def seal_template_candidate(receipt, original, native):
+    """Same proposed native checker + ORIGINAL source inventory; no live parser.
+
+    The existing seal's caller has already bound Plan and ORIGINAL byte bundle.
+    A proposal that adds/removes/changes source identity cannot use this subset.
+    Unsupported/duplicate source inventories retain their unmatched disposition.
+    """
+    from .native_input_baseline import _receipt_bytes
+    _need(type(original) is OriginalTemplateSources)
+    candidate = seal_template_sources(receipt, original.ledger, native)
+    if original.rows is not None and candidate.rows is not None:
+        _need(tuple(row[:2] for row in candidate.rows)
+              == tuple(row[:2] for row in original.rows))
+    else:
+        _need(original.rows is None and candidate.rows is None)
+    return CandidateTemplateSources(_receipt_bytes(receipt), original.sha256,
+                                    receipt.proposed_files, candidate)
