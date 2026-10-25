@@ -20,7 +20,9 @@ class NativeHelperPersistence:
     def __init__(self, hass):
         from homeassistant.config_entries import ConfigEntries
         from homeassistant.const import __version__
-        if __version__ != '2026.10.2' or type(hass.config_entries) is not ConfigEntries:
+        # Both pinned runtimes use ConfigEntryStore 1.5 and the same pending-write
+        # fields. Keep the exact manager, store identity and full native encoder.
+        if __version__ not in ('2025.6.0', '2026.10.2') or type(hass.config_entries) is not ConfigEntries:
             raise PersistenceError('unsupported_config_entries_runtime')
         self.hass = hass
         self.manager = hass.config_entries

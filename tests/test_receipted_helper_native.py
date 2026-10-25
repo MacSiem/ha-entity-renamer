@@ -1,7 +1,6 @@
 """Actual isolated HA: quiescence, mixed receipts, Recorder and restored helper.
 
-Current Core only: installed helper runtime observers/persistence intentionally
-refuse older layouts. No running QA API/config, endpoint or readiness claim.
+Pinned Core schemas only. No running QA API/config, endpoint or readiness claim.
 Lifecycle uses separate real private Stores in both forward and reverse cycles.
 """
 from datetime import timedelta
@@ -20,8 +19,8 @@ fixtures = quiescence.fixtures
 class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
     async def _before_start(self, hass, root):
         from homeassistant.const import __version__
-        if __version__ != '2026.10.2':
-            self.skipTest('native helper callbacks qualified on Core 2026.10.2 only')
+        if __version__ not in ('2025.6.0', '2026.10.2'):
+            self.skipTest('native helper callbacks require an exact pinned Core')
         from homeassistant.helpers.recorder import async_initialize_recorder
         from homeassistant.setup import async_setup_component
         async_initialize_recorder(hass)
@@ -32,6 +31,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
     async def test_threshold_supported_unload_own_mutations_setup_and_reverse(self):
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+        from homeassistant.components.threshold.config_flow import ConfigFlowHandler
         from homeassistant.helpers import entity_registry as er
         from homeassistant.helpers.entity_component import EntityComponent
         f, hass = self.f, self.f.hass
@@ -55,7 +55,8 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         helper = ConfigEntry(domain='threshold', title='Receipted Threshold', data={},
             options={'name': 'Receipted Threshold', 'entity_id': old, 'hysteresis': 0.0,
                      'lower': None, 'upper': 42.5}, discovery_keys=MappingProxyType({}),
-            source='user', version=1, minor_version=2, subentries_data=[],
+            source='user', version=ConfigFlowHandler.VERSION,
+            minor_version=ConfigFlowHandler.MINOR_VERSION, subentries_data=[],
             unique_id='receipted-threshold', pref_disable_polling=True)
         await hass.config_entries.async_add(helper)
         await hass.async_block_till_done()

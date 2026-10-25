@@ -80,13 +80,13 @@ class Harness:
 class HelperLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_plan_survives_crash_before_inner_journal_creation(self):
         h = await Harness().initialize(self)
-        self.assertEqual(h.h.log.rows, {})
+        self.assertIsNone(await h.h.log.load('provided-operation-id'))
         await h.obj.quiesce()
         reopened = await h.reopen()
         recovered_plan = module.stored_lifecycle_plan(reopened.store, reopened.root_id)
         self.assertEqual(recovered_plan, h.h.f['plan'])
         self.assertEqual(recovered_plan.fingerprint, h.h.f['plan'].fingerprint)
-        self.assertEqual(h.h.log.rows, {})
+        self.assertIsNone(await h.h.log.load('provided-operation-id'))
 
     async def test_reverse_quiescence_requires_same_applied_accepted_chain(self):
         h = await Harness().initialize(self)

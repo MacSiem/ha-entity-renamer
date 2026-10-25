@@ -1,4 +1,4 @@
-"""Read-only HA 2026.10.2 helper callbacks; capture BEFORE registry changes.
+"""Read-only HA 2025.6.0 / 2026.10.2 helper callbacks; capture BEFORE registry changes.
 
 Scope: threshold, min_max, group/binary_sensor config-entry helpers only.
 No import-time HA dependency. No configuration/state/service/registry writes.
@@ -19,6 +19,13 @@ from .helper_native import read_entry
 from .helper_plan import plan_helper, snapshot_equal
 
 
+# Exact installed-source audit only: no semver range or inferred compatibility.
+_HELPER_SCHEMA_VERSIONS = {
+    '2025.6.0': {'threshold': (1, 1), 'min_max': (1, 1), 'group': (1, 1)},
+    '2026.10.2': {'threshold': (1, 2), 'min_max': (1, 1), 'group': (1, 1)},
+}
+
+
 class ObservationUnavailable(ValueError):
     """Missing evidence is a refusal, never a successful boolean proof."""
 
@@ -26,6 +33,12 @@ class ObservationUnavailable(ValueError):
 def require(condition, reason):
     if not condition:
         raise ObservationUnavailable(reason)
+
+
+def _helper_schema_version(version, domain):
+    require(version in _HELPER_SCHEMA_VERSIONS, 'helper_ha_version_unsupported')
+    require(domain in _HELPER_SCHEMA_VERSIONS[version], 'helper_domain_unsupported')
+    return _HELPER_SCHEMA_VERSIONS[version][domain]
 
 
 @dataclass(frozen=True)
@@ -125,7 +138,7 @@ class NativeHelperObservers:
         from homeassistant.const import __version__
         from homeassistant.helpers import entity_registry as er
 
-        require(__version__ == '2026.10.2', 'helper_ha_version_unsupported')
+        require(__version__ in _HELPER_SCHEMA_VERSIONS, 'helper_ha_version_unsupported')
         snapshots = tuple(deepcopy(s) for s in snapshots)
         require(bool(snapshots), 'helper_observer_empty_scope')
         proof = tuple(mapping_proof)
@@ -212,7 +225,7 @@ class NativeHelperObservers:
         """Validate desired snapshots too (no manager equality prerequisite)."""
         from homeassistant.const import __version__
 
-        require(__version__ == '2026.10.2', 'helper_ha_version_unsupported')
+        require(__version__ in _HELPER_SCHEMA_VERSIONS, 'helper_ha_version_unsupported')
         entry_id = snapshot['identity']['entry_id']
         require(entry_id in self.before, 'helper_outside_captured_scope')
         baseline = self.before[entry_id]
@@ -222,7 +235,7 @@ class NativeHelperObservers:
         require(not snapshot['data'] and not snapshot['subentries'], 'helper_layout_unsupported')
         domain, options = snapshot['domain'], snapshot['options']
         self._references(snapshot)  # rejects uninspected group types
-        expected = (1, 2) if domain == 'threshold' else (1, 1)
+        expected = _helper_schema_version(__version__, domain)
         require((snapshot['identity']['version'], snapshot['identity']['minor_version']) == expected,
                 'helper_schema_version_unsupported')
         flow = import_module(f'homeassistant.components.{domain}.config_flow')
