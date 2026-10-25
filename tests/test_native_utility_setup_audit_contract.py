@@ -52,6 +52,12 @@ def evidence(core='2026.10.2'):
             # Exact native get_or_create forwards these explicit unchanged args.
             args['config_entry_id'] = 'entry'
             args['capabilities'] = before['capabilities']
+        if index == 2:
+            # Entity._async_write_ha_state explicitly forwards these preserved
+            # values in addition to the changing original_device_class.
+            for field in ('capabilities', 'supported_features') + (
+                    ('original_name',) if core == '2026.10.2' else ()):
+                args[field] = before[field]
         names = a._COMMON_ARGS | (a._EXTRA_ARGS if core == '2026.10.2' else set())
         calls.append({'index': index, 'before': before, 'after': deepcopy(current),
                       'arguments': args, 'undefined': sorted(names - args.keys()),
@@ -256,6 +262,7 @@ class SetupAuditNativeContractTests(unittest.IsolatedAsyncioTestCase):
             with a.NativeUtilitySetupAudit(hass, baseline, snapshot, rows, guard=lambda: True) as collector:
                 self.assertTrue(await hass.config_entries.async_setup(self.entry.entry_id))
                 await hass.async_block_till_done()
+                self.assertIsNone(collector._error, 'native setup must succeed before fault injection')
                 old_name = rows[0]['name']
                 self.f.entity.async_update_entity(rows[0]['entity_id'], name='Foreign')
                 self.f.entity.async_update_entity(rows[0]['entity_id'], name=old_name)
@@ -270,6 +277,7 @@ class SetupAuditNativeContractTests(unittest.IsolatedAsyncioTestCase):
             with a.NativeUtilitySetupAudit(hass, baseline, snapshot, rows, guard=lambda: True) as collector:
                 self.assertTrue(await hass.config_entries.async_setup(self.entry.entry_id))
                 await hass.async_block_till_done()
+                self.assertIsNone(collector._error, 'native setup must succeed before fault injection')
                 hass.bus.async_fire_internal('entity_registry_updated', {
                     'action': 'update', 'entity_id': rows[0]['entity_id'],
                     'changes': {'original_device_class': None}})
@@ -288,6 +296,7 @@ class SetupAuditNativeContractTests(unittest.IsolatedAsyncioTestCase):
                 with collector:
                     self.assertTrue(await hass.config_entries.async_setup(self.entry.entry_id))
                     await hass.async_block_till_done()
+                    self.assertIsNone(collector._error, 'native setup must succeed before fault injection')
                     sys.setprofile(other)
                     collector.finish()
             self.assertIs(sys.getprofile(), other)
@@ -329,6 +338,7 @@ class SetupAuditNativeContractTests(unittest.IsolatedAsyncioTestCase):
             with collector:
                 self.assertTrue(await hass.config_entries.async_setup(self.entry.entry_id))
                 await hass.async_block_till_done()
+                self.assertIsNone(collector._error, 'native setup must succeed before fault injection')
                 # No mutation/event is needed to discover an unknown caller.
                 self.f.entity.async_update_entity(rows[0]['entity_id'], name=rows[0]['name'])
                 collector.finish()

@@ -272,7 +272,11 @@ def validate_setup_audit(baseline, expected_snapshot, source_rows, audit):
         elif 'get_or_create' in call['path']:
             _need('original_device_class' in args and 'options' not in args, 'add_arguments')
         else:
-            _need(set(args) == {'original_device_class'}, 'state_arguments')
+            state_args = {'original_device_class', 'capabilities', 'supported_features'}
+            if value['core'] == '2026.10.2':
+                state_args.add('original_name')
+            _need('original_device_class' in args and set(args) <= state_args,
+                  'state_arguments')
         for name, arg in args.items():
             if name in ('original_device_class', 'options'):
                 expected[name] = arg
@@ -280,8 +284,11 @@ def validate_setup_audit(baseline, expected_snapshot, source_rows, audit):
                 # Pinned async_get_or_create explicitly forwards preserved
                 # metadata. Do not confuse a defined no-change argument with a
                 # mutation allowance. Other paths must use UNDEFINED.
-                _need('get_or_create' in call['path'] and name in before
-                      and _same(before[name], arg), 'foreign_argument')
+                native_state_arg = (call['path'][0] == 'update' and 'state' in call['path']
+                    and name in ({'capabilities', 'supported_features', 'original_name'}
+                        if value['core'] == '2026.10.2' else {'capabilities', 'supported_features'}))
+                _need(('get_or_create' in call['path'] or native_state_arg)
+                      and name in before and _same(before[name], arg), 'foreign_argument')
         _need(args.keys() & {'original_device_class', 'options'}, 'empty_arguments')
         _need(expected['original_device_class'] in (None, doc['source_class']),
               'device_class_scope')
