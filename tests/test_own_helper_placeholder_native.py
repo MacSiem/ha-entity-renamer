@@ -639,7 +639,10 @@ class ReceiptedOwnHelperMixedYAMLNativeTests(ReceiptedOwnHelperNativeTests):
                     return await actual_yaml_apply(step, guard)
                 except Exception as error:
                     # Observe a refused real call; never manufacture its result.
-                    effect_errors.append((type(error).__name__, str(error)))
+                    import traceback
+                    effect_errors.append((type(error).__name__, str(error),
+                        [(item.name, item.lineno) for item in
+                         traceback.extract_tb(error.__traceback__)]))
                     raise
             yaml_adapter.apply = diagnosed_yaml_apply
             coordinator = tx.Coordinator({'registry': registry, 'yaml': yaml_adapter}, journal,
