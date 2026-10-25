@@ -97,7 +97,8 @@ async def ws_status(hass, connection, message):
         connection.send_error(message['id'], 'recovery_unavailable', 'Migration recovery status is unavailable')
         return
     if (user is None or not user.is_active or not user.is_admin
-            or connection.user.id != user_id or not connection.user.is_admin):
+            or connection.user.id != user_id or not connection.user.is_admin
+            or not connection.user.is_active):
         connection.send_error(message['id'], 'unauthorized', 'Administrator permissions are required')
         return
     if hass.data.get(DATA_RUNTIME) is not runtime or not runtime.loaded or runtime.unloading:
