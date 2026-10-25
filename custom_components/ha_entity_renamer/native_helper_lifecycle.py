@@ -690,6 +690,8 @@ class NativeHelperLifecycle:
         Durable receipts alone are historical. Installed IO must additionally
         retain callback/platform exclusion while the Coordinator operates.
         """
+        if self.failed:
+            _fail('failed_lifecycle_read_only')
         self._authorize()
         status = self.inspect()
         if (not status['inactive_receipts_complete'] or status['pending']
