@@ -890,8 +890,16 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         if pending is not None:
             row = self.store.read(pending[0])
             if (not self.writable or self.active is None
-                    or self.active.reference != pending
-                    or row['payload']['kind'] != 'registry_intent'):
+                    or self.active.reference != pending):
+                _fail('unknown_unresolved_intent')
+            if row['payload']['kind'] == 'helper_setup_intent':
+                from .native_helper_setup_receipts import HelperSetupIntent, _activation
+                if type(self.active) is not HelperSetupIntent:
+                    _fail('unknown_unresolved_intent')
+                live = _activation(self, self.active.lifecycle, self.active.entry_id, live=True)
+                if live != {k: v for k, v in row['payload']['activation'].items() if k != 'witness'}:
+                    _fail('unknown_unresolved_intent')
+            elif row['payload']['kind'] != 'registry_intent':
                 _fail('unknown_unresolved_intent')
 
     def live_yaml_inputs(self, intent, context, calls=()):
