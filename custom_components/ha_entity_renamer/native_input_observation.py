@@ -69,7 +69,7 @@ def _observation_fence(original):
         os.close(reader.root)
 
 
-async def async_observe_native_inputs(hass, original_receipt, *, guard):
+async def async_observe_native_inputs(hass, original_receipt, *, guard, input_state=None):
     """Observe only; caller holds coordinator and external native-editor lease.
 
     All awaits drain safely and are bracketed by guard/manager checks. Held
@@ -83,11 +83,20 @@ async def async_observe_native_inputs(hass, original_receipt, *, guard):
         guard()
         original = _receipt_bytes(original_receipt)
         managers = _Managers(hass, original_receipt)
-        fence = await _drained(hass.async_add_executor_job,
-                               lambda: _observation_fence(original_receipt))
+        if input_state is None:
+            fence = await _drained(hass.async_add_executor_job,
+                                   lambda: _observation_fence(original_receipt))
+        else:
+            from .accepted_input_state import AcceptedInputState
+            if type(input_state) is not AcceptedInputState:
+                _fail('native_input_observation_state_invalid')
+            input_state = await _drained(hass.async_add_executor_job,
+                lambda: input_state._native_observation_fence(original_receipt))
+            fence = original_receipt
         guard()
         managers.check()
-        pinned = _Pinned(fence, managers.initial)
+        pinned = (_Pinned(fence, managers.initial) if input_state is None else
+                  _Pinned(original_receipt, managers.initial, input_state=input_state))
         observation = await _drained(hass.async_add_executor_job, pinned.capture)
         guard()
         managers.check()

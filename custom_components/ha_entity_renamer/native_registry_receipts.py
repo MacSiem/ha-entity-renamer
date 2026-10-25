@@ -1,4 +1,4 @@
-"""Private registry/config-entry intent/receipt sidecar; no HA effects or YAML grants.
+"""Private native/YAML intent/receipt sidecar; no HA effects or grants.
 
 Trusted callers supply durable PhaseContext, independently authenticated raw
 observations and the actual synchronous NativeRegistryMutation return. These
@@ -17,6 +17,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 import asyncio
 import hashlib
+import json
 import re
 import stat
 from typing import TYPE_CHECKING
@@ -34,6 +35,8 @@ from .native_config_transition import (
 )
 from .prepared import PreparedStore, canonical, decode_change
 from .transaction import PhaseContext, Plan
+from .yaml_transaction import PreparedYAML
+from .accepted_input_state import AcceptedInputState, initial_sources, fold_yaml_calls
 
 if TYPE_CHECKING:
     from .yaml_validation import ValidationReceipt
@@ -162,22 +165,25 @@ class RegistryReceiptChain:
 
 start() must run before any effect. prepared_digests is trusted backend metadata
 for the ORIGINAL immutable preparations, not a client-selected resolver. All
-steps must be plain registry or adapter-owned helpers steps. Listeners, YAML
-and unknown predecessors remain unsupported, with named gap refusals.
+steps are plain registry/helpers followed by at most one aggregate YAML step.
+Listeners, interleaved YAML and unknown predecessors remain unsupported.
 """
 
     def __init__(self, store: RegistryReceiptStore, operation_id: str, plan: Plan,
-                 receipt: ValidationReceipt, prepared_digests: dict[str, str]):
+                 receipt: ValidationReceipt, prepared_digests: dict[str, str], *, yaml_original_metadata=None):
         if (type(store) is not RegistryReceiptStore or type(plan) is not Plan
                 or type(operation_id) is not str or not operation_id):
             _fail('binding_invalid')
         plan.validate()
         if not plan.native_inputs:
             _fail('gap_original_native_inputs')
+        yaml_steps = [i for i, step in enumerate(plan.steps) if step.adapter == 'yaml']
+        if yaml_steps and yaml_steps != [len(plan.steps) - 1]:
+            _fail('gap_yaml_order')
         for step in plan.steps:
             if step.caused_by:
                 _fail('gap_native_listeners')
-            if step.adapter not in ('registry', 'helpers'):
+            if step.adapter not in ('registry', 'helpers', 'yaml'):
                 _fail({'helper': 'gap_config_entry_mapping', 'yaml': 'gap_yaml_predecessor',
                        'dashboard': 'gap_nonnative_predecessor',
                        'energy': 'gap_nonnative_predecessor'}.get(step.adapter, 'gap_unknown_predecessor'))
@@ -186,6 +192,8 @@ and unknown predecessors remain unsupported, with named gap refusals.
         self.baseline = self.preparations.resolve_native_inputs(plan.native_inputs, receipt)
         self.version = receipt.version
         self.root_id = _event_id(['root', operation_id, plan.fingerprint])
+        self.original_receipt = receipt
+        self.yaml_index = yaml_steps[0] if yaml_steps else None
         self.changes, bindings = [], []
         self._helper_origins = {}  # Immutable target-row bytes, never current IO.
         original_config = None
@@ -195,10 +203,11 @@ and unknown predecessors remain unsupported, with named gap refusals.
         for step in plan.steps:
             digest = prepared_digests[step.prepared_ref]
             original_payload = self.preparations.resolve(step.prepared_ref, digest)
-            if step.adapter == 'helpers' and _digest(original_payload) != digest:
+            if step.adapter in ('helpers', 'yaml') and _digest(original_payload) != digest:
                 _fail('preparation_binding_invalid')
             change = decode_change(original_payload)
-            expected_type = PreparedHelper if step.adapter == 'helpers' else PreparedRegistryChange
+            expected_type = {'helpers': PreparedHelper, 'yaml': PreparedYAML,
+                             'registry': PreparedRegistryChange}[step.adapter]
             if type(change) is not expected_type:
                 _fail('preparation_mismatch')
             if (change.identity != step.identity
@@ -210,6 +219,12 @@ and unknown predecessors remain unsupported, with named gap refusals.
                     _fail('preparation_mismatch')
                 binding = {'ref': step.prepared_ref, 'digest': digest,
                            'registry_digest': prepared_registry_digest(change)}
+            elif step.adapter == 'yaml':
+                change.checked()
+                if change.receipt != receipt:
+                    _fail('yaml_original_receipt_mismatch')
+                binding = {'ref': step.prepared_ref, 'digest': digest,
+                           'yaml_digest': _digest(json.loads(_json(asdict(change))))}
             else:
                 if type(change) is not PreparedHelper:
                     _fail('preparation_mismatch')
@@ -229,6 +244,18 @@ and unknown predecessors remain unsupported, with named gap refusals.
         self.root = {'kind': 'registry_chain', 'schema': 1,
                      'operation_id': operation_id, 'fingerprint': plan.fingerprint,
                      'native_inputs': list(plan.native_inputs), 'bindings': bindings}
+        if self.yaml_index is not None:
+            # start requires original-fenced metadata; reopen reads its immutable root.
+            if yaml_original_metadata is None:
+                saved = store.read(self.root_id)
+                if saved is None:
+                    _fail('yaml_original_metadata_required')
+                yaml_original_metadata = saved['payload'].get('yaml_original_metadata')
+            from .accepted_input_state import validate_yaml_metadata
+            metadata = validate_yaml_metadata(receipt, self.changes[self.yaml_index],
+                                              yaml_original_metadata)
+            self.root.update(schema=2, original_receipt_sha256=_sha(self.baseline.receipt_json),
+                             yaml_original_metadata=metadata)
         self.root_digest = _digest(self.root)
         self.writable = False
         self.active = None
@@ -236,8 +263,25 @@ and unknown predecessors remain unsupported, with named gap refusals.
 
     @classmethod
     async def start(cls, store: RegistryReceiptStore, operation_id: str, plan: Plan,
-                    receipt: ValidationReceipt, prepared_digests: dict[str, str]) -> RegistryReceiptChain:
-        obj = cls(store, operation_id, plan, receipt, prepared_digests)
+                    receipt: ValidationReceipt, prepared_digests: dict[str, str], *,
+                    yaml_original_metadata=None) -> RegistryReceiptChain:
+        yaml_indices = [i for i, step in enumerate(plan.steps) if step.adapter == 'yaml']
+        if yaml_indices and yaml_indices != [len(plan.steps) - 1]:
+            _fail('gap_yaml_order')
+        yaml_steps = [plan.steps[i] for i in yaml_indices]
+        if yaml_steps:
+            from .accepted_input_state import capture_yaml_original_metadata
+            step = yaml_steps[-1]
+            change = decode_change(store.preparations.resolve(
+                step.prepared_ref, prepared_digests[step.prepared_ref]))
+            if type(change) is not PreparedYAML:
+                _fail('preparation_mismatch')
+            captured = capture_yaml_original_metadata(receipt, change)
+            if yaml_original_metadata is not None and canonical(yaml_original_metadata)[0] != captured:
+                _fail('yaml_original_metadata_mismatch')
+            yaml_original_metadata = captured
+        obj = cls(store, operation_id, plan, receipt, prepared_digests,
+                  yaml_original_metadata=yaml_original_metadata)
         obj._initial()  # Refuse absence before creating any sidecar state.
         await store.create(obj.root_id, obj.root)
         obj.writable = True
@@ -268,14 +312,32 @@ and unknown predecessors remain unsupported, with named gap refusals.
                   'prepared_digest': binding['digest'],
                   'direction': direction, 'phases': list(context.record.phases),
                   'status': context.record.status}
-        name = 'helper_digest' if context.step.adapter == 'helpers' else 'registry_digest'
+        name = {'helpers': 'helper_digest', 'yaml': 'yaml_digest',
+                'registry': 'registry_digest'}[context.step.adapter]
         result[name] = binding[name]
         return result
 
     def _original_change(self, index):
         """Re-resolve immutable original; never validate mutable cached helpers."""
+        if self.plan.steps[index].adapter == 'yaml':
+            binding = self.root['bindings'][index]
+            payload = self.preparations.resolve(binding['ref'], binding['digest'])
+            change = decode_change(payload)
+            if (_digest(payload) != binding['digest'] or type(change) is not PreparedYAML
+                    or _digest(json.loads(_json(asdict(change.checked())))) != binding['yaml_digest']
+                    or change != self.changes[index]):
+                _fail('preparation_mismatch')
+            return change
         if self.plan.steps[index].adapter != 'helpers':
-            return self.changes[index]
+            binding = self.root['bindings'][index]
+            payload = self.preparations.resolve(binding['ref'], binding['digest'])
+            change = decode_change(payload)
+            if (_digest(payload) != binding['digest']
+                    or type(change) is not PreparedRegistryChange
+                    or prepared_registry_digest(change) != binding['registry_digest']
+                    or change != self.changes[index]):
+                _fail('preparation_mismatch')
+            return change
         binding = self.root['bindings'][index]
         payload = self.preparations.resolve(binding['ref'], binding['digest'])
         if _digest(payload) != binding['digest']:
@@ -427,7 +489,8 @@ and unknown predecessors remain unsupported, with named gap refusals.
 
     def _cache_key(self):
         self.store._ready()
-        return tuple((key, row['digest']) for key, row in self.store.rows.items())
+        return tuple((key, row['digest'], _digest(row['payload']))
+                     for key, row in self.store.rows.items())
 
     def _remember(self, result):
         self._cache = (self._cache_key(), result)
@@ -437,13 +500,16 @@ and unknown predecessors remain unsupported, with named gap refusals.
         if self.store.read(self.root_id) != {'digest': self.root_digest, 'payload': self.root}:
             _fail('root_binding_mismatch')
         # Even a cached reconstruction must resolve the ORIGINAL preparations.
-        for index, step in enumerate(self.plan.steps):
-            if step.adapter == 'helpers':
-                self._original_change(index)
+        for index in range(len(self.plan.steps)):
+            self._original_change(index)
+        for row in self.store.rows.values():
+            if row['digest'] != _digest(row['payload']):
+                _fail('event_digest_mismatch')
         token = self._cache_key()
         if self._cache is not None and self._cache[0] == token:
             return self._cache[1]
         states, completed = self._initial(), {}
+        yaml_sources = self._initial_sources() if self.yaml_index is not None else None
         head, sequence, pending = self.root_digest, 0, None
         events = []
         self.store._ready()
@@ -453,7 +519,7 @@ and unknown predecessors remain unsupported, with named gap refusals.
                 events.append((key, row))
         while events:
             intents = [(key, row) for key, row in events
-                       if row['payload'].get('kind') == 'registry_intent'
+                       if row['payload'].get('kind') in ('registry_intent', 'yaml_intent')
                        and row['payload'].get('sequence') == sequence]
             if len(intents) != 1:
                 _fail('chain_graph_invalid')
@@ -465,6 +531,10 @@ and unknown predecessors remain unsupported, with named gap refusals.
                     or direction not in ('forward', 'rollback')
                     or intent['source_chain'] != head or intent['source'] != self._summary(states)
                     or ikey != self._slot('intent', index, direction)):
+                _fail('intent_binding_mismatch')
+            yaml = self.plan.steps[index].adapter == 'yaml'
+            if (intent['kind'] != ('yaml_intent' if yaml else 'registry_intent')
+                    or yaml and intent.get('input_source') != yaml_sources):
                 _fail('intent_binding_mismatch')
             context = self._historical_context(binding)
             if self._context(context) != binding:
@@ -482,13 +552,25 @@ and unknown predecessors remain unsupported, with named gap refusals.
                 _fail('chain_graph_invalid')
             _, rrow = matches[0]
             receipt = rrow['payload']
-            if (receipt.get('kind') != 'registry_receipt'
+            if (receipt.get('kind') != ('yaml_receipt' if yaml else 'registry_receipt')
                     or receipt.get('intent') != [ikey, irow['digest']]
                     or receipt.get('binding') != binding
                     or receipt.get('sequence') != sequence
                     or receipt.get('source_chain') != head):
                 _fail('receipt_binding_mismatch')
-            states = self._advance(states, receipt, self._original_change(index))
+            if yaml:
+                if receipt.get('result') != self._summary(states):
+                    _fail('foreign_native_delta')
+                yaml_sources = fold_yaml_calls(self._original_change(index), yaml_sources,
+                    receipt['calls'], direction, receipt.get('call_operation_ids'))
+                if receipt.get('input_result') != yaml_sources:
+                    _fail('yaml_reconstruction_mismatch')
+            else:
+                states = self._advance(states, receipt, self._original_change(index))
+                if yaml_sources is not None:
+                    for native_key, native_value in states.items():
+                        yaml_sources['.storage/' + native_key][:4] = [
+                            native_value['sha256'], *native_value['identity']]
             completed[index] = direction
             events.remove((rkey, rrow))
             head, sequence = rrow['digest'], sequence + 1
@@ -618,6 +700,8 @@ and unknown predecessors remain unsupported, with named gap refusals.
         if not self.writable:
             _fail('reopen_read_only')
         binding = self._context(context)
+        if context.step.adapter == 'yaml':
+            _fail('yaml_requires_aggregate_api')
         states, head, sequence, completed, pending = self._reconstruct()
         if pending is not None or self.active is not None:
             _fail('unknown_unresolved_intent')
@@ -646,6 +730,8 @@ and unknown predecessors remain unsupported, with named gap refusals.
         if not self.writable or type(intent) is not RegistryIntent or intent is not self.active:
             _fail('intent_not_live')
         binding = self._context(context)
+        if context.step.adapter == 'yaml':
+            _fail('yaml_requires_aggregate_api')
         states, head, sequence, completed, pending = self._reconstruct()
         row = self.store.read(intent.reference[0])
         if (pending != intent.reference or row['digest'] != intent.reference[1]
@@ -705,4 +791,134 @@ and unknown predecessors remain unsupported, with named gap refusals.
         self.active = None
         self._remember((result_states, ref[1], sequence + 1,
                         {**completed, context.index: binding['direction']}, None))
+        return ref
+
+    def _initial_sources(self):
+        return initial_sources(self.original_receipt,
+                               self.root.get('yaml_original_metadata', {}))
+
+    def reconstruct_inputs(self):
+        """Original graph plus accepted durable deltas; pending is UNKNOWN."""
+        states, head, _, _, pending = self._reconstruct()
+        if pending is not None:
+            _fail('unknown_unresolved_intent')
+        sources = self._initial_sources()
+        # Follow the same validated sequence, never dict insertion order.
+        rows = sorted((row['payload'] for row in self.store.rows.values()
+                       if row['payload'].get('chain') == self.root_id
+                       and row['payload'].get('kind') == 'yaml_receipt'),
+                      key=lambda payload: payload['sequence'])
+        for payload in rows:
+            sources = fold_yaml_calls(self._original_change(payload['binding']['index']),
+                sources, payload['calls'], payload['binding']['direction'],
+                payload['call_operation_ids'])
+        for key, value in states.items():
+            path = '.storage/' + key
+            sources[path][:4] = [value['sha256'], *value['identity']]
+        return AcceptedInputState(self.baseline.receipt_json, head, sources,
+            {key: deepcopy(value['document']) for key, value in states.items()},
+            evidence_check=lambda: self._check_inputs_head(head))
+
+    def _check_inputs_head(self, expected_head):
+        # Re-resolve immutable preparations even when the caller kept a state
+        # object across awaits. A native call may be currently pending in this
+        # SAME writer; YAML partial calls require their dedicated live hook.
+        _, head, _, _, pending = self._reconstruct()
+        if head != expected_head:
+            _fail('input_state_stale')
+        if pending is not None:
+            row = self.store.read(pending[0])
+            if (not self.writable or self.active is None
+                    or self.active.reference != pending
+                    or row['payload']['kind'] != 'registry_intent'):
+                _fail('unknown_unresolved_intent')
+
+    def live_yaml_inputs(self, intent, context, calls=()):
+        """Only this live hook may fence actual partial calls; never recovery.
+
+        Caller passes direct synchronous mutator returns, under its same locks.
+        The returned state cannot be serialized/reopened as accepted evidence.
+        """
+        if not self.writable or intent is not self.active or context.step.adapter != 'yaml':
+            _fail('intent_not_live')
+        binding = self._context(context)
+        states, head, _, _, pending = self._reconstruct()
+        row = self.store.read(intent.reference[0])
+        if (pending != intent.reference or row['digest'] != intent.reference[1]
+                or row['payload']['binding'] != binding):
+            _fail('intent_binding_mismatch')
+        sources = deepcopy(row['payload']['input_source'])
+        change = self._original_change(context.index)
+        reverse = binding['direction'] == 'rollback'
+        operations = self._yaml_operations(change, reverse)
+        sources = fold_yaml_calls(change, sources, calls, binding['direction'],
+                                  operations, partial=True)
+        for key, value in states.items():
+            sources['.storage/' + key][:4] = [value['sha256'], *value['identity']]
+        return AcceptedInputState(self.baseline.receipt_json, head, sources,
+            {key: deepcopy(value['document']) for key, value in states.items()},
+            live_check=lambda: self._check_live_yaml(intent, context))
+
+    def _check_live_yaml(self, intent, context):
+        if not self.writable or intent is not self.active:
+            _fail('intent_not_live')
+        self._context(context)
+        if self._reconstruct()[-1] != intent.reference:
+            _fail('intent_binding_mismatch')
+
+    @staticmethod
+    def _yaml_operations(change, reverse):
+        from .yaml_transaction import _digest as yaml_digest
+        rows = tuple(reversed(change.files)) if reverse else change.files
+        return ['yaml_' + yaml_digest((change.identity, row.path, reverse))[:64]
+                for row in rows]
+
+    async def begin_yaml(self, context, observations, *, input_state):
+        """One YAML-last effect, caller already checked whole inputs/runtime BEFORE."""
+        if not self.writable or context.step.adapter != 'yaml':
+            _fail('yaml_intent_not_live')
+        binding = self._context(context)
+        states, head, sequence, completed, pending = self._reconstruct()
+        if pending is not None or self.active is not None:
+            _fail('unknown_unresolved_intent')
+        self._phase_state(context, completed)
+        expected = self.reconstruct_inputs()
+        if type(input_state) is not AcceptedInputState or not input_state.same_evidence(expected):
+            _fail('yaml_input_binding_mismatch')
+        input_state.assert_current(self.original_receipt)
+        self._observe(observations, states)
+        payload = {'kind': 'yaml_intent', 'chain': self.root_id, 'binding': binding,
+                   'source_chain': head, 'sequence': sequence, 'source': self._summary(states),
+                   'input_source': expected.sources()}
+        ref = await self.store.create(self._slot('intent', context.index,
+                                                context.record.direction), payload)
+        self.active = RegistryIntent(ref)
+        return self.active
+
+    async def complete_yaml(self, intent, context, before, after, *, calls):
+        """After independent runtime verification; actual calls alone never prove runtime.
+
+        No reload or manager mutation is allowed within this effect. Caller
+        supplies full independently authenticated manager/disk observations.
+        """
+        live = self.live_yaml_inputs(intent, context, calls)
+        states, head, sequence, completed, pending = self._reconstruct()
+        self._observe(before, states)
+        self._observe(after, states)  # Any reload native effect is unsupported.
+        binding = self._context(context)
+        change = self._original_change(context.index)
+        operations = self._yaml_operations(change, binding['direction'] == 'rollback')
+        source = self.store.read(intent.reference[0])['payload']['input_source']
+        result = fold_yaml_calls(change, source, calls, binding['direction'], operations)
+        live.assert_current(self.original_receipt)
+        payload = {'kind': 'yaml_receipt', 'chain': self.root_id, 'binding': binding,
+                   'source_chain': head, 'sequence': sequence, 'intent': list(intent.reference),
+                   'calls': canonical(json.loads(_json(list(calls))))[0],
+                   'call_operation_ids': operations,
+                   'input_result': result, 'result': self._summary(states)}
+        ref = await self.store.create(self._slot('receipt', context.index,
+                                                context.record.direction), payload)
+        self.active = None
+        self._cache = None
+        self._reconstruct()
         return ref

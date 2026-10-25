@@ -454,19 +454,32 @@ def _open_absolute_directory(path):
         raise
 
 
+@dataclass(frozen=True)
+class _ObservedNativeFiles:
+    """Internal readback; deliberately not a new preparation baseline."""
+    files: tuple[NativeInputFile, ...]
+
+
 class _Pinned:
     """Own descriptors until final named-path checks, including across awaits.
 
     Keeping the original read fd open prevents inode reuse masquerading as the
     same source on mounted filesystems. Do not replace this with close/reopen.
     """
-    def __init__(self, receipt, documents):
+    def __init__(self, receipt, documents, *, input_state=None):
         self.receipt, self.documents = receipt, documents
+        self.input_state = input_state
         self.reader = None
         self.handles = []
         self.storage_fd = None
         self.root_signature = None
         self.files = []
+
+    def _assert_current(self):
+        if self.input_state is None:
+            assert_validation_current(self.receipt)
+        else:
+            self.input_state.assert_current(self.receipt)
 
     def close(self):
         for _, fd, _ in self.handles:
@@ -507,8 +520,8 @@ class _Pinned:
 
     def capture(self):
         try:
-            assert_validation_current(self.receipt)  # ALL sources, not three files alone.
-            sources, entries = _native_receipt(self.receipt)
+            self._assert_current()  # ALL sources, not three files alone.
+            sources, entries = _native_receipt(self.input_state or self.receipt)
             self.reader = _Reader(self.receipt.config_root, Limits(max_file_bytes=MAX_FILE_BYTES))
             self.root_signature = _signature(os.fstat(self.reader.root))
             if entries is not None:
@@ -537,8 +550,21 @@ class _Pinned:
             if self.storage_fd is not None:
                 os.fsync(self.storage_fd)
             os.fsync(self.reader.root)
-            baseline = NativeInputBaseline(_receipt_bytes(self.receipt), tuple(self.files))
-            _validate_baseline(baseline)
+            if self.input_state is None:
+                baseline = NativeInputBaseline(_receipt_bytes(self.receipt), tuple(self.files))
+                _validate_baseline(baseline)
+            else:
+                baseline = _ObservedNativeFiles(tuple(self.files))
+                expected_documents = self.input_state.documents()
+                for item in self.files:
+                    path = '.storage/' + item.key
+                    source = dict((row[0], row[1:]) for row in self.input_state.source_files).get(path)
+                    if (item.raw is None or source is None
+                            or (_sha(item.raw), *item.identity[:2]) != source
+                            or _json(_envelope(item.raw, item.key, self.receipt.version)['data']) != item.manager_json
+                            or _json(_envelope(item.raw, item.key, self.receipt.version)) !=
+                               _json(expected_documents[item.key])):
+                        _fail('native_input_accepted_state_mismatch')
             self.verify()
             return baseline
         except BaseException:
@@ -546,7 +572,7 @@ class _Pinned:
             raise
 
     def verify(self):
-        assert_validation_current(self.receipt)
+        self._assert_current()
         self._named()
         # Re-read original descriptors while still pinned, reject same-length
         # rewrites even if an editor restored mtime. ctime is also fenced above.
@@ -561,7 +587,7 @@ class _Pinned:
             if b''.join(parts) != item.raw:
                 _fail('native_input_source_changed')
         self._named()
-        assert_validation_current(self.receipt)
+        self._assert_current()
 
 
 async def _drained(executor, function):
