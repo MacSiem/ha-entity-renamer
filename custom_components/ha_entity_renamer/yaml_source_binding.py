@@ -5,7 +5,7 @@ receipt, changed projection semantics, native load or configuration execution.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import re
 
 from .native_input_baseline import _receipt_bytes
@@ -41,6 +41,16 @@ class OriginalSourceEvidence:
     @property
     def migration_ready(self):
         return False
+
+    @property
+    def sha256(self):
+        import hashlib
+        import json
+        payload = {'receipt': self.receipt_json.decode('utf-8'),
+                   'ledger': self.ledger.sha256,
+                   'domains': [asdict(row) for row in self.domains]}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True,
+            separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
     def domain_projection(self, domain):
         _need(domain in _DOMAINS)
@@ -138,7 +148,7 @@ def _runtime_sample(hass, evidence, observed):
     if _pending_native_work(hass, _DOMAINS):
         raise SourceBindingError('runtime_source_runtime_unavailable')
     native = next(row for row in observed.files if row.key == 'core.entity_registry')
-    registry_rows = json.loads(native.manager_json)['data']['entities']
+    registry_rows = json.loads(native.manager_json)['entities']
     registry = hass.data.get(er.DATA_REGISTRY)
     _need(type(registry) is er.EntityRegistry)
     observer = NativeYAMLRuntimeReadback(hass)
@@ -221,7 +231,7 @@ async def async_bind_original_runtime(hass, receipt, evidence, *, guard):
     _need(type(evidence) is OriginalSourceEvidence)
     evidence.assert_receipt(receipt)
     def result(rows=(), blockers=(), tokens=()):
-        return BoundSourceRuntime(evidence.ledger.sha256, rows, blockers, tokens)
+        return BoundSourceRuntime(evidence.sha256, rows, blockers, tokens)
     if evidence.ledger.findings:
         return result(blockers=('runtime_source_inventory_unverified',))
     try:
@@ -251,5 +261,5 @@ async def async_bind_original_runtime(hass, receipt, evidence, *, guard):
         return result(*last)
     except PermissionError:
         raise
-    except ValueError:
+    except (ValueError, KeyError, AttributeError, TypeError):
         return result(blockers=('runtime_source_runtime_unavailable',))

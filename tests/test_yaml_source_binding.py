@@ -72,6 +72,17 @@ class SourceEvidenceBindingTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(SourceBindingError):
                 seal_original_sources(receipt, plan, ledger, value)
 
+    def test_binding_digest_includes_receipt_and_native_rows(self):
+        receipt, plan, ledger, native = self.fixture()
+        original = seal_original_sources(receipt, plan, ledger, native)
+        different_receipt = seal_original_sources(replace(receipt, config_root='/other-config'),
+                                                  plan, ledger, native)
+        changed = deepcopy(native)
+        changed['domains'][1][2][0][1] = 'f' * 64
+        different_rows = seal_original_sources(receipt, plan, ledger, changed)
+        self.assertNotEqual(original.sha256, different_receipt.sha256)
+        self.assertNotEqual(original.sha256, different_rows.sha256)
+
     def test_unknown_native_projection_is_preserved_without_authority(self):
         receipt, plan, ledger, native = self.fixture()
         unknown = deepcopy(native)
