@@ -140,6 +140,12 @@ class NativeHelperObservers:
 
         require(__version__ in _HELPER_SCHEMA_VERSIONS, 'helper_ha_version_unsupported')
         snapshots = tuple(deepcopy(s) for s in snapshots)
+        if any(s.get('domain') == 'utility_meter' for s in snapshots):
+            require(all(s.get('domain') == 'utility_meter' for s in snapshots),
+                    'utility_mixed_scope_unsupported')
+            from .utility_meter_observers import NativeUtilityMeterObservers
+            return await NativeUtilityMeterObservers.capture(
+                hass, snapshots, mapping_proof, settle_timeout=settle_timeout)
         require(bool(snapshots), 'helper_observer_empty_scope')
         proof = tuple(mapping_proof)
         require(all(type(p) is RegistryMappingProof for p in proof), 'helper_mapping_proof_type')
