@@ -122,7 +122,8 @@ def expected_placeholder_scope(chain, payload, change, escrow_root_reference):
         'unload_receipt': deepcopy(eb['unload_receipt']), 'entry_id': entry_id,
         'registry_uuid': change.identity, 'prepared_digest': prepared_registry_digest(change),
         'direction': direction, 'source': source['entity_id'], 'target': target['entity_id'],
-        'source_attrs': attrs, 'source_state_json': doc['state_json'], 'target_attrs': deepcopy(attrs)}
+        'source_attrs': attrs, 'source_state_json': doc['state_json'],
+        'source_reserved': doc['reserved'], 'target_attrs': deepcopy(attrs)}
 
 
 def validate_placeholder_receipt(chain, payload, change):

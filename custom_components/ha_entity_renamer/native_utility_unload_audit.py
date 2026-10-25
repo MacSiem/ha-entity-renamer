@@ -124,7 +124,7 @@ def _payload(data):
                 {k: v for k, v in doc['writer_row'].items() if k not in ignored}),
           'writer_row_binding')
     _need(_same(doc['source_pins'], _SOURCES[doc['core']]), 'data_source_pins')
-    _need(type(doc['reserved']) is bool and doc['reserved'], 'reservation')
+    _need(type(doc['reserved']) is bool, 'reservation')
     call = doc['call']
     _need(type(call) is dict and set(call) == {'count', 'path', 'row_json', 'return_none',
         'same_actor', 'same_hass', 'same_row', 'same_state_at_finish',
@@ -252,6 +252,7 @@ class NativeUtilityUnloadAudit:
         self._manager_returned = False
         self._native_set_state = None
         self._set_count = 0
+        self._reserved = None
 
     def _poison(self, reason):
         if self._error is None:
@@ -368,7 +369,8 @@ class NativeUtilityUnloadAudit:
         _need(type(self._captured) is self._modules['core'].State
               and self._machine.get(self.expected_row['entity_id']) is self._captured
               and _state(self._captured) == self._state_json
-              and self.expected_row['entity_id'] in self._machine._reservations,
+              and type(self._reserved) is bool
+              and (self.expected_row['entity_id'] in self._machine._reservations) is self._reserved,
               'state_object_continuity_lost')
 
     def _quiescent(self):
@@ -530,8 +532,10 @@ class NativeUtilityUnloadAudit:
                       and state.state == 'unavailable'
                       and _same(json.loads(_state(state))['attributes'], self._attrs),
                       'native_unavailable_state')
-                _need(self.expected_row['entity_id'] in self._machine._reservations,
-                      'native_reservation')
+                # Core reserves an entity only on its first non-restored add.
+                # An audited reload from its unavailable placeholder may have
+                # no reservation. Preserve what this exact writer left behind.
+                self._reserved = self.expected_row['entity_id'] in self._machine._reservations
                 self._captured, self._state_json = state, _state(state)
                 self._return_none = True
                 self._write_frame = None
@@ -581,7 +585,7 @@ class NativeUtilityUnloadAudit:
             doc = {'schema': 1, 'core': self.core, 'entry_id': self.entry.entry_id,
                 'source_row': self.expected_row, 'writer_row': self._writer_row,
                 'source_pins': self._pins,
-                'state_json': self._state_json, 'reserved': True,
+                'state_json': self._state_json, 'reserved': self._reserved,
                 'call': {'count': 1, 'path': ['RegistryEntry.write_unavailable_state',
                     'Entity.__async_remove_impl', 'Entity.async_remove'],
                     'row_json': self._row_json, 'return_none': True, 'same_actor': True,

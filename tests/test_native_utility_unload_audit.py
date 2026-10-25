@@ -46,7 +46,9 @@ class ActualUtilityUnloadAuditTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(encoded['payload']['source_row'], self.expected_row)
             self.assertEqual(encoded['payload']['writer_row'], u._row(self.entity.registry_entry))
             from copy import deepcopy
-            for key, value in (('schema', True), ('core', '2026.10.3'), ('reserved', False),
+            self.assertIs(encoded['payload']['reserved'],
+                          self.helper_id in self.f.hass.states._reservations)
+            for key, value in (('schema', True), ('core', '2026.10.3'), ('reserved', 0),
                                ('entry_id', 'foreign'), ('state_json', '{}')):
                 changed = deepcopy(encoded)
                 changed['payload'][key] = value

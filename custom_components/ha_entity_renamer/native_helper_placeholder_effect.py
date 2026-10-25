@@ -192,7 +192,7 @@ def validate_effect(stamp, *, expected_scope, change, mutation,
     _need(type(scope) is dict and set(scope) == {'version', 'source_pins', 'operation_id',
           'fingerprint', 'chain_root', 'registry_intent', 'phase', 'lifecycle_root',
           'unload_receipt', 'entry_id', 'registry_uuid', 'prepared_digest', 'direction',
-          'source', 'target', 'source_attrs', 'source_state_json', 'target_attrs'}, 'scope_shape')
+          'source', 'target', 'source_attrs', 'source_state_json', 'source_reserved', 'target_attrs'}, 'scope_shape')
     _need(type(expected_scope) is dict and _json(scope) == _json(expected_scope), 'original_scope_mismatch')
     _need(callable(validate_unload_witness), 'unload_validator_required')
     _need(_sync(validate_unload_witness, scope) is True, 'unload_witness_rejected')
@@ -230,6 +230,8 @@ def validate_effect(stamp, *, expected_scope, change, mutation,
           'capture_binding')
     _state_shape(capture['source_state'], scope['source'], scope['source_attrs'])
     _need(capture['source_state'] == scope['source_state_json'], 'source_state_body_changed')
+    _need(type(scope['source_reserved']) is bool
+          and capture['source_reserved'] is scope['source_reserved'], 'source_reservation_binding')
     _need(final['source_row'] is None and final['target_row'] == mutation.after_json
           and final['source_state'] is None and final['source_reserved'] is False,
           'finish_binding')
@@ -380,6 +382,7 @@ class OwnHelperPlaceholder:
             'prepared_digest': prepared_registry_digest(obj.change),
             'direction': context.record.direction, 'source': obj.source, 'target': obj.target,
             'source_attrs': obj.source_attrs, 'source_state_json': obj.source_body,
+            'source_reserved': obj.source in obj.machine._reservations,
             # Target attrs computed after mutation from the exact current row.
             'target_attrs': None}
         obj.binding_json = _json(obj.scope).decode('ascii')
