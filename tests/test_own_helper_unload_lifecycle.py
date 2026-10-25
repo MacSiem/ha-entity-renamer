@@ -20,6 +20,21 @@ class OwnHelperUnloadLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def guard(self):
         self.assertIs(self.f.hass.config_entries.async_get_entry(self.entry.entry_id), self.entry)
 
+    async def _configure_own_probe(self, hass, root):
+        (root / 'configuration.yaml').write_text('script:\n  own_id_probe:\n'
+            '    sequence:\n      - variables:\n'
+            '          sample: "{{ states(\'' + self.old_helper + '\') }}"\n')
+
+    async def _validate_own_probe(self, hass, proposal, root):
+        return await fixture.fixtures.validation.async_validate_proposed(
+            hass, proposal, root.parent)
+
+    async def _prepare_own_plan(self, preparations, step, digest, native_ref, receipt, proposal):
+        tx = importlib.import_module(PACKAGE + '.transaction')
+        plan = tx.Plan('own-helper-unload', ('registry',), ('registry',), (step,),
+            'native-unload-lifecycle', ('registry',), native_ref)
+        return plan, {'own-helper-change': digest}
+
     async def _lifecycle(self):
         await self._fixture()
         hass = self.f.hass
@@ -29,14 +44,12 @@ class OwnHelperUnloadLifecycleTests(unittest.IsolatedAsyncioTestCase):
         observer = await fixture.h.NativeHelperObservers.capture(hass, [self.before], ())
         self.own_observer = observer  # retain the ORIGINAL A0/S0, never recapture
         root = self.f.root
-        (root / 'configuration.yaml').write_text('script:\n  own_id_probe:\n'
-            '    sequence:\n      - variables:\n'
-            '          sample: "{{ states(\'' + self.old_helper + '\') }}"\n')
+        await self._configure_own_probe(hass, root)
         await self._flush_documents(initialize=True)
         yp = importlib.import_module(PACKAGE + '.yaml_plan')
         proposal = yp.plan_yaml(root, {self.old_helper: self.target})
         self.assertTrue(proposal.ready, proposal.issues)
-        receipt = await fixture.fixtures.validation.async_validate_proposed(hass, proposal, root.parent)
+        receipt = await self._validate_own_probe(hass, proposal, root)
         self.assertTrue(receipt.ready_for_apply)
         original = await fixture.fixtures.baseline.async_capture_native_input_baseline(
             hass, receipt, guard=self.guard)
@@ -57,8 +70,8 @@ class OwnHelperUnloadLifecycleTests(unittest.IsolatedAsyncioTestCase):
         digest = await preparations.create('own-helper-change', prep.encode_change(change))
         step = tx.Step('own-helper', 'registry', change.identity,
             change.before_revision, change.after_revision, 'own-helper-change')
-        plan = tx.Plan('own-helper-unload', ('registry',), ('registry',), (step,),
-            'native-unload-lifecycle', ('registry',), native_ref)
+        plan, digests = await self._prepare_own_plan(
+            preparations, step, digest, native_ref, receipt, proposal)
         store = lm.native_helper_lifecycle_store(hass, preparations)
         await store.initialize()
         lease_module = importlib.import_module(PACKAGE + '.native_helper_activation_lease')
@@ -80,7 +93,7 @@ class OwnHelperUnloadLifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def unused(*args):
             raise AssertionError('unused setup/reverse verifier invoked during unload')
         self.args = (store, hass.config_entries, 'own-helper-unload', plan, receipt,
-                     {'own-helper-change': digest})
+                     digests)
         self.kwargs = dict(guard=self.guard, activation_lease=self.lease,
             verify_original_native_inputs=original_source, settle=hass.async_block_till_done,
             verify_inactive=inactive, verify_runtime=unused, verify_accepted_native_chain=unused,
