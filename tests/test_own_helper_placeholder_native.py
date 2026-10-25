@@ -36,6 +36,8 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
             chain = await rr.RegistryReceiptChain.start(chain_store, life.operation_id,
                 life.plan, life.receipt, life.binding['preparations'])
             inputs = chain.reconstruct_inputs()
+            self.own_observer.bind_native_chain(chain)
+            self.own_observer.bind_activation_lease(self.lease)
             managers = modules['native_input_baseline']._Managers(hass, life.receipt)
             unload_slot = life._slot('unload', self.entry.entry_id, 'receipt')
             unload = life.store.read(unload_slot)
@@ -45,7 +47,11 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
                 life.require_quiescent()
                 self.guard()
                 inputs.assert_current(life.receipt)
-                managers.check()
+                # Preserve ORIGINAL manager/store identities while comparing
+                # contents only with ORIGINAL plus accepted native deltas.
+                self.assertEqual(managers.sample(), tuple(
+                    modules['native_input_baseline']._json(chain.accepted_documents()[key]['data'])
+                    for key in modules['native_input_baseline']._KEYS))
                 life.verify_live_unload_state(self.entry.entry_id, unload_ref, original_state)
             from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
             data = hass.data[DATA_RESTORE_STATE]
@@ -63,9 +69,18 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
             record = tx.Record(life.operation_id, life.plan, status='applying', phases=('intent',))
             await journal.create(record)
             context = tx.PhaseContext(await journal.load(life.operation_id), 0)
-            async def observe():
-                result = await modules['native_input_observation'].async_observe_native_inputs(
+            async def observe_native():
+                nonlocal inputs
+                try:
+                    inputs = chain.reconstruct_inputs()
+                except rr.RegistryReceiptError:
+                    if (chain.active is None or chain.store.read(chain.active.reference[0])[
+                            'payload']['kind'] not in ('registry_intent', 'helper_setup_intent')):
+                        raise
+                return await modules['native_input_observation'].async_observe_native_inputs(
                     hass, life.receipt, guard=self.guard, input_state=inputs)
+            async def observe():
+                result = await observe_native()
                 return tuple(rr.RegistryRawObservation(row.key, row.raw, row.identity)
                              for row in result.files)
             before = await observe()
@@ -176,10 +191,33 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(ValueError):
                         rr.RegistryReceiptChain.reopen(view, life.operation_id,
                             life.plan, life.receipt, life.binding['preparations'])
-            # Consumer check only: audited setup integration
-            # are tested separately before a complete migration can be accepted.
-            self.assertTrue(await self.lease.async_setup(self.entry.entry_id))
-            await hass.async_block_till_done()
+            await journal.save(tx.Record(life.operation_id, life.plan,
+                status='applied', phases=('verified',)))
+            async def accepted_source(auth):
+                record = await journal.load(life.operation_id)
+                self.assertEqual((auth.operation_id, auth.fingerprint, auth.status),
+                    (life.operation_id, life.plan.fingerprint, record.status))
+                observed = await observe()
+                chain.expected(tx.PhaseContext(record, 0), observed)
+                return chain.verify_setup_authorization(auth)
+            async def runtime(entry_id, original, auth):
+                self.assertEqual(entry_id, self.entry.entry_id)
+                self.assertEqual(original['state'], 'loaded')
+                self.assertTrue(await self.own_observer.verify_runtime(
+                    life.helper_snapshots[entry_id][0]))
+                return True
+            life.verify_accepted_native_chain = accepted_source
+            life.verify_runtime = runtime
+            setup = importlib.import_module(base.PACKAGE + '.native_helper_setup_effects')
+            life.setup_effect = setup.NativeHelperSetupEffects(hass, chain, observe_native,
+                journal.load, guard=self.guard)
+            record = await journal.load(life.operation_id)
+            head = chain.expected(tx.PhaseContext(record, 0), await observe())
+            authorization = base.lm.RestoreAuthorization(life.operation_id,
+                life.plan.fingerprint, head, 'applied')
+            await life.restore(authorization)
+            self.assertTrue(life.inspect()['activation_receipts_complete'])
+            self.assertTrue(chain.verify_setup_authorization(authorization))
             from homeassistant.helpers.entity_platform import async_get_platforms
             entity, = [e for platform in async_get_platforms(hass, 'utility_meter')
                        if platform.config_entry is self.entry for e in platform.entities.values()]
@@ -187,6 +225,7 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(entity.native_value, Decimal('11'))
             await self._emit('119')
             self.assertEqual(entity.native_value, Decimal('19'))
+            self.assertTrue(await self.own_observer.verify_runtime(life.helper_snapshots[self.entry.entry_id][0]))
             self.assertEqual(self.f.entity.async_get(self.target).id, self.row['id'])
         finally:
             self.lease.release()

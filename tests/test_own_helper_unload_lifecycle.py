@@ -27,6 +27,7 @@ class OwnHelperUnloadLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.target = 'sensor.lifecycle_own_helper_changed'
         # ORIGINAL actual helper/source observation, unchanged helper configuration.
         observer = await fixture.h.NativeHelperObservers.capture(hass, [self.before], ())
+        self.own_observer = observer  # retain the ORIGINAL A0/S0, never recapture
         root = self.f.root
         (root / 'configuration.yaml').write_text('script:\n  own_id_probe:\n'
             '    sequence:\n      - variables:\n'
