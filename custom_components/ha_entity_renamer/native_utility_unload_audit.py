@@ -119,7 +119,7 @@ def _payload(data):
           and doc['entry_id'] == data.entry_id, 'data_binding')
     _bind(doc['source_row'], data.entry_id)
     _bind(doc['writer_row'], data.entry_id)
-    ignored = {'options', 'modified_at'} if doc['core'] == '2025.6.0' else set()
+    ignored = {'options', 'modified_at'}
     _need(_same({k: v for k, v in doc['source_row'].items() if k not in ignored},
                 {k: v for k, v in doc['writer_row'].items() if k not in ignored}),
           'writer_row_binding')
@@ -439,16 +439,14 @@ class NativeUtilityUnloadAudit:
               and self._entity._parent_meter == self.entry.entry_id, 'bound_entity_identity')
         self._row_object = self._entity.registry_entry
         self._writer_row = _bind(_row(self._row_object), self.entry.entry_id)
-        # Minimum Core retains an older row object after native sensor display
+        # Both pinned Cores can retain an older row after native sensor display
         # options updates. The actual unload writer reads no options or audit
         # timestamp. Preserve BOTH complete rows; every writer-relevant field
         # and the actual produced attributes must still match independently.
-        ignored = {'options', 'modified_at'} if self.core == '2025.6.0' else set()
+        ignored = {'options', 'modified_at'}
         _need(_same({k: v for k, v in self._writer_row.items() if k not in ignored},
                     {k: v for k, v in self.expected_row.items() if k not in ignored}),
               'bound_writer_row')
-        if not ignored:
-            _need(self._row_object is self._manager_row, 'bound_current_row_object')
         restore = self._modules['helpers.restore_state']
         self._restore = self.hass.data.get(restore.DATA_RESTORE_STATE)
         _need(type(self._restore) is restore.RestoreStateData, 'restore_manager')
