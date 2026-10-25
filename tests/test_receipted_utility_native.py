@@ -5,3 +5,15 @@ import test_receipted_helper_native as fixture
 class NativeReceiptedUtilityTests(fixture.NativeReceiptedHelperTests):
     helper_domain = 'utility_meter'
     with_yaml = True
+
+
+class NativeUtilityRootAckLossTests(NativeReceiptedUtilityTests):
+    lifecycle_save_fault = 'root'
+
+
+class NativeUtilityIntentAckLossTests(NativeReceiptedUtilityTests):
+    lifecycle_save_fault = 'intent'
+
+
+class NativeUtilityReceiptAckLossTests(NativeReceiptedUtilityTests):
+    lifecycle_save_fault = 'receipt'

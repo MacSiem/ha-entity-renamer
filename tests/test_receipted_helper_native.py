@@ -258,7 +258,20 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             settle=hass.async_block_till_done, verify_inactive=verify_inactive,
             verify_runtime=runtime, verify_accepted_native_chain=accepted_source)
         if utility:
-            lifecycle_callbacks['runtime_baselines'] = loaded_observer.runtime_baselines()
+            um = importlib.import_module(fixtures.PACKAGE + '.utility_meter_observers')
+            values = loaded_observer.runtime_baselines()
+            lifecycle_callbacks['runtime_baselines'] = values
+            event_count = len(lifecycle_store.rows)
+            encoded = um.encode_runtime_baseline(values[0])
+            encoded['payload']['source_identity'][0] = 'unproven-source-uuid'
+            wrong_source = um.decode_runtime_baseline(encoded)
+            for invalid in ((), values * 2, (wrong_source,)):
+                with self.assertRaises((lm.HelperLifecycleError,
+                                        m['helper_observers'].ObservationUnavailable)):
+                    await lm.NativeHelperLifecycle.start(*lifecycle_args,
+                        **dict(lifecycle_callbacks, runtime_baselines=invalid))
+                self.assertEqual(len(lifecycle_store.rows), event_count)
+                self.assertIs(helper.state, ConfigEntryState.LOADED)
         fault = getattr(self, 'lifecycle_save_fault', None)
         if fault is not None:
             native_save = lifecycle_store.store.save
@@ -279,6 +292,10 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             recovered = lm.NativeHelperLifecycle.reopen(recovered_store,
                 *lifecycle_args[1:], **lifecycle_callbacks)
             report = await recovered.reconcile()
+            if utility:
+                self.assertEqual(recovered.root['schema'], 2)
+                self.assertEqual(recovered.runtime_baselines(), loaded_observer.runtime_baselines())
+                self.assertEqual(lm.stored_lifecycle_plan(recovered_store, recovered.root_id), plan)
             self.assertTrue(report['read_only'])
             self.assertFalse(report['full_ready'])
             if fault == 'intent':
