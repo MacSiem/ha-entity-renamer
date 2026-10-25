@@ -134,7 +134,7 @@ class NativeHelperObservers:
         self._all_entry_ids = frozenset(e.entry_id for e in hass.config_entries.async_entries())
 
     @classmethod
-    async def capture(cls, hass, snapshots, mapping_proof, *, settle_timeout=15):
+    async def capture(cls, hass, snapshots, mapping_proof, *, settle_timeout=15, activation_lease=None):
         from homeassistant.const import __version__
         from homeassistant.helpers import entity_registry as er
 
@@ -145,7 +145,8 @@ class NativeHelperObservers:
                     'utility_mixed_scope_unsupported')
             from .utility_meter_observers import NativeUtilityMeterObservers
             return await NativeUtilityMeterObservers.capture(
-                hass, snapshots, mapping_proof, settle_timeout=settle_timeout)
+                hass, snapshots, mapping_proof, settle_timeout=settle_timeout,
+                activation_lease=activation_lease)
         require(bool(snapshots), 'helper_observer_empty_scope')
         proof = tuple(mapping_proof)
         require(all(type(p) is RegistryMappingProof for p in proof), 'helper_mapping_proof_type')

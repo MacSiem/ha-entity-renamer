@@ -19,13 +19,20 @@ from .native_registry_transaction import ReceiptedRegistryTransactionAdapter
 from .transaction import Position, Refused
 
 
-def _require_inactive(entry):
+def _require_inactive(entry, activation_lease=None):
     # Installed HA contract: missing fields are unsupported, never guessed empty.
     # NOT_LOADED alone does not exclude orphan tasks/listeners after an unload.
     try:
+        owned_lock = False
+        if activation_lease is not None:
+            from .native_helper_activation_lease import NativeHelperActivationLease
+            if (type(activation_lease) is not NativeHelperActivationLease
+                    or not activation_lease.owns_entry(entry)):
+                raise Refused('helper_receipt_activation_lease_mismatch')
+            owned_lock = True
         if (entry.state.value != 'not_loaded' or entry.update_listeners
                 or entry._on_unload or entry._async_cancel_retry_setup is not None
-                or entry.setup_lock.locked()
+                or (entry.setup_lock.locked() and not owned_lock)
                 or any(not task.done() for task in (*entry._tasks, *entry._background_tasks))):
             raise Refused('helper_receipt_requires_quiescence')
     except (AttributeError, TypeError):
@@ -84,8 +91,9 @@ class ReceiptedHelperTransactionAdapter(ReceiptedRegistryTransactionAdapter):
     if they can yield between the coordinator's preflight and their native call.
     """
     def __init__(self, helper, chain, observer, phase_loader, guard, *,
-                 full_verify=None, full_verify_rollback=None):
+                 full_verify=None, full_verify_rollback=None, activation_lease=None):
         self.helper = helper
+        self.activation_lease = activation_lease
         self.authorization_guard = guard
         super().__init__(_HelperReceiptBridge(self), helper.resolver, chain,
                          observer, phase_loader, self._guard,
@@ -101,7 +109,7 @@ class ReceiptedHelperTransactionAdapter(ReceiptedRegistryTransactionAdapter):
                     change.before['identity']['entry_id'])
                 if entry is None:
                     raise Refused('helper_receipt_entry_missing')
-                _require_inactive(entry)
+                _require_inactive(entry, self.activation_lease)
 
     def _change(self, step):
         if step.caused_by:

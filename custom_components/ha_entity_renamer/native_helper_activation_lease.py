@@ -163,6 +163,11 @@ class NativeHelperActivationLease:
                zip(self._owned, self._locks, strict=True)):
             _fail('ownership_lost')
 
+    def owns_entry(self, entry: ConfigEntry) -> bool:
+        """Read-only exact entry/lock ownership, including native child tasks."""
+        self.check()
+        return any(candidate is entry for candidate in self._entries)
+
     def _entry(self, entry_id: str) -> ConfigEntry:
         self.check()
         if type(entry_id) is not str:

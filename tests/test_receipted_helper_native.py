@@ -277,6 +277,8 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         lease_module = importlib.import_module(fixtures.PACKAGE + '.native_helper_activation_lease')
         self.activation_lease = await lease_module.NativeHelperActivationLease.acquire(
             hass, hass.config_entries, (helper,), guard=lambda: None)
+        if utility:
+            loaded_observer.bind_activation_lease(self.activation_lease)
         lifecycle_callbacks = dict(activation_lease=self.activation_lease, guard=lambda: None, verify_original_native_inputs=original_source,
             settle=hass.async_block_till_done, verify_inactive=verify_inactive,
             verify_runtime=runtime, verify_accepted_native_chain=accepted_source)
@@ -357,7 +359,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             self.assertFalse(recovered_lifecycle.writable)
         await lifecycle.quiesce()
         inactive = await m['helper_observers'].NativeHelperObservers.capture(
-            hass, (original_snapshot,), proof)
+            hass, (original_snapshot,), proof, activation_lease=self.activation_lease)
         if utility:
             inactive.bind_native_chain(chain)
         def guarded_quiescence():
@@ -382,10 +384,12 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             return await callback(plan)
         adapter = m['native_helper_transaction'].ReceiptedHelperTransactionAdapter(
             native, chain, observe, log.load, guarded_quiescence,
-            full_verify=lambda _: verify('after'), full_verify_rollback=lambda _: verify('before'))
+            full_verify=lambda _: verify('after'), full_verify_rollback=lambda _: verify('before'),
+            activation_lease=self.activation_lease)
         registry = m['native_registry_transaction'].ReceiptedRegistryTransactionAdapter(
             bridge, resolver, chain, observe, log.load, adapter.guard,
-            full_verify=lambda _: verify('after'), full_verify_rollback=lambda _: verify('before'))
+            full_verify=lambda _: verify('after'), full_verify_rollback=lambda _: verify('before'),
+            activation_lease=self.activation_lease)
         adapters = {'registry': registry, 'helpers': adapter}
         candidate_proofs = []
         if self.with_yaml:

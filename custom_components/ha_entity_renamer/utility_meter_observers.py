@@ -266,7 +266,7 @@ class NativeUtilityMeterObservers:
     """One immutable capture per transaction; current samples may evolve legally."""
 
     @classmethod
-    async def capture(cls, hass, snapshots, mapping_proof, *, settle_timeout=15):
+    async def capture(cls, hass, snapshots, mapping_proof, *, settle_timeout=15, activation_lease=None):
         from homeassistant.const import __version__
         from homeassistant.helpers import entity_registry as er
         require(__version__ in PINS, 'utility_ha_version_unsupported')
@@ -287,6 +287,7 @@ class NativeUtilityMeterObservers:
         self.hass, self.core, self.settle_timeout = hass, __version__, settle_timeout
         self.before, self.after, self.source_rows, self.helper_rows, self.modes = {}, {}, {}, {}, {}
         self._baselines, self._objects = {}, {}
+        self._activation_lease = activation_lease
         self._all_entry_ids = frozenset(e.entry_id for e in hass.config_entries.async_entries())
         mapping = {p.old: p.new for p in proof}
         self.source_names = {}
@@ -344,6 +345,14 @@ class NativeUtilityMeterObservers:
             self._baselines[key] = baseline
             self._objects[key] = entity
         return self
+
+    def bind_activation_lease(self, lease):
+        from .native_helper_activation_lease import NativeHelperActivationLease
+        require(self._activation_lease is None and type(lease) is NativeHelperActivationLease
+                and lease.manager is self.hass.config_entries
+                and all(lease.owns_entry(self.hass.config_entries.async_get_entry(key))
+                        for key in self.before), 'utility_activation_lease_binding')
+        self._activation_lease = lease
 
     def bind_native_chain(self, chain):
         """Use ONLY ORIGINAL + accepted native effects for expected registry rows.
@@ -468,7 +477,13 @@ class NativeUtilityMeterObservers:
         require(self._rows(key) == self.expected_registry_rows(key), 'utility_helper_registry_changed')
         entry = self.hass.config_entries.async_get_entry(key)
         require(entry.state.value == self.modes[key], 'utility_lifecycle_changed')
-        require(not entry.setup_lock.locked() and entry._async_cancel_retry_setup is None
+        owned_lock = False
+        if self._activation_lease is not None:
+            from .native_helper_activation_lease import NativeHelperActivationLease
+            require(type(self._activation_lease) is NativeHelperActivationLease
+                    and self._activation_lease.owns_entry(entry), 'utility_activation_lease_binding')
+            owned_lock = True
+        require((not entry.setup_lock.locked() or owned_lock) and entry._async_cancel_retry_setup is None
                 and not any(not task.done() for task in (*entry._tasks, *entry._background_tasks)),
                 'utility_native_pending_or_busy')
         candidates = [entity for platform in ep.async_get_platforms(self.hass, 'utility_meter')

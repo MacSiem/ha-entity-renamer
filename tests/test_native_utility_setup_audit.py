@@ -55,7 +55,7 @@ class NativeUtilitySetupAuditProbe(unittest.IsolatedAsyncioTestCase):
                     if action == 'call':
                         target = self.f.entity.async_get(local['entity_id'])
                         value = {'before': row(target), 'callers': ancestors(frame),
-                                 'frame_id': id(frame)}
+                                 'call_token': len(calls)}
                         calls.append(value)  # Native writes may synchronously nest.
                         active[id(frame)] = value
                     elif action == 'return':
@@ -68,7 +68,7 @@ class NativeUtilitySetupAuditProbe(unittest.IsolatedAsyncioTestCase):
                         data = local.get('event_data')
                         parent = frame.f_back
                         if parent is not None and parent.f_code is writer_code:
-                            emitted[id(data)] = (data, deepcopy(data), id(parent),
+                            emitted[id(data)] = (data, deepcopy(data), active[id(parent)]['call_token'],
                                 row(self.f.entity.async_get(data['entity_id'])))
                 elif code is event_code and action == 'call':
                     if local.get('event_type') == 'entity_registry_updated':
@@ -98,7 +98,7 @@ class NativeUtilitySetupAuditProbe(unittest.IsolatedAsyncioTestCase):
         previous = original
         for call in calls:
             self.assertEqual(call['before'], previous)
-            matching = [item for item in emitted.values() if item[2] == call['frame_id']]
+            matching = [item for item in emitted.values() if item[2] == call['call_token']]
             if call['before'] != call['after']:
                 self.assertEqual(len(matching), 1)
                 self.assertEqual(call['after'], matching[0][3])

@@ -423,7 +423,7 @@ class NativeHelperLifecycle:
 
     def _inactive(self, original):
         self._assert_activation(original, 'not_loaded')
-        _require_inactive(self.manager.async_get_entry(original['entry_id']))
+        _require_inactive(self.manager.async_get_entry(original['entry_id']), self.activation_lease)
 
     def inspect(self):
         """Read-only durable status. Receipt ACK loss is inspectable, never replayed."""

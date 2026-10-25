@@ -93,6 +93,21 @@ class NativeActivationLeaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(await lease.async_setup(disabled.entry_id), False)
         self.assertFalse(disabled.setup_lock.locked())
 
+    async def test_only_owned_exact_lock_can_pass_inactive_proof(self):
+        adapter = importlib.import_module(fixtures.PACKAGE + '.native_helper_transaction')
+        entry = await self.helper()
+        other = await self.helper(disabled=True)
+        async with await self.acquire(entry) as lease:
+            self.assertTrue(await lease.async_unload(entry.entry_id))
+            await self.hass.async_block_till_done()
+            with self.assertRaises(adapter.Refused):
+                adapter._require_inactive(entry)
+            adapter._require_inactive(entry, lease)
+            with self.assertRaises(adapter.Refused):
+                adapter._require_inactive(other, lease)
+        with self.assertRaises(Refusal):
+            adapter._require_inactive(entry, lease)
+
     async def test_ordinary_setup_queues_on_same_native_lock_until_release(self):
         entry = await self.helper(disabled=True)
         async with await self.acquire(entry):
