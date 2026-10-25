@@ -52,6 +52,8 @@ class OwnHelperUnloadLifecycleTests(unittest.IsolatedAsyncioTestCase):
         import json
         change = nr.PreparedRegistryChange('entity', self.row['id'], json.dumps(self.row),
             json.dumps(dict(self.row, entity_id=self.target)))
+        if hasattr(self, '_prepare_own_change'):
+            change = await self._prepare_own_change()
         digest = await preparations.create('own-helper-change', prep.encode_change(change))
         step = tx.Step('own-helper', 'registry', change.identity,
             change.before_revision, change.after_revision, 'own-helper-change')

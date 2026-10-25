@@ -12,6 +12,7 @@ p = importlib.import_module(base.PACKAGE + '.native_helper_placeholder_effect')
 
 @unittest.skipUnless(base.fixture.fixtures.HAS_HA, 'requires actual pinned HA')
 class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
+    use_adapter = False
     asyncSetUp = base.OwnHelperUnloadLifecycleTests.asyncSetUp
     _before_start = base.OwnHelperUnloadLifecycleTests._before_start
     _fixture = base.OwnHelperUnloadLifecycleTests._fixture
@@ -83,17 +84,6 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
                 result = await observe_native()
                 return tuple(rr.RegistryRawObservation(row.key, row.raw, row.identity)
                              for row in result.files)
-            before = await observe()
-            intent = await chain.begin(context, before)
-            before = await observe()
-            chain.verify_intent_source(intent, context, before)
-            def fence(scope):
-                source_guard()
-                escrow.require_completed(token)
-                durable = modules['journal'].decode(json.loads(Path(journal.store._path).read_bytes())['data'])
-                self.assertEqual(durable[life.operation_id], context.record)
-                chain.verify_intent_source(intent, context, before)
-                return True
             def validate_witness(scope):
                 parsed = base.lm.validate_lifecycle_receipt_witness(life.store,
                     life.operation_id, life.plan, life.receipt, life.binding['preparations'],
@@ -103,20 +93,75 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(scope['unload_receipt'], list(unload_ref))
                 self.assertEqual(scope['registry_uuid'], life.own_registry_changes[self.entry.entry_id].identity)
                 return True
-            io = modules['native_registry'].NativeRegistryIO(hass)
-            node = p.OwnHelperPlaceholder.capture(io=io, lifecycle=life, chain=chain,
-                context=context, intent=intent, observations=before,
-                live_guard=self.guard, fresh_source_fence=fence,
-                validate_unload_witness=validate_witness,
-                verify_live_unload_state=lambda actual, ref, state:
-                    actual.verify_live_unload_state(self.entry.entry_id, ref, state))
-            mutation = node.mutate()
-            self.guard()
-            await io.settle()
-            self.guard()
-            await io.flush('entity')
-            self.guard()
-            stamp = node.finish()
+            io = getattr(self, 'native_io', None) or modules['native_registry'].NativeRegistryIO(hass)
+            transition = importlib.import_module(base.PACKAGE + '.native_registry_transition')
+            async def registry_effect(context):
+                def durable_source_fence(actual_context):
+                    source_guard()
+                    self.assertEqual(actual_context, context)
+                    durable = modules['journal'].decode(json.loads(Path(journal.store._path).read_bytes())['data'])
+                    self.assertEqual(durable[life.operation_id], context.record)
+                if self.use_adapter:
+                    am = importlib.import_module(base.PACKAGE + '.native_registry_transaction')
+                    prep = importlib.import_module(base.PACKAGE + '.prepared')
+                    adapter = am.ReceiptedRegistryTransactionAdapter(self.native_bridge,
+                        lambda ref: prep.decode_change(life.store.preparations.resolve(
+                            ref, life.binding['preparations'][ref])),
+                        chain, observe_native, journal.load, self.guard)
+                    adapter.bind_phase_context(context)
+                    self.assertTrue(callable(getattr(adapter, 'bind_own_helper_escrow', None)),
+                        'receipted adapter has no live own-helper escrow binding')
+                    adapter.bind_own_helper_escrow(escrow, token, source_fence=durable_source_fence)
+                    method = adapter.apply if context.record.direction == 'forward' else adapter.compensate
+                    mutation = await method(context.step, self.guard)
+                    slot = chain._slot('receipt', context.index, context.record.direction)
+                    row = chain.store.read(slot)
+                    self.assertIsNotNone(row)
+                    completed = (slot, row['digest'])
+                    stamp = p.decode_effect(row['payload']['own_helper_placeholder']['stamp'])
+                    intent = rr.RegistryIntent(tuple(row['payload']['intent']))
+                    self.assertTrue(await self.native_history.verify(self.own_history))
+                    return mutation, stamp, completed, intent
+                before = await observe()
+                intent = await chain.begin(context, before)
+                before = await observe()
+                chain.verify_intent_source(intent, context, before)
+                def fence(scope):
+                    durable_source_fence(context)
+                    escrow.require_completed(token)
+                    chain.verify_intent_source(intent, context, before)
+                    return True
+                node = p.OwnHelperPlaceholder.capture(io=io, lifecycle=life, chain=chain,
+                    context=context, intent=intent, observations=before,
+                    live_guard=self.guard, fresh_source_fence=fence,
+                    validate_unload_witness=validate_witness,
+                    verify_live_unload_state=lambda actual, ref, state:
+                        actual.verify_live_unload_state(self.entry.entry_id, ref, state))
+                mutation = node.mutate()
+                self.guard()
+                await io.settle()
+                self.guard()
+                await io.flush('entity')
+                self.guard()
+                await modules['native_restore_state_escrow_receipts'].copy_escrow_witness(
+                    life.store, chain.store, chain.operation_id, chain.plan,
+                    chain.original_receipt, life.binding['preparations'], escrow.root_reference)
+                self.guard()
+                after = await observe()
+                source_raw = next(row.raw for row in before if row.key == 'core.entity_registry')
+                result_raw = next(row.raw for row in after if row.key == 'core.entity_registry')
+                audit = transition.NativeRegistryEffectAudit('entity', self.row['id'],
+                    'forward' if context.record.direction == 'forward' else 'reverse',
+                    rr._sha(source_raw), rr._sha(result_raw),
+                    p.prepared_registry_digest(life.own_registry_changes[self.entry.entry_id]),
+                    json.loads(mutation.before_json)['modified_at'],
+                    json.loads(mutation.after_json)['modified_at'])
+                stamp = node.finish()
+                completed = await chain.complete(intent, context, before, after,
+                    mutation=mutation, audit=audit, placeholder_stamp=stamp,
+                    escrow_root_reference=escrow.root_reference)
+                return mutation, stamp, completed, intent
+            mutation, stamp, completed, intent = await registry_effect(context)
             from copy import deepcopy
             attrs = json.loads(unload['payload']['native_unload']['payload']['state_json'])['attributes']
             expected_scope = {'version': life.receipt.version,
@@ -142,22 +187,6 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(hass.states.async_available(self.old_helper))
             self.assertEqual(hass.states.get(self.target).state, 'unavailable')
             self.assertEqual(self.f.entity.async_get(self.target).id, self.row['id'])
-            await modules['native_restore_state_escrow_receipts'].copy_escrow_witness(
-                life.store, chain.store, chain.operation_id, chain.plan,
-                chain.original_receipt, life.binding['preparations'], escrow.root_reference)
-            self.guard()
-            after = await observe()
-            transition = importlib.import_module(base.PACKAGE + '.native_registry_transition')
-            source_raw = next(row.raw for row in before if row.key == 'core.entity_registry')
-            result_raw = next(row.raw for row in after if row.key == 'core.entity_registry')
-            audit = transition.NativeRegistryEffectAudit('entity', self.row['id'], 'forward',
-                rr._sha(source_raw), rr._sha(result_raw),
-                p.prepared_registry_digest(life.own_registry_changes[self.entry.entry_id]),
-                json.loads(mutation.before_json)['modified_at'],
-                json.loads(mutation.after_json)['modified_at'])
-            completed = await chain.complete(intent, context, before, after,
-                mutation=mutation, audit=audit, placeholder_stamp=stamp,
-                escrow_root_reference=escrow.root_reference)
             stored = chain.store.read(completed[0])['payload']
             self.assertIn('own_helper_placeholder', stored)
             fresh_store = rr.native_registry_receipt_store(hass, life.store.preparations)
@@ -266,39 +295,10 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
             await journal.save(tx.Record(life.operation_id, life.plan,
                 status='rolling_back', phases=('undo_intent',), direction='rollback'))
             context = tx.PhaseContext(await journal.load(life.operation_id), 0)
-            before = await observe()
-            intent = await chain.begin(context, before)
-            before = await observe()
-            chain.verify_intent_source(intent, context, before)
-            node = p.OwnHelperPlaceholder.capture(io=io, lifecycle=life, chain=chain,
-                context=context, intent=intent, observations=before,
-                live_guard=self.guard, fresh_source_fence=fence,
-                validate_unload_witness=validate_witness,
-                verify_live_unload_state=lambda actual, ref, state:
-                    actual.verify_live_unload_state(self.entry.entry_id, ref, state))
-            mutation = node.mutate()
-            self.guard()
-            await io.settle()
-            self.guard()
-            await io.flush('entity')
-            self.guard()
-            stamp = node.finish()
+            mutation, stamp, completed, intent = await registry_effect(context)
             self.assertIsNone(hass.states.get(self.target))
             self.assertTrue(hass.states.async_available(self.target))
             self.assertEqual(hass.states.get(self.old_helper).state, 'unavailable')
-            await modules['native_restore_state_escrow_receipts'].copy_escrow_witness(
-                life.store, chain.store, chain.operation_id, chain.plan,
-                chain.original_receipt, life.binding['preparations'], escrow.root_reference)
-            after = await observe()
-            source_raw = next(row.raw for row in before if row.key == 'core.entity_registry')
-            result_raw = next(row.raw for row in after if row.key == 'core.entity_registry')
-            audit = transition.NativeRegistryEffectAudit('entity', self.row['id'], 'reverse',
-                rr._sha(source_raw), rr._sha(result_raw),
-                p.prepared_registry_digest(life.own_registry_changes[self.entry.entry_id]),
-                json.loads(mutation.before_json)['modified_at'],
-                json.loads(mutation.after_json)['modified_at'])
-            await chain.complete(intent, context, before, after, mutation=mutation, audit=audit,
-                placeholder_stamp=stamp, escrow_root_reference=escrow.root_reference)
             await journal.save(tx.Record(life.operation_id, life.plan,
                 status='rolled_back', phases=('undone',), direction='rollback'))
             record = await journal.load(life.operation_id)
@@ -318,3 +318,33 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await self.own_observer.verify_runtime(life.helper_snapshots[self.entry.entry_id][0]))
         finally:
             self.lease.release()
+
+
+@unittest.skipUnless(base.fixture.fixtures.HAS_HA, 'requires actual pinned HA')
+class ReceiptedOwnHelperNativeTests(OwnHelperPlaceholderNativeTests):
+    use_adapter = True
+
+    async def _before_start(self, hass, root):
+        from homeassistant.helpers.recorder import async_initialize_recorder
+        from homeassistant.setup import async_setup_component
+        async_initialize_recorder(hass)
+        self.assertTrue(await async_setup_component(hass, 'recorder', {'recorder': {
+            'db_url': 'sqlite:///' + str(root / 'own-helper.db'), 'commit_interval': 0,
+            'auto_purge': False, 'auto_repack': False}}))
+        await super()._before_start(hass, root)
+
+    async def _prepare_own_change(self):
+        nr = importlib.import_module(base.PACKAGE + '.native_registry')
+        recorder_module = importlib.import_module(base.PACKAGE + '.recorder_guard')
+        history_module = importlib.import_module(base.PACKAGE + '.history_guard')
+        self.native_io = nr.NativeRegistryIO(self.f.hass)
+        recorder = recorder_module.NativeRecorderGuard(self.f.hass)
+        self.native_history = history_module.NativeHistoryGuard(recorder)
+        self.native_bridge = nr.NativeRegistryBridge(self.native_io, recorder,
+            history_guard=self.native_history)
+        change = await self.native_bridge.prepare('entity', self.row['id'],
+            {'entity_id': self.target}, self.guard)
+        self.own_history = json.loads(change.history_before_json)
+        self.assertTrue(self.own_history['state_ids'])
+        self.assertGreater(self.own_history['content']['states']['count'], 0)
+        return change
