@@ -7,8 +7,50 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 
 from .helper_plan import HelperPlan, plan_helper, rebase_after_listeners, snapshot_equal
+
+
+
+@dataclass(frozen=True)
+class NativeConfigMutation:
+    """Private storage rows around one synchronous ConfigEntries update.
+
+    This is a call observation, not listener provenance, a full-document receipt
+    or a durability claim. Never expose these local private bytes to clients.
+    """
+    entry_id: str
+    before_json: str
+    after_json: str
+    changed: bool
+
+
+def _config_row_json(entry):
+    """Use HA's storage encoder; unavailable evidence stays explicitly unknown."""
+    try:
+        from homeassistant.helpers.json import _orjson_bytes_default_encoder
+        row = entry.as_dict()
+        if row['entry_id'] != entry.entry_id:
+            return None
+        return _orjson_bytes_default_encoder(row).decode('utf-8')
+    except Exception:
+        # Evidence capture must not change existing native update/reload behavior.
+        # Missing/incompatible serialization is not a fabricated partial snapshot.
+        return None
+
+
+def _mutate_entry(manager, entry, *, data, options):
+    """Capture both actual rows before any reload/listener await, even on False."""
+    entry_id = entry.entry_id
+    before_json = _config_row_json(entry)
+    changed = manager.async_update_entry(entry, data=data, options=options)
+    # ConfigEntries returns bool, NOT an entry. Serialize the same actual entry.
+    after_json = _config_row_json(entry)
+    if (before_json is None or after_json is None or type(changed) is not bool
+            or entry.entry_id != entry_id):
+        return None
+    return NativeConfigMutation(entry_id, before_json, after_json, changed)
 
 
 def _plain(value):
@@ -61,7 +103,11 @@ async def apply_entry(hass, plan: HelperPlan, *, guard, settle, record_intent,
 
     Result verifies manager readback/runtime only. Owner still must prove manager
     persistence through supported flush/restart and journal whole-transaction
-    progress. An exception after intent/write is UNKNOWN: inspect before retry.
+    progress. The private _native_config_mutation field is the actual call stamp,
+    or None when no call occurred or native serialization/return was unavailable.
+    None never proves a listener effect or a native no-op. adapter_write retains
+    its existing meaning (an adapter call was attempted), independent of HA's
+    returned bool. An exception after intent/write is UNKNOWN: inspect before retry.
     """
     if plan.blocked:
         raise ValueError('helper_coverage_blocked')
@@ -82,6 +128,7 @@ async def apply_entry(hass, plan: HelperPlan, *, guard, settle, record_intent,
     guard()
     if not snapshot_equal(read_entry(hass, entry_id), current):
         raise ValueError('helper_snapshot_conflict')
+    mutation = None
     changed = not snapshot_equal(desired, current)
     if changed:
         entry = hass.config_entries.async_get_entry(entry_id)
@@ -89,8 +136,8 @@ async def apply_entry(hass, plan: HelperPlan, *, guard, settle, record_intent,
         if lifecycle not in ('loaded', 'not_loaded'):
             raise ValueError('helper_lifecycle_unsettled')
         # No await between final compare and native synchronous mutation.
-        hass.config_entries.async_update_entry(
-            entry, data=desired['data'], options=desired['options'])
+        mutation = _mutate_entry(
+            hass.config_entries, entry, data=desired['data'], options=desired['options'])
         if desired['domain'] != 'powercalc' and lifecycle == 'loaded':
             # options_flow_reloads only applies to OptionsFlowWithReload, not
             # direct manager writes. Do not infer automatic reload from it.
@@ -109,7 +156,8 @@ async def apply_entry(hass, plan: HelperPlan, *, guard, settle, record_intent,
     if not snapshot_equal(read_entry(hass, entry_id), desired):
         raise ValueError('helper_changed_during_runtime_verification')
     return {'manager_readback': 'verified', 'runtime': 'verified',
-            'persistence': 'unknown', 'adapter_write': changed}
+            'persistence': 'unknown', 'adapter_write': changed,
+            '_native_config_mutation': mutation}
 
 
 def inventory(hass, mapping):

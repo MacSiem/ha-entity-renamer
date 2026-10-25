@@ -198,7 +198,7 @@ class HelperTransactionAdapter:
             await self._proof(self.settle)
             guard()
 
-        await apply_entry(self.hass, write_plan, guard=guard, settle=checked_settle,
+        result = await apply_entry(self.hass, write_plan, guard=guard, settle=checked_settle,
             record_intent=already_journaled, verify_runtime=checked_activation,
             validate_snapshot=checked_validation)
         guard()
@@ -206,18 +206,20 @@ class HelperTransactionAdapter:
         guard()
         if not snapshot_equal(read_entry(self.hass, desired['identity']['entry_id']), desired):
             raise Refused('helper_changed_after_flush')
+        # Private trusted IO result; never put storage rows into a UI response.
+        return result
 
     async def apply(self, step, guard):
-        await self._write(self._change(step), guard)
+        return await self._write(self._change(step), guard)
 
     async def apply_native(self, step, guard):
         """Coordinator-only path after durable intent + verified declared causes."""
         if not step.caused_by:
             raise Refused('helper_missing_native_cause')
-        await self._write(self._change(step), guard, native=True)
+        return await self._write(self._change(step), guard, native=True)
 
     async def compensate(self, step, guard):
-        await self._write(self._change(step), guard, reverse=True)
+        return await self._write(self._change(step), guard, reverse=True)
 
     async def verify(self, plan):
         return await self.verify_inventory(plan)
