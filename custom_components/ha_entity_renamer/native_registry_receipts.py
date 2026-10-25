@@ -293,6 +293,19 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
                 states[key]['sha256'], observed[key]['sha256'],
                 prepared_registry_digest(change), before.get('modified_at'), after.get('modified_at'))):
             _fail('audit_binding_mismatch')
+        # Reopening must enforce the same semantic preparation boundary as the
+        # live writer. Stored hashes alone cannot replace that check. These
+        # canonical bytes validate reconstructed content only; actual physical
+        # raw hashes above remain independently bound and checked by _observe.
+        source_content = _json(states[key]['document'])
+        result_content = _json(result[key]['document'])
+        content_audit = NativeRegistryEffectAudit(change.kind, change.identity,
+            'forward' if binding['direction'] == 'forward' else 'reverse',
+            _sha(source_content), _sha(result_content), prepared_registry_digest(change),
+            before.get('modified_at'), after.get('modified_at'))
+        validate_registry_transition(source_content, result_content, change,
+            version=self.version, direction=content_audit.direction,
+            native_effect_audit=content_audit)
         for item_key in KEYS:
             identity = observed[item_key]['identity']
             if (type(identity) is not list or len(identity) != 3
