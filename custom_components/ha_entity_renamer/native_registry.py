@@ -346,18 +346,25 @@ class NativeRegistryBridge:
             return RegistryEvidence("unknown", None, None, None, None,
                                     reason="native_readback_failed")
 
-    async def apply(self, change, guard):
-        return await self._write(change, change.before, change.after, guard)
+    async def apply(self, change, guard, *, before_mutation=None):
+        return await self._write(change, change.before, change.after, guard,
+                                 before_mutation=before_mutation)
 
-    async def compensate(self, change, guard):
-        return await self._write(change, change.after, change.before, guard)
+    async def compensate(self, change, guard, *, before_mutation=None):
+        return await self._write(change, change.after, change.before, guard,
+                                 before_mutation=before_mutation)
 
-    async def _write(self, change, source, target, guard):
+    async def _write(self, change, source, target, guard, *, before_mutation=None):
         evidence = await self.inspect(change)
         self._fresh(change, source, guard)
         expected = "before" if source == change.before else "after"
         if evidence.position != expected:
             raise RegistryConflict("inspect_before_write:" + evidence.reason)
+        if before_mutation is not None:
+            # Trusted whole-input/intent consumer runs AFTER the final async
+            # runtime inspection. No await separates its final fence from API.
+            await before_mutation()
+            self._fresh(change, source, guard)
         # No await between fresh authorization/revision and one native mutation.
         stamp = self.io.mutate(change, target)
         await self.io.settle()

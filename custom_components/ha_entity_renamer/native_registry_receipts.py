@@ -444,6 +444,61 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
         self._observe(observations, states)
         return head  # Evidence chain digest only; not authorization.
 
+    def verify_initial(self, observations):
+        """Read-only preflight before Coordinator creates its journal record."""
+        states, head, sequence, completed, pending = self._reconstruct()
+        if sequence or completed or pending is not None:
+            _fail('initial_chain_not_pristine')
+        self._observe(observations, states)
+        return head
+
+    def verify_intent_source(self, intent, context, observations):
+        """Final full source fence after intent ACK, immediately before API."""
+        if not self.writable or intent is not self.active:
+            _fail('intent_not_live')
+        binding = self._context(context)
+        states, _, _, _, pending = self._reconstruct()
+        row = self.store.read(intent.reference[0])
+        if (pending != intent.reference or row['digest'] != intent.reference[1]
+                or row['payload']['binding'] != binding):
+            _fail('intent_binding_mismatch')
+        self._observe(observations, states)
+
+    def position(self, context, observations):
+        """Read-only phase proof, including receipt ACK before journal ACK.
+
+        A confirmed receipt may precede verified/undone in the journal. This
+        permits reconciliation of that exact effect, never a new writer/replay.
+        An unresolved sidecar intent still refuses even if raw looks correct.
+        """
+        if (type(context) is not PhaseContext
+                or context.record.operation_id != self.operation_id
+                or context.record.plan != self.plan):
+            _fail('phase_binding_mismatch')
+        states, _, _, completed, pending = self._reconstruct()
+        if pending is not None:
+            _fail('unknown_unresolved_intent')
+        unresolved = 0
+        for index, phase in enumerate(context.record.phases):
+            actual = completed.get(index)
+            if phase == 'intent' and context.record.direction == 'forward':
+                allowed = (None, 'forward')
+                unresolved += 1
+            elif phase == 'undo_intent' and context.record.direction == 'rollback':
+                allowed = ('forward', 'rollback')
+                unresolved += 1
+            else:
+                expected = {'verified': 'forward', 'undone': 'rollback', 'pending': None}
+                if phase not in expected:
+                    _fail('phase_receipt_mismatch')
+                allowed = (expected[phase],)
+            if actual not in allowed:
+                _fail('phase_receipt_mismatch')
+        if unresolved > 1:
+            _fail('phase_receipt_mismatch')
+        self._observe(observations, states)
+        return 'after' if completed.get(context.index) == 'forward' else 'before'
+
     async def begin(self, context: PhaseContext,
                     observations: tuple[RegistryRawObservation, ...]) -> RegistryIntent:
         if not self.writable:
