@@ -528,9 +528,10 @@ class NativeUtilityUnloadAudit:
                 _need(state is self._native_set_state and self._set_count == 1
                       and type(state) is self._modules['core'].State
                       and state.state == 'unavailable'
-                      and _same(json.loads(_state(state))['attributes'], self._attrs)
-                      and self.expected_row['entity_id'] in self._machine._reservations,
+                      and _same(json.loads(_state(state))['attributes'], self._attrs),
                       'native_unavailable_state')
+                _need(self.expected_row['entity_id'] in self._machine._reservations,
+                      'native_reservation')
                 self._captured, self._state_json = state, _state(state)
                 self._return_none = True
                 self._write_frame = None
@@ -542,7 +543,7 @@ class NativeUtilityUnloadAudit:
                 'native_unloader_return', 'native_set_cause', 'multiple_native_sets',
                 'native_set_object_replaced_or_noop', 'writer_hass', 'duplicate_write',
                 'native_causal_frame', 'writer_row_binding', 'writer_return',
-                'native_unavailable_state', 'missing_state', 'native_state_json'}
+                'native_unavailable_state', 'native_reservation', 'missing_state', 'native_state_json'}
             if (type(error) is UtilityUnloadAuditError and len(error.args) == 1
                     and type(error.args[0]) is str):
                 prefix = 'utility_unload_audit_'
