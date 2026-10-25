@@ -25,6 +25,10 @@ POWERCALC_ONE = frozenset({'entity_id', 'availability_entity', 'power_sensor_id'
     'energy_sensor_id', 'energy_price_sensor', 'main_power_sensor'})
 POWERCALC_MANY = frozenset({'group_power_entities', 'group_energy_entities',
     'exclude_entities', 'subtract_entities'})
+POWERCALC_GROUP_SELECTORS = frozenset({
+    'include', 'entities', 'create_group', 'create_domain_groups',
+    'force_calculate_group_energy', 'group',
+})
 TEMPLATE_FIELDS = frozenset({'state', 'value_template', 'availability', 'hvac_modes',
     'hvac_mode', 'hvac_action', 'current_temperature', 'target_temperature', 'position',
     'in_zones', 'latitude', 'longitude', 'location_accuracy', 'event_type', 'event_types',
@@ -97,6 +101,21 @@ def plan_helper(snapshot: dict, mapping: dict[str, str]) -> HelperPlan:
         cost = before['data'].get('cost')
         if isinstance(cost, dict) and 'energy_sensor_id' in cost:
             add(('data', 'cost', 'energy_sensor_id'), cost['energy_sensor_id'], 'one')
+        # Powercalc 1.26.1 supports dynamic/group membership and can derive
+        # extra energy sensors. A scalar reference plan cannot prove group
+        # membership, measured/estimated provenance or double-counting safety.
+        # Even a literal-free area include changes membership at runtime.
+        # This is a fail-closed planner marker, NOT a Powercalc adapter.
+        for root in ('data', 'options'):
+            for field in sorted(POWERCALC_GROUP_SELECTORS):
+                if field in before[root]:
+                    markers.append(Marker((root, field),
+                        'powercalc_group_membership_unverified',
+                        'Native group membership and Energy provenance required'))
+            if before[root].get('force_energy_sensor_creation') is True:
+                markers.append(Marker((root, 'force_energy_sensor_creation'),
+                    'powercalc_double_count_unverified',
+                    'Measured and derived energy topology requires proof'))
     elif domain == 'template':
         for field in TEMPLATE_FIELDS:
             if field in before['options']:
