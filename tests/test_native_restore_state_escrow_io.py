@@ -1,4 +1,4 @@
-"""Authored diagnostics, NOT executed. Owner runs FIFO on both exact HA pins.
+"""Raw native escrow IO diagnostics, separate from the typed product lifecycle.
 
 Uses actual native BASIC Utility Meter and native Store/file IO in isolated HA.
 No counter/cache values are injected. Patches below only induce failed IO.
@@ -105,6 +105,29 @@ class NativeEscrowIOTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first.before_json, second.after_json)
         self.assertEqual(Decimal(json.loads(second.before_json)['extra_data']['last_valid_state']),
                          Decimal('119'))
+        from homeassistant.const import __version__
+        if __version__ == '2025.6.0':
+            # This diagnostic intentionally calls Core directly, bypassing the
+            # product's OwnedHelperPlaceholder seam. Minimum Core retains the
+            # departed unavailable State/reservation and rejects raw reverse.
+            # Product reverse is proved by test_own_helper_placeholder_native
+            # through real unload/typed escrow/receipt/audited setup on BOTH pins.
+            departed = hass.states.get(self.old_helper)
+            self.assertIsNone(self.f.entity.async_get(self.old_helper))
+            self.assertEqual(departed.state, 'unavailable')
+            self.assertIs(departed.attributes['restored'], True)
+            self.assertIn(self.old_helper, hass.states._reservations)
+            before = self.projection(data, self.target, self.old_helper)
+            cached = {key: data.last_states[key] for key in (self.target, self.old_helper)}
+            with self.assertRaisesRegex(ValueError, 'already registered'):
+                self.f.entity.async_update_entity(self.target, new_entity_id=self.old_helper)
+            self.assertIs(hass.states.get(self.old_helper), departed)
+            self.assertEqual(self.f.entity.async_get(self.target).id, self.uuid)
+            self.assertIsNone(self.f.entity.async_get(self.old_helper))
+            self.assertEqual(self.projection(data, self.target, self.old_helper), before)
+            for key, value in cached.items():
+                self.assertIs(data.last_states[key], value)
+            return
         self.assertTrue(hass.states.async_available(self.old_helper)
             and self.f.entity.async_get(self.old_helper) is None, {
             'target_registry': repr(self.f.entity.async_get(self.old_helper)),
