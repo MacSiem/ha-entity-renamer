@@ -13,6 +13,7 @@ p = importlib.import_module(base.PACKAGE + '.native_helper_placeholder_effect')
 @unittest.skipUnless(base.fixture.fixtures.HAS_HA, 'requires actual pinned HA')
 class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
     use_adapter = False
+    gap_during_unload = False
     asyncSetUp = base.OwnHelperUnloadLifecycleTests.asyncSetUp
     _before_start = base.OwnHelperUnloadLifecycleTests._before_start
     _fixture = base.OwnHelperUnloadLifecycleTests._fixture
@@ -25,6 +26,9 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
         life = await self._lifecycle()
         try:
             await life.quiesce()
+            if self.gap_during_unload:
+                await self._emit('115')
+                await self._emit('119')
             hass = self.f.hass
             modules = {name: importlib.import_module(base.PACKAGE + '.' + name) for name in
                 ('native_registry', 'native_registry_receipts', 'native_input_observation',
@@ -279,7 +283,7 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
             entity, = [e for platform in async_get_platforms(hass, 'utility_meter')
                        if platform.config_entry is self.entry for e in platform.entities.values()]
             self.assertEqual(entity.entity_id, self.target)
-            self.assertEqual(entity.native_value, Decimal('11'))
+            self.assertEqual(entity.native_value, Decimal('19' if self.gap_during_unload else '11'))
             await self._emit('119')
             self.assertEqual(entity.native_value, Decimal('19'))
             self.assertTrue(await self.own_observer.verify_runtime(life.helper_snapshots[self.entry.entry_id][0]))
@@ -368,3 +372,8 @@ class ReceiptedOwnHelperNativeTests(OwnHelperPlaceholderNativeTests):
         self.assertTrue(self.own_history['state_ids'])
         self.assertGreater(self.own_history['content']['states']['count'], 0)
         return change
+
+
+@unittest.skipUnless(base.fixture.fixtures.HAS_HA, 'requires actual pinned HA')
+class ReceiptedOwnHelperGapNativeTests(ReceiptedOwnHelperNativeTests):
+    gap_during_unload = True
