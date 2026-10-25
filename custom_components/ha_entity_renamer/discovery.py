@@ -6,7 +6,8 @@ Only this backend chooses roots, native readers and resource identities.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, fields, is_dataclass
 import hashlib
 import json
 import uuid
@@ -25,6 +26,19 @@ def _json(value):
 
 def _sha(value):
     return hashlib.sha256(value).hexdigest()
+
+
+def _plain(value):
+    """Thaw only detached server snapshots, including immutable native trees."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _plain(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, Mapping):
+        return {key: _plain(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(child) for child in value]
+    if value is None or type(value) in (str, int, float, bool):
+        return value
+    raise ValueError('discovery_snapshot_type')
 
 
 @dataclass(frozen=True)
@@ -167,6 +181,40 @@ def _runtime_family(hass, domain):
         return _unknown(domain, 'runtime_inventory_unavailable'), None
 
 
+def _consumer_family(name, outcome, mapping):
+    if outcome.status != 'COMPLETE':
+        return _unknown(name, outcome.reason, denied=outcome.status == 'DENIED')
+    value = outcome.value
+    blockers, rows = [], []
+    if name == 'dashboard':
+        from .dashboard_plan import plan_dashboard
+        for snapshot in value.snapshots:
+            row = _plain(snapshot)
+            rows.append(('storage:' + _json(snapshot.dashboard.route).decode(),
+                         snapshot.dashboard.key, _sha(_json(row))))
+            if snapshot.config is not None:
+                try:
+                    blockers.extend(marker.code for marker in
+                                    plan_dashboard(_plain(snapshot.config), mapping).markers)
+                except (ValueError, TypeError, KeyError):
+                    blockers.append('dashboard_semantics_unavailable')
+        for source in value.yaml_sources:
+            identity = 'yaml:' + _json(source.route).decode()
+            rows.append((identity, identity, _sha(_json(_plain(source)))))
+    elif name == 'energy':
+        from .energy_plan import plan_energy
+        rows.append(('energy', 'energy', value.revision))
+        if value.value is not None:
+            try:
+                blockers.extend(marker.code for marker in
+                                plan_energy(_plain(value.value), mapping).markers)
+            except (ValueError, TypeError, KeyError):
+                blockers.append('energy_semantics_unavailable')
+    else:
+        raise ValueError('discovery_consumer_family')
+    return _family(name, _plain(value), rows, blockers=blockers)
+
+
 async def async_discover(hass, proposal, guard):
     """Capture native sources and dependent families without any mutation API."""
     from homeassistant.const import __version__
@@ -176,6 +224,7 @@ async def async_discover(hass, proposal, guard):
     from .native_input_baseline import _drained
     from .recorder_guard import NativeRecorderGuard, prepare as recorder_preflight
     from .history_guard import NativeHistoryGuard
+    from .native_discovery_consumers import async_observe_discovery_consumers
     proposal_json, manifest = _proposal(proposal)
     mapping = {row.old_id: row.new_id for row in manifest.entities if row.old_id != row.new_id}
     families = {name: _unknown(name, 'source_inventory_unavailable') for name in FAMILIES}
@@ -205,15 +254,19 @@ async def async_discover(hass, proposal, guard):
         for name in ('entity_registry', 'device_registry', 'config_entries', 'template', 'powercalc'):
             families[name] = _unknown(name, 'native_input_unavailable')
     guard()
+    consumers = await async_observe_discovery_consumers(hass, guard=guard)
+    guard()
+    for name in ('dashboard', 'energy'):
+        families[name] = _consumer_family(name, getattr(consumers, name), mapping)
+    yaml_roots = (tuple(sorted({row.filename for row in consumers.dashboard.value.yaml_sources}))
+                  if consumers.dashboard.status == 'COMPLETE' else ())
     runtime_tokens = {}
     for domain in ('automation', 'script'):
         families[domain], runtime_tokens[domain] = _runtime_family(hass, domain)
-    # YAML dashboard filenames are supplied only by server runtime discovery.
-    # Until that runtime-source binding is proved, keep those family claims
-    # UNKNOWN rather than silently dropping sources from the graph.
+    # Runtime-known dashboard roots come from registered native managers.
     try:
         yaml = await _drained(hass.async_add_executor_job,
-            lambda: plan_yaml(hass.config.config_dir, mapping))
+            lambda: plan_yaml(hass.config.config_dir, mapping, yaml_dashboards=yaml_roots))
         guard()
         payload = {'files': [asdict(row) for row in yaml.files],
                    'directories': [asdict(row) for row in yaml.directories],
@@ -222,8 +275,15 @@ async def async_discover(hass, proposal, guard):
             [(row.path, row.path, row.sha256) for row in yaml.files],
             blockers=tuple(issue.code for issue in yaml.issues) +
                      ('runtime_source_coverage_unverified',))
+        if consumers.dashboard.status == 'COMPLETE':
+            files = {row.path: row for row in yaml.files}
+            for source in consumers.dashboard.value.yaml_sources:
+                file = files.get(source.filename)
+                if (file is None or file.sha256 != source.sha256
+                        or (file.device, file.inode) != source.file_identity[:2]):
+                    raise ValueError('yaml_dashboard_source_changed')
         yaml_again = await _drained(hass.async_add_executor_job,
-            lambda: plan_yaml(hass.config.config_dir, mapping))
+            lambda: plan_yaml(hass.config.config_dir, mapping, yaml_dashboards=yaml_roots))
         guard()
         if yaml_again != yaml:
             families['yaml_sources'] = _unknown('yaml_sources', 'source_changed_during_capture')
@@ -265,6 +325,16 @@ async def async_discover(hass, proposal, guard):
         for name in ('history', 'statistics'):
             families[name] = _unknown(name, 'recorder_scope_unavailable')
     guard()
+    final_consumers = await async_observe_discovery_consumers(hass, guard=guard)
+    guard()
+    for name in ('dashboard', 'energy'):
+        first, final = getattr(consumers, name), getattr(final_consumers, name)
+        if first.status == 'COMPLETE' and final != first:
+            families[name] = (_consumer_family(name, final, mapping)
+                if final.status != 'COMPLETE' else _unknown(name, 'source_changed_during_capture'))
+            conflicts.append('source_changed_during_capture')
+            if name == 'dashboard':
+                families['yaml_sources'] = _unknown('yaml_sources', 'source_changed_during_capture')
     # A member added during any await invalidates every native family, even
     # when it was not a changed target. Never learn a replacement snapshot.
     if native is not None:
