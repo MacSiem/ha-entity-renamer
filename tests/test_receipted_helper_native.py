@@ -287,6 +287,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             adapters['yaml'] = yaml_adapter
         coordinator = tx.Coordinator(adapters, log, adapter.guard, required_scopes=tuple(scopes))
         calls = []
+        effect_errors = []
         def intents(index):
             durable = m['journal'].decode(json.loads(Path(hass.config.path('.storage',
                 'ha_entity_renamer.migrations')).read_bytes())['data'])[operation]
@@ -340,12 +341,22 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                     self.assertEqual(captured_script_values, [str(value)])
             self.assertTrue(await history.verify(historical))
         with ExitStack() as effects:
+            for key, bound in adapters.items():
+                original_apply = bound.apply
+                async def diagnosed_apply(step, guard, apply=original_apply, scope=key):
+                    try:
+                        return await apply(step, guard)
+                    except Exception as error:
+                        effect_errors.append((scope, type(error).__name__, str(error)))
+                        raise
+                effects.enter_context(patch.object(bound, 'apply', diagnosed_apply))
             effects.enter_context(patch.object(io, 'mutate', registry_call))
             effects.enter_context(patch.object(m['helper_native'], '_mutate_entry', helper_call))
             if self.with_yaml:
                 effects.enter_context(patch.object(m['yaml_transaction'], 'apply_file_patch', file_call))
             applied = await coordinator.apply(plan, plan.fingerprint, operation)
-            self.assertEqual(applied.status, 'applied', (applied.reason, applied.phases))
+            self.assertEqual(applied.status, 'applied',
+                             (applied.reason, applied.phases, calls, effect_errors))
             expected_forward = [(i, 'forward') for i in range(len(steps))]
             self.assertEqual(calls, expected_forward)
             self.assertEqual(await coordinator.apply(plan, plan.fingerprint, operation), applied)
