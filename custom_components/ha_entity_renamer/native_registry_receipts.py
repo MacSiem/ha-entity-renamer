@@ -40,6 +40,16 @@ class RegistryReceiptError(ValueError):
     """Sanitized refusal; never contains private document contents."""
 
 
+def native_registry_receipt_store(hass, preparations):
+    """Create one private native sidecar; caller owns initialization and locks."""
+    from homeassistant.helpers.storage import Store
+    from .persistence import VerifiedStore
+    key = 'ha_entity_renamer.registry_receipts'
+    writer = Store(hass, 1, key, private=True, minor_version=1, atomic_writes=True)
+    return RegistryReceiptStore(VerifiedStore(hass.config.path('.storage', key), key,
+        writer.async_save, hass.async_add_executor_job), preparations)
+
+
 def _fail(reason):
     raise RegistryReceiptError('registry_receipt_' + reason) from None
 
