@@ -30,6 +30,10 @@ transition = importlib.import_module(base.PACKAGE + '.native_config_transition')
 async def fixture():
     f = await base.fixture()
     config_doc, _, _ = config_fixture.fixture()
+    # Pure validator fixtures deliberately include opaque envelope keys. The
+    # preparation baseline is the stricter exact native Store envelope/schema.
+    config_doc = {key: config_doc[key] for key in ('version', 'minor_version', 'key', 'data')}
+    config_doc['data'] = {'entries': config_doc['data']['entries']}
     observations = list(f['observations'])
     observations[2] = replace(observations[2], raw=base.raw(config_doc))
     observations = tuple(observations)

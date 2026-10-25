@@ -15,6 +15,8 @@ parser.add_argument('--pattern', default='test*.py')
 parser.add_argument('--repeat', type=int, default=1)
 args = parser.parse_args()
 assert args.repeat >= 1 and '/' not in args.pattern and '\\' not in args.pattern
+if not any(path.is_file() for path in (ROOT/'tests').glob(args.pattern)):
+    parser.error('test pattern selected no source files')
 info = json.loads(subprocess.check_output(['docker', 'inspect', args.container], text=True))[0]
 assert info['State']['Running']
 mounts = [m['Source'] for m in info['Mounts'] if m['Destination'] == '/config']
@@ -37,6 +39,8 @@ with tempfile.TemporaryDirectory(prefix='renamer-unit-', dir='/config') as direc
     sys.path.insert(0, str(root))
     suite = unittest.TestSuite(unittest.defaultTestLoader.discover('tests', pattern=PATTERN)
                                for _ in range(REPEAT))
+    if suite.countTestCases() == 0:
+        raise RuntimeError('test discovery selected no test cases')
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     print(json.dumps({'tests': result.testsRun, 'failures': len(result.failures),
                      'errors': len(result.errors), 'skipped': len(result.skipped),
