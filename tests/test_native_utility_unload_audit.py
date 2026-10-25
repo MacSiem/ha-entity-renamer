@@ -27,18 +27,6 @@ class ActualUtilityUnloadAuditTests(unittest.IsolatedAsyncioTestCase):
         self.expected_row = self.observer.expected_registry_rows(self.entry.entry_id)[0]
         self.lease = await lease_module.NativeHelperActivationLease.acquire(
             self.f.hass, self.f.hass.config_entries, (self.entry,), guard=lambda: None)
-        erow = self.entity.registry_entry
-        current = self.f.entity.async_get(self.helper_id)
-        print('UNLOAD_ENTITY_BINDING', {'same_row_object': erow is current,
-            'same_row_content': u._row(erow) == self.expected_row,
-            'row_changed_keys': sorted(k for k in set(u._row(erow)) | set(self.expected_row)
-                if u._row(erow).get(k) != self.expected_row.get(k)),
-            'same_platform': self.entity.platform in [p for p in __import__(
-                'homeassistant.helpers.entity_platform', fromlist=['async_get_platforms']
-                ).async_get_platforms(self.f.hass, 'utility_meter')],
-            'same_unique': self.entity.unique_id == self.entry.entry_id,
-            'same_parent': self.entity._parent_meter == self.entry.entry_id,
-            'same_hass': self.entity.hass is self.f.hass})
         self.audit = u.NativeUtilityUnloadAudit(self.f.hass, self.entry,
                                                self.expected_row, guard=lambda: None)
 
@@ -55,6 +43,31 @@ class ActualUtilityUnloadAuditTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(witness.check_live(hass=self.f.hass, entry=self.entry,
                 lease=self.lease, actual_state=state, expected_data=witness.data))
             encoded = u.encode_unload_audit(witness.data)
+            self.assertEqual(encoded['payload']['source_row'], self.expected_row)
+            self.assertEqual(encoded['payload']['writer_row'], u._row(self.entity.registry_entry))
+            from copy import deepcopy
+            for key, value in (('schema', True), ('core', '2026.10.3'), ('reserved', False),
+                               ('entry_id', 'foreign'), ('state_json', '{}')):
+                changed = deepcopy(encoded)
+                changed['payload'][key] = value
+                with self.subTest(key=key), self.assertRaises((ValueError, TypeError)):
+                    u.decode_unload_audit(changed)
+            for key in ('same_actor', 'same_hass', 'same_row', 'same_state_at_finish',
+                        'native_unloader_return_true', 'same_native_set_state', 'return_none'):
+                changed = deepcopy(encoded)
+                changed['payload']['call'][key] = False
+                with self.subTest(key=key), self.assertRaises(u.UtilityUnloadAuditError):
+                    u.decode_unload_audit(changed)
+            changed = deepcopy(encoded)
+            changed['payload']['writer_row']['original_name'] = 'Foreign native writer'
+            with self.assertRaises(u.UtilityUnloadAuditError):
+                u.decode_unload_audit(changed)
+            changed = deepcopy(encoded)
+            changed['authority'] = True
+            with self.assertRaises(u.UtilityUnloadAuditError):
+                u.decode_unload_audit(changed)
+            with self.assertRaises(u.UtilityUnloadAuditError):
+                u.NativeUtilityUnloadWitness()
             self.assertEqual(u.decode_unload_audit(encoded), witness.data)
             self.assertEqual(encoded['payload']['state_json'], state.as_dict_json.decode())
             self.assertTrue(u.validate_unload_audit(witness.data,
