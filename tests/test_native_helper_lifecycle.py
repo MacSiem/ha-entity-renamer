@@ -88,6 +88,29 @@ class HelperLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovered_plan.fingerprint, h.h.f['plan'].fingerprint)
         self.assertIsNone(await h.h.log.load('provided-operation-id'))
 
+    async def test_copied_receipt_witness_is_pure_readonly_graph_validation(self):
+        h = await Harness().initialize(self)
+        await h.obj.quiesce()
+        before = dict(h.store.rows)
+        parsed = module.validate_lifecycle_receipt_witness(*h.args,
+            root_id=h.obj.root_id)
+        self.assertFalse(parsed.writable)
+        self.assertEqual(parsed.inspect(), h.obj.inspect())
+        self.assertEqual(parsed.plan, h.h.f['plan'])
+        self.assertEqual(h.store.rows, before)
+        with self.assertRaisesRegex(module.HelperLifecycleError, 'read_only'):
+            await parsed.quiesce()
+        with self.assertRaisesRegex(module.HelperLifecycleError, 'root_binding'):
+            module.validate_lifecycle_receipt_witness(*h.args, root_id='rr-' + '0' * 64)
+        await h.obj.restore(h.authorization)
+        reverse = await module.NativeHelperLifecycle.start(*h.args, **h.kwargs,
+            source_authorization=h.authorization)
+        parsed_reverse = module.validate_lifecycle_receipt_witness(*h.args,
+            root_id=reverse.root_id)
+        self.assertEqual(parsed_reverse.source_authorization, h.authorization)
+        self.assertEqual(parsed_reverse.root_id, reverse.root_id)
+        self.assertFalse(parsed_reverse.writable)
+
     async def test_reverse_quiescence_requires_same_applied_accepted_chain(self):
         h = await Harness().initialize(self)
         await h.obj.quiesce()
