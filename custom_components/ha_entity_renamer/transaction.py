@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
 import json
+import re
 from typing import Callable, Protocol
 
 
@@ -53,14 +54,24 @@ class Plan:
     # Nonempty only after ALL adapters prove enumeration, validation and backups.
     coverage_evidence: str
     verification_adapters: tuple[str, ...]
+    # Immutable private batch baseline: prepared ID, payload digest, codec digest.
+    # Empty on legacy plans; never enrich an already journaled plan in place.
+    native_inputs: tuple[str, ...] = ()
 
     @property
     def fingerprint(self) -> str:
         from dataclasses import asdict
-        raw = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+        payload = asdict(self)
+        if self.native_inputs == ():
+            payload.pop('native_inputs')  # Preserve all legacy fingerprints.
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(raw.encode()).hexdigest()
 
     def validate(self) -> None:
+        if self.native_inputs != ():
+            validate_native_input_ref(self.native_inputs)
+        elif type(self.native_inputs) is not tuple:
+            raise Refused('Invalid native input reference')
         if (not self.plan_id or not self.coverage_evidence or not self.required_scopes
                 or set(self.required_scopes) != set(self.covered_scopes)
                 or not self.verification_adapters
@@ -79,6 +90,16 @@ class Plan:
             preceding.add(step.key)
             if step.before_revision == step.after_revision:
                 raise Refused("Step requires distinguishable revisions")
+
+
+def validate_native_input_ref(reference):
+    """Typed nonempty reference; possession is not transition authorization."""
+    if (type(reference) is not tuple or len(reference) != 3
+            or type(reference[0]) is not str
+            or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', reference[0])
+            or any(type(value) is not str or not re.fullmatch(r'[0-9a-f]{64}', value)
+                   for value in reference[1:])):
+        raise Refused('Invalid native input reference')
 
 
 @dataclass(frozen=True)

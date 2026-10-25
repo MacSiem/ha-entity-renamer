@@ -6,7 +6,9 @@ import importlib
 import json
 import unittest
 
-from test_native_input_baseline import BaselineFileTests, PACKAGE, baseline
+import test_native_input_baseline as fixture_module
+
+PACKAGE = fixture_module.PACKAGE
 
 prepared = importlib.import_module(PACKAGE + '.prepared')
 tx = importlib.import_module(PACKAGE + '.transaction')
@@ -29,7 +31,7 @@ class Disk:
 
 class NativeInputPreparationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.fixture = BaselineFileTests('test_raw_audit_order_unknowns_mode_and_codec_are_immutable')
+        self.fixture = fixture_module.BaselineFileTests('test_raw_audit_order_unknowns_mode_and_codec_are_immutable')
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.baseline = self.fixture.capture()

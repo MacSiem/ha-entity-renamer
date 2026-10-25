@@ -33,6 +33,10 @@ def decode(value):
             step_data['caused_by'] = tuple(causes)
             steps.append(Step(**step_data))
         plan_data['steps'] = tuple(steps)
+        if 'native_inputs' in plan_data:
+            if type(plan_data['native_inputs']) is not list:
+                raise ValueError('invalid_journal_native_inputs')
+            plan_data['native_inputs'] = tuple(plan_data['native_inputs'])
         for field in ('required_scopes', 'covered_scopes', 'verification_adapters'):
             if type(plan_data[field]) is not list or any(type(item) is not str for item in plan_data[field]):
                 raise ValueError('invalid_journal_plan')
