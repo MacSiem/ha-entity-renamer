@@ -329,18 +329,11 @@ class NativeHelperLifecycle:
         return True
 
     def _capture_source_gap(self, entry_id):
-        from .utility_meter_observers import _payload
         from .native_utility_source_gap import NativeUtilitySourceGap
         values = [value for value in self.runtime_baselines() if value.entry_id == entry_id]
         if not values:
             return
         value, = values
-        doc = _payload(value)
-        # Initial handoff scope: own-ID with the same physical source
-        # name. Source-ID transitions retain their existing independent runtime
-        # verification; queued rename emissions need separate characterization.
-        if doc['source_before'] != doc['source_after']:
-            return
         if entry_id in self._source_gaps:
             _fail('source_gap_one_live_capture_required')
         snapshot = self.helper_snapshots[entry_id][1 if self.source_authorization else 0]

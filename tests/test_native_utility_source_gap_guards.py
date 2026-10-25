@@ -13,6 +13,7 @@ leases = importlib.import_module(fixture.fixtures.PACKAGE + '.native_helper_acti
 
 @unittest.skipUnless(fixture.fixtures.HAS_HA, 'requires actual pinned HA')
 class NativeUtilitySourceGapGuardTests(unittest.IsolatedAsyncioTestCase):
+    mapped_source = False
     asyncSetUp = fixture.ActualUtilityMeterObserverTests.asyncSetUp
     _before_start = fixture.ActualUtilityMeterObserverTests._before_start
     _fixture = fixture.ActualUtilityMeterObserverTests._fixture
@@ -30,7 +31,9 @@ class NativeUtilitySourceGapGuardTests(unittest.IsolatedAsyncioTestCase):
         await self._fixture()
         self.allowed = True
         self.helper_uuid = self.f.entity.async_get(self.entity.entity_id).id
-        original = await fixture.h.NativeHelperObservers.capture(self.f.hass, [self.before], ())
+        proof = (fixture.h.RegistryMappingProof(self.old, 'sensor.source_gap_renamed',
+            self.source_uuid),) if self.mapped_source else ()
+        original = await fixture.h.NativeHelperObservers.capture(self.f.hass, [self.before], proof)
         baseline, = original.runtime_baselines()
         self.lease = await leases.NativeHelperActivationLease.acquire(self.f.hass,
             self.f.hass.config_entries, (self.entry,), guard=self.guard)

@@ -132,6 +132,8 @@ class NativeUtilitySourceGap:
         self._thread = threading.get_ident()
         self._live, self._error, self._settling = True, None, False
         self._attempted, self._latest_event, self._unsubscribe = False, None, None
+        self._emissions = self._emission_data = None
+        self._pending_move = False
         self._event_shape = None
         self._er = import_module('homeassistant.helpers.entity_registry')
         self._registry = self._er.async_get(hass)
@@ -146,6 +148,9 @@ class NativeUtilitySourceGap:
               and type(hass.bus) is self._classes['EventBus'], 'installed_binding')
         self._check(snapshot)
         source_name = self._source_name()
+        self._from_name = source_name
+        self._to_name = (self._doc['source_after'] if source_name == self._doc['source_before']
+                         else self._doc['source_before'])
         source = self._states.get(source_name)
         value = self._value(source)
         _need(value >= _decimal(self._doc['s0']), 'capture_before_original')
@@ -167,6 +172,10 @@ class NativeUtilitySourceGap:
             self._observe(event)
         self._callback = observe
         try:
+            if self._from_name != self._to_name:
+                from .native_utility_source_emissions import NativeSourceEmissions
+                self._emissions = NativeSourceEmissions(self._codes['fire'], self._bus,
+                    self._observe_emission, self._poison)
             self._unsubscribe = self._bus.async_listen('state_changed', observe)
             self.check()
         except BaseException:
@@ -187,6 +196,8 @@ class NativeUtilitySourceGap:
                   and not self._task.done(), 'task_or_loop_lost')
             _need(self._guard() is True, 'guard_lost')
             self._lease.check()
+            if self._emissions is not None:
+                self._emissions.check()
             _need(self._lease.owns_entry(self._entry)
                   and self._hass.config_entries.async_get_entry(self._baseline.entry_id) is self._entry
                   and self._hass.states is self._states and self._hass.bus is self._bus
@@ -286,7 +297,9 @@ class NativeUtilitySourceGap:
                         and frame.f_locals.get('event_data') is event.data):
                     bus_frame = frame
                 frame = frame.f_back
-            _need(source_frame is not None and bus_frame is not None, 'UNKNOWN_source_event_origin')
+            _need(bus_frame is not None and (source_frame is not None
+                  or self._emissions is not None and event.data is self._emission_data),
+                  'UNKNOWN_source_event_origin')
         finally:
             del frame, source_frame, bus_frame
 
@@ -296,6 +309,45 @@ class NativeUtilitySourceGap:
                 id(event.data.get('old_state')), id(event.data.get('new_state')),
                 event.event_type, event.time_fired.isoformat())
 
+    def _observe_emission(self, frame):
+        """Fold genuine emissions before the native bus can defer their delivery."""
+        local = frame.f_locals
+        data = local.get('event_data')
+        if (local.get('event_type') != 'state_changed' or type(data) is not dict
+                or data.get('entity_id') not in (self._from_name, self._to_name)):
+            return
+        self._check(owner=False)
+        parent = frame.f_back
+        _need(frame.f_code is self._codes['fire'] and parent is not None
+              and parent.f_code in (self._codes['source_set'], self._codes['source_remove'])
+              and parent.f_locals.get('self') is self._states
+              and parent.f_locals.get('state_changed_data') is data,
+              'UNKNOWN_source_emission_origin')
+        _need(not self._settling, 'source_changed_during_handoff')
+        name, new, old = data['entity_id'], data.get('new_state'), data.get('old_state')
+        physical = self._source_name()
+        if new is None:
+            _need(not self._pending_move and name == self._from_name
+                  and physical == self._to_name and name != physical
+                  and old is self._latest_state and self._states.get(name) is None,
+                  'source_removed')
+            self._pending_move = True
+            return
+        value = self._value(new)
+        _need(name == physical and self._states.get(name) is new
+              and new.entity_id == name and value >= self._latest_value,
+              'source_reset_or_head')
+        if self._pending_move:
+            _need(name == self._to_name and old is None
+                  and self._latest_state.entity_id == self._from_name, 'source_move_unproven')
+            self._pending_move = False
+        else:
+            _need(self._latest_state.entity_id == name and old is self._latest_state,
+                  'source_stream_discontinuity')
+        self._latest_state, self._latest_value = new, value
+        self._emission_data = data
+        self._latest_event = self._event_shape = None
+
     def _observe(self, event):
         # Never throw into HA, including guard cancellation or malformed events.
         try:
@@ -304,6 +356,15 @@ class NativeUtilitySourceGap:
                 return
             self._check(owner=False)
             _need(not self._settling, 'source_changed_during_handoff')
+            if self._emissions is not None:
+                # Every applicable emission was checked before enqueueing. Only
+                # the latest payload is retained; older queued deliveries cannot
+                # authorize accounting or change the already folded stream.
+                if event.data is self._emission_data:
+                    self._genuine_event(event)
+                    self._latest_event = event
+                    self._event_shape = self._shape(event)
+                return
             self._genuine_event(event)
             physical_name = self._source_name()
             new, old = event.data.get('new_state'), event.data.get('old_state')
@@ -335,6 +396,8 @@ class NativeUtilitySourceGap:
         self._check()
         name = self._source_name()
         current = self._states.get(name)
+        _need(not self._pending_move and (self._emission_data is None
+              or self._latest_event is not None), 'source_delivery_pending')
         _need(current is self._latest_state and self._value(current) == self._latest_value,
               'unobserved_source_head')
         _need(self._latest_event is None or self._shape(self._latest_event) == self._event_shape,
@@ -428,6 +491,9 @@ class NativeUtilitySourceGap:
             if self._unsubscribe is not None:
                 self._unsubscribe()
         finally:
+            if self._emissions is not None:
+                self._emissions.close()
+                self._emissions = self._emission_data = None
             self._unsubscribe = self._latest_event = self._latest_state = None
             self._event_shape = None
             self._old_entity = None
