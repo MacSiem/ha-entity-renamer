@@ -2,8 +2,9 @@
 
 Actual native objects remain the only arithmetic writers. This product adapter
 migrates their actual fields and timer ownership at a pinned synchronous setup
-seam. It is not source-ID rename, restart recovery, or lifecycle authorization.
+seam. Optional source-ID policy binds the existing ORIGINAL/accepted chain.
 An owner must supply the existing full-source guard, lease and immutable store.
+Restart recovery and own-ID composition are separate capabilities.
 """
 from __future__ import annotations
 
@@ -68,7 +69,7 @@ class NativeIntegrationContinuity:
         _need(False, 'ephemeral_only')
 
     @classmethod
-    async def start(cls, hass, entry, lease, store, *, guard):
+    async def start(cls, hass, entry, lease, store, *, guard, source_binding=None):
         from homeassistant.components.integration.sensor import IntegrationSensor
         from homeassistant.core import HomeAssistant, EventBus, StateMachine, State, HassJob, HassJobType, callback
         from homeassistant.helpers import entity_platform as ep, entity_registry as er, event
@@ -91,6 +92,7 @@ class NativeIntegrationContinuity:
         self._bridge_depth, self._native_old_calls, self._bridge_calls = 0, 0, 0
         self._timer_rearms, self._transferred, self._new_timer_bound = 0, None, False
         self._old_cancelled = None
+        self.source_binding = source_binding
         self.registry = er.async_get(hass)
         rows = list(er.async_entries_for_config_entry(self.registry, entry.entry_id))
         entities = [e for p in ep.async_get_platforms(hass, 'integration')
@@ -107,6 +109,12 @@ class NativeIntegrationContinuity:
         _need(self.source_row is not None and self.source_row.disabled_by is None
               and self.old._source_entity == self.source, 'source_binding')
         self._config = canonical(read_entry(hass, entry.entry_id))[0]
+        self.source_names = (self.source,)
+        self._pending_move = None
+        if source_binding is not None:
+            from .native_integration_source_clock import IntegrationSourceClockBinding
+            _need(type(source_binding) is IntegrationSourceClockBinding, 'typed_source_binding')
+            source_binding.bind(self)
         self.root = Path(import_module('homeassistant').__file__).resolve().parent
         self.pins = dict(_SOURCES[version])
         self.pins.update({'components/integration/sensor.py': _INTEGRATION[version],
@@ -120,6 +128,7 @@ class NativeIntegrationContinuity:
             ('reported', IntegrationSensor, '_integrate_on_state_report_with_max_sub_interval'),
             ('fire', EventBus, 'async_fire_internal'),
             ('source_set', StateMachine, 'async_set_internal'),
+            ('source_remove', StateMachine, 'async_remove'),
             ('call_at', event, 'async_call_at'),
             ('call_later', event, 'async_call_later'),
             ('run_timer', event, '_run_async_call_action'),
@@ -134,6 +143,8 @@ class NativeIntegrationContinuity:
             'IntegrationSensor._schedule_max_sub_interval_exceeded_if_state_is_numeric.<locals>._integrate_on_max_sub_interval_exceeded_callback']
         _need(len(timer_codes) == 1, 'timer_code_shape')
         self._timer_code = timer_codes[0]
+        if self.source_binding is not None:
+            self.source_binding.qualify(self)
         self._check(owner=True)
         # Require an actual already-fired timer. This prerequisite deliberately
         # has no fallback for an uninitialized, unavailable or no-timer helper.
@@ -150,13 +161,15 @@ class NativeIntegrationContinuity:
             self._install_monitor()
             self._emissions = NativeSourceEmissions(self.codes['fire'], hass.bus,
                                                     self._emission, self._poison)
-            self._unsubscribes.append(event.async_track_state_change_event(hass, self.source, changed))
-            self._unsubscribes.append(event.async_track_state_report_event(hass, self.source, reported))
+            self._unsubscribes.append(event.async_track_state_change_event(hass, self.source_names, changed))
+            self._unsubscribes.append(event.async_track_state_report_event(hass, self.source_names, reported))
             self._require_job_order(self.old, bridges=True)
             intent = {'kind': 'integration_clock_intent', 'schema': 1,
                       'entry_id': entry.entry_id, 'helper_uuid': self.row.id,
                       'source_uuid': self.source_row.id, 'core': version,
                       'config': self._config, 'actual': asdict(self.initial)}
+            if self.source_binding is not None:
+                intent['source_binding'] = self.source_binding.description()
             self.intent = await self._save(intent)
             self._check(owner=True)
             return self
@@ -176,10 +189,13 @@ class NativeIntegrationContinuity:
         _need(self.guard() is True and self.lease.owns_entry(self.entry)
               and self.hass.config_entries.async_get_entry(self.entry.entry_id) is self.entry,
               'guard_or_lease')
-        _need(self.registry.async_get(self.row.entity_id) is self.row
-              and self.registry.async_get(self.source) is self.source_row
-              and canonical(read_entry(self.hass, self.entry.entry_id))[0] == self._config,
-              'same_id_config_changed')
+        _need(self.registry.async_get(self.row.entity_id) is self.row, 'same_helper_id_changed')
+        if self.source_binding is None:
+            _need(self.registry.async_get(self.source) is self.source_row
+                  and canonical(read_entry(self.hass, self.entry.entry_id))[0] == self._config,
+                  'same_id_config_changed')
+        else:
+            self.source_binding.check(self)
         unchanged(self.refs, self.methods, tuple(self.codes.values()))
         if self._tool is not None:
             monitor = sys.monitoring
@@ -208,7 +224,7 @@ class NativeIntegrationContinuity:
         cells = dict(zip(action.__code__.co_freevars, (c.cell_contents for c in action.__closure__), strict=True))
         _need(set(cells) == {'self', 'source_state', 'source_state_dec'}
               and cells['self'] is entity and type(cells['source_state']) is self._state_cls
-              and cells['source_state'].entity_id == self.source
+              and cells['source_state'].entity_id in self.source_names
               and type(cells['source_state_dec']) is Decimal
               and cells['source_state_dec'].is_finite()
               and cells['source_state_dec'] == Decimal(cells['source_state'].state),
@@ -320,6 +336,8 @@ class NativeIntegrationContinuity:
             self._poison('monitor_callback_refused')
 
     def _emission(self, frame):
+        if self.source_binding is not None:
+            return self.source_binding.emission(self, frame)
         data, parent = frame.f_locals.get('event_data'), frame.f_back
         kind = frame.f_locals.get('event_type')
         if kind not in ('state_changed', 'state_reported') or type(data) is not dict or data.get('entity_id') != self.source:
@@ -353,6 +371,8 @@ class NativeIntegrationContinuity:
                 state.attributes.get('device_class'))
 
     def _validate_emission(self, event_object, kind):
+        if self.source_binding is not None:
+            return self.source_binding.validate_emission(self,event_object,kind)
         data = event_object.data
         item = self._emitted.get(id(data))
         _need(item is not None and item[0] is data
@@ -366,6 +386,8 @@ class NativeIntegrationContinuity:
               'emission_delivery_or_mutable_input')
 
     def _bridge(self, event_object, kind):
+        if self.source_binding is not None:
+            return self.source_binding.bridge(self, event_object, kind)
         try:
             self._check()
             data = event_object.data
@@ -394,8 +416,10 @@ class NativeIntegrationContinuity:
     def _transfer(self, entity):
         from homeassistant.helpers.entity import EntityPlatformState
         self._check()
+        if self.source_binding is not None:
+            self.source_binding.require_accepted(self, seam=True)
         _need(self._new is None and self._retained and not self._bridge_depth
-              and not self._emitted and not self._consumed
+              and not self._emitted and not self._consumed and self._pending_move is None
               and self.old._platform_state is EntityPlatformState.REMOVED
               and entity.entity_id == self.row.entity_id and entity.registry_entry is self.row
               and entity.platform.config_entry is self.entry and entity.hass is self.hass
@@ -453,6 +477,8 @@ class NativeIntegrationContinuity:
     async def setup(self):
         self._check(owner=True)
         _need(self._phase == 'retained', 'one_setup')
+        if self.source_binding is not None:
+            self.source_binding.require_accepted(self)
         self._phase = 'setting_up'
         result = await self.lease.async_setup(self.entry.entry_id)
         self._check(owner=True)
@@ -467,6 +493,8 @@ class NativeIntegrationContinuity:
                    'transfer_readback': self._transfer_readback,
                    'native_old_calls': self._native_old_calls, 'bridge_calls': self._bridge_calls,
                    'new_timer_rearms': self._timer_rearms, 'old_timer_cancelled': True}
+        if self.source_binding is not None:
+            receipt['source_binding'] = self.source_binding.description(accepted=True)
         self.receipt = await self._save(receipt)
         self._phase = 'loaded'
         self._check(owner=True)
