@@ -17,7 +17,7 @@ from pathlib import Path
 import sys
 import threading
 
-from .native_utility_setup_audit import _SOURCES, _code_objects, _canonical, _load
+from .native_utility_setup_audit import _SOURCES, _canonical, _load
 
 
 class UtilityUnloadAuditError(ValueError):
@@ -288,23 +288,14 @@ class NativeUtilityUnloadAudit:
             (self._modules['core'].State, '__init__')]
         if self.core == '2026.10.2':
             self._refs.append((self.er, 'async_get_legacy_friendly_name'))
-        self._methods = tuple(getattr(obj, name) for obj, name in self._refs)
-        compiled = {}
-        for (owner, method_name), method in zip(self._refs, self._methods, strict=True):
-            code = getattr(method, '__code__', None)
-            _need(code is not None, 'native_code_required')
-            path = Path(code.co_filename)
-            _need(path.resolve() == path and path.is_relative_to(self._root), 'code_path')
-            if str(path) not in compiled:
-                compiled[str(path)] = tuple(_code_objects(compile(path.read_bytes(), str(path),
-                    'exec', dont_inherit=True, optimize=sys.flags.optimize)))
-            expected_name = ('Entity.__async_remove_impl' if method_name ==
-                '_Entity__async_remove_impl' else (method_name if inspect.ismodule(owner)
-                else owner.__name__ + '.' + method_name))
-            _need(path.relative_to(self._root).as_posix() in _SOURCES[self.core]
-                  and any(code == item and item.co_qualname == expected_name
-                          for item in compiled[str(path)]), 'native_code_changed')
-        self._codes = tuple(method.__code__ for method in self._methods)
+        from .native_unload_code_proof import prove_methods
+        try:
+            self._methods, self._codes = prove_methods(
+                self._root, _SOURCES[self.core], self._refs)
+        except ValueError as error:
+            reason = {'native_unload_code_required': 'native_code_required',
+                      'native_unload_code_path': 'code_path'}.get(str(error), 'native_code_changed')
+            _need(False, reason)
         self._pins = deepcopy(_SOURCES[self.core])
         self._pins_live()
         self._lease_methods = (type(self.lease).check, type(self.lease).owns_entry,

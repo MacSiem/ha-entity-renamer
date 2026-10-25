@@ -221,3 +221,48 @@ class EscrowIO:
             return Readback(actual[source], actual[target])
         finally:
             self.guard = original_guard
+
+    async def integration_transfer(self, payload, *, witness, disk_preimage):
+        """One-key, same-helper-ID Integration data migration prerequisite.
+
+        Unlike dual-key escrow(), source and target name are identical. Returned
+        before is historical preimage, never a claim that it remains in cache.
+        The enclosing product must persist its own intent/receipt. This primitive
+        supplies capture authenticity and guarded native IO, no plan authority.
+        """
+        from .native_integration_unload_audit import NativeIntegrationUnloadWitness
+        require(type(payload) is codec.PreparedIntegrationPayload
+                and type(witness) is NativeIntegrationUnloadWitness,
+                'integration_typed_capture_required')
+        before, after = codec._parse(payload.before_json), codec._parse(payload.after_json)
+        entity_id = before['state']['entity_id']
+        require(after['state']['entity_id'] == entity_id and self.entry.domain == 'integration',
+                'integration_same_id_prerequisite_only')
+        expected = {entity_id: payload.before_json}
+        require(type(disk_preimage) is dict and set(disk_preimage) == {entity_id},
+                'explicit_disk_preimage_required')
+        self._boundary(expected, inactive=True)
+        witness._claim(self, payload)
+        await self._raw(expected, disk_preimage)
+        self._boundary(expected, inactive=True)
+        witness.check_live(lease=self.lease, data=self.data)
+        clone = codec.materialize_integration_payload(payload)
+        self._boundary(expected, inactive=True)
+        witness.check_live(lease=self.lease, data=self.data)
+        self.data.last_states[entity_id] = clone
+        witness._written(self, clone)
+        post = {entity_id: payload.after_json}
+        self._boundary(post, inactive=True)
+        await self.data.async_dump_states()
+        self._boundary(post, inactive=True)
+        witness.check_live(lease=self.lease, data=self.data)
+        actual = await self._raw(post, post)
+        witness.check_live(lease=self.lease, data=self.data)
+        return IntegrationReadback(payload.before_json, actual[entity_id])
+
+
+@dataclass(frozen=True)
+class IntegrationReadback:
+    """One key: immutable original preimage and actual transformed postimage."""
+    before: bytes
+    after: bytes

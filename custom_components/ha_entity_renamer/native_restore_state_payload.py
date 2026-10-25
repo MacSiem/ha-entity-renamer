@@ -302,3 +302,155 @@ def materialize(payload):
     _require(_canonical(_capture(clone, api)) == payload.after_json,
              'native_clone_not_exact')
     return clone
+
+
+# Explicit Integration data migration. Utility schema 1 above is unchanged.
+@dataclass(frozen=True)
+class PreparedIntegrationPayload:
+    """Detached data only; applying it also requires the live native witness."""
+    core_version: str
+    before_json: bytes
+    after_json: bytes
+    capture_json: bytes
+
+    def __post_init__(self):
+        from decimal import Decimal, InvalidOperation
+        _require(self.core_version in PINS, 'ha_version_unsupported')
+        before, after, capture = (_parse(raw) for raw in
+            (self.before_json, self.after_json, self.capture_json))
+        _shape(before)
+        _shape(after)
+        _require(all(raw == _canonical(value) for raw, value in (
+            (self.before_json, before), (self.after_json, after),
+            (self.capture_json, capture))), 'payload_not_canonical')
+        keys = {'core_version', 'entry_id', 'helper_uuid', 'entity_id',
+                'full_state_text', 'last_valid_state_text', 'before_sha256'}
+        _require(type(capture) is dict and set(capture) == keys
+                 and all(type(v) is str and bool(v) for v in capture.values()),
+                 'integration_capture_schema')
+        _require(capture['core_version'] == self.core_version
+                 and capture['entity_id'] == before['state']['entity_id']
+                 and capture['before_sha256'] == self.before_digest,
+                 'integration_capture_binding')
+        for key in ('full_state_text', 'last_valid_state_text'):
+            try:
+                value = Decimal(capture[key])
+            except InvalidOperation:
+                raise PayloadRejected('integration_decimal') from None
+            _require(value.is_finite() and str(value) == capture[key], 'integration_decimal')
+        extra = before['extra_data']
+        _require(type(extra) is dict and set(extra) == {'native_value',
+                 'native_unit_of_measurement', 'source_entity', 'last_valid_state'},
+                 'integration_extra_schema')
+        last = capture['last_valid_state_text']
+        _require(extra['last_valid_state'] == (last if Decimal(last) else None),
+                 'integration_original_last_valid')
+        target = after['state']['entity_id']
+        _require(target.startswith('sensor.') and before['state']['entity_id'].startswith('sensor.'),
+                 'integration_sensor_endpoint')
+        expected = _parse(self.before_json)
+        expected['state']['entity_id'] = target
+        expected['extra_data']['native_value'] = capture['full_state_text']
+        expected['extra_data']['last_valid_state'] = last
+        _require(_canonical(expected) == self.after_json,
+                 'integration_changed_outside_transfer')
+
+    @property
+    def before_digest(self):
+        return hashlib.sha256(self.before_json).hexdigest()
+
+    @property
+    def after_digest(self):
+        return hashlib.sha256(self.after_json).hexdigest()
+
+
+def validate_integration_capture(payload, witness):
+    """Historical bytes never substitute for actual live native removal."""
+    from dataclasses import asdict
+    from .native_integration_unload_audit import NativeIntegrationUnloadWitness
+    _require(type(payload) is PreparedIntegrationPayload
+             and type(witness) is NativeIntegrationUnloadWitness,
+             'integration_live_witness_required')
+    witness.check_live()
+    capture = witness.capture
+    _require(payload.core_version == capture.core_version
+             and payload.capture_json == _canonical(asdict(capture))
+             and payload.before_json == witness._audit._before,
+             'integration_live_capture_mismatch')
+
+
+def prepare_integration_payload(stored, target_entity_id, *, witness):
+    """Actual post-unload source plus the original native getter witness."""
+    from dataclasses import asdict
+    from .native_integration_unload_audit import NativeIntegrationUnloadWitness
+    _require(type(witness) is NativeIntegrationUnloadWitness,
+             'integration_live_witness_required')
+    witness.check_live(stored=stored)
+    api = _native()
+    before = _capture(stored, api)
+    capture = witness.capture
+    after = _parse(_canonical(before))
+    after['state']['entity_id'] = target_entity_id
+    after['extra_data']['native_value'] = capture.full_state_text
+    after['extra_data']['last_valid_state'] = capture.last_valid_state_text
+    result = PreparedIntegrationPayload(api[0], _canonical(before), _canonical(after),
+                                        _canonical(asdict(capture)))
+    validate_integration_capture(result, witness)
+    materialize_integration_payload(result)
+    witness.check_live(stored=stored)
+    return result
+
+
+def serialize_integration_payload(payload):
+    _require(type(payload) is PreparedIntegrationPayload, 'integration_payload_type')
+    return _canonical({'kind': 'native_restore_state_payload', 'schema': 2,
+        'adapter': 'integration_exact_v1', 'store': dict(_STORE),
+        'core_version': payload.core_version, 'before': _parse(payload.before_json),
+        'after': _parse(payload.after_json), 'capture': _parse(payload.capture_json),
+        'before_digest': payload.before_digest, 'after_digest': payload.after_digest})
+
+
+def deserialize_integration_payload(raw):
+    row = _parse(raw)
+    _require(type(row) is dict and set(row) == {'kind', 'schema', 'adapter', 'store',
+        'core_version', 'before', 'after', 'capture', 'before_digest', 'after_digest'},
+        'integration_envelope_schema')
+    _require(row['kind'] == 'native_restore_state_payload'
+             and type(row['schema']) is int and row['schema'] == 2
+             and row['adapter'] == 'integration_exact_v1'
+             and type(row['store']) is dict and row['store'] == _STORE
+             and type(row['store']['version']) is int
+             and type(row['store']['minor_version']) is int, 'integration_envelope_schema')
+    result = PreparedIntegrationPayload(row['core_version'], _canonical(row['before']),
+        _canonical(row['after']), _canonical(row['capture']))
+    _require(result.before_digest == row['before_digest']
+             and result.after_digest == row['after_digest'], 'payload_digest_mismatch')
+    return result
+
+
+def materialize_integration_payload(payload):
+    """Exact native clone, plus real native parser validation; no cache writes."""
+    from decimal import Decimal
+    from homeassistant.components.integration.sensor import IntegrationSensorExtraStoredData
+    _require(type(payload) is PreparedIntegrationPayload, 'integration_payload_type')
+    api = _native()
+    version, Context, State, _, _, StoredState, RestoredExtraData, _, _ = api
+    _require(version == payload.core_version, 'ha_version_mismatch')
+    row, capture = _parse(payload.after_json), _parse(payload.capture_json)
+    state, context = row['state'], row['state']['context']
+    clone = StoredState(State(state['entity_id'], state['state'], state['attributes'],
+        last_changed=_timestamp(state['last_changed']),
+        last_updated=_timestamp(state['last_updated']),
+        last_reported=_timestamp(state['last_reported']),
+        context=Context(id=context['id'], user_id=context['user_id'],
+                        parent_id=context['parent_id'])),
+        RestoredExtraData(row['extra_data']), _timestamp(row['last_seen']))
+    _require(_canonical(_capture(clone, api)) == payload.after_json, 'native_clone_not_exact')
+    parsed = IntegrationSensorExtraStoredData.from_dict(clone.extra_data.as_dict())
+    _require(type(parsed) is IntegrationSensorExtraStoredData
+             and type(parsed.native_value) is str
+             and parsed.native_value == capture['full_state_text']
+             and parsed.last_valid_state.as_tuple()
+                 == Decimal(capture['last_valid_state_text']).as_tuple(),
+             'integration_native_parser_not_exact')
+    return clone
