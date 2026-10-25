@@ -75,6 +75,20 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         except Exception:
             return Position.UNKNOWN
 
+    def _mutation_type(self):
+        return NativeRegistryMutation
+
+    def _native_key(self, change):
+        return 'core.' + change.kind + '_registry'
+
+    def _effect_audit(self, change, direction, source_raw, result_raw, mutation):
+        # Timestamps belong to the actual synchronous call, never eventual rows.
+        return NativeRegistryEffectAudit(change.kind, change.identity,
+            'forward' if direction == 'forward' else 'reverse',
+            hashlib.sha256(source_raw).hexdigest(), hashlib.sha256(result_raw).hexdigest(),
+            prepared_registry_digest(change), json.loads(mutation.before_json).get('modified_at'),
+            json.loads(mutation.after_json).get('modified_at'))
+
     async def _effect(self, step, caller_guard, direction):
         def guard():
             self.guard()
@@ -101,20 +115,14 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         method = self.bridge.apply if direction == 'forward' else self.bridge.compensate
         mutation = await method(change, guard, before_mutation=before_mutation)
         guard()
-        if intent is None or type(mutation) is not NativeRegistryMutation:
+        if intent is None or type(mutation) is not self._mutation_type():
             raise Refused('Native registry call not confirmed')
         await self._durable_context(guard, context)
         after = await self._read(guard)
-        key = 'core.' + change.kind + '_registry'
+        key = self._native_key(change)
         source_raw = next(item.raw for item in before if item.key == key)
         result_raw = next(item.raw for item in after if item.key == key)
-        # Audit timestamps come from the exact direct native call stamp, never
-        # invented by accepting whatever row the later result happened to show.
-        audit = NativeRegistryEffectAudit(change.kind, change.identity,
-            'forward' if direction == 'forward' else 'reverse',
-            hashlib.sha256(source_raw).hexdigest(), hashlib.sha256(result_raw).hexdigest(),
-            prepared_registry_digest(change), json.loads(mutation.before_json).get('modified_at'),
-            json.loads(mutation.after_json).get('modified_at'))
+        audit = self._effect_audit(change, direction, source_raw, result_raw, mutation)
         await self.chain.complete(intent, context, before, after,
                                   mutation=mutation, audit=audit)
         guard()

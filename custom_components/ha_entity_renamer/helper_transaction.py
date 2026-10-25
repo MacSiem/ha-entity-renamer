@@ -118,19 +118,24 @@ class HelperTransactionAdapter:
         if await callback(*args) is False:
             raise Refused('helper_callback_rejected')
 
-    async def inspect(self, step):
+    async def inspect(self, step, *, guard=None):
         """Read managers, native disk and actual runtime; never flush or reload.
 
         NATIVE_PARTIAL includes an exact listener result whose native delayed
         save still needs finalization. It is NOT BEFORE or AFTER and cannot pass
         initial preflight. Only a coordinator with verified causes may finalize.
         """
+        guard = guard if guard is not None else lambda: None
+        guard()
         change = self._change(step)
         try:
             await self._proof(self.settle)
+            guard()
             current = read_entry(self.hass, change.before['identity']['entry_id'])
             await self._proof(self.validate_snapshot, current)
+            guard()
             await self._proof(self.verify_activation, current)
+            guard()
             candidate = False
             if not snapshot_equal(current, change.before):
                 try:
@@ -142,8 +147,10 @@ class HelperTransactionAdapter:
             if not any(snapshot_equal(current, value) for value in (change.before, change.after)) and not candidate:
                 return Position.UNKNOWN
             durable = await self.persistence.inspect_current(current)
+            guard()
             if snapshot_equal(current, change.after):
                 await self._proof(self.verify_runtime, current)
+                guard()
             if not snapshot_equal(read_entry(self.hass, current['identity']['entry_id']), current):
                 return Position.UNKNOWN
             if durable and snapshot_equal(current, change.before):
@@ -156,7 +163,8 @@ class HelperTransactionAdapter:
         except Exception:
             return Position.UNKNOWN
 
-    async def _write(self, change, guard, *, native=False, reverse=False):
+    async def _write(self, change, guard, *, native=False, reverse=False,
+                     before_mutation=None):
         plan = change.plan()
         guard()
         await self._proof(self.settle)
@@ -200,7 +208,7 @@ class HelperTransactionAdapter:
 
         result = await apply_entry(self.hass, write_plan, guard=guard, settle=checked_settle,
             record_intent=already_journaled, verify_runtime=checked_activation,
-            validate_snapshot=checked_validation)
+            validate_snapshot=checked_validation, before_mutation=before_mutation)
         guard()
         await self.persistence.flush(desired, guard)
         guard()
@@ -209,8 +217,8 @@ class HelperTransactionAdapter:
         # Private trusted IO result; never put storage rows into a UI response.
         return result
 
-    async def apply(self, step, guard):
-        return await self._write(self._change(step), guard)
+    async def apply(self, step, guard, *, before_mutation=None):
+        return await self._write(self._change(step), guard, before_mutation=before_mutation)
 
     async def apply_native(self, step, guard):
         """Coordinator-only path after durable intent + verified declared causes."""
@@ -218,8 +226,9 @@ class HelperTransactionAdapter:
             raise Refused('helper_missing_native_cause')
         return await self._write(self._change(step), guard, native=True)
 
-    async def compensate(self, step, guard):
-        return await self._write(self._change(step), guard, reverse=True)
+    async def compensate(self, step, guard, *, before_mutation=None):
+        return await self._write(self._change(step), guard, reverse=True,
+                                 before_mutation=before_mutation)
 
     async def verify(self, plan):
         return await self.verify_inventory(plan)

@@ -89,7 +89,7 @@ def read_entry(hass, entry_id: str) -> dict:
 
 
 async def apply_entry(hass, plan: HelperPlan, *, guard, settle, record_intent,
-                      verify_runtime, validate_snapshot) -> dict:
+                      verify_runtime, validate_snapshot, before_mutation=None) -> dict:
     """Apply one entry inside owner's exclusive transaction lock.
 
     guard(): synchronous fresh admin/operation authorization, raises on failure.
@@ -135,6 +135,16 @@ async def apply_entry(hass, plan: HelperPlan, *, guard, settle, record_intent,
         lifecycle = entry.state.value
         if lifecycle not in ('loaded', 'not_loaded'):
             raise ValueError('helper_lifecycle_unsettled')
+        if before_mutation is not None:
+            # Trusted receipt intent and whole-input fence, after lifecycle checks.
+            await before_mutation()
+            guard()
+            if not snapshot_equal(read_entry(hass, entry_id), current):
+                raise ValueError('helper_snapshot_conflict')
+            entry = hass.config_entries.async_get_entry(entry_id)
+            lifecycle = entry.state.value
+            if lifecycle not in ('loaded', 'not_loaded'):
+                raise ValueError('helper_lifecycle_unsettled')
         # No await between final compare and native synchronous mutation.
         mutation = _mutate_entry(
             hass.config_entries, entry, data=desired['data'], options=desired['options'])
