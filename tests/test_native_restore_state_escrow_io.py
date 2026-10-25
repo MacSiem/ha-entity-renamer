@@ -105,7 +105,8 @@ class NativeEscrowIOTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first.before_json, second.after_json)
         self.assertEqual(Decimal(json.loads(second.before_json)['extra_data']['last_valid_state']),
                          Decimal('119'))
-        self.assertTrue(hass.states.async_available(self.old_helper), {
+        self.assertTrue(hass.states.async_available(self.old_helper)
+            and self.f.entity.async_get(self.old_helper) is None, {
             'target_registry': repr(self.f.entity.async_get(self.old_helper)),
             'target_state': repr(hass.states.get(self.old_helper)),
             'reserved': self.old_helper in hass.states._reservations})
