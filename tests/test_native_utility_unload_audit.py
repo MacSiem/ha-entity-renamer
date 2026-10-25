@@ -22,6 +22,7 @@ class ActualUtilityUnloadAuditTests(unittest.IsolatedAsyncioTestCase):
     _emit = utility_fixture.ActualUtilityMeterObserverTests._emit
     async def _audit_fixture(self):
         await self._fixture()  # producer 100 -> 107 -> 111, helper == 11
+        await self.f.hass.async_block_till_done()  # deliver native option/registry callbacks
         self.helper_id = self.entity.entity_id
         self.expected_row = self.observer.expected_registry_rows(self.entry.entry_id)[0]
         self.lease = await lease_module.NativeHelperActivationLease.acquire(
