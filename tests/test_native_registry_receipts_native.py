@@ -160,9 +160,9 @@ class NativeRegistryReceiptsTests(unittest.IsolatedAsyncioTestCase):
         await store.initialize()
         chain = await rr.RegistryReceiptChain.start(store, operation, plan, f.receipt, digests)
 
-        async def observe():
+        async def observe(input_state=None):
             result = await observation.async_observe_native_inputs(f.hass, f.receipt,
-                                                                   guard=f.guard)
+                guard=f.guard, input_state=input_state)
             self.assertEqual(result.original_receipt_json, captured.receipt_json)
             return tuple(rr.RegistryRawObservation(item.key, item.raw, item.identity)
                          for item in result.files)
@@ -175,7 +175,8 @@ class NativeRegistryReceiptsTests(unittest.IsolatedAsyncioTestCase):
                     status='applying' if direction == 'forward' else 'rolling_back')
                 await log.save(record)
                 ctx = tx.PhaseContext(await log.load(operation), index)
-                before = await observe()
+                accepted_before = chain.reconstruct_inputs()
+                before = await observe(accepted_before)
                 intent = await chain.begin(ctx, before)
                 f.guard()
                 change = changes[index]
@@ -183,7 +184,9 @@ class NativeRegistryReceiptsTests(unittest.IsolatedAsyncioTestCase):
                 await io.settle()
                 await io.flush(change.kind)
                 f.guard()
-                after = await observe()
+                # The pending effect may update native raw/identity only. The
+                # original non-native graph stays exact in this observation.
+                after = await observe(accepted_before)
                 key = 'core.' + change.kind + '_registry'
                 source = next(item.raw for item in before if item.key == key)
                 result = next(item.raw for item in after if item.key == key)
@@ -195,6 +198,9 @@ class NativeRegistryReceiptsTests(unittest.IsolatedAsyncioTestCase):
                     json.loads(stamp.after_json).get('modified_at'))
                 await chain.complete(intent, ctx, before, after, mutation=stamp, audit=audit)
                 f.guard()
+                accepted_after = chain.reconstruct_inputs()
+                accepted_after.assert_current(f.receipt)
+                self.assertEqual(await observe(accepted_after), after)
                 phases[index] = 'verified' if direction == 'forward' else 'undone'
                 record = replace(record, phases=tuple(phases))
                 await log.save(record)
