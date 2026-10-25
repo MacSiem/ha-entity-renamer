@@ -275,15 +275,29 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             bridge, resolver, chain, observe, log.load, adapter.guard,
             full_verify=lambda _: verify('after'), full_verify_rollback=lambda _: verify('before'))
         adapters = {'registry': registry, 'helpers': adapter}
+        candidate_proofs = []
         if self.with_yaml:
             from homeassistant.core import Context
             yaml_observer = m['yaml_runtime_observer'].NativeYAMLRuntimeReadback(hass)
             locks = m['yaml_editor_locks'].NativeYAMLEditorLocks(hass)
             self.assertGreaterEqual(len(locks.enumerate()), 3)
+            candidate_validator = importlib.import_module(
+                fixtures.PACKAGE + '.native_candidate_validation')
+            async def verify_yaml(direction):
+                if not await verify(direction):
+                    return False
+                async with locks.hold(adapter.guard):
+                    proof = await candidate_validator.async_revalidate_accepted_candidate(
+                        hass, chain, log.load, f.root.parent, adapter.guard)
+                    self.assertEqual(proof.direction,
+                        'forward' if direction == 'after' else 'rollback')
+                    self.assertEqual(proof.fingerprint, plan.fingerprint)
+                    candidate_proofs.append(proof)
+                return True
             yaml_adapter = m['native_yaml_transaction'].ReceiptedYAMLTransactionAdapter(
                 hass, resolver, locks, yaml_observer, chain, observe, log.load, adapter.guard,
-                context=Context(), full_verify=lambda _: verify('after'),
-                full_verify_rollback=lambda _: verify('before'))
+                context=Context(), full_verify=lambda _: verify_yaml('after'),
+                full_verify_rollback=lambda _: verify_yaml('before'))
             adapters['yaml'] = yaml_adapter
         coordinator = tx.Coordinator(adapters, log, adapter.guard, required_scopes=tuple(scopes))
         calls = []
@@ -380,6 +394,9 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             self.assertIs(helper.state, ConfigEntryState.NOT_LOADED)
             restored = await coordinator.rollback(operation)
             self.assertEqual(restored.status, 'rolled_back', (restored.reason, restored.phases))
+            if self.with_yaml:
+                self.assertEqual([proof.direction for proof in candidate_proofs],
+                                 ['forward', 'rollback'])
             self.assertEqual(calls, expected_forward +
                              [(i, 'rollback') for i in reversed(range(len(steps)))])
             expected_config = helper_change.before
