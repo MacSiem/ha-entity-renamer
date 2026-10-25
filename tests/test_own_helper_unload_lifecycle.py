@@ -104,4 +104,5 @@ class OwnHelperUnloadLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     (slot, receipt['digest']), state)
             self.assertFalse(reopened.writable)
         finally:
+            life.close_source_gaps()
             self.lease.release()

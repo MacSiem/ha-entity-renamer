@@ -107,6 +107,18 @@ class NativeUtilitySourceGap:
     and State; stream validity is a constant-space monotonic fold with no cap.
     """
 
+    def __init__(self):
+        _need(False, 'live_capture_required')
+
+    def __copy__(self):
+        _need(False, 'ephemeral_only')
+
+    def __deepcopy__(self, memo):
+        _need(False, 'ephemeral_only')
+
+    def __reduce_ex__(self, protocol):
+        _need(False, 'ephemeral_only')
+
     @classmethod
     def capture(cls, hass, baseline: UtilityMeterRuntimeBaseline, snapshot,
                 activation_lease, *, guard):

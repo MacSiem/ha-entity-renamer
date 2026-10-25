@@ -336,7 +336,7 @@ class NativeHelperLifecycle:
             return
         value, = values
         doc = _payload(value)
-        # First qualified handoff scope: own-ID with the same physical source
+        # Initial handoff scope: own-ID with the same physical source
         # name. Source-ID transitions retain their existing independent runtime
         # verification; queued rename emissions need separate characterization.
         if doc['source_before'] != doc['source_after']:

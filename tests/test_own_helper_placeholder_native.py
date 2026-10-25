@@ -26,6 +26,12 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
         life = await self._lifecycle()
         try:
             await life.quiesce()
+            gap, = life._source_gaps.values()
+            import copy
+            import pickle
+            for copier in (copy.copy, copy.deepcopy, pickle.dumps):
+                with self.subTest(copier=copier), self.assertRaisesRegex(ValueError, 'ephemeral_only'):
+                    copier(gap)
             if self.gap_during_unload:
                 await self._emit('115')
                 await self._emit('119')
@@ -341,6 +347,7 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(entity.native_value, Decimal('23'))
             self.assertTrue(await self.own_observer.verify_runtime(life.helper_snapshots[self.entry.entry_id][0]))
         finally:
+            life.close_source_gaps()
             self.lease.release()
 
 
