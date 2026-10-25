@@ -3,11 +3,14 @@
 No product apply/recovery/own-ID acceptance is claimed. The native setup and
 native negative detach are real; no helper output/field/cache seeds or callbacks.
 """
+import asyncio
 from datetime import timedelta
 import importlib
 import logging
+import threading
 from types import MappingProxyType
 import unittest
+from unittest.mock import patch
 import test_native_helper_quiescence as fixture
 
 
@@ -163,3 +166,86 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
         path.write_text(path.read_text() + '# foreign edit\n')
         with self.assertRaises(ValueError):
             await self.observe()
+
+    async def test_physical_edit_during_final_code_source_job_refuses_original(self):
+        await self.prepare('yaml')
+        module = importlib.import_module(fixture.fixtures.PACKAGE + '.native_template_consumers')
+        path = self.f.root / 'template.yaml'
+        original = path.read_bytes()
+        original_sources = module._Native.sources
+        loop_thread = threading.get_ident()
+        calls, edit_threads = [], []
+
+        def sources_then_physical_edit(native):
+            result = original_sources(native)  # genuine native code/source readback
+            calls.append(native)
+            if len(calls) == 2:
+                # Runs inside the last code-source executor await. On the old
+                # product this is AFTER the last ORIGINAL fence; with the fix
+                # the combined job checks ORIGINAL immediately after this call.
+                edit_threads.append(threading.get_ident())
+                path.write_bytes(original + b'# edit during final code-source job\n')
+            return result
+
+        try:
+            with patch.object(module._Native, 'sources', sources_then_physical_edit):
+                task = asyncio.create_task(self.observe())
+                with self.assertRaises(ValueError):
+                    await task
+        finally:
+            path.write_bytes(original)
+        self.assertEqual(len(calls), 2, 'injection must reach the final source job')
+        self.assertIs(calls[0], calls[1])
+        self.assertEqual(len(edit_threads), 1)
+        self.assertNotEqual(edit_threads[0], loop_thread)
+        self.assertIs(module._Native.sources, original_sources)
+        self.assertEqual(path.read_bytes(), original)
+
+    async def test_native_false_render_filter_cannot_keep_consumer_source_proof(self):
+        await self.prepare('entry')
+        info = self.consumer._template_result_info
+        self.assertEqual(len(info._info), 1)
+        template, render = next(iter(info._info.items()))
+        native_false = importlib.import_module(type(render).__module__)._false
+        original_filter, original_lifecycle = render.filter, render.filter_lifecycle
+        self.assertIs(original_filter.__self__, render)
+        self.assertIs(original_filter.__func__, type(render)._filter_entities)
+        # Entity-only native lifecycle is ALREADY _false on both pinned Core.
+        self.assertIs(original_lifecycle, native_false)
+        filtered = info._track_state_changes
+        remove = next(iter(filtered._listeners.values()))
+        callbacks = remove.args[-1]
+        memberships = tuple((key, tuple(map(id, jobs)))
+                            for key, jobs in callbacks.items())
+        cleanups = tuple(map(id, self.consumer._on_remove))
+        try:
+            render.filter = native_false  # negative fault injection ONLY
+            self.assertIs(self.consumer._template_result_info, info)
+            self.assertIs(info._info[template], render)
+            self.assertIs(info._track_state_changes, filtered)
+            self.assertIs(next(iter(filtered._listeners.values())), remove)
+            self.assertEqual(tuple((key, tuple(map(id, jobs)))
+                                   for key, jobs in callbacks.items()), memberships)
+            self.assertEqual(tuple(map(id, self.consumer._on_remove)), cleanups)
+            # Real producer event is discarded by native _event_triggers_rerender;
+            # no callback invocation or consumer/cache/state seeding is involved.
+            before = self.f.hass.states.get(self.consumer.entity_id).state
+            self.producer._attr_native_value = 5
+            self.producer.async_write_ha_state()
+            await self.f.hass.async_block_till_done()
+            self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, before)
+            self.assertEqual(self.f.hass.states.get(self.source_id).state, '5')
+            try:
+                observed = await self.observe()
+            except ValueError:
+                pass  # strict observer refusal is also valid
+            else:
+                row = self.consumer_row(observed)
+                self.assertFalse(row.consumer_verified, row.reason)
+                self.assertFalse(row.source_verified, row.reason)
+        finally:
+            render.filter = original_filter
+            render.filter_lifecycle = original_lifecycle
+        self.assertIs(render.filter, original_filter)
+        self.assertIs(render.filter_lifecycle, original_lifecycle)
+        await self.emit(7)  # genuine callback resumes and reads 14 after restore
