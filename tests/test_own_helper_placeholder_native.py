@@ -118,7 +118,8 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
                     row = chain.store.read(slot)
                     self.assertIsNotNone(row)
                     completed = (slot, row['digest'])
-                    stamp = p.decode_effect(row['payload']['own_helper_placeholder']['stamp'])
+                    stamp = p.decode_effect(json.dumps(
+                        row['payload']['own_helper_placeholder']['stamp']).encode('utf-8'))
                     intent = rr.RegistryIntent(tuple(row['payload']['intent']))
                     self.assertTrue(await self.native_history.verify(self.own_history))
                     return mutation, stamp, completed, intent
