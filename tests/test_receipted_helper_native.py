@@ -377,9 +377,16 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                            for row in document['events'].values()):
                         raise OSError('actual YAML ' + yaml_fault + ' ACK lost after durable save')
                 effects.enter_context(patch.object(store.store, 'save', lose_yaml_ack))
-            applied = await coordinator.apply(plan, plan.fingerprint, operation)
             if yaml_fault:
-                self.assertEqual(applied.status, 'unknown')
+                # Poisoned shared preparations also invalidate the lifecycle
+                # guard: even saving UNKNOWN must not bypass that guard.
+                with self.assertRaisesRegex(ValueError, 'preparations_unavailable'):
+                    await coordinator.apply(plan, plan.fingerprint, operation)
+                applied = await log.load(operation)
+            else:
+                applied = await coordinator.apply(plan, plan.fingerprint, operation)
+            if yaml_fault:
+                self.assertEqual(applied.status, 'applying')
                 self.assertEqual(applied.phases, ('verified', 'verified', 'intent'))
                 self.assertEqual(calls, [(0, 'forward'), (1, 'forward')] +
                     ([(2, 'forward')] if yaml_fault == 'receipt' else []))
@@ -393,12 +400,17 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                 fresh_chain = rr.RegistryReceiptChain.reopen(
                     fresh_store, operation, plan, receipt, digests)
                 self.assertFalse(fresh_chain.writable)
+                fresh_lifecycle_store = lm.native_helper_lifecycle_store(hass, fresh_preparations)
+                await fresh_lifecycle_store.initialize()
+                fresh_lifecycle = lm.NativeHelperLifecycle.reopen(fresh_lifecycle_store,
+                    *lifecycle_args[1:], **lifecycle_callbacks)
+                fresh_guard = fresh_lifecycle.require_quiescent
                 async def fresh_observe(state):
                     return await m['native_input_observation'].async_observe_native_inputs(
-                        hass, receipt, guard=adapter.guard, input_state=state)
+                        hass, receipt, guard=fresh_guard, input_state=state)
                 fresh_adapter = m['native_yaml_transaction'].ReceiptedYAMLTransactionAdapter(
                     hass, lambda ref: prep.decode_change(fresh_preparations.resolve(ref, digests[ref])),
-                    locks, yaml_observer, fresh_chain, fresh_observe, log.load, adapter.guard,
+                    locks, yaml_observer, fresh_chain, fresh_observe, log.load, fresh_guard,
                     context=Context(), full_verify=lambda _: verify('after'),
                     full_verify_rollback=lambda _: verify('before'))
                 fresh_adapter.bind_phase_context(tx.PhaseContext(await log.load(operation), 2))
@@ -416,7 +428,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                 self.assertEqual(json.loads(Path(hass.config.path('.storage',
                     'ha_entity_renamer.registry_receipts')).read_bytes()), before_events)
                 with self.assertRaises(ValueError):
-                    await fresh_adapter.apply(steps[2], adapter.guard)
+                    await fresh_adapter.apply(steps[2], fresh_guard)
                 if yaml_fault == 'intent':
                     with self.assertRaisesRegex(ValueError, 'unresolved_intent'):
                         fresh_chain.reconstruct_inputs()
