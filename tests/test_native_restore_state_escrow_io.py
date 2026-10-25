@@ -16,6 +16,7 @@ import test_utility_meter_observers as fixture
 
 codec = importlib.import_module(fixture.fixtures.PACKAGE + '.native_restore_state_payload')
 io = importlib.import_module(fixture.fixtures.PACKAGE + '.native_restore_state_escrow_io')
+activation = importlib.import_module(fixture.fixtures.PACKAGE + '.native_helper_activation_lease')
 
 
 @unittest.skipUnless(fixture.fixtures.HAS_HA, 'requires actual pinned HA')
@@ -49,6 +50,10 @@ class NativeEscrowIOTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0].id, self.uuid)
         self.assertIn(rows[0].entity_id, (self.old_helper, self.target))
 
+    async def held_entry(self):
+        return await activation.NativeHelperActivationLease.acquire(
+            self.f.hass, self.f.hass.config_entries, (self.entry,), guard=self.guard)
+
     async def prepare(self):
         await self._fixture()
         self.old_helper = self.entity.entity_id
@@ -67,8 +72,8 @@ class NativeEscrowIOTests(unittest.IsolatedAsyncioTestCase):
         stored = data.last_states[source]
         payload = codec.prepare_payload(stored, target)
         before_disk = self.projection(data, source, target)
-        async with io.hold_entry(self.f.hass, self.entry) as lease:
-            adapter = io.EscrowIO(lease, data, guard=self.guard)
+        async with await self.held_entry() as lease:
+            adapter = io.EscrowIO(lease, self.entry.entry_id, data, guard=self.guard)
             async with asyncio.timeout(10):
                 readback = await adapter.escrow(payload,
                     expected_source=stored, expected_target=target_preimage,
@@ -129,8 +134,8 @@ class NativeEscrowIOTests(unittest.IsolatedAsyncioTestCase):
         await self._emit('120')
         before = other.native_value
         payload = codec.prepare_payload(data.last_states[self.old_helper], self.target)
-        async with io.hold_entry(self.f.hass, self.entry) as lease:
-            adapter = io.EscrowIO(lease, data, guard=self.guard)
+        async with await self.held_entry() as lease:
+            adapter = io.EscrowIO(lease, self.entry.entry_id, data, guard=self.guard)
             # Both use actual native store serialization; no method replacement.
             periodic = asyncio.create_task(data.async_dump_states())
             advance = asyncio.create_task(self._emit('125'))
@@ -164,8 +169,8 @@ class NativeEscrowIOTests(unittest.IsolatedAsyncioTestCase):
         retained = data.last_states[target]
         original_file = Path(data.store.path).read_bytes()
         payload = codec.prepare_payload(data.last_states[self.old_helper], target)
-        async with io.hold_entry(self.f.hass, self.entry) as lease:
-            adapter = io.EscrowIO(lease, data, guard=self.guard)
+        async with await self.held_entry() as lease:
+            adapter = io.EscrowIO(lease, self.entry.entry_id, data, guard=self.guard)
             with self.assertRaises(io.EscrowRejected):
                 await adapter.escrow(payload, expected_source=data.last_states[self.old_helper],
                     expected_target=io.ABSENT,
@@ -181,8 +186,8 @@ class NativeEscrowIOTests(unittest.IsolatedAsyncioTestCase):
             # Explicit failure injection ONLY at Store IO; native payload untouched.
             store._data = {'version':1, 'minor_version':1,
                            'key':store.key, 'data':values}
-        async with io.hold_entry(self.f.hass, self.entry) as lease:
-            adapter = io.EscrowIO(lease, data, guard=self.guard)
+        async with await self.held_entry() as lease:
+            adapter = io.EscrowIO(lease, self.entry.entry_id, data, guard=self.guard)
             with patch.object(type(data.store), 'async_save', new=no_write):
                 with self.assertRaisesRegex(io.EscrowRejected, 'raw_disk'):
                     async with asyncio.timeout(10):
@@ -196,8 +201,8 @@ class NativeEscrowIOTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_native_setup_waits_for_actual_entry_lock(self):
         data = await self.prepare()
         payload = codec.prepare_payload(data.last_states[self.old_helper], self.target)
-        async with io.hold_entry(self.f.hass, self.entry) as lease:
-            adapter = io.EscrowIO(lease, data, guard=self.guard)
+        async with await self.held_entry() as lease:
+            adapter = io.EscrowIO(lease, self.entry.entry_id, data, guard=self.guard)
             setup = asyncio.create_task(self.f.hass.config_entries.async_setup(self.entry.entry_id))
             self.addAsyncCleanup(self._finish_task, setup)
             await asyncio.sleep(0)
@@ -222,11 +227,11 @@ class NativeEscrowIOTests(unittest.IsolatedAsyncioTestCase):
         raw = Path(data.store.path).read_bytes()
         stored = data.last_states[self.old_helper]
         payload = codec.prepare_payload(stored, self.target)
-        async with io.hold_entry(self.f.hass, self.entry) as lease:
+        async with await self.held_entry() as lease:
             with patch.object(data.store, '_read_only', True):
                 with self.assertRaisesRegex(io.EscrowRejected, 'not_writable'):
-                    io.EscrowIO(lease, data, guard=self.guard)
-            adapter = io.EscrowIO(lease, data, guard=self.guard)
+                    io.EscrowIO(lease, self.entry.entry_id, data, guard=self.guard)
+            adapter = io.EscrowIO(lease, self.entry.entry_id, data, guard=self.guard)
             with self.assertRaises(io.EscrowRejected):
                 await adapter.cleanup(source=self.old_helper, target=self.target,
                     owned_source=payload.before_json, expected_target=payload.after_json,
@@ -246,11 +251,11 @@ class NativeEscrowIOTests(unittest.IsolatedAsyncioTestCase):
         duplicate_file.write_text(json.dumps(doc))
         with self.assertRaisesRegex(io.EscrowRejected, 'duplicate'):
             io.EscrowIO._read(duplicate_file, (self.old_helper, self.target))
-        async with io.hold_entry(self.f.hass, self.entry) as lease:
+        async with await self.held_entry() as lease:
             with self.assertRaises(io.EscrowRejected):
-                io.EscrowIO(lease, data, guard=None)
-        with self.assertRaises(io.EscrowRejected):
-            io.EscrowIO(lease, data, guard=self.guard)
+                io.EscrowIO(lease, self.entry.entry_id, data, guard=None)
+        with self.assertRaises(activation.NativeHelperActivationLeaseError):
+            io.EscrowIO(lease, self.entry.entry_id, data, guard=self.guard)
         self.assertEqual(Path(data.store.path).read_bytes(), raw)
 
 
