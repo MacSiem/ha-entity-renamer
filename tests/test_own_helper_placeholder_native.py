@@ -239,6 +239,13 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
                 **dict(self.kwargs, verify_accepted_native_chain=accepted_source,
                     verify_runtime=runtime, setup_effect=life.setup_effect,
                     source_authorization=source_auth))
+            unload_module = importlib.import_module(base.PACKAGE + '.native_utility_unload_audit')
+            writer_row = unload_module._row(entity.registry_entry)
+            manager_row = unload_module._row(self.f.entity.async_get(entity.entity_id))
+            print('REVERSE_NATIVE_WRITER_ROW', {
+                'same_object': entity.registry_entry is self.f.entity.async_get(entity.entity_id),
+                'changed_keys': sorted(key for key in set(writer_row) | set(manager_row)
+                    if writer_row.get(key) != manager_row.get(key))})
             await life.quiesce()
             unload_slot = life._slot('unload', self.entry.entry_id, 'receipt')
             unload = life.store.read(unload_slot)
