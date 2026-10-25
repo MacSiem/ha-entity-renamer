@@ -31,31 +31,42 @@ def _pairs(pairs):
     return out
 
 def _serial(value):
-    seen = [0]
-    def check(item, depth):
-        seen[0] += 1
-        if depth > 48 or seen[0] > 80000: _fail()
-        if type(item) is dict:
-            if len(item) > 10000: _fail()
-            for k,v in item.items():
-                if type(k) is not str: _fail()
-                check(v,depth+1)
-        elif type(item) is list:
-            if len(item) > 10000: _fail()
-            for v in item: check(v,depth+1)
-        elif item is None or type(item) in (str,bool,int):
-            if type(item) is str and len(item) > 2_000_000: _fail()
-        elif type(item) is float:
-            if not math.isfinite(item): _fail()
-        else: _fail()
-    check(value,0)
-    raw=json.dumps(value,sort_keys=True,separators=(',',':'),
-                   ensure_ascii=True,allow_nan=False).encode()
-    if len(raw)>24_000_000: _fail()
-    return raw
+    """Compare the native JSON projection of already bounded input trees.
+
+    Discovery's native parser and inventory's reference planner enforce their
+    existing resource limits. Only the intersection of their key contracts is
+    admitted here: plain str and native 64-bit int. Do not use an encoder/decoder
+    round trip: HA's OPT_NON_STR_KEYS can silently erase colliding keys.
+    Values retain exact bool/int/float types, independent of key projection.
+    """
+    def project(item):
+        kind = type(item)
+        if kind is dict:
+            result = {}
+            for key, child in item.items():
+                if type(key) is str:
+                    projected_key = key
+                elif type(key) is int and -(1 << 63) <= key < (1 << 64):
+                    # Native orjson signed-min/unsigned-max integer contract.
+                    projected_key = str(key)
+                else:
+                    _fail()
+                if projected_key in result:
+                    _fail()
+                result[projected_key] = project(child)
+            return result
+        if kind is list:
+            return [project(child) for child in item]
+        if item is None or kind in (str, bool, int):
+            return item
+        if kind is float and math.isfinite(item):
+            return item
+        _fail()
+    return json.dumps(project(value), sort_keys=True, separators=(',', ':'),
+                      ensure_ascii=True, allow_nan=False).encode()
 
 def _id(value):
-    return type(value) is str and bool(value.strip()) and len(value)<=256 and not any(ord(c)<32 for c in value)
+    return type(value) is str and bool(value.strip()) and not any(ord(c)<32 for c in value)
 
 def _subentries(saved, current):
     if saved is None: saved=[]
@@ -76,18 +87,18 @@ def _subentries(saved, current):
 def bind_source_consumer(native, plans):
     """Bind complete server source and consumer inventory with exact JSON semantics.
 
+    Inputs come from the bounded native discovery parser and helper inventory.
     Caller retains native discovery guard and independently rechecks native disk
     and managers after awaiting other sources. No generated completeness claims.
     """
     try:
         if (native.version not in ('2025.6.0','2026.10.2') or
             type(native.files) is not tuple or len(native.files)!=3 or
-            type(plans) is not tuple or len(plans)>10000):
+            type(plans) is not tuple):
             _fail()
         keyed={}
         for item in native.files:
-            if (not _id(item.key) or item.key in keyed or type(item.manager_json) is not bytes
-                or len(item.manager_json)>32_000_000): _fail()
+            if (not _id(item.key) or item.key in keyed or type(item.manager_json) is not bytes): _fail()
             keyed[item.key]=item
         if set(keyed)!={'core.entity_registry','core.device_registry','core.config_entries'}: _fail()
         raw=keyed['core.config_entries'].manager_json

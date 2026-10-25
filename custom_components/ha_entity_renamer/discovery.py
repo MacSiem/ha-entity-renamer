@@ -241,6 +241,10 @@ async def async_discover(hass, proposal, guard):
         except ValueError:
             conflicts.append('registry_mapping_conflict')
         plans = inventory(hass, mapping)
+        # Compare the full source and consumer sets before inventory markers
+        # can describe ConfigEntries as complete (also disabled/unloaded rows).
+        from .native_configentry_binding import bind_source_consumer
+        bind_source_consumer(native, plans)
         # Preserve all ConfigEntry/subentry planner markers, including domains
         # outside the rename target and unchanged consumers.
         markers = tuple(marker.code for plan in plans for marker in plan.markers)
@@ -248,9 +252,11 @@ async def async_discover(hass, proposal, guard):
         families['config_entries'] = Family(current.name, current.status, current.reason,
             current.payload_json, current.rows, tuple(sorted(set(markers))))
     except PermissionError:
+        bound = None
         for name in ('entity_registry', 'device_registry', 'config_entries', 'template', 'powercalc'):
             families[name] = _unknown(name, 'read_access_denied', denied=True)
     except (ValueError, OSError, KeyError, TypeError):
+        bound = None
         for name in ('entity_registry', 'device_registry', 'config_entries', 'template', 'powercalc'):
             families[name] = _unknown(name, 'native_input_unavailable')
     guard()
