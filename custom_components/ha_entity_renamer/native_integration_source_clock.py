@@ -284,7 +284,8 @@ class IntegrationSourceClockBinding:
         # Minimum Core defers keyed state_changed delivery with call_soon. Its
         # original EventBus frame has returned by then: bind the actual Event
         # created by that native frame before its queued dispatcher can run.
-        if scope.version != '2025.6.0' or scope._new is not None:
+        if (scope.version != '2025.6.0' or scope._new is not None
+                or frame.f_locals.get('self') is not scope.hass.bus):
             return
         data, event = frame.f_locals.get('event_data'), frame.f_locals.get('event')
         item = scope._emitted.get(id(data))
