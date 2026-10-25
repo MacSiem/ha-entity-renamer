@@ -78,6 +78,26 @@ class Harness:
 
 
 class HelperLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reverse_quiescence_requires_same_applied_accepted_chain(self):
+        h = await Harness().initialize(self)
+        await h.obj.quiesce()
+        await h.obj.restore(h.authorization)
+        h.original_valid = False
+        forward_root = h.obj.root_id
+        reverse = await module.NativeHelperLifecycle.start(*h.args, **h.kwargs,
+            source_authorization=h.authorization)
+        self.assertNotEqual(reverse.root_id, forward_root)
+        h.obj = reverse  # fake API checks this cycle's independently durable intent
+        await reverse.quiesce()
+        reverse.require_quiescent()
+        await reverse.restore(module.RestoreAuthorization('provided-operation-id',
+            h.h.f['plan'].fingerprint, 'b' * 64, 'rolled_back'))
+        self.assertEqual(len(h.calls), 4)
+        h.chain_valid = False
+        with self.assertRaises(module.HelperLifecycleError):
+            await module.NativeHelperLifecycle.start(*h.args, **h.kwargs,
+                source_authorization=h.authorization)
+
     async def test_cached_original_activation_cannot_override_durable_root(self):
         h = await Harness().initialize(self)
         h.obj.root['original'][0]['state'] = (

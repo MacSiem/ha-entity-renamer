@@ -106,7 +106,8 @@ class NativeHelperLifecycle:
 
     def __init__(self, store, manager, operation_id, plan, receipt, prepared_digests,
                  *, guard, verify_original_native_inputs, settle,
-                 verify_inactive, verify_runtime, verify_accepted_native_chain):
+                 verify_inactive, verify_runtime, verify_accepted_native_chain,
+                 source_authorization=None):
         if (type(store) is not RegistryReceiptStore or type(plan) is not Plan
                 or type(operation_id) is not str or not operation_id):
             _fail('binding_invalid')
@@ -158,6 +159,18 @@ class NativeHelperLifecycle:
         self.binding = {'operation_id': operation_id, 'fingerprint': plan.fingerprint,
                         'native_inputs': list(plan.native_inputs),
                         'preparations': deepcopy(prepared_digests)}
+        self.source_authorization = source_authorization
+        if source_authorization is not None:
+            if type(source_authorization) is not RestoreAuthorization:
+                _fail('accepted_native_chain_required')
+            self._auth_shape(asdict(source_authorization))
+            if source_authorization.status != 'applied':
+                _fail('rollback_requires_applied_source')
+            # A reverse lifecycle starts from the already accepted FORWARD
+            # image of this same operation, never a fresh current baseline.
+            # Its independent root preserves the first activation history.
+            self.binding['source_authorization'] = asdict(source_authorization)
+            self.root_id = _id(['helper_lifecycle_rollback', self.binding])
         self.root = None
         self.writable = False
         self.failed = False
@@ -176,8 +189,11 @@ class NativeHelperLifecycle:
     async def _original(self):
         # Re-resolve the immutable original on EVERY original fence check.
         self.store.preparations.resolve_native_inputs(self.plan.native_inputs, self.receipt)
-        await self._verify(self.verify_original_native_inputs,
-                           self.plan.native_inputs, self.receipt)
+        if self.source_authorization is None:
+            await self._verify(self.verify_original_native_inputs,
+                               self.plan.native_inputs, self.receipt)
+        else:
+            await self._verify(self.verify_accepted_native_chain, self.source_authorization)
 
     def _slot(self, stage, entry_id, kind):
         return _id([self.root_id, stage, entry_id, kind])
