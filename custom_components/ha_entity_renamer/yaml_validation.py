@@ -52,10 +52,10 @@ def _digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def _stage(config_root, plan, baseline, proposed):
+def _stage(config_root, plan, baseline, proposed, with_sources=False):
     reader = _Reader(config_root, Limits(max_file_bytes=_MAX_BYTES))
     try:
-        return _stage_owned(reader, plan, baseline, proposed)
+        return _stage_owned(reader, plan, baseline, proposed, with_sources=with_sources)
     except (OSError, ValueError) as error:
         if isinstance(error, YAMLValidationError):
             raise
@@ -64,7 +64,7 @@ def _stage(config_root, plan, baseline, proposed):
         os.close(reader.root)
 
 
-def _stage_owned(reader, plan, baseline, proposed):
+def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False):
     if not plan.ready or not plan.patches:
         raise YAMLValidationError('yaml_plan_not_ready')
     reachable = {'configuration.yaml'}
@@ -189,6 +189,7 @@ def _stage_owned(reader, plan, baseline, proposed):
                 (proposed / path).mkdir(parents=True, exist_ok=True, mode=0o700)
         snapshots = {item.path: item for item in plan.files}
         sources, total = [], 0
+        original_bytes = {} if with_sources else None
         for path in sorted(paths):
             raw, info = reader.read(path)
             digest = _digest(raw)
@@ -199,6 +200,8 @@ def _stage_owned(reader, plan, baseline, proposed):
                 snap = snapshots[path]
                 if (digest, info.st_dev, info.st_ino) != (snap.sha256, snap.device, snap.inode):
                     raise YAMLValidationError('validation_source_changed')
+                if original_bytes is not None:
+                    original_bytes[path] = raw
             replacement = raw
             if patch := patches.get(path):
                 if patch.expected_sha256 != digest:
@@ -218,8 +221,12 @@ def _stage_owned(reader, plan, baseline, proposed):
                 destination.write_bytes(data)
                 destination.chmod(0o600)
             sources.append((path, digest, info.st_dev, info.st_ino))
-        return tuple(sources), tuple((path, directories[path], directory_names[path])
-                                     for path in sorted(directories))
+        staged = (tuple(sources), tuple((path, directories[path], directory_names[path])
+                                       for path in sorted(directories)))
+        if with_sources:
+            from .yaml_source_ledger import extract_source_ledger
+            return (*staged, extract_source_ledger(plan, original_bytes))
+        return staged
     except (OSError, ValueError) as exc:
         if isinstance(exc, YAMLValidationError):
             raise
@@ -265,7 +272,7 @@ async def _settled_executor(hass, function, *args):
     return result
 
 
-async def async_validate_proposed(hass, plan, scratch_parent, *, timeout=120):
+async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, with_sources=False):
     """Return only after native validation of the entire proposed graph succeeds.
 
     scratch_parent must be private local storage OUTSIDE config_root. It contains
@@ -281,10 +288,13 @@ async def async_validate_proposed(hass, plan, scratch_parent, *, timeout=120):
             before, after = Path(stage) / 'before', Path(stage) / 'after'
             before.mkdir(mode=0o700)
             after.mkdir(mode=0o700)
-            sources, directories = await _settled_executor(hass, _stage, root, plan, before, after)
+            staged = await _settled_executor(hass, _stage, root, plan, before, after,
+                                             *((True,) if with_sources else ()))
+            sources, directories = staged[:2]
             worker = str(Path(__file__).with_name('yaml_validation_worker.py'))
             process = await asyncio.create_subprocess_exec(
                 sys.executable, '-I', worker, str(before), str(after),
+                *(('--source-evidence',) if with_sources else ()),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                 start_new_session=True)
             try:
@@ -305,10 +315,29 @@ async def async_validate_proposed(hass, plan, scratch_parent, *, timeout=120):
                 tuple(sorted((patch.path, _digest(patch.proposed_bytes)) for patch in plan.patches)),
                 tuple(result['changed_domains']), tuple(result['unsupported_domains']), result['version'],
                 tuple(tuple(row) for row in result.get('runtime_expected', ())))
-            await hass.async_add_executor_job(assert_validation_current, receipt)
+            await _settled_executor(hass, assert_validation_current, receipt)
+            if with_sources:
+                from .yaml_source_binding import seal_original_sources
+                evidence = seal_original_sources(receipt, plan, staged[2], result['source_runtime'])
+                return receipt, evidence
             return receipt
     except (OSError, TimeoutError):
         raise YAMLValidationError('native_checker_unavailable') from None
+
+
+async def async_validate_proposed(hass, plan, scratch_parent, *, timeout=120):
+    """Original validation API; receipt layout and projection hashes unchanged."""
+    return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout)
+
+
+async def async_validate_proposed_with_sources(hass, plan, scratch_parent, *, timeout=120):
+    """Same ORIGINAL staging/checker, plus detached source evidence for preparation.
+
+    This server API never creates a second ValidationReceipt or gains mutation
+    authority. The normal receipt/CAS remains independently required by apply.
+    """
+    return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
+                                         with_sources=True)
 
 
 def assert_proposal_matches(receipt, plan):

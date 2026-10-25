@@ -102,7 +102,7 @@ def _fingerprint(value):
     return hashlib.sha256(payload).hexdigest()
 
 
-async def _expected_runtime(root, domains):
+async def _expected_runtime(root, domains, *, source_rows=None):
     """Native schema projections in the isolated validator, without component setup.
 
     No scripts/actions/templates are run and no scene is activated. The trusted
@@ -126,6 +126,14 @@ async def _expected_runtime(root, domains):
         config = await async_hass_config_yaml(hass)
         for domain in domains:
             try:
+                if domain in ('automation', 'script') and not any(
+                        key.split(' ', 1)[0] == domain for key in config):
+                    # Exact empty ORIGINAL native config, not an absent runtime
+                    # entity silently omitted from a nonempty source family.
+                    result[domain] = _fingerprint([])
+                    if source_rows is not None:
+                        source_rows[domain] = []
+                    continue
                 if domain == 'homeassistant':
                     from homeassistant.core_config import _CUSTOMIZE_CONFIG_SCHEMA
                     from homeassistant.helpers.entity_values import EntityValues
@@ -180,15 +188,20 @@ async def _expected_runtime(root, domains):
                         raise ValueError('duplicate_runtime_id')
                     projection.sort(key=lambda row: row[0])
                 result[domain] = _fingerprint(projection)
+                if source_rows is not None and domain in ('automation', 'script'):
+                    source_rows[domain] = [[row[0], _fingerprint(row[1]), _fingerprint(row)]
+                                           for row in projection]
             except Exception:
                 # Per-domain unsupported proof never degrades validation itself.
                 result[domain] = None
+                if source_rows is not None and domain in ('automation', 'script'):
+                    source_rows[domain] = None
         return result
     finally:
         await hass.async_stop(force=True)
 
 
-async def check(before_root, proposed_root):
+async def check(before_root, proposed_root, *, with_sources=False):
     from homeassistant.const import __version__
     from homeassistant.scripts.check_config import async_check_config
     if __version__ not in ('2025.6.0', '2026.10.2'):
@@ -202,12 +215,19 @@ async def check(before_root, proposed_root):
     changed, unsupported = changed_domains(before, after)
     if not changed:
         return {'status': 'no_effective_config_change'}
-    old_runtime = await _expected_runtime(before_root, changed)
+    source_rows = {} if with_sources else None
+    original_domains = sorted(set(changed) | {'automation', 'script'}) if with_sources else changed
+    old_runtime = await _expected_runtime(before_root, original_domains, source_rows=source_rows)
     new_runtime = await _expected_runtime(proposed_root, changed)
-    return {'status': 'valid', 'version': __version__, 'changed_domains': changed,
-            'unsupported_domains': unsupported,
-            'runtime_expected': [(domain, old_runtime.get(domain), new_runtime.get(domain))
-                                 for domain in changed]}
+    result = {'status': 'valid', 'version': __version__, 'changed_domains': changed,
+              'unsupported_domains': unsupported,
+              'runtime_expected': [(domain, old_runtime.get(domain), new_runtime.get(domain))
+                                   for domain in changed]}
+    if with_sources:
+        result['source_runtime'] = {'version': __version__, 'domains': [
+            [domain, old_runtime.get(domain), source_rows.get(domain)]
+            for domain in ('automation', 'script')]}
+    return result
 
 
 def main():
@@ -215,7 +235,8 @@ def main():
     try:
         from homeassistant import runner
         with open(os.devnull, 'w') as sink, redirect_stdout(sink), redirect_stderr(sink):
-            result = asyncio.run(check(sys.argv[1], sys.argv[2]),
+            result = asyncio.run(check(sys.argv[1], sys.argv[2],
+                                       with_sources=len(sys.argv) == 4 and sys.argv[3] == '--source-evidence'),
                                  loop_factory=getattr(runner, 'create_event_loop', None))
     except BaseException:
         result = {'status': 'checker_failed'}
