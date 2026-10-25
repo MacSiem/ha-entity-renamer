@@ -126,7 +126,31 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(hass.states.async_available(self.old_helper))
             self.assertEqual(hass.states.get(self.target).state, 'unavailable')
             self.assertEqual(self.f.entity.async_get(self.target).id, self.row['id'])
-            # Consumer check only: receipt subeffect and audited setup integration
+            await modules['native_restore_state_escrow_receipts'].copy_escrow_witness(
+                life.store, chain.store, chain.operation_id, chain.plan,
+                chain.original_receipt, life.binding['preparations'], escrow.root_reference)
+            self.guard()
+            after = await observe()
+            transition = importlib.import_module(base.PACKAGE + '.native_registry_transition')
+            source_raw = next(row.raw for row in before if row.key == 'core.entity_registry')
+            result_raw = next(row.raw for row in after if row.key == 'core.entity_registry')
+            audit = transition.NativeRegistryEffectAudit('entity', self.row['id'], 'forward',
+                rr._sha(source_raw), rr._sha(result_raw),
+                p.prepared_registry_digest(life.own_registry_changes[self.entry.entry_id]),
+                json.loads(mutation.before_json)['modified_at'],
+                json.loads(mutation.after_json)['modified_at'])
+            completed = await chain.complete(intent, context, before, after,
+                mutation=mutation, audit=audit, placeholder_stamp=stamp,
+                escrow_root_reference=escrow.root_reference)
+            stored = chain.store.read(completed[0])['payload']
+            self.assertIn('own_helper_placeholder', stored)
+            fresh_store = rr.native_registry_receipt_store(hass, life.store.preparations)
+            await fresh_store.initialize()
+            reopened = rr.RegistryReceiptChain.reopen(fresh_store, life.operation_id,
+                life.plan, life.receipt, life.binding['preparations'])
+            self.assertFalse(reopened.writable)
+            self.assertEqual(reopened.reconstruct_inputs().documents(), chain.accepted_documents())
+            # Consumer check only: audited setup integration
             # are tested separately before a complete migration can be accepted.
             self.assertTrue(await self.lease.async_setup(self.entry.entry_id))
             await hass.async_block_till_done()
