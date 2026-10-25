@@ -17,3 +17,11 @@ class NativeUtilityIntentAckLossTests(NativeReceiptedUtilityTests):
 
 class NativeUtilityReceiptAckLossTests(NativeReceiptedUtilityTests):
     lifecycle_save_fault = 'receipt'
+
+
+class NativeUtilitySetupIntentAckLossTests(NativeReceiptedUtilityTests):
+    setup_save_fault = 'intent'
+
+
+class NativeUtilitySetupReceiptAckLossTests(NativeReceiptedUtilityTests):
+    setup_save_fault = 'receipt'

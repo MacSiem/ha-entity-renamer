@@ -429,8 +429,47 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             head = chain.expected(tx.PhaseContext(record, 0), tuple(
                 rr.RegistryRawObservation(item.key, item.raw, item.identity) for item in observed.files))
             return lm.RestoreAuthorization(operation, plan.fingerprint, head, record.status)
+        async def reopen_setup_state(auth, *, pending):
+            # Read actual disk Stores with fresh preparation/receipt/lifecycle
+            # objects. These never acquire authority to replay a setup.
+            fresh_preparations = prep.native_prepared_store(hass)
+            await fresh_preparations.initialize()
+            fresh_store = rr.native_registry_receipt_store(hass, fresh_preparations)
+            await fresh_store.initialize()
+            fresh_chain = rr.RegistryReceiptChain.reopen(
+                fresh_store, operation, plan, receipt, digests)
+            fresh_lifecycle_store = lm.native_helper_lifecycle_store(hass, fresh_preparations)
+            await fresh_lifecycle_store.initialize()
+            fresh_lifecycle = lm.NativeHelperLifecycle.reopen(fresh_lifecycle_store,
+                *lifecycle_args[1:], **lifecycle_callbacks,
+                source_authorization=lifecycle.source_authorization)
+            self.assertFalse(fresh_chain.writable)
+            self.assertFalse(fresh_lifecycle.writable)
+            status = fresh_lifecycle.inspect()
+            self.assertFalse(status['full_ready'])
+            self.assertEqual(status['pending'],
+                [{'stage': 'setup', 'entry_id': helper.entry_id}] if pending else [])
+            self.assertEqual(status['activation_receipts_complete'], not pending)
+            if not pending:
+                observed = await observe()
+                fresh_chain.expected(tx.PhaseContext(await log.load(operation), 0), tuple(
+                    rr.RegistryRawObservation(item.key, item.raw, item.identity)
+                    for item in observed.files))
+                self.assertTrue(fresh_chain.verify_setup_authorization(auth))
+            disk_before = {name: Path(hass.config.path('.storage', name)).read_bytes()
+                for name in ('ha_entity_renamer.registry_receipts',
+                             'ha_entity_renamer.helper_lifecycle')}
+            with self.assertRaises(ValueError):
+                await fresh_lifecycle.restore(auth)
+            self.assertEqual({name: Path(hass.config.path('.storage', name)).read_bytes()
+                for name in disk_before}, disk_before)
+            return fresh_chain
+
         async def restore_and_stimulate(snapshot):
-            await lifecycle.restore(await authorization())
+            auth = await authorization()
+            await lifecycle.restore(auth)
+            if utility:
+                await reopen_setup_state(auth, pending=False)
             await loaded_observer.verify_runtime(snapshot)
             self.assertEqual(f.entity.async_get(helper_row.entity_id).id, helper_row.id)
             stimuli = (((48, '7'), (52, '11')) if snapshot == helper_change.after else
@@ -545,6 +584,38 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             fresh_chain.expected(tx.PhaseContext(await log.load(operation), 0), tuple(
                 rr.RegistryRawObservation(item.key, item.raw, item.identity) for item in observed.files))
             expected_config = helper_change.after
+            setup_fault = getattr(self, 'setup_save_fault', None)
+            if setup_fault:
+                auth = await authorization()
+                native_save = store.store.save
+                async def lose_setup_ack(document):
+                    await native_save(document)
+                    if any(row['payload']['kind'] == 'helper_setup_' + setup_fault
+                           for row in document['events'].values()):
+                        raise OSError('actual helper setup ' + setup_fault +
+                                      ' ACK lost after durable save')
+                with patch.object(store.store, 'save', lose_setup_ack):
+                    with self.assertRaises(OSError):
+                        await lifecycle.restore(auth)
+                self.assertTrue(lifecycle.failed)
+                self.assertTrue(store.poisoned)
+                self.assertIs(helper.state, ConfigEntryState.NOT_LOADED
+                    if setup_fault == 'intent' else ConfigEntryState.LOADED)
+                fresh_chain = await reopen_setup_state(auth, pending=True)
+                if setup_fault == 'intent':
+                    with self.assertRaisesRegex(ValueError, 'unresolved_intent'):
+                        fresh_chain.reconstruct_inputs()
+                else:
+                    self.assertTrue(fresh_chain.verify_setup_authorization(auth))
+                    self.assertEqual(hass.states.get(helper_row.entity_id).state, '6')
+                before_rows = f.entity.async_get(helper_row.entity_id).as_dict()
+                with self.assertRaises(ValueError):
+                    await lifecycle.restore(auth)
+                self.assertEqual(f.entity.async_get(helper_row.entity_id).as_dict(), before_rows)
+                self.assertEqual(calls, expected_forward)
+                self.assertTrue(await history.verify(historical))
+                self.assertTrue(await history.verify(helper_history))
+                return
             await restore_and_stimulate(helper_change.after)
             # A separate durable cycle starts from the accepted forward head;
             # it cannot mint a new baseline from post-migration current inputs.
