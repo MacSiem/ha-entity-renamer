@@ -681,6 +681,10 @@ class NativeHelperLifecycle:
                         self._assert_activation(original, original['state'])
                         if original['state'] == 'not_loaded':
                             self._inactive(original)
+                    # Runtime verification and receipt persistence can yield
+                    # after setup effects. Preserve any observed refusal until
+                    # the last await completes, before removing the monitors.
+                    self.check_source_gaps()
             except BaseException:
                 # Even pre-effect errors forbid continuing from stale expectations.
                 self.failed = True
