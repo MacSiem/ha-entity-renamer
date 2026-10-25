@@ -129,6 +129,29 @@ class NativeDiscoveryFlowTests(unittest.IsolatedAsyncioTestCase):
                       (self.f.root / 'configuration.yaml').read_text())
         self.assertFalse(subject.compose_preview(capture)['migration_ready'])
 
+    async def test_native_manager_edit_during_final_graph_await_is_not_adopted(self):
+        baseline = importlib.import_module(backend.__name__ + '.native_input_baseline')
+        drain = baseline._drained
+        calls = 0
+        async def late_manager_edit(*args, **kwargs):
+            nonlocal calls
+            result = await drain(*args, **kwargs)
+            calls += 1
+            if calls == 3:
+                self.f.entity.async_update_entity(self.f.other.entity_id,
+                                                 name='Foreign final edit')
+                await self.f.entity._store.async_save(self.f.entity._data_to_save())
+            return result
+        with patch.object(baseline, '_drained', late_manager_edit):
+            capture = await self.discover()
+        self.assertEqual(calls, 3)
+        self.assertIsNone(capture.bound_manifest_json)
+        self.assertIn('source_changed_during_capture', capture.conflicts)
+        for family in capture.families:
+            if family.name in ('entity_registry', 'device_registry', 'config_entries'):
+                self.assertEqual(family.status, 'UNKNOWN')
+        self.assertEqual(self.f.entity.async_get(self.f.other.entity_id).name, 'Foreign final edit')
+
     async def test_native_permission_denied_and_missing_evidence_are_distinct(self):
         source = importlib.import_module(backend.__name__ + '.native_discovery_inputs')
         for error, status in ((PermissionError('private'), 'DENIED'), (ValueError('private'), 'UNKNOWN')):
