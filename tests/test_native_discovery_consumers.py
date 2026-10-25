@@ -99,6 +99,47 @@ class NativeDiscoveryConsumersTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(named.config['retained_foreign_metadata']['ordered']), 2)
         self.assertGreater(self.calls, 10)
 
+    async def test_server_discovery_uses_native_families_and_actual_yaml_filename(self):
+        discovery = importlib.import_module(fixture.PACKAGE + '.discovery')
+        (self.root / 'configuration.yaml').write_text('script: {}\n')
+        capture = await discovery.async_discover(self.hass,
+            {'entities': [{'entity_id': 'sensor.old', 'proposed_entity_id': 'sensor.new'}]},
+            self.guard)
+        families = {row.name: row for row in capture.families}
+        self.assertEqual(families['dashboard'].status, 'COMPLETE')
+        self.assertEqual(families['energy'].status, 'COMPLETE')
+        self.assertEqual(len(families['dashboard'].rows), 3)
+        self.assertEqual(len(families['energy'].rows), 1)
+        import json
+        graph = json.loads(families['yaml_sources'].payload_json)
+        self.assertIn('boards/source.yaml', {row['path'] for row in graph['files']})
+        self.assertNotIn('different-route', {row['path'] for row in graph['files']})
+        preview = discovery.compose_preview(capture)
+        self.assertFalse(preview['migration_ready'])
+        self.assertNotIn('sensor.old', json.dumps(preview))
+
+    async def test_server_discovery_does_not_adopt_later_dashboard_image(self):
+        discovery = importlib.import_module(fixture.PACKAGE + '.discovery')
+        (self.root / 'configuration.yaml').write_text('script: {}\n')
+        original, calls = subject.async_observe_discovery_consumers, 0
+        async def foreign_edit(*args, **kwargs):
+            nonlocal calls
+            result = await original(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                self.named._data['config']['foreign'] = 'retained'
+                await self.named._store.async_save(self.named._data)
+            return result
+        with patch.object(subject, 'async_observe_discovery_consumers', foreign_edit):
+            captured = await discovery.async_discover(self.hass,
+                {'entities': [{'entity_id': 'sensor.old', 'proposed_entity_id': 'sensor.new'}]},
+                self.guard)
+        families = {row.name: row for row in captured.families}
+        self.assertEqual(calls, 2)
+        self.assertEqual(families['dashboard'].status, 'UNKNOWN')
+        self.assertEqual(families['energy'].status, 'COMPLETE')
+        self.assertEqual(self.named._data['config']['foreign'], 'retained')
+
     async def test_missing_energy_does_not_erase_dashboard(self):
         del self.hass.data['energy_manager']
         result = await self.observe()
