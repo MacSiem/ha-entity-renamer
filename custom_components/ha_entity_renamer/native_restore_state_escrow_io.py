@@ -83,6 +83,8 @@ class EscrowIO:
         from homeassistant.config_entries import ConfigEntryState
         from homeassistant.helpers.entity_platform import async_get_platforms
         require(self.entry.state is ConfigEntryState.NOT_LOADED, 'helper_entry_active')
+        from .native_helper_transaction import _require_inactive
+        _require_inactive(self.entry, self.lease)
         for entity_id in ids:
             require(entity_id not in self.data.entities, 'restore_entity_active')
             state = self.hass.states.get(entity_id)

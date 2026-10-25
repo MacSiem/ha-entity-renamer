@@ -147,7 +147,10 @@ class NativeEscrowIOTests(unittest.IsolatedAsyncioTestCase):
         rows = json.loads(Path(data.store.path).read_bytes())['data']
         matches = [r for r in rows if r['state']['entity_id'] == other.entity_id]
         self.assertEqual(len(matches), 1)
-        self.assertEqual(Decimal(matches[0]['extra_data']['native_value']), other.native_value)
+        from homeassistant.components.sensor import SensorExtraStoredData
+        native_extra = SensorExtraStoredData.from_dict(matches[0]['extra_data'])
+        self.assertIsNotNone(native_extra)
+        self.assertEqual(native_extra.native_value, other.native_value)
         self.assertEqual(self.projection(data), {
             self.old_helper: payload.before_json, self.target: payload.after_json})
 
