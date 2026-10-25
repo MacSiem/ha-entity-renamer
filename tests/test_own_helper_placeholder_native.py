@@ -543,7 +543,7 @@ class ReceiptedOwnHelperMixedYAMLNativeTests(ReceiptedOwnHelperNativeTests):
                 'native_input_observation', 'native_restore_state_escrow_receipts',
                 'native_restore_state_escrow_io', 'native_yaml_transaction', 'yaml_editor_locks',
                 'yaml_runtime_observer', 'native_candidate_validation', 'prepared', 'journal',
-                'transaction', 'native_helper_setup_effects')}
+                'transaction', 'native_helper_setup_effects', 'yaml_transaction')}
             rr, tx, prep = (m[name] for name in ('native_registry_receipts', 'transaction', 'prepared'))
             original = (life.plan, life.receipt, dict(life.binding['preparations']),
                         self.own_observer.runtime_baselines())
@@ -718,8 +718,23 @@ class ReceiptedOwnHelperMixedYAMLNativeTests(ReceiptedOwnHelperNativeTests):
                 await escrow.execute(token)
                 escrow.require_completed(token)
                 registry.bind_own_helper_escrow(escrow, token, source_fence=source_fence)
-                record = (await coordinator.rollback(life.operation_id) if reverse else
-                    await coordinator.apply(life.plan, life.plan.fingerprint, life.operation_id))
+                import os
+                from unittest.mock import patch
+                actual_yaml_write = m['yaml_transaction'].apply_file_patch
+                def pinned_yaml_write(*args, **kwargs):
+                    result = actual_yaml_write(*args, **kwargs)
+                    # Same mounted-filesystem fixture method as the existing
+                    # mixed helper test: retain the ACTUAL direct-return inode,
+                    # never replace the stamp with a later observed identity.
+                    fd = os.open(self.f.root / result['path'], os.O_RDONLY | os.O_NOFOLLOW)
+                    self.addCleanup(os.close, fd)
+                    info = os.fstat(fd)
+                    self.assertEqual((info.st_dev, info.st_ino, info.st_mode),
+                        tuple(result['after_identity']))
+                    return result
+                with patch.object(m['yaml_transaction'], 'apply_file_patch', pinned_yaml_write):
+                    record = (await coordinator.rollback(life.operation_id) if reverse else
+                        await coordinator.apply(life.plan, life.plan.fingerprint, life.operation_id))
                 self.assertEqual(record.status, 'rolled_back' if reverse else 'applied',
                     (record.status, record.reason, record.phases, effect_errors))
                 self.assertEqual(record.phases, ('undone', 'undone') if reverse else
