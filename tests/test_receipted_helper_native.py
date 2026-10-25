@@ -50,6 +50,9 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         try:
             await self._run_receipted_migration()
         finally:
+            lifecycle = getattr(self, 'live_lifecycle', None)
+            if lifecycle is not None:
+                lifecycle.close_source_gaps()
             if self.activation_lease is not None:
                 self.activation_lease.release()
 
@@ -346,6 +349,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             self.assertEqual(await observe(fresh_state), before_readonly)
             return
         lifecycle = await lm.NativeHelperLifecycle.start(*lifecycle_args, **lifecycle_callbacks)
+        self.live_lifecycle = lifecycle
         if utility:
             self.assertEqual(lifecycle.root['schema'], 2)
             self.assertEqual(lifecycle.runtime_baselines(), loaded_observer.runtime_baselines())
@@ -358,6 +362,10 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             self.assertEqual(lm.stored_lifecycle_plan(fresh_lifecycle_store, lifecycle.root_id), plan)
             self.assertFalse(recovered_lifecycle.writable)
         await lifecycle.quiesce()
+        if getattr(self, 'source_gap_during_unload', False):
+            meter._attr_native_value = 48
+            meter.async_write_ha_state()
+            await hass.async_block_till_done()
         inactive = await m['helper_observers'].NativeHelperObservers.capture(
             hass, (original_snapshot,), proof, activation_lease=self.activation_lease)
         if utility:
@@ -646,7 +654,12 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             forward_authorization = await authorization()
             lifecycle = await lm.NativeHelperLifecycle.start(*lifecycle_args,
                 **lifecycle_callbacks, source_authorization=forward_authorization)
+            self.live_lifecycle = lifecycle
             await lifecycle.quiesce()
+            if getattr(self, 'source_gap_during_unload', False):
+                meter._attr_native_value = 54
+                meter.async_write_ha_state()
+                await hass.async_block_till_done()
             self.assertIs(helper.state, ConfigEntryState.NOT_LOADED)
             restored = await coordinator.rollback(operation)
             self.assertEqual(restored.status, 'rolled_back', (restored.reason, restored.phases))

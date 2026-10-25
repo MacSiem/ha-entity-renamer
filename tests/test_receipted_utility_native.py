@@ -7,6 +7,10 @@ class NativeReceiptedUtilityTests(fixture.NativeReceiptedHelperTests):
     with_yaml = True
 
 
+class NativeReceiptedUtilitySourceGapTests(NativeReceiptedUtilityTests):
+    source_gap_during_unload = True
+
+
 class NativeUtilityRootAckLossTests(NativeReceiptedUtilityTests):
     lifecycle_save_fault = 'root'
 
