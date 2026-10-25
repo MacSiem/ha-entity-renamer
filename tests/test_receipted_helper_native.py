@@ -100,6 +100,12 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         f.entity.async_update_entity(helper_row.entity_id,
             hidden_by=er.RegistryEntryHider.USER, name='Retained helper preference')
         await self._flush_documents(initialize=True)
+        registry_events = []
+        if utility:
+            def registry_event(event):
+                if event.data.get('entity_id') == helper_row.entity_id:
+                    registry_events.append(dict(event.data))
+            self.addCleanup(hass.bus.async_listen('entity_registry_updated', registry_event))
         original_snapshot = m['helper_native'].read_entry(hass, helper.entry_id)
         source_uuid = f.entity.async_get(old).id
         proof = (m['helper_observers'].RegistryMappingProof(old, new, source_uuid),)
@@ -237,10 +243,10 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             if utility:
                 current_rows = loaded_observer._rows(entry_id)
                 expected_rows = loaded_observer.helper_rows[entry_id]
-                self.assertEqual(current_rows, expected_rows, {
+                self.assertEqual(current_rows, expected_rows, (registry_events, {
                     key: (expected_rows[0].get(key), current_rows[0].get(key))
                     for key in set(current_rows[0]) | set(expected_rows[0])
-                    if expected_rows[0].get(key) != current_rows[0].get(key)})
+                    if expected_rows[0].get(key) != current_rows[0].get(key)}))
             await loaded_observer.verify_runtime(helper_change.after
                 if authorization.status == 'applied' else helper_change.before)
             return True
