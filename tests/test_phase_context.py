@@ -50,7 +50,7 @@ class PhaseContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({c.step.key for c in intents}, {'one', 'two'})
         self.assertEqual((await owner.rollback('operation')).status, 'rolled_back')
         reverse = [c for c in adapter.observed if c.record.phases[c.index] == 'undo_intent']
-        self.assertEqual([c.step.key for c in reverse[::2]], ['two', 'one'])
+        self.assertEqual(list(dict.fromkeys(c.step.key for c in reverse)), ['two', 'one'])
         self.assertEqual(adapter.effects, ['one', 'two', 'undo:two', 'undo:one'])
         with self.assertRaises(FrozenInstanceError):
             adapter.observed[-1].index = 0

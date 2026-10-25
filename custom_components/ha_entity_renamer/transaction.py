@@ -113,6 +113,35 @@ class Record:
     direction: str = "forward"
 
 
+@dataclass(frozen=True)
+class PhaseContext:
+    """Coordinator-owned read-only snapshot of a successfully durable Record.
+
+    This is not a client credential, standalone transition proof or substitute
+    for the shared coordinator/editor locks. Native adapters resolve immutable
+    baseline/receipts against this exact plan and phase, never overall status.
+    """
+    record: Record
+    index: int
+
+    def __post_init__(self):
+        if (type(self.record) is not Record or type(self.index) is not int
+                or not 0 <= self.index < len(self.record.plan.steps)
+                or type(self.record.phases) is not tuple
+                or len(self.record.phases) != len(self.record.plan.steps)):
+            raise Refused('Invalid durable phase context')
+
+    @property
+    def step(self):
+        return self.record.plan.steps[self.index]
+
+    def require_effect(self, step: Step, direction: str):
+        expected = {'forward': 'intent', 'rollback': 'undo_intent'}.get(direction)
+        if (expected is None or step != self.step or self.record.direction != direction
+                or self.record.phases[self.index] != expected):
+            raise Refused('Durable phase does not authorize this effect')
+
+
 class Journal(Protocol):
     async def load(self, operation_id: str) -> Record | None: ...
     async def active(self) -> tuple[Record, ...]:
@@ -196,11 +225,18 @@ class Coordinator:
         async with self.lock:
             return await self._load(operation_id)
 
-    def _adapter(self, step: Step) -> Adapter:
+    def _adapter(self, step: Step, record: Record | None = None,
+                 index: int | None = None) -> Adapter:
         try:
-            return self.adapters[step.adapter]
+            adapter = self.adapters[step.adapter]
         except KeyError as err:
             raise Refused("Missing adapter") from err
+        binder = getattr(adapter, 'bind_phase_context', None)
+        if binder is not None:
+            # Initial preflight has no durable Record. Clear any stale binding
+            # when this shared adapter is reused for another operation.
+            binder(None if record is None else PhaseContext(record, index))
+        return adapter
 
     async def apply(self, plan: Plan, fingerprint: str, operation_id: str) -> Record:
         async with self.lock:
@@ -257,7 +293,7 @@ class Coordinator:
         # Recovery must validate ALL revisions again before any resumed effect.
         for index, step in enumerate(record.plan.steps):
             expected = Position.AFTER if record.phases[index] == "verified" else Position.BEFORE
-            position = await self._adapter(step).inspect(step)
+            position = await self._adapter(step, record, index).inspect(step)
             self.guard()
             causal = (record.phases[index] == "pending"
                       and position in (Position.AFTER, Position.NATIVE_PARTIAL)
@@ -267,7 +303,7 @@ class Coordinator:
         for index, step in enumerate(record.plan.steps):
             if record.phases[index] == "verified":
                 continue
-            adapter = self._adapter(step)
+            adapter = self._adapter(step, record, index)
             position = await adapter.inspect(step)
             self.guard()
             if position == Position.AFTER and self._native_effect_proven(record, step):
@@ -283,6 +319,7 @@ class Coordinator:
             record = await self._phase(record, index, "intent")
             self.guard()  # Rechecked AFTER durable intent await, before effect.
             try:
+                adapter = self._adapter(step, record, index)
                 if native:
                     await adapter.apply_native(step, self.guard)
                 else:
@@ -326,7 +363,7 @@ class Coordinator:
             for index, step in enumerate(record.plan.steps):
                 phase = record.phases[index]
                 try:
-                    position = await self._adapter(step).inspect(step)
+                    position = await self._adapter(step, record, index).inspect(step)
                     self.guard()
                 except asyncio.CancelledError:
                     raise
@@ -380,7 +417,7 @@ class Coordinator:
                 if record.phases[index] in ("pending", "undone"):
                     continue
                 step = record.plan.steps[index]
-                adapter = self._adapter(step)
+                adapter = self._adapter(step, record, index)
                 position = await adapter.inspect(step)
                 self.guard()
                 if position != Position.AFTER:
@@ -388,6 +425,7 @@ class Coordinator:
                 record = await self._phase(record, index, "undo_intent", "rolling_back")
                 self.guard()
                 try:
+                    adapter = self._adapter(step, record, index)
                     await adapter.compensate(step, self.guard)
                     self.guard()
                     position = await adapter.inspect(step)
@@ -399,8 +437,8 @@ class Coordinator:
                 if position != Position.BEFORE:
                     return await self._unknown(record, "compensation_unverified")
                 record = await self._phase(record, index, "undone", "rolling_back")
-            for step in record.plan.steps:
-                position = await self._adapter(step).inspect(step)
+            for index, step in enumerate(record.plan.steps):
+                position = await self._adapter(step, record, index).inspect(step)
                 self.guard()
                 if position != Position.BEFORE:
                     return await self._unknown(record, "rollback_final_conflict")
