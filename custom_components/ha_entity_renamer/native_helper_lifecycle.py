@@ -319,6 +319,43 @@ class NativeHelperLifecycle:
         self.failed = False
         self.lock = asyncio.Lock()
         self._unload_witnesses = {}  # ephemeral native State identity, never reopened
+        self._source_gaps = {}  # real Events retained only within this live cycle
+        self._source_gap_data = {}  # detached diagnostic data, never authority
+
+    def _source_gap_guard(self):
+        if not self.writable or self.failed:
+            _fail('source_gap_live_lifecycle_required')
+        self._authorize()
+        return True
+
+    def _capture_source_gap(self, entry_id):
+        from .utility_meter_observers import _payload
+        from .native_utility_source_gap import NativeUtilitySourceGap
+        values = [value for value in self.runtime_baselines() if value.entry_id == entry_id]
+        if not values:
+            return
+        value, = values
+        doc = _payload(value)
+        # First qualified handoff scope: own-ID with the same physical source
+        # name. Source-ID transitions retain their existing independent runtime
+        # verification; queued rename emissions need separate characterization.
+        if doc['source_before'] != doc['source_after']:
+            return
+        if entry_id in self._source_gaps:
+            _fail('source_gap_one_live_capture_required')
+        snapshot = self.helper_snapshots[entry_id][1 if self.source_authorization else 0]
+        self._source_gaps[entry_id] = NativeUtilitySourceGap.capture(self.manager.hass,
+            value, snapshot, self.activation_lease, guard=self._source_gap_guard)
+
+    def check_source_gaps(self):
+        for gap in self._source_gaps.values():
+            gap.check()
+
+    def close_source_gaps(self):
+        """Caller may also close on abort before restore, without replay."""
+        for gap in tuple(self._source_gaps.values()):
+            gap.close()
+        self._source_gaps.clear()
 
     def runtime_baselines(self):
         """Immutable historical observations; readback never grants write access."""
@@ -634,6 +671,7 @@ class NativeHelperLifecycle:
                     for original in self.root['original']:
                         await self._verify(self.verify_inactive, original['entry_id'])
                     self.require_quiescent()
+                    self.check_source_gaps()
                 else:
                     for original in self.root['original']:
                         await self._verify(self.verify_runtime, original['entry_id'],
@@ -646,7 +684,11 @@ class NativeHelperLifecycle:
             except BaseException:
                 # Even pre-effect errors forbid continuing from stale expectations.
                 self.failed = True
+                self.close_source_gaps()
                 raise
+            finally:
+                if stage == 'setup':
+                    self.close_source_gaps()
 
     async def _source(self, stage, authorization):
         if stage == 'unload':
@@ -685,6 +727,8 @@ class NativeHelperLifecycle:
         if stage == 'setup' or not active:
             self._inactive(original)
         if active:
+            if stage == 'unload' and original['domain'] == 'utility_meter':
+                self._capture_source_gap(key)
             if audited_setup:
                 effect_reference = await self.setup_effect(key, self, intent_reference, authorization)
                 if (type(effect_reference) is not tuple or len(effect_reference) != 2

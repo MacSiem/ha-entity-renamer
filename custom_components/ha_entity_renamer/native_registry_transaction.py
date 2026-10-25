@@ -70,6 +70,7 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         if result is not None:
             raise Refused('own_helper_source_fence_result')
         escrow.require_completed(token)
+        life.check_source_gaps()
         return binding
 
     def _own_node(self, binding, entry_id, change, context, intent, before, guard):

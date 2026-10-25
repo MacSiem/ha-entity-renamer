@@ -96,6 +96,7 @@ class NativeHelperSetupEffects:
         _need(type(self.hass.data.get(er.DATA_REGISTRY)) is er.EntityRegistry
               and type(self.hass.data.get(dr.DATA_REGISTRY)) is dr.DeviceRegistry)
         io = NativeRegistryIO(self.hass)
+        gap = lifecycle._source_gaps.get(entry_id)
         with NativeUtilitySetupAudit(self.hass, baseline, snapshot, source_rows,
                 guard=lambda: self._scope(lifecycle), own_registry_change=own_change,
                 direction=direction) as collector:
@@ -104,21 +105,29 @@ class NativeHelperSetupEffects:
             self._scope(lifecycle)
             _need(await lifecycle.settle() is not False)
             self._scope(lifecycle)
+            if gap is not None:
+                lifecycle._source_gap_data[entry_id] = gap.settle(snapshot, collector)
             audit = collector.finish()
             # Native setup schedules the registry's native delayed write. The
             # existing trusted writer flushes that exact manager under this scope;
             # independent raw/manager/fsync reads, not a save ACK, prove durability.
             await io.flush('entity')
             self._scope(lifecycle)
+            if gap is not None:
+                gap.check()
             _need(collector.finish() == audit)
             after = await self._read(lifecycle)
             _need(collector.finish() == audit)
             reference = await self.chain.complete_helper_setup(intent, context,
                 before, after, audit=audit)
             self._scope(lifecycle)
+            if gap is not None:
+                gap.check()
             _need(collector.finish() == audit)
             final = await self._read(lifecycle)
             self.chain.expected(context, final)
             self.chain.verify_setup_authorization(authorization)
             _need(collector.finish() == audit)
+            if gap is not None:
+                gap.check()
         return reference
