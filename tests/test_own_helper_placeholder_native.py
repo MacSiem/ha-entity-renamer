@@ -75,7 +75,7 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
             def fence(scope):
                 source_guard()
                 escrow.require_completed(token)
-                durable = modules['journal'].decode(json.loads(Path(journal.store.path).read_bytes())['data'])
+                durable = modules['journal'].decode(json.loads(Path(journal.store._path).read_bytes())['data'])
                 self.assertEqual(durable[life.operation_id], context.record)
                 chain.verify_intent_source(intent, context, before)
                 return True
