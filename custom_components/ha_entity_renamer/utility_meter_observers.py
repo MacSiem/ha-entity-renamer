@@ -499,7 +499,7 @@ class NativeUtilityMeterObservers:
         require(len(candidates) == 1 and type(candidates[0]) is UtilityMeterSensor,
                 'utility_native_class_or_count')
         entity = candidates[0]
-        row = self.helper_rows[key][0]
+        row = self.expected_registry_rows(key)[0]
         require(entity.hass is self.hass and entity.entity_id == row['entity_id']
                 and entity.unique_id == key == row['unique_id']
                 and entity.registry_entry is not None and entity.registry_entry.id == row['id'],

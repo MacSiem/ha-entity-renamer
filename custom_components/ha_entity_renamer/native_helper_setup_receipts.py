@@ -270,14 +270,17 @@ def fold_receipt(chain, states, intent, receipt):
         _fail('receipt_layout')
     obj, baseline = _validate_activation(chain, intent['activation'])
     entry_id = intent['activation']['entry_id']
-    change = obj.helper_changes[entry_id]
-    snapshot = change.after if intent['binding']['direction'] == 'forward' else change.before
+    before_snapshot, after_snapshot = obj.helper_snapshots[entry_id]
+    snapshot = after_snapshot if intent['binding']['direction'] == 'forward' else before_snapshot
+    own_change = obj.own_registry_changes.get(entry_id)
     from .native_utility_setup_audit import decode_setup_audit, validate_setup_audit
     rows = states[ENTITY]['document']['data']['entities']
     indices = [i for i, row in enumerate(rows) if row.get('config_entry_id') == entry_id]
     source = [deepcopy(rows[i]) for i in indices]
     audit = decode_setup_audit(receipt['audit'])
-    final = validate_setup_audit(baseline, snapshot, source, audit)
+    final = validate_setup_audit(baseline, snapshot, source, audit,
+        own_registry_change=own_change,
+        direction=intent['binding']['direction'] if own_change else None)
     if (type(final) is not list or len(final) != len(source)
             or any(type(row) is not dict for row in final)
             or [row.get('id') for row in final] != [row.get('id') for row in source]):

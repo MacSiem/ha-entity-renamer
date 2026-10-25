@@ -142,7 +142,7 @@ def _without_stamp(row):
     return {key: value for key, value in row.items() if key != 'modified_at'}
 
 
-def _bind(baseline, snapshot, rows):
+def _bind(baseline, snapshot, rows, *, own_registry_change=None, direction=None):
     # Roundtrip ORIGINAL codec; no capture/adoption from current manager.
     original = encode_runtime_baseline(baseline)
     decode_runtime_baseline(original)
@@ -153,7 +153,27 @@ def _bind(baseline, snapshot, rows):
           'source_rows')
     rows = deepcopy(list(rows))
     _canonical(rows)
-    _need(_same(_without_stamp(rows[0]), _without_stamp(doc['helper_rows'][0])),
+    expected = deepcopy(doc['helper_rows'][0])
+    if own_registry_change is not None:
+        from .native_registry import PreparedRegistryChange
+        change = own_registry_change
+        _need(type(change) is PreparedRegistryChange and change.kind == 'entity'
+              and direction in ('forward', 'rollback'), 'own_registry_preparation')
+        before, after = change.before, change.after
+        _need(_same(before, expected) and change.identity == expected['id']
+              and before['config_entry_id'] == doc['entry_id']
+              and before['unique_id'] == doc['entry_id']
+              and before['platform'] == 'utility_meter'
+              and before.get('config_subentry_id') is None
+              and type(after.get('entity_id')) is str and after['entity_id'].startswith('sensor.')
+              and before['entity_id'] != after['entity_id']
+              and _same({k: v for k, v in before.items() if k not in ('entity_id', 'modified_at')},
+                        {k: v for k, v in after.items() if k not in ('entity_id', 'modified_at')}),
+              'own_registry_preparation')
+        expected['entity_id'] = (after if direction == 'forward' else before)['entity_id']
+    else:
+        _need(direction is None, 'own_registry_preparation')
+    _need(_same(_without_stamp(rows[0]), _without_stamp(expected)),
           'original_rows_binding')
     _stamp(rows[0]['modified_at'])
     _need(rows[0]['device_id'] is None, 'device_rebinding_unsupported')
@@ -241,14 +261,16 @@ def decode_setup_audit(value):
     return result
 
 
-def validate_setup_audit(baseline, expected_snapshot, source_rows, audit):
+def validate_setup_audit(baseline, expected_snapshot, source_rows, audit, *,
+                         own_registry_change=None, direction=None):
     """Pure replay from ORIGINAL + caller-accepted source; returns detached final rows.
 
     JSON cannot authenticate its own history. The caller authenticates audit bytes
     and bindings in the durable intent/result chain, as for the baseline codec.
     No capture/current-manager fallback, no readiness/publication authorization.
     """
-    doc, rows, binding = _bind(baseline, expected_snapshot, source_rows)
+    doc, rows, binding = _bind(baseline, expected_snapshot, source_rows,
+        own_registry_change=own_registry_change, direction=direction)
     value = _payload(audit)
     _need(value['core'] == doc['core'] and value['entry_id'] == doc['entry_id']
           and _same(value['binding'], binding), 'original_binding')
@@ -398,9 +420,12 @@ class NativeUtilitySetupAudit:
     UtilityMeterSensor object, bound by the actual platform-add stack.
     """
 
-    def __init__(self, hass, baseline, expected_snapshot, source_rows, *, guard):
+    def __init__(self, hass, baseline, expected_snapshot, source_rows, *, guard,
+                 own_registry_change=None, direction=None):
         _need(callable(guard), 'guard_required')
-        self._doc, self._source, self._binding = _bind(baseline, expected_snapshot, source_rows)
+        self._doc, self._source, self._binding = _bind(baseline, expected_snapshot, source_rows,
+            own_registry_change=own_registry_change, direction=direction)
+        self._own_registry_change, self._direction = own_registry_change, direction
         self._baseline = baseline
         self._snapshot = deepcopy(expected_snapshot)
         self._hass, self._guard = hass, guard
@@ -800,7 +825,8 @@ class NativeUtilitySetupAudit:
             'binding': self._binding, 'calls': self._calls,
             'events': events, 'final_rows': rows}
         audit = NativeUtilitySetupAuditData(self._doc['entry_id'], _canonical(value))
-        validate_setup_audit(self._baseline, self._snapshot, self._source, audit)
+        validate_setup_audit(self._baseline, self._snapshot, self._source, audit,
+            own_registry_change=self._own_registry_change, direction=self._direction)
         self._check()
         self._sealed = True
         return audit

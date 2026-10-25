@@ -78,8 +78,10 @@ class NativeHelperSetupEffects:
         self.chain.expected(context, before)
         self.chain.verify_setup_authorization(authorization)
         baseline, = tuple(value for value in lifecycle.runtime_baselines() if value.entry_id == entry_id)
-        change = lifecycle.helper_changes[entry_id]
-        snapshot = change.after if authorization.status == 'applied' else change.before
+        before_snapshot, after_snapshot = lifecycle.helper_snapshots[entry_id]
+        snapshot = after_snapshot if authorization.status == 'applied' else before_snapshot
+        own_change = lifecycle.own_registry_changes.get(entry_id)
+        direction = ('forward' if authorization.status == 'applied' else 'rollback') if own_change else None
         source_rows = [row for row in self.chain.accepted_documents()['core.entity_registry']
                        ['data']['entities'] if row.get('config_entry_id') == entry_id]
         intent = await self.chain.begin_helper_setup(context, before,
@@ -95,7 +97,8 @@ class NativeHelperSetupEffects:
               and type(self.hass.data.get(dr.DATA_REGISTRY)) is dr.DeviceRegistry)
         io = NativeRegistryIO(self.hass)
         with NativeUtilitySetupAudit(self.hass, baseline, snapshot, source_rows,
-                guard=lambda: self._scope(lifecycle)) as collector:
+                guard=lambda: self._scope(lifecycle), own_registry_change=own_change,
+                direction=direction) as collector:
             manager = lifecycle.activation_lease or self.hass.config_entries
             _need(await manager.async_setup(entry_id) is True)
             self._scope(lifecycle)

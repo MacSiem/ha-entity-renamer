@@ -186,7 +186,7 @@ class NativeHelperLifecycle:
             _fail('original_native_inputs_required')
         # This resolves ORIGINAL immutable bytes + ORIGINAL ValidationReceipt;
         # no IO capture, second baseline or current-only preparation exists here.
-        store.preparations.resolve_native_inputs(plan.native_inputs, receipt)
+        original_baseline = store.preparations.resolve_native_inputs(plan.native_inputs, receipt)
         callbacks = (guard, verify_original_native_inputs, settle, verify_inactive,
                      verify_runtime, verify_accepted_native_chain)
         if not all(callable(item) for item in callbacks):
@@ -197,6 +197,8 @@ class NativeHelperLifecycle:
         ids = set()
         self.expected_metadata = {}
         self.helper_changes = {}
+        self.helper_snapshots = {}
+        self.own_registry_changes = {}
         for step in plan.steps:
             if step.adapter != 'helpers':
                 continue
@@ -218,7 +220,60 @@ class NativeHelperLifecycle:
             if key in self.helper_changes:
                 _fail('duplicate_helper_preparation')
             self.helper_changes[key] = change
+            self.helper_snapshots[key] = (change.before, change.after)
             ids.add(key)
+        # A helper's own entity rename may have no configuration mutation.
+        # Resolve targets and unchanged configuration only from ORIGINAL full-three.
+        from .native_registry import PreparedRegistryChange
+        from .native_config_transition import _projection
+        documents = {item.key: json.loads(item.manager_json) for item in original_baseline.files}
+        self.original_entities = documents['core.entity_registry']['entities']
+        configs = documents['core.config_entries']['entries']
+        for step in plan.steps:
+            if step.adapter != 'registry':
+                continue
+            change = decode_change(store.preparations.resolve(
+                step.prepared_ref, prepared_digests[step.prepared_ref]))
+            if (step.caused_by or type(change) is not PreparedRegistryChange
+                    or (change.identity, change.before_revision, change.after_revision)
+                       != (step.identity, step.before_revision, step.after_revision)):
+                _fail('registry_preparation_binding')
+            if change.kind != 'entity':
+                continue
+            before, after = change.before, change.after
+            if before.get('entity_id') == after.get('entity_id'):
+                continue  # A display-name edit does not request own-ID lifecycle.
+            key = before.get('config_entry_id')
+            entries = [row for row in configs if row['entry_id'] == key]
+            if len(entries) != 1 or entries[0]['domain'] not in NATIVE_FIELDS:
+                continue
+            # Own-ID support is scoped to the pinned BASIC UtilityMeter relation.
+            # Other native helpers retain their existing configuration-step path.
+            if entries[0]['domain'] != 'utility_meter':
+                _fail('own_helper_domain_unsupported')
+            original_rows = [row for row in self.original_entities if row.get('id') == change.identity]
+            if (len(original_rows) != 1 or original_rows[0] != before
+                    or before.get('platform') != 'utility_meter'
+                    or before.get('unique_id') != key
+                    or before.get('config_subentry_id') is not None
+                    or before.get('entity_id') == after.get('entity_id')
+                    or not all(type(row.get('entity_id')) is str
+                               and row['entity_id'].startswith('sensor.') for row in (before, after))
+                    or {k: v for k, v in before.items() if k not in ('entity_id', 'modified_at')}
+                       != {k: v for k, v in after.items() if k not in ('entity_id', 'modified_at')}
+                    or key in self.own_registry_changes):
+                _fail('own_helper_registry_binding')
+            self.own_registry_changes[key] = change
+            original = _projection(entries[0])
+            if key in self.helper_snapshots:
+                if self.helper_snapshots[key][0] != original:
+                    _fail('ordinary_helper_binding_required')
+            else:
+                self.helper_snapshots[key] = (original, deepcopy(original))
+                identity = original['identity']
+                self.expected_metadata[key] = {'domain': original['domain'], **{field: identity[field]
+                    for field in ('disabled_by', 'pref_disable_new_entities', 'pref_disable_polling')}}
+                ids.add(key)
         if not ids:
             _fail('helpers_required')
         self.ids = tuple(sorted(ids))
@@ -280,8 +335,12 @@ class NativeHelperLifecycle:
             key, payload = value.entry_id, document['payload']
             if key not in required or key in seen or payload['core'] != self.receipt.version:
                 _fail('runtime_baseline_scope')
-            change = self.helper_changes[key]
-            verify_baseline_binding(value, change.before, change.after)
+            before_snapshot, after_snapshot = self.helper_snapshots[key]
+            verify_baseline_binding(value, before_snapshot, after_snapshot)
+            original_helpers = sorted((row for row in self.original_entities
+                if row.get('config_entry_id') == key), key=lambda row: row['id'])
+            if payload['helper_rows'] != original_helpers:
+                _fail('runtime_baseline_helper_binding')
             # Authenticate the source's physical identity and exact rename using
             # ORIGINAL immutable registry preparations, not a current row capture.
             matches = []
@@ -302,7 +361,18 @@ class NativeHelperLifecycle:
                         and (candidate.identity, candidate.before_revision, candidate.after_revision)
                             == (step.identity, step.before_revision, step.after_revision)):
                     matches.append(candidate)
-            if len(matches) != 1:
+            if payload['source_before'] == payload['source_after']:
+                fields = ('id', 'unique_id', 'platform', 'config_entry_id', 'config_subentry_id')
+                originals = [row for row in self.original_entities
+                    if [row.get(f) for f in fields] == payload['source_identity']
+                    and row.get('entity_id') == payload['source_before']]
+                if matches or len(originals) != 1:
+                    _fail('runtime_baseline_registry_binding')
+                # Reject an unrepresented source rename, even if options use UUID.
+                for step in self.plan.steps:
+                    if step.adapter == 'registry' and step.identity == payload['source_identity'][0]:
+                        _fail('runtime_baseline_registry_binding')
+            elif len(matches) != 1:
                 _fail('runtime_baseline_registry_binding')
             seen.add(key)
             encoded.append(document)
