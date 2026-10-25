@@ -227,5 +227,85 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(entity.native_value, Decimal('19'))
             self.assertTrue(await self.own_observer.verify_runtime(life.helper_snapshots[self.entry.entry_id][0]))
             self.assertEqual(self.f.entity.async_get(self.target).id, self.row['id'])
+
+            # Reverse starts from the accepted forward setup, while retaining
+            # the SAME ORIGINAL A0/S0 and preparations. B1 comes from real unload.
+            forward_escrow_receipt = escrow.inspect()['receipt']
+            record = await journal.load(life.operation_id)
+            source_head = chain.expected(tx.PhaseContext(record, 0), await observe())
+            source_auth = base.lm.RestoreAuthorization(life.operation_id,
+                life.plan.fingerprint, source_head, 'applied')
+            life = await base.lm.NativeHelperLifecycle.start(*self.args,
+                **dict(self.kwargs, verify_accepted_native_chain=accepted_source,
+                    verify_runtime=runtime, setup_effect=life.setup_effect,
+                    source_authorization=source_auth))
+            await life.quiesce()
+            unload_slot = life._slot('unload', self.entry.entry_id, 'receipt')
+            unload = life.store.read(unload_slot)
+            unload_ref = (unload_slot, unload['digest'])
+            original_state = hass.states.get(self.target)
+            self.assertEqual(original_state.state, 'unavailable')
+            await data.async_dump_states()
+            escrow = modules['native_restore_state_escrow_receipts'].NativeRestoreStateEscrow(
+                life, self.entry.entry_id, data, source_guard=source_guard)
+            disk = modules['native_restore_state_escrow_io'].EscrowIO._read(data.store.path,
+                (self.target, self.old_helper))
+            token = await escrow.begin(disk_preimage=disk,
+                forward_receipt=forward_escrow_receipt)
+            await escrow.execute(token)
+            escrow.require_completed(token)
+            await journal.save(tx.Record(life.operation_id, life.plan,
+                status='rolling_back', phases=('undo_intent',), direction='rollback'))
+            context = tx.PhaseContext(await journal.load(life.operation_id), 0)
+            before = await observe()
+            intent = await chain.begin(context, before)
+            before = await observe()
+            chain.verify_intent_source(intent, context, before)
+            node = p.OwnHelperPlaceholder.capture(io=io, lifecycle=life, chain=chain,
+                context=context, intent=intent, observations=before,
+                live_guard=self.guard, fresh_source_fence=fence,
+                validate_unload_witness=validate_witness,
+                verify_live_unload_state=lambda actual, ref, state:
+                    actual.verify_live_unload_state(self.entry.entry_id, ref, state))
+            mutation = node.mutate()
+            self.guard()
+            await io.settle()
+            self.guard()
+            await io.flush('entity')
+            self.guard()
+            stamp = node.finish()
+            self.assertIsNone(hass.states.get(self.target))
+            self.assertTrue(hass.states.async_available(self.target))
+            self.assertEqual(hass.states.get(self.old_helper).state, 'unavailable')
+            await modules['native_restore_state_escrow_receipts'].copy_escrow_witness(
+                life.store, chain.store, chain.operation_id, chain.plan,
+                chain.original_receipt, life.binding['preparations'], escrow.root_reference)
+            after = await observe()
+            source_raw = next(row.raw for row in before if row.key == 'core.entity_registry')
+            result_raw = next(row.raw for row in after if row.key == 'core.entity_registry')
+            audit = transition.NativeRegistryEffectAudit('entity', self.row['id'], 'reverse',
+                rr._sha(source_raw), rr._sha(result_raw),
+                p.prepared_registry_digest(life.own_registry_changes[self.entry.entry_id]),
+                json.loads(mutation.before_json)['modified_at'],
+                json.loads(mutation.after_json)['modified_at'])
+            await chain.complete(intent, context, before, after, mutation=mutation, audit=audit,
+                placeholder_stamp=stamp, escrow_root_reference=escrow.root_reference)
+            await journal.save(tx.Record(life.operation_id, life.plan,
+                status='rolled_back', phases=('undone',), direction='rollback'))
+            record = await journal.load(life.operation_id)
+            head = chain.expected(tx.PhaseContext(record, 0), await observe())
+            auth = base.lm.RestoreAuthorization(life.operation_id, life.plan.fingerprint,
+                head, 'rolled_back')
+            await life.restore(auth)
+            self.assertTrue(life.inspect()['activation_receipts_complete'])
+            self.assertTrue(chain.verify_setup_authorization(auth))
+            entity, = [e for platform in async_get_platforms(hass, 'utility_meter')
+                       if platform.config_entry is self.entry for e in platform.entities.values()]
+            self.assertEqual(entity.entity_id, self.old_helper)
+            self.assertEqual(entity.native_value, Decimal('19'))
+            self.assertEqual(self.f.entity.async_get(self.old_helper).id, self.row['id'])
+            await self._emit('123')
+            self.assertEqual(entity.native_value, Decimal('23'))
+            self.assertTrue(await self.own_observer.verify_runtime(life.helper_snapshots[self.entry.entry_id][0]))
         finally:
             self.lease.release()
