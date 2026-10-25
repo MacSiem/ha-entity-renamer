@@ -365,20 +365,36 @@ class YAMLTransactionAdapter:
             return Position.UNKNOWN
         return position
 
-    async def _write(self, change, guard, *, reverse):
+    async def _write(self, change, guard, *, reverse, _trusted_hooks=None):
+        # Private backend seam; never populated from a request or preparation.
+        # Legacy callers keep their original source checker and activation path.
         results = []
+        def sources():
+            if _trusted_hooks is None:
+                _assert_sources(change, after_paths, reverse)
+            else:
+                _trusted_hooks.assert_sources()
+        async def checkpoint():
+            guard()
+            if _trusted_hooks is not None:
+                await _trusted_hooks.checkpoint()
+                guard()
+
         all_paths = {f.path for f in change.files}
         after_paths = set(all_paths) if reverse else set()
         # Initial forward CAS requires original identities. Compensation requires
         # exact AFTER bytes on every owned file and unchanged non-owned inputs.
-        await _settled_executor(self.hass, _assert_sources, change, after_paths)
-        guard()
+        if _trusted_hooks is None:
+            await _settled_executor(self.hass, _assert_sources, change, after_paths)
+        else:
+            await _settled_executor(self.hass, sources)
+        await checkpoint()
         for row in (reversed(change.files) if reverse else change.files):
-            await _settled_executor(self.hass, _assert_sources, change, after_paths, reverse)
-            guard()
+            await _settled_executor(self.hass, sources)
+            await checkpoint()
             def effect(row=row):
                 guard()
-                _assert_sources(change, after_paths, reverse)
+                sources()
                 guard()
                 reader = _Reader(change.receipt.config_root, Limits())
                 try:
@@ -386,7 +402,7 @@ class YAMLTransactionAdapter:
                 finally:
                     os.close(reader.root)
                 expected = row.after if reverse else row.before
-                if current != expected or (not reverse and (info.st_dev, info.st_ino) != (row.device, row.inode)):
+                if current != expected or (_trusted_hooks is None and not reverse and (info.st_dev, info.st_ino) != (row.device, row.inode)):
                     raise Refused('yaml_write_cas_conflict')
                 proposed = row.before if reverse else row.after
                 patch = FilePatch(row.path, _hash(current), (Edit(0, len(current), current, proposed),), proposed)
@@ -394,24 +410,36 @@ class YAMLTransactionAdapter:
                 # Backup ID is content-bound and distinct for the reverse image.
                 operation = 'yaml_' + _digest((change.identity, row.path, reverse))[:64]
                 guard()
-                return apply_file_patch(change.receipt.config_root, patch, snapshot, operation, guard)
+                # The final guard runs INSIDE apply_file_patch immediately before
+                # replacement. Capture its direct return before any async yield.
+                def final_guard():
+                    guard()
+                    if _trusted_hooks is not None:
+                        sources()
+                result = apply_file_patch(change.receipt.config_root, patch, snapshot, operation, final_guard)
+                if _trusted_hooks is not None:
+                    _trusted_hooks.capture(result)
+                return result
             result = await _settled_executor(self.hass, effect)
             results.append(result)
-            guard()
+            await checkpoint()
             if reverse:
                 after_paths.remove(row.path)
             else:
                 after_paths.add(row.path)
-        await _settled_executor(self.hass, _assert_sources, change, after_paths, reverse)
-        guard()
-        await _settled(async_activate_yaml(self.hass, change.receipt, context=self.context, guard=guard))
-        guard()
+        await _settled_executor(self.hass, sources)
+        await checkpoint()
+        if _trusted_hooks is None:
+            await _settled(async_activate_yaml(self.hass, change.receipt, context=self.context, guard=guard))
+        else:
+            await _settled(_trusted_hooks.activate())
+        await checkpoint()
         position = await self.observer.position(change)
-        guard()
+        await checkpoint()
         if position != (Position.BEFORE if reverse else Position.AFTER):
             raise Refused('yaml_native_runtime_unconfirmed')
-        await _settled_executor(self.hass, _assert_sources, change, after_paths, reverse)
-        guard()
+        await _settled_executor(self.hass, sources)
+        await checkpoint()
         return results
 
     async def apply(self, step, guard):
