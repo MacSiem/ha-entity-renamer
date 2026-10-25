@@ -13,7 +13,7 @@ import logging
 import unittest
 
 import test_native_input_baseline as fixtures
-from test_native_helper_quiescence import NativeHelperQuiescenceTests
+import test_native_helper_quiescence as quiescence
 
 u = importlib.import_module(fixtures.PACKAGE + '.utility_meter_observers')
 h = importlib.import_module(fixtures.PACKAGE + '.helper_observers')
@@ -130,7 +130,7 @@ class UtilityBaselineCodecTests(unittest.TestCase):
 
 @unittest.skipUnless(fixtures.HAS_HA, 'native HA dependencies required')
 class ActualUtilityMeterObserverTests(unittest.IsolatedAsyncioTestCase):
-    asyncSetUp = NativeHelperQuiescenceTests.asyncSetUp
+    asyncSetUp = quiescence.NativeHelperQuiescenceTests.asyncSetUp
 
     async def _before_start(self, hass, root):
         from homeassistant.setup import async_setup_component
