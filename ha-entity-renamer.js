@@ -1413,8 +1413,92 @@ class HAEntityRenamer extends HTMLElement {
     const intro = this._lang === 'pl' ? _LOCAL_INTRO_PL : _LOCAL_INTRO;
     const label = this._lang === 'pl' ? 'Jak to działa?' : 'How does it work?';
     return `<details class="renamer-help" ${state.open ? 'open' : ''}><summary>ⓘ ${label}</summary>
-      <p>${_esc(intro.headline)}</p><ol>${intro.steps.map(step => `<li>${_esc(step)}</li>`).join('')}</ol></details>`;
+      <p>${_esc(intro.headline)}</p><ol>${intro.steps.map(step => `<li>${_esc(step)}</li>`).join('')}</ol>
+      ${this._renderBackendStatus()}</details>`;
   }
+  _renderBackendStatus() {
+    // This opt-in check cannot authorize any mutation. Do not render raw
+    // operations, version details, private errors or journal identifiers.
+    const user = this._hass?.user;
+    if (user?.is_admin !== true || typeof user.id !== 'string' || !user.id.trim()) return '';
+    const code = this._backendStatus?.code || 'not_checked';
+    const labels = this._lang === 'pl' ? {
+      not_checked: 'Nie sprawdzono backendu migracji',
+      checking: 'Sprawdzanie stanu backendu',
+      blocked: 'Backend działa, migracja zależności niegotowa',
+      recovery_required: 'Backend wymaga weryfikacji odzyskiwania, migracja zablokowana',
+      unavailable: 'Backend migracji niedostępny',
+      unauthorized: 'Brak uprawnień administratora do backendu',
+      unverified: 'Nie udało się potwierdzić bezpiecznego stanu backendu'
+    } : {
+      not_checked: 'Migration backend not checked',
+      checking: 'Checking migration backend status',
+      blocked: 'Backend online, dependency migration not ready',
+      recovery_required: 'Backend requires recovery review, migration blocked',
+      unavailable: 'Migration backend unavailable',
+      unauthorized: 'Backend administrator permissions required',
+      unverified: 'Unable to verify migration backend status'
+    };
+    const label = labels[code] || labels.unverified;
+    const button = this._lang === 'pl' ? 'Sprawdź backend (tylko odczyt)' : 'Check backend (read-only)';
+    return `<div class="renamer-backend-row">
+      <button id="checkRenamerBackendStatus" class="btn btn-outline" type="button" ${code === 'checking' ? 'disabled aria-busy="true"' : ''}>${button}</button>
+      <span id="renamerBackendStatus" role="status" aria-live="polite" data-backend-state="${code}">${_esc(label)}</span>
+    </div>`;
+  }
+
+  _updateBackendStatusRow() {
+    // Preserve the existing controls, focus and independent export dialog.
+    // Reuse the sanitized presentation without replacing the card or row.
+    const button = this.shadowRoot.getElementById('checkRenamerBackendStatus');
+    const status = this.shadowRoot.getElementById('renamerBackendStatus');
+    if (!button || !status) return;
+    const template = this.ownerDocument.createElement('template');
+    template.innerHTML = this._renderBackendStatus();
+    const nextButton = template.content.querySelector('#checkRenamerBackendStatus');
+    const nextStatus = template.content.querySelector('#renamerBackendStatus');
+    if (!nextButton || !nextStatus) return;
+    button.disabled = nextButton.disabled;
+    if (nextButton.hasAttribute('aria-busy')) button.setAttribute('aria-busy', 'true');
+    else button.removeAttribute('aria-busy');
+    status.dataset.backendState = nextStatus.dataset.backendState;
+    status.textContent = nextStatus.textContent;
+  }
+
+  async _checkBackendStatus() {
+    // A deliberate administrator gesture is required. No automatic polling,
+    // new mutation entrypoints or fallback to legacy registry updates.
+    if (!this._renameAuthorityAvailable() || this._backendStatus?.code === 'checking') return;
+    const read = this._captureRead();
+    const epoch = ++this._backendStatusEpoch;
+    const current = () => epoch === this._backendStatusEpoch && read.current()
+      && this._renameAuthorityAvailable();
+    this._backendStatus = {code:'checking'};
+    this._updateBackendStatusRow();
+    try {
+      const status = await read.hass.callWS({type:'ha_entity_renamer/status'});
+      if (!current()) return;
+      // Even migration_ready=true is not owner qualification of M1.c/M2.a.
+      const devBlocked = status && status.migration_ready === false
+        && status.reason === 'dependency_coverage_incomplete'
+        && typeof status.recovery_required === 'boolean'
+        && typeof status.version === 'string'
+        && Array.isArray(status.operations);
+      this._backendStatus = {code: devBlocked
+        ? (status.recovery_required ? 'recovery_required' : 'blocked')
+        : 'unverified'};
+    } catch (error) {
+      if (!current()) return;
+      const reason = error && typeof error === 'object' ? error.code : null;
+      // Core returns unknown_command when the optional integration has not
+      // registered its WS command at all (separate from configured-but-offline).
+      this._backendStatus = {code: reason === 'unavailable' || reason === 'unknown_command' ? 'unavailable'
+        : reason === 'unauthorized' ? 'unauthorized' : 'unverified'};
+    } finally {
+      if (current()) this._updateBackendStatusRow();
+    }
+  }
+
   _syncHelpWidth(width) {
     const help = this.shadowRoot.querySelector('details.renamer-help');
     if (!help || !(width > 0)) return;
@@ -1445,6 +1529,8 @@ class HAEntityRenamer extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this._lang = 'en';
     this._hass = null;
+    this._backendStatus = null;
+    this._backendStatusEpoch = 0;
     this._devices = [];
     this._entities = [];
     this._selectedDevice = null;
@@ -1530,6 +1616,8 @@ class HAEntityRenamer extends HTMLElement {
     this._legacyReviewLog = [];
     this._authorityEpoch++;
     this._readEpoch++;
+    this._backendStatusEpoch++;
+    this._backendStatus = null;
     if (this._applyOperation) this._applyOperation.cancelled = true;
     else this._loading = false;
     this._confirmation = null;
@@ -3124,6 +3212,10 @@ class HAEntityRenamer extends HTMLElement {
         :host input[type=checkbox] { accent-color:var(--_hat-primary-fill); }
         :host .btn-primary:disabled { opacity:1;background:var(--_hat-chip);color:var(--_hat-text-2);box-shadow:none; }
 
+        .renamer-backend-row {display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:12px 0 4px;min-width:0;}
+        .renamer-backend-row button {min-height:44px;white-space:normal;}
+        .renamer-backend-row button:focus-visible {outline:3px solid var(--primary-color);outline-offset:2px;}
+        .renamer-backend-row [role=status] {flex:1 1 180px;min-width:0;overflow-wrap:anywhere;font-size:13px;}
         .renamer-help { margin:8px 0 12px;font-size:14px; }
         .renamer-help summary { cursor:pointer;min-height:44px;align-content:center; }
         .renamer-help summary:focus-visible { outline:3px solid var(--primary-color);outline-offset:2px; }
@@ -3437,6 +3529,7 @@ class HAEntityRenamer extends HTMLElement {
     const t = this._t;
     root.getElementById('exportRenameLog')?.addEventListener('click', e => this._openRenameExport(e.currentTarget));
     root.getElementById('reviewLegacyHistory')?.addEventListener('click', () => this._reviewLegacyHistory());
+    root.getElementById('checkRenamerBackendStatus')?.addEventListener('click', () => this._checkBackendStatus());
 
     // Tab switching
     root.querySelectorAll('.tab-button').forEach(btn => {
