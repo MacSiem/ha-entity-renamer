@@ -231,6 +231,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             observed = await observe()
             fresh_chain.expected(tx.PhaseContext(await log.load(operation), 0), tuple(
                 rr.RegistryRawObservation(item.key, item.raw, item.identity) for item in observed.files))
+            expected_config = helper_change.after
             await restore_and_stimulate(helper_change.after)
             # A separate durable cycle starts from the accepted forward head;
             # it cannot mint a new baseline from post-migration current inputs.
