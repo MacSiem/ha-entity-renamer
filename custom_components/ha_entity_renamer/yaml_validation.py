@@ -224,8 +224,10 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False):
         staged = (tuple(sources), tuple((path, directories[path], directory_names[path])
                                        for path in sorted(directories)))
         if with_sources:
-            from .yaml_source_ledger import extract_source_ledger
-            return (*staged, extract_source_ledger(plan, original_bytes))
+            from .yaml_source_ledger import (extract_source_ledger,
+                                              extract_template_source_ledger)
+            return (*staged, extract_source_ledger(plan, original_bytes),
+                    extract_template_source_ledger(plan, original_bytes))
         return staged
     except (OSError, ValueError) as exc:
         if isinstance(exc, YAMLValidationError):
@@ -318,7 +320,8 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
             await _settled_executor(hass, assert_validation_current, receipt)
             if with_sources:
                 from .yaml_source_binding import seal_original_sources
-                evidence = seal_original_sources(receipt, plan, staged[2], result['source_runtime'])
+                evidence = seal_original_sources(receipt, plan, staged[2], result['source_runtime'],
+                    template_ledger=staged[3], template_native=result['template_sources'])
                 return receipt, evidence
             return receipt
     except (OSError, TimeoutError):

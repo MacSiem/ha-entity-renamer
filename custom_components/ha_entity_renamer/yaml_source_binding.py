@@ -10,6 +10,7 @@ import re
 
 from .native_input_baseline import _receipt_bytes
 from .yaml_source_ledger import SourceLedger, source_graph_digest
+from .template_source_evidence import OriginalTemplateSources
 from .yaml_validation import assert_proposal_matches
 
 _DOMAINS = ('automation', 'script')
@@ -37,6 +38,7 @@ class OriginalSourceEvidence:
     ledger: SourceLedger
     receipt_json: bytes
     domains: tuple[NativeSourceDomain, ...]
+    template_sources: OriginalTemplateSources | None = None
 
     @property
     def migration_ready(self):
@@ -49,6 +51,8 @@ class OriginalSourceEvidence:
         payload = {'receipt': self.receipt_json.decode('utf-8'),
                    'ledger': self.ledger.sha256,
                    'domains': [asdict(row) for row in self.domains]}
+        if self.template_sources is not None:
+            payload['template_sources'] = self.template_sources.sha256
         return hashlib.sha256(json.dumps(payload, sort_keys=True,
             separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
@@ -63,7 +67,8 @@ class OriginalSourceEvidence:
             raise SourceBindingError('original_source_receipt_mismatch') from None
 
 
-def seal_original_sources(receipt, plan, ledger, native):
+def seal_original_sources(receipt, plan, ledger, native, *,
+                          template_ledger=None, template_native=None):
     """Consume private output from the SAME original staging/check operation.
 
     This function validates binding/layout; it cannot turn client-provided
@@ -106,7 +111,13 @@ def seal_original_sources(receipt, plan, ledger, native):
         old = {domain: before for domain, before, _ in receipt.runtime_expected}
         _need(all(row.domain not in old or row.projection == old[row.domain]
                   for row in domains))
-        return OriginalSourceEvidence(ledger, receipt_json, tuple(domains))
+        template_sources = None
+        if template_ledger is not None or template_native is not None:
+            from .template_source_evidence import seal_template_sources
+            _need(type(template_ledger) is SourceLedger
+                  and template_ledger.original_graph_sha256 == source_graph_digest(plan))
+            template_sources = seal_template_sources(receipt, template_ledger, template_native)
+        return OriginalSourceEvidence(ledger, receipt_json, tuple(domains), template_sources)
     except (ValueError, TypeError, KeyError, AttributeError):
         raise SourceBindingError('original_source_evidence_rejected') from None
 

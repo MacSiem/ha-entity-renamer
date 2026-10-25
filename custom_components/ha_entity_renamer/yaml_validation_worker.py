@@ -102,7 +102,66 @@ def _fingerprint(value):
     return hashlib.sha256(payload).hexdigest()
 
 
-async def _expected_runtime(root, domains, *, source_rows=None):
+def _template_source_projection(checked):
+    """Native validated ORIGINAL blocks + every platform entity, no rendering.
+
+    This is distinct from _expected_runtime: there is no Template live observer
+    yet. Native conversion/defaults/variables are retained in each hashed row.
+    """
+    from homeassistant.components.template.const import PLATFORMS
+    rows = []
+    for cfg in checked.get('template', ()):
+        if cfg.raw_config is None or cfg.raw_blueprint_inputs is not None:
+            raise ValueError('template_blueprint_or_raw_source_unverified')
+        mode = 'trigger' if 'triggers' in cfg else 'state'
+        entities = []
+        for platform in PLATFORMS:
+            for entity in cfg.get(platform, ()):
+                key = entity.get('unique_id')
+                if type(key) is not str or not key:
+                    raise ValueError('template_stable_id_unverified')
+                prefix = cfg.get('unique_id')
+                if prefix:
+                    key = prefix + '-' + key
+                # Include parent trigger/variables/action context in the entity
+                # digest; a matching entity body alone is insufficient later.
+                entities.append(['template.' + platform, key, entity])
+        keys = sorted((row[0], row[1]) for row in entities)
+        if not keys:
+            raise ValueError('template_block_identity_unverified')
+        prefix = cfg.get('unique_id')
+        block_key = ('id:' + prefix if prefix else 'entities:' +
+            json.dumps(keys, separators=(',', ':'), ensure_ascii=True))
+        rows.append(['template.' + mode, block_key, cfg])
+        rows.extend([domain, key, [block_key, cfg, entity]]
+                    for domain, key, entity in entities)
+    keys = [(row[0], row[1]) for row in rows]
+    if len(set(keys)) != len(keys):
+        raise ValueError('template_duplicate_native_key')
+    return sorted(rows, key=lambda row: (row[0], row[1]))
+
+
+async def _expected_template_sources(hass, config):
+    """Same ORIGINAL checker instance/config; no factory, setup or rendering."""
+    from homeassistant.const import __version__
+    from homeassistant.config import async_process_component_and_handle_errors
+    from homeassistant.loader import async_get_integration
+    try:
+        if any(key.split(' ', 1)[0] == 'template' for key in config):
+            integration = await async_get_integration(hass, 'template')
+            checked = await async_process_component_and_handle_errors(hass, config, integration)
+            if checked is None:
+                raise ValueError('template_native_source_unverified')
+            projection = _template_source_projection(checked)
+        else:
+            projection = []  # exact absent modern YAML; legacy stays ledger UNKNOWN
+        return {'version': __version__, 'projection': _fingerprint(projection),
+                'rows': [[row[0], row[1], _fingerprint(row)] for row in projection]}
+    except Exception:
+        return {'version': __version__, 'projection': None, 'rows': None}
+
+
+async def _expected_runtime(root, domains, *, source_rows=None, template_sources=None):
     """Native schema projections in the isolated validator, without component setup.
 
     No scripts/actions/templates are run and no scene is activated. The trusted
@@ -124,6 +183,8 @@ async def _expected_runtime(root, domains, *, source_rows=None):
             from homeassistant.helpers import trigger
             await trigger.async_setup(hass)
         config = await async_hass_config_yaml(hass)
+        if template_sources is not None:
+            template_sources.update(await _expected_template_sources(hass, config))
         for domain in domains:
             try:
                 if domain in ('automation', 'script') and not any(
@@ -217,13 +278,16 @@ async def check(before_root, proposed_root, *, with_sources=False):
         return {'status': 'no_effective_config_change'}
     source_rows = {} if with_sources else None
     original_domains = sorted(set(changed) | {'automation', 'script'}) if with_sources else changed
-    old_runtime = await _expected_runtime(before_root, original_domains, source_rows=source_rows)
+    template_sources = {} if with_sources else None
+    old_runtime = await _expected_runtime(before_root, original_domains,
+        source_rows=source_rows, template_sources=template_sources)
     new_runtime = await _expected_runtime(proposed_root, changed)
     result = {'status': 'valid', 'version': __version__, 'changed_domains': changed,
               'unsupported_domains': unsupported,
               'runtime_expected': [(domain, old_runtime.get(domain), new_runtime.get(domain))
                                    for domain in changed]}
     if with_sources:
+        result['template_sources'] = template_sources
         result['source_runtime'] = {'version': __version__, 'domains': [
             [domain, old_runtime.get(domain), source_rows.get(domain)]
             for domain in ('automation', 'script')]}

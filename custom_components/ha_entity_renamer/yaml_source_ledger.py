@@ -81,7 +81,7 @@ class SourceLedger:
         A candidate means only a physically inventoried source definition. Native
         schema acceptance and exact projection hashes remain the checker's job.
         """
-        if domain not in ('automation', 'script') or self.findings:
+        if self.schema != 1 or domain not in ('automation', 'script') or self.findings:
             raise SourceLedgerError('source_inventory_unknown')
         rows = [row for row in self.definitions if row.domain == domain]
         if any(row.disposition != 'candidate' or row.native_key is None for row in rows):
@@ -126,6 +126,22 @@ class _Ref:
 
 def extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
                           limits: Limits = Limits()) -> SourceLedger:
+    """Existing automation/script inventory; Template findings remain separate."""
+    return _extract_source_ledger(plan, original, limits=limits, template=False)
+
+
+def extract_template_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
+                                   limits: Limits = Limits()) -> SourceLedger:
+    """All physical Template blocks/entities; no runtime or reload qualification.
+
+    Schema 2 distinguishes this detached inventory from automation/script v1.
+    Uses the exact same ORIGINAL Plan/bytes/edges; never scans includes again.
+    """
+    return _extract_source_ledger(plan, original, limits=limits, template=True)
+
+
+def _extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
+                           limits: Limits, template: bool) -> SourceLedger:
     """Inventory configuration.yaml reachability using the existing frozen graph.
 
     Extra Plan roots (e.g. dashboards) remain in graph digest but are not treated
@@ -300,13 +316,111 @@ def extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
                                       keyref.origin(), digest,
                                       'unsupported' if len(findings) != start else 'candidate'))
 
+    template_platforms = frozenset(('alarm_control_panel', 'binary_sensor',
+        'button', 'climate', 'cover', 'device_tracker', 'event', 'fan', 'image',
+        'light', 'lock', 'number', 'select', 'sensor', 'switch', 'update',
+        'vacuum', 'weather'))  # union of the two pinned native inventories
+    template_metadata = frozenset(('unique_id', 'triggers', 'trigger',
+        'conditions', 'condition', 'actions', 'action', 'variables', 'use_blueprint'))
+    template_blocks = 0
+
+    def template_items(ref):
+        ref = mapping_ref(ref)
+        if isinstance(ref.node, MappingNode):
+            yield ref  # native ensure_list accepts one mapping
+        else:
+            yield from expand(ref, 'seq')
+
+    def template_block(ref, section, package, *, legacy=False):
+        nonlocal template_blocks
+        ref = mapping_ref(ref)
+        index = str(template_blocks)
+        template_blocks += 1
+        start = len(findings)
+        members = pairs(ref)
+        values = {key: child for key, child, _ in members}
+        mode = 'legacy' if legacy else ('trigger' if
+            {'triggers', 'trigger'} & values.keys() else 'state')
+        if legacy:
+            flag(ref, 'source_template_legacy_unverified')
+        if 'use_blueprint' in values:
+            flag(ref, 'source_blueprint_unsupported')
+        for key, _, keyref in members:
+            if not legacy and key not in template_platforms | template_metadata:
+                flag(keyref, 'source_template_member_unverified')
+        block_hash = _hash(body(ref))
+        block_position = len(definitions)
+        definitions.append(Definition('template.' + mode, index, section, package,
+            ref.origin(), ref.origin(), block_hash,
+            'unsupported' if len(findings) != start else 'candidate'))
+        if legacy:
+            return
+        prefix = values.get('unique_id')
+        if prefix is not None:
+            if (not isinstance(prefix.node, ScalarNode) or prefix.node.tag != _STR
+                    or not prefix.node.value):
+                flag(prefix, 'source_template_prefix_unverified')
+                prefix_text = None
+            else:
+                prefix_text = prefix.node.value
+        else:
+            prefix_text = ''
+        for platform, value, _ in members:
+            if platform not in template_platforms:
+                continue
+            for entity in template_items(value):
+                entity = mapping_ref(entity)
+                start = len(findings)
+                cfg = pairs(entity)
+                ids = [(child, keyref) for key, child, keyref in cfg if key == 'unique_id']
+                native_key, keyref = None, entity
+                if (len(ids) == 1 and isinstance(ids[0][0].node, ScalarNode)
+                        and ids[0][0].node.tag == _STR and ids[0][0].node.value
+                        and prefix_text is not None):
+                    native_key = (prefix_text + '-' if prefix_text else '') + ids[0][0].node.value
+                    keyref = ids[0][1]
+                else:
+                    flag(entity, 'source_template_stable_id_missing')
+                digest = _hash(body(entity))
+                definitions.append(Definition('template.' + platform, native_key,
+                    section, package, entity.origin(), keyref.origin(), digest,
+                    'unsupported' if len(findings) != start else 'candidate'))
+
+        # Native package/label flattening can reorder sections. Bind blocks by
+        # stable prefix or complete entity-key set, never physical list ordinal.
+        children = definitions[block_position + 1:]
+        keys = sorted((row.domain, row.native_key) for row in children
+                      if row.native_key is not None)
+        if len(keys) != len(children) or not keys or prefix_text is None:
+            flag(ref, 'source_template_block_identity_unverified')
+            block_key = None
+        else:
+            block_key = ('id:' + prefix_text if prefix_text else
+                'entities:' + json.dumps(keys, separators=(',', ':'), ensure_ascii=True))
+        definitions[block_position] = replace(definitions[block_position],
+            native_key=block_key, disposition=('unsupported' if block_key is None
+                else definitions[block_position].disposition))
+
     def sections(ref, package=None):
         for section, value, keyref in pairs(ref):
             domain = section.split(' ', 1)[0]
-            if domain == 'automation':
+            if template and domain == 'template':
+                for item in template_items(value):
+                    template_block(item, section, package)
+            elif template and domain in template_platforms:
+                # Legacy platform: template is independent from top-level
+                # template:. Preserve its existence even when not qualified.
+                for item in template_items(value):
+                    resolved = mapping_ref(item)
+                    if isinstance(resolved.node, MappingNode) and any(
+                        isinstance(key, ScalarNode) and key.value == 'platform'
+                        and isinstance(child, ScalarNode) and child.value == 'template'
+                        for key, child in resolved.node.value):
+                        template_block(item, section, package, legacy=True)
+            elif not template and domain == 'automation':
                 for item in expand(value, 'seq'):
                     definition(domain, None, item, keyref, section, package)
-            elif domain == 'script':
+            elif not template and domain == 'script':
                 for key, item, origin in pairs(value):
                     definition(domain, key, item, origin, section, package)
             elif section == 'homeassistant' and package is None:
@@ -333,7 +447,8 @@ def extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
                 findings.append(Finding('source_duplicate_native_key', row.key_origin))
     # Stable encounter order is physical source order / frozen edge order. It
     # conveys no guessed native include-dir precedence.
-    payload = {'schema': 1, 'original_graph_sha256': graph_hash,
+    schema = 2 if template else 1
+    payload = {'schema': schema, 'original_graph_sha256': graph_hash,
                'definitions': [asdict(row) for row in definitions],
                'findings': [asdict(row) for row in findings]}
-    return SourceLedger(1, graph_hash, tuple(definitions), tuple(findings), _hash(payload))
+    return SourceLedger(schema, graph_hash, tuple(definitions), tuple(findings), _hash(payload))
