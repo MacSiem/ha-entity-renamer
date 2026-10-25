@@ -128,8 +128,8 @@ def assert_only_entity_id_changed(before, after, old_id, new_id):
     """Full serialized equality proof, with precisely one permitted field delta."""
     _shape(before)
     _shape(after)
-    _require(type(old_id) is str and type(new_id) is str and old_id != new_id,
-             'rename_endpoints')
+    _require(type(old_id) is str and type(new_id) is str and old_id != new_id
+             and old_id.split('.', 1)[0] == new_id.split('.', 1)[0], 'rename_endpoints')
     _require(before['state']['entity_id'] == old_id and
              after['state']['entity_id'] == new_id, 'rename_endpoints')
     expected = _parse(_canonical(before))

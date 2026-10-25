@@ -117,6 +117,13 @@ class PureCodecTests(unittest.TestCase):
         with self.assertRaises(codec.PayloadRejected):
             prepared(row)
 
+    def test_cross_domain_target_cannot_become_an_entity_identity_migration(self):
+        before = sample()
+        after = deepcopy(before)
+        after['state']['entity_id'] = 'light.new'
+        with self.assertRaises(codec.PayloadRejected):
+            codec.PreparedPayload('2026.10.2', codec._canonical(before), codec._canonical(after))
+
     def test_timestamp_spelling_and_offset_are_not_normalized(self):
         for value in ('2026-10-25T09:00:00Z', '2026-10-25T09:00:00',
                       '2026-10-25T09:00+00:00'):
@@ -188,12 +195,65 @@ class NativeTypeTests(unittest.TestCase):
         with self.assertRaises(codec.PayloadRejected):
             codec.prepare_payload(source, 'sensor.new')
 
+    def test_native_string_enum_is_encoded_without_arbitrary_string_conversion(self):
+        from homeassistant.const import UnitOfEnergy
+        source = self.make_native({'unit': UnitOfEnergy.KILO_WATT_HOUR})
+        payload = codec.prepare_payload(source, 'sensor.new')
+        clone = codec.materialize(payload)
+        self.assertEqual(clone.extra_data.as_dict(), {'unit': 'kWh'})
+
+    def test_foreign_extra_subclass_is_refused_before_its_conversion(self):
+        from homeassistant.helpers.restore_state import StoredState, ExtraStoredData
+        class ForeignExtra(ExtraStoredData):
+            def as_dict(self):
+                raise AssertionError('must not invoke foreign extra conversion')
+        source = self.make_native(None)
+        foreign = StoredState(source.state, ForeignExtra(), source.last_seen)
+        with self.assertRaises(codec.PayloadRejected):
+            codec.prepare_payload(foreign, 'sensor.new')
+
     def test_noop_invalid_target_and_native_nan_are_refused(self):
         for target in ('sensor.old', 'bad target', 'sensor.UPPER'):
             with self.assertRaises(codec.PayloadRejected):
                 codec.prepare_payload(self.make_native(None), target)
         with self.assertRaises(codec.PayloadRejected):
             codec.prepare_payload(self.make_native({'bad': float('nan')}), 'sensor.new')
+
+
+class ActualUtilityPayloadTests(unittest.IsolatedAsyncioTestCase):
+    """Actual native removal payload, without installing a cloned state anywhere."""
+    async def asyncSetUp(self):
+        import test_utility_meter_observers as fixture
+        if not fixture.fixtures.HAS_HA:
+            self.skipTest('requires actual installed Home Assistant')
+        self._native_fixture = fixture
+        await fixture.ActualUtilityMeterObserverTests.asyncSetUp(self)
+
+    async def _before_start(self, hass, root):
+        import test_utility_meter_observers as fixture
+        await fixture.ActualUtilityMeterObserverTests._before_start(self, hass, root)
+
+    async def _emit(self, *args, **kwargs):
+        return await self._native_fixture.ActualUtilityMeterObserverTests._emit(self, *args, **kwargs)
+
+    async def test_real_unload_payload_clones_without_mutating_native_cache(self):
+        from decimal import Decimal
+        from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
+        await self._native_fixture.ActualUtilityMeterObserverTests._fixture(self)
+        old = self.entity.entity_id
+        self.assertEqual(self.entity.native_value, Decimal('11'))
+        self.assertTrue(await self.f.hass.config_entries.async_unload(self.entry.entry_id))
+        await self.f.hass.async_block_till_done()
+        data = self.f.hass.data[DATA_RESTORE_STATE]
+        stored = data.last_states[old]
+        payload = codec.prepare_payload(stored, 'sensor.actual_utility_renamed')
+        restored = codec.materialize(codec.deserialize(codec.serialize(payload)))
+        self.assertIs(data.last_states[old], stored)
+        self.assertNotIn('sensor.actual_utility_renamed', data.last_states)
+        self.assertEqual(Decimal(restored.extra_data.as_dict()['native_value']), Decimal('11'))
+        self.assertEqual(Decimal(restored.extra_data.as_dict()['last_valid_state']), Decimal('111'))
+        codec.assert_only_entity_id_changed(json.loads(payload.before_json),
+            json.loads(payload.after_json), old, 'sensor.actual_utility_renamed')
 
 
 if __name__ == '__main__':
