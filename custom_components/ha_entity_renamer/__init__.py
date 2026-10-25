@@ -22,6 +22,35 @@ class Runtime:
     loaded: bool = True
     unloading: bool = False
 
+    async def discover(self, hass, proposal, *, guard, refresh):
+        """Server-owned read under the same lease used by migration/recovery.
+
+        Trusted callers provide fresh authorization IO, never a request field.
+        This neither creates preparations nor changes an original recovery plan.
+        """
+        from .discovery import async_discover
+        def current():
+            guard()
+            if (hass.data.get(DATA_RUNTIME) is not self or not self.loaded
+                    or self.unloading):
+                raise ValueError('discovery_runtime_unavailable')
+        current()
+        async with self.operation_lock:
+            current()
+            await refresh()
+            current()
+            result = await async_discover(hass, proposal, current)
+            current()
+            await refresh()
+            current()
+            return result
+
+    async def preview(self, hass, proposal, *, guard, refresh):
+        """Use the very same discovery for the server's conflict preview."""
+        from .discovery import compose_preview
+        capture = await self.discover(hass, proposal, guard=guard, refresh=refresh)
+        return compose_preview(capture)
+
 
 async def async_setup(hass, config):
     return True
