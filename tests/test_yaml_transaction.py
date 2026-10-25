@@ -149,16 +149,24 @@ class Regressions(unittest.IsolatedAsyncioTestCase):
 
     async def test_graph_edit_after_executor_fence_is_caught_before_first_write(self):
         fences = []
+        original = module._assert_sources
+        def observed(*args):
+            result = original(*args)
+            fences.append(True)
+            return result
+        injected = False
         async def executor(function, *args):
+            nonlocal injected
             result = await asyncio.to_thread(function, *args)
-            if function is module._assert_sources:
-                fences.append(True)
-                if len(fences) == 2:
-                    (self.root / self.rows[1].path).write_bytes(b'foreign between executor calls\n')
+            if len(fences) == 2 and not injected:
+                injected = True
+                (self.root / self.rows[1].path).write_bytes(b'foreign between executor calls\n')
             return result
         self.hass.async_add_executor_job = executor
-        with self.assertRaises(transaction.Refused):
-            await self.adapter.apply(self.step, lambda: None)
+        with patch.object(module, '_assert_sources', observed):
+            with self.assertRaises(transaction.Refused):
+                await self.adapter.apply(self.step, lambda: None)
+        self.assertTrue(injected)
         self.assertEqual((self.root / self.rows[0].path).read_bytes(), self.rows[0].before)
         self.assertEqual((self.root / self.rows[1].path).read_bytes(), b'foreign between executor calls\n')
         self.assertEqual(self.reload_count, 0)
