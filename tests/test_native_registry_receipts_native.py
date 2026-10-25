@@ -71,6 +71,15 @@ class NativeRegistryReceiptsTests(unittest.IsolatedAsyncioTestCase):
         coordinator = tx.Coordinator({'registry': adapter}, log, f.guard,
                                      required_scopes=('registry',))
         original_mutate, calls = io.mutate, []
+        effect_errors = []
+        original_apply = adapter.apply
+
+        async def diagnosed_apply(step, guard):
+            try:
+                return await original_apply(step, guard)
+            except Exception as err:
+                effect_errors.append((type(err).__name__, str(err)))
+                raise
 
         def checked_mutate(change, target):
             # Inspect independently persisted raw journal/sidecar at the exact
@@ -90,9 +99,10 @@ class NativeRegistryReceiptsTests(unittest.IsolatedAsyncioTestCase):
             calls.append((change.identity, durable.direction))
             return original_mutate(change, target)
 
-        with patch.object(io, 'mutate', checked_mutate):
+        with patch.object(io, 'mutate', checked_mutate), patch.object(adapter, 'apply', diagnosed_apply):
             applied = await coordinator.apply(plan, plan.fingerprint, operation)
-            self.assertEqual(applied.status, 'applied')
+            self.assertEqual(applied.status, 'applied',
+                             (applied.reason, applied.phases, calls, effect_errors))
             self.assertEqual(len(calls), 2)
             self.assertEqual(await coordinator.apply(plan, plan.fingerprint, operation), applied)
             self.assertEqual(len(calls), 2)
