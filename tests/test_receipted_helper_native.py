@@ -114,8 +114,10 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                                'device_id': f.entity.async_get(old).device_id}]}, lambda: None)
             families = {row.name: row for row in discovered.families}
             for family in ('entity_registry', 'device_registry', 'config_entries',
-                           'history', 'statistics'):
+                           'history', 'statistics', 'script'):
                 self.assertEqual(families[family].status, 'COMPLETE', families[family].reason)
+            self.assertEqual(len(families['script'].rows), 1)
+            self.assertIn('runtime_source_binding_unverified', families['script'].blockers)
             historical_scope = json.loads(families['history'].payload_json)
             self.assertEqual(historical_scope['scope_entity_ids'], sorted((old, new)))
             self.assertFalse(discovery.compose_preview(discovered)['migration_ready'])
