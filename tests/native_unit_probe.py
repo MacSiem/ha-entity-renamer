@@ -13,9 +13,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--container', choices=('ha-renamer-qa222', 'ha-renamer-min222'), default='ha-renamer-qa222')
 parser.add_argument('--pattern', default='test*.py')
 parser.add_argument('--repeat', type=int, default=1)
+parser.add_argument('--timeout', type=int, default=600, help='Container suite timeout in seconds')
 parser.add_argument('--test-filter', default='', help='Only discovered test IDs containing this string')
 args = parser.parse_args()
-assert args.repeat >= 1 and '/' not in args.pattern and '\\' not in args.pattern
+assert args.repeat >= 1 and args.timeout > 0 and '/' not in args.pattern and '\\' not in args.pattern
 if not any(path.is_file() for path in (ROOT/'tests').glob(args.pattern)):
     parser.error('test pattern selected no source files')
 info = json.loads(subprocess.check_output(['docker', 'inspect', args.container], text=True))[0]
@@ -59,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix='renamer-unit-', dir='/config') as direc
 raise SystemExit(0 if success else 1)
 '''
 completed = subprocess.run(['docker','exec','-i',args.container,'python','-X','faulthandler','-B','-'],
-    input='SOURCES = '+repr(sources)+'\nPATTERN = '+repr(args.pattern)+'\nREPEAT = '+repr(args.repeat)+'\nTEST_FILTER = '+repr(args.test_filter)+'\n'+program, text=True, capture_output=True, timeout=120)
+    input='SOURCES = '+repr(sources)+'\nPATTERN = '+repr(args.pattern)+'\nREPEAT = '+repr(args.repeat)+'\nTEST_FILTER = '+repr(args.test_filter)+'\n'+program, text=True, capture_output=True, timeout=args.timeout)
 print(completed.stdout)
 print(completed.stderr)
 completed.check_returncode()
