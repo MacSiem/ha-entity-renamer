@@ -437,7 +437,6 @@ class NativeUtilityMeterObservers:
         if self.modes[key] == 'not_loaded':
             require(not candidates and info is None and not self._jobs(key),
                     'utility_inactive_has_runtime')
-            self._source(snapshot, values=False)
             return None, None
         require(entry.disabled_by is None and len(self.helper_rows[key]) == 1
                 and self.helper_rows[key][0].get('disabled_by') is None,
@@ -496,6 +495,17 @@ class NativeUtilityMeterObservers:
         # No await between dependency, subscription, source, native and output reads.
         entity, source = self._activation(snapshot)
         if entity is None:
+            # An inactive saga may temporarily have old options while the source
+            # registry already holds the new ID (and vice versa on reverse).
+            # Prove the ORIGINAL physical source at exactly one prepared name;
+            # activation checks alone must not demand an active dependency.
+            from homeassistant.helpers import entity_registry as er
+            key = snapshot['identity']['entry_id']
+            registry = er.async_get(self.hass)
+            rows = [registry.async_get(name) for name in set(self.source_names[key])]
+            rows = [row for row in rows if row is not None]
+            require(len(rows) == 1 and registry_identity(rows[0]) == self.source_rows[key],
+                    'utility_inactive_source_identity_changed')
             return True  # Preserved absence only: never an accumulator proof.
         key = snapshot['identity']['entry_id']
         baseline = _payload(self._baselines[key])
