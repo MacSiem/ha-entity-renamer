@@ -7,7 +7,7 @@ are synthetic private trees, never the running container's /config storage.
 import asyncio
 import base64
 from copy import deepcopy
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, asdict, replace
 import hashlib
 import importlib.util
 import json
@@ -363,6 +363,33 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.helpers.storage import Store
         with patch.object(Store, 'async_save', forbidden), patch.object(Store, 'async_load', forbidden):
             await self.capture()
+
+    async def test_native_prepared_store_and_journal_reopen_preserve_full_baseline(self):
+        prepared = importlib.import_module(PACKAGE + '.prepared')
+        journal = importlib.import_module(PACKAGE + '.journal')
+        tx = importlib.import_module(PACKAGE + '.transaction')
+        captured = await self.capture()
+        store = prepared.native_prepared_store(self.hass)
+        await store.initialize()
+        reference = await store.create_native_inputs('batch-native-inputs', captured)
+        plan = tx.Plan('synthetic-batch', ('registry',), ('registry',),
+            (tx.Step('one', 'registry', 'identity', 'before', 'after', 'prepared-change'),),
+            'synthetic-coverage', ('registry',), native_inputs=reference)
+        log = journal.native_journal(self.hass)
+        await log.initialize()
+        await log.create(tx.Record('synthetic-operation', plan, phases=('pending',)))
+        fresh_store = prepared.native_prepared_store(self.hass)
+        fresh_log = journal.native_journal(self.hass)
+        await fresh_store.initialize()
+        await fresh_log.initialize()
+        reopened = await fresh_log.load('synthetic-operation')
+        self.assertEqual(reopened.plan.fingerprint, plan.fingerprint)
+        self.assertEqual(fresh_store.resolve_native_inputs(
+            reopened.plan.native_inputs, self.receipt), captured)
+        payload = (self.root / '.storage/ha_entity_renamer.prepared').read_bytes()
+        self.assertIn(b'native_input_baseline', payload)
+        # These stores are private. No names/config bytes belong in Plan/journal.
+        self.assertNotIn(b'unknown_preserved_data', json.dumps(asdict(reopened)).encode())
 
     async def test_pending_delay_write_and_final_listener_refuse(self):
         for store in (m._store for m in self.managers):
