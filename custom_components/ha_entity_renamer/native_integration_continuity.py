@@ -270,6 +270,8 @@ class NativeIntegrationContinuity:
                 if entity is self.old and not self._bridge_depth:
                     event_object = frame.f_locals.get('event')
                     _need(event_object is not None, 'callback_event_shape')
+                    self._validate_emission(event_object,
+                        'changed' if frame.f_code is self.codes['changed'] else 'reported')
                     if phase == 'start':
                         _need(id(event_object) not in self._consumed, 'duplicate_old_consumer')
                         self._consumed[id(event_object)] = (event_object, False)
@@ -278,13 +280,12 @@ class NativeIntegrationContinuity:
                               'old_consumer_return')
                         self._consumed[id(event_object)] = (event_object, True)
                         self._native_old_calls += 1
-                elif entity is self._new and phase == 'start':
-                    # After the atomic cut, the native new listener is the sole
-                    # consumer; retire the origin token without retaining history.
+                elif entity is self._new:
                     event_object = frame.f_locals.get('event')
-                    item = self._emitted.pop(id(event_object.data), None)
-                    _need(item is not None and item[0] is event_object.data,
-                          'new_consumer_without_emission')
+                    self._validate_emission(event_object,
+                        'changed' if frame.f_code is self.codes['changed'] else 'reported')
+                    if phase == 'return':
+                        self._emitted.pop(id(event_object.data))
                 return
             if frame.f_code is self.codes['remove_callbacks'] and entity is self.old:
                 _need(self._phase == 'unloading', 'foreign_old_removal')
@@ -337,19 +338,42 @@ class NativeIntegrationContinuity:
         state = data.get('new_state')
         _need(state is not None and state is self.hass.states.get(self.source)
               and Decimal(state.state).is_finite(), 'finite_source_head')
-        self._emitted[id(data)] = (data, state, state.state, state.last_reported)
+        old_state = data.get('old_state')
+        self._emitted[id(data)] = (
+            data, kind, old_state, state, self._state_values(old_state),
+            self._state_values(state), data.get('old_last_reported'),
+            data.get('last_reported'), tuple(sorted(data)))
+
+    def _state_values(self, state):
+        if state is None:
+            return None
+        _need(type(state) is self._state_cls, 'actual_event_state')
+        return (state.entity_id, state.state, state.last_changed, state.last_updated,
+                state.last_reported, state.attributes.get('unit_of_measurement'),
+                state.attributes.get('device_class'))
+
+    def _validate_emission(self, event_object, kind):
+        data = event_object.data
+        item = self._emitted.get(id(data))
+        _need(item is not None and item[0] is data
+              and item[1] == event_object.event_type == 'state_' + kind
+              and item[2] is data.get('old_state') and item[3] is data.get('new_state')
+              and item[4] == self._state_values(item[2])
+              and item[5] == self._state_values(item[3])
+              and item[6] == data.get('old_last_reported')
+              and item[7] == data.get('last_reported')
+              and item[8] == tuple(sorted(data)),
+              'emission_delivery_or_mutable_input')
 
     def _bridge(self, event_object, kind):
         try:
             self._check()
             data = event_object.data
-            item = self._emitted.pop(id(data), None)
-            _need(item is not None and item[0] is data and item[1] is data.get('new_state')
-                  and item[2] == item[1].state and item[3] == item[1].last_reported,
-                  'emission_delivery_or_mutable_endpoint')
+            self._validate_emission(event_object, kind)
             consumed = self._consumed.pop(id(event_object), None)
             if consumed is not None:
                 _need(consumed == (event_object, True), 'native_consumer_incomplete')
+                self._emitted.pop(id(data))
                 return
             _need(self._retained and self._phase in ('unloading', 'retained', 'setting_up')
                   and not self._bridge_depth, 'one_retained_consumer')
@@ -358,6 +382,8 @@ class NativeIntegrationContinuity:
                 callback = getattr(self.old, '_integrate_on_state_' +
                     ('change' if kind == 'changed' else 'report') + '_with_max_sub_interval')
                 callback(event_object)  # SAME real Event, real native arithmetic.
+                self._validate_emission(event_object, kind)
+                self._emitted.pop(id(data))
                 self._bridge_calls += 1
             finally:
                 self._bridge_depth -= 1
@@ -385,9 +411,9 @@ class NativeIntegrationContinuity:
         handle, _, endpoint = self._timer(self.old)
         _need(endpoint is self.hass.states.get(self.source), 'retained_endpoint_head')
         snapshot = self._snapshot(self.old)
-        for unsubscribe in self._unsubscribes:
+        for unsubscribe in tuple(self._unsubscribes):
             unsubscribe()
-        self._unsubscribes.clear()
+            self._unsubscribes.remove(unsubscribe)
         handle.cancel()
         self._old_cancelled = handle
         # Causal actual-data migration, never arithmetic/calibration/fixture seed.
@@ -448,27 +474,39 @@ class NativeIntegrationContinuity:
 
     def close(self):
         _need(asyncio.current_task() is self.task, 'owner_cleanup')
-        if not self._live:
-            return
         self._live = False
-        try:
-            for unsubscribe in self._unsubscribes:
-                unsubscribe()
-            self._unsubscribes.clear()
-            if self._retained:
-                self.old._max_sub_interval_exceeded_callback()
+        first_error = None
+        def attempt(action):
+            nonlocal first_error
+            try:
+                action()
+                return True
+            except BaseException as error:
+                self._poison('cleanup_failed')
+                if first_error is None:
+                    first_error = error
+                return False
+        # Each resource category is independent. A failed native unsubscribe
+        # cannot leave the retained timer or either monitoring tool alive.
+        while self._unsubscribes:
+            unsubscribe = self._unsubscribes.pop(0)
+            attempt(unsubscribe)
+        if self._retained:
+            if attempt(self.old._max_sub_interval_exceeded_callback):
                 self._retained = False
-        finally:
-            if self._emissions is not None:
-                self._emissions.close()
+        if self._emissions is not None:
+            if attempt(self._emissions.close):
                 self._emissions = None
-            monitor = sys.monitoring
-            if self._tool is not None and monitor.get_tool(self._tool) == _NAME:
-                for code in self._watched:
-                    monitor.set_local_events(self._tool, code, 0)
-                monitor.register_callback(self._tool, monitor.events.PY_START, None)
-                monitor.register_callback(self._tool, monitor.events.PY_RETURN, None)
-                monitor.free_tool_id(self._tool)
-            self._tool = None
-            self._consumed.clear()
-            self._emitted.clear()
+        monitor = sys.monitoring
+        if self._tool is not None and monitor.get_tool(self._tool) == _NAME:
+            key = self._tool
+            for code in self._watched:
+                attempt(lambda code=code: monitor.set_local_events(key, code, 0))
+            attempt(lambda: monitor.register_callback(key, monitor.events.PY_START, None))
+            attempt(lambda: monitor.register_callback(key, monitor.events.PY_RETURN, None))
+            if attempt(lambda: monitor.free_tool_id(key)):
+                self._tool = None
+        self._consumed.clear()
+        self._emitted.clear()
+        if first_error is not None:
+            raise first_error
