@@ -92,7 +92,7 @@ class HelperLifecycleTests(unittest.IsolatedAsyncioTestCase):
         h = await Harness().initialize(self)
         await h.obj.quiesce()
         before = dict(h.store.rows)
-        parsed = module.validate_lifecycle_receipt_witness(*h.args,
+        parsed = module.validate_lifecycle_receipt_witness(h.args[0], *h.args[2:],
             root_id=h.obj.root_id)
         self.assertFalse(parsed.writable)
         self.assertEqual(parsed.inspect(), h.obj.inspect())
@@ -101,11 +101,11 @@ class HelperLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(module.HelperLifecycleError, 'read_only'):
             await parsed.quiesce()
         with self.assertRaisesRegex(module.HelperLifecycleError, 'root_binding'):
-            module.validate_lifecycle_receipt_witness(*h.args, root_id='rr-' + '0' * 64)
+            module.validate_lifecycle_receipt_witness(h.args[0], *h.args[2:], root_id='rr-' + '0' * 64)
         await h.obj.restore(h.authorization)
         reverse = await module.NativeHelperLifecycle.start(*h.args, **h.kwargs,
             source_authorization=h.authorization)
-        parsed_reverse = module.validate_lifecycle_receipt_witness(*h.args,
+        parsed_reverse = module.validate_lifecycle_receipt_witness(h.args[0], *h.args[2:],
             root_id=reverse.root_id)
         self.assertEqual(parsed_reverse.source_authorization, h.authorization)
         self.assertEqual(parsed_reverse.root_id, reverse.root_id)

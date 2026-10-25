@@ -77,6 +77,46 @@ def stored_lifecycle_plan(store, root_id):
         _fail('root_binding_mismatch')
 
 
+def validate_lifecycle_receipt_witness(store, operation_id, plan, receipt,
+        prepared_digests, *, root_id, source_authorization=None):
+    """Parse copied immutable lifecycle events for a native-effect receipt.
+
+    This has no manager or installed runtime IO. Reuse the SAME strict reopen
+    graph validator with callbacks that always refuse if invoked. The result is
+    permanently read-only; it cannot approve setup, recover writes or grant a
+    current source fence. Original preparations and receipt remain mandatory.
+    """
+    if type(store) is not RegistryReceiptStore or type(root_id) is not str:
+        _fail('root_binding_mismatch')
+    row = store.read(root_id)
+    if (type(row) is not dict or type(row.get('payload')) is not dict
+            or row.get('digest') != _digest(row['payload'])
+            or type(row['payload'].get('binding')) is not dict):
+        _fail('root_binding_mismatch')
+    saved = row['payload']['binding'].get('source_authorization')
+    if saved is not None:
+        try:
+            inferred = RestoreAuthorization(**saved)
+        except (TypeError, ValueError):
+            _fail('root_binding_mismatch')
+        if source_authorization is not None and source_authorization != inferred:
+            _fail('root_binding_mismatch')
+        source_authorization = inferred
+    elif source_authorization is not None:
+        _fail('root_binding_mismatch')
+
+    def no_effect(*_args, **_kwargs):
+        _fail('receipt_witness_read_only')
+
+    parsed = NativeHelperLifecycle.reopen(store, None, operation_id, plan, receipt,
+        prepared_digests, guard=no_effect, verify_original_native_inputs=no_effect,
+        settle=no_effect, verify_inactive=no_effect, verify_runtime=no_effect,
+        verify_accepted_native_chain=no_effect, source_authorization=source_authorization)
+    if parsed.root_id != root_id:
+        _fail('root_binding_mismatch')
+    return parsed
+
+
 @dataclass(frozen=True)
 class RestoreAuthorization:
     """Trusted chain verifier must authenticate all fields against durable state.
