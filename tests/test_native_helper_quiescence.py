@@ -10,7 +10,7 @@ import importlib
 import json
 import logging
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 import unittest
 
 import test_native_input_baseline as fixtures
@@ -19,10 +19,26 @@ import test_native_input_baseline as fixtures
 @unittest.skipUnless(fixtures.HAS_HA, 'native HA dependencies required')
 class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.f = fixtures.NativeBaselineTests(
-            'test_actual_native_serialization_and_store_full_baseline')
-        await self.f.asyncSetUp()
-        self.addAsyncCleanup(self.f.asyncTearDown)
+        from homeassistant import loader
+        from homeassistant.bootstrap import async_load_base_functionality
+        from homeassistant.config_entries import ConfigEntries
+        from homeassistant.const import __version__
+        from homeassistant.core import HomeAssistant
+        from homeassistant.helpers import entity_registry as er, device_registry as dr
+        directory = fixtures.scratch()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name).resolve()
+        (root / 'configuration.yaml').write_bytes(b'script: {}\n')
+        hass = HomeAssistant(str(root))
+        self.addAsyncCleanup(hass.async_stop, force=True)
+        loader.async_setup(hass)
+        hass.config_entries = ConfigEntries(hass, {})
+        await loader.async_get_custom_components(hass)
+        self.assertIsNot(await async_load_base_functionality(hass), False)
+        await hass.async_start()
+        self.f = SimpleNamespace(hass=hass, root=root, version=__version__,
+            entity=er.async_get(hass), device=dr.async_get(hass))
+        self.f.managers = (self.f.entity, self.f.device, hass.config_entries)
         self.modules = {name: importlib.import_module(fixtures.PACKAGE + '.' + name)
                         for name in ('native_registry', 'native_registry_transition',
                                      'helper_native', 'helper_transaction',
@@ -90,8 +106,6 @@ class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(source[other], result[other])
 
     async def test_threshold_supported_unload_own_mutations_setup_and_reverse(self):
-        from homeassistant import loader
-        from homeassistant.bootstrap import async_load_base_functionality
         from homeassistant.components.sensor import (
             SensorEntity, SensorDeviceClass, SensorStateClass)
         from homeassistant.config_entries import ConfigEntry, ConfigEntryState
@@ -100,11 +114,6 @@ class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
 
         f, m = self.f, self.modules
         hass = f.hass
-        # Reuse native_registry_probe's actual base initialization, without its
-        # Recorder/http setup or network server. Hass is the baseline's SSD tree.
-        await loader.async_get_custom_components(hass)
-        self.assertIsNot(await async_load_base_functionality(hass), False)
-
         class Meter(SensorEntity):
             _attr_name = 'Renamer Quiescence Meter'
             _attr_unique_id = 'renamer-quiescence-meter'
