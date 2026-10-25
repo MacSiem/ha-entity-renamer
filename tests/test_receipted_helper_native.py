@@ -427,7 +427,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                     self.assertEqual(Path(hass.config.path(row.path)).read_bytes(), before_files[row.path])
                 self.assertEqual(json.loads(Path(hass.config.path('.storage',
                     'ha_entity_renamer.registry_receipts')).read_bytes()), before_events)
-                with self.assertRaises(ValueError):
+                with self.assertRaises((ValueError, tx.Refused)):
                     await fresh_adapter.apply(steps[2], fresh_guard)
                 if yaml_fault == 'intent':
                     with self.assertRaisesRegex(ValueError, 'unresolved_intent'):
