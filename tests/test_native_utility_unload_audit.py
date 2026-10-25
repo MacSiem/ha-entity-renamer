@@ -26,6 +26,18 @@ class ActualUtilityUnloadAuditTests(unittest.IsolatedAsyncioTestCase):
         self.expected_row = self.observer.expected_registry_rows(self.entry.entry_id)[0]
         self.lease = await lease_module.NativeHelperActivationLease.acquire(
             self.f.hass, self.f.hass.config_entries, (self.entry,), guard=lambda: None)
+        erow = self.entity.registry_entry
+        current = self.f.entity.async_get(self.helper_id)
+        print('UNLOAD_ENTITY_BINDING', {'same_row_object': erow is current,
+            'same_row_content': u._row(erow) == self.expected_row,
+            'row_changed_keys': sorted(k for k in set(u._row(erow)) | set(self.expected_row)
+                if u._row(erow).get(k) != self.expected_row.get(k)),
+            'same_platform': self.entity.platform in [p for p in __import__(
+                'homeassistant.helpers.entity_platform', fromlist=['async_get_platforms']
+                ).async_get_platforms(self.f.hass, 'utility_meter')],
+            'same_unique': self.entity.unique_id == self.entry.entry_id,
+            'same_parent': self.entity._parent_meter == self.entry.entry_id,
+            'same_hass': self.entity.hass is self.f.hass})
         self.audit = u.NativeUtilityUnloadAudit(self.f.hass, self.entry,
                                                self.expected_row, guard=lambda: None)
 
