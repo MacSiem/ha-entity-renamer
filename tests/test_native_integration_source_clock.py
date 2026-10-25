@@ -10,6 +10,7 @@ import importlib
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from types import MappingProxyType
 import unittest
@@ -176,6 +177,9 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
         yaml_observer=m['yaml_runtime_observer'].NativeYAMLRuntimeReadback(hass)
         locks=m['yaml_editor_locks'].NativeYAMLEditorLocks(hass)
         def retained_guard():
+            if self.scope is not None and threading.get_ident() != self.scope.thread:
+                from homeassistant.util.async_ import run_callback_threadsafe
+                return run_callback_threadsafe(hass.loop, retained_guard).result()
             self.guard()
             self.scope._check()
             self.assertTrue(self.scope._retained)
