@@ -7,6 +7,7 @@ Backups and failed temporary files remain local for journal-driven recovery.
 """
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 import hashlib
 import os
 from pathlib import PurePosixPath
@@ -19,6 +20,53 @@ from .yaml_plan import Limits, _Reader, _relative
 
 class FileConflict(ValueError):
     """A sanitized conflict; do not retry without independent reconciliation."""
+
+
+@dataclass(frozen=True)
+class FileMutationResult:
+    """Private call evidence, never an authorization or client-supplied receipt.
+
+    Only the synchronous mutator creates this from its pinned source and final
+    readback. Keep the public return a plain dictionary for existing consumers.
+    No codec accepts external evidence or recovers a lost call acknowledgement.
+    """
+
+    operation_id: str
+    path: str
+    before_sha256: str
+    after_sha256: str
+    before_identity: tuple[int, int, int]
+    after_identity: tuple[int, int, int]
+    before_uid: int
+    before_gid: int
+    after_uid: int
+    after_gid: int
+    backup: str
+
+    def __post_init__(self):
+        if (type(self.operation_id) is not str
+                or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', self.operation_id)
+                or type(self.path) is not str or _relative(self.path) != self.path
+                or type(self.backup) is not str or _relative(self.backup) != self.backup):
+            raise ValueError('invalid_file_mutation_result')
+        for digest in (self.before_sha256, self.after_sha256):
+            if type(digest) is not str or not re.fullmatch(r'[0-9a-f]{64}', digest):
+                raise ValueError('invalid_file_mutation_result')
+        for identity in (self.before_identity, self.after_identity):
+            if (type(identity) is not tuple or len(identity) != 3
+                    or any(type(n) is not int or n < 0 for n in identity)
+                    or not stat.S_ISREG(identity[2])):
+                raise ValueError('invalid_file_mutation_result')
+        if any(type(n) is not int or n < 0 for n in
+               (self.before_uid, self.before_gid, self.after_uid, self.after_gid)):
+            raise ValueError('invalid_file_mutation_result')
+
+    def as_dict(self):
+        """Add full evidence while preserving every original dictionary field."""
+        result = asdict(self)
+        result.update(sha256=self.after_sha256,
+                      device=self.after_identity[0], inode=self.after_identity[1])
+        return result
 
 
 def _hash(raw):
@@ -167,8 +215,15 @@ def apply_file_patch(config_root, patch, expected_snapshot, operation_id, guard=
         if (after != projected or (after_info.st_dev, after_info.st_ino) != (new_info.st_dev, new_info.st_ino)
                 or not _metadata_equal(after_info, new_info)):
             raise FileConflict('file_write_unconfirmed')
-        return {'path': path, 'sha256': _hash(after), 'backup': backup,
-                'device': after_info.st_dev, 'inode': after_info.st_ino}
+        return FileMutationResult(
+            operation_id=operation_id, path=path,
+            before_sha256=_hash(before), after_sha256=_hash(after),
+            before_identity=(pinned.st_dev, pinned.st_ino, pinned.st_mode),
+            after_identity=(after_info.st_dev, after_info.st_ino, after_info.st_mode),
+            before_uid=pinned.st_uid, before_gid=pinned.st_gid,
+            after_uid=after_info.st_uid, after_gid=after_info.st_gid,
+            backup=backup,
+        ).as_dict()
     except OSError:
         raise FileConflict('file_io_unconfirmed') from None
     finally:

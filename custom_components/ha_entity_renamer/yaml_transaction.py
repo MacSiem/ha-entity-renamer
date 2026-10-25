@@ -366,6 +366,7 @@ class YAMLTransactionAdapter:
         return position
 
     async def _write(self, change, guard, *, reverse):
+        results = []
         all_paths = {f.path for f in change.files}
         after_paths = set(all_paths) if reverse else set()
         # Initial forward CAS requires original identities. Compensation requires
@@ -393,8 +394,9 @@ class YAMLTransactionAdapter:
                 # Backup ID is content-bound and distinct for the reverse image.
                 operation = 'yaml_' + _digest((change.identity, row.path, reverse))[:64]
                 guard()
-                apply_file_patch(change.receipt.config_root, patch, snapshot, operation, guard)
-            await _settled_executor(self.hass, effect)
+                return apply_file_patch(change.receipt.config_root, patch, snapshot, operation, guard)
+            result = await _settled_executor(self.hass, effect)
+            results.append(result)
             guard()
             if reverse:
                 after_paths.remove(row.path)
@@ -410,6 +412,7 @@ class YAMLTransactionAdapter:
             raise Refused('yaml_native_runtime_unconfirmed')
         await _settled_executor(self.hass, _assert_sources, change, after_paths, reverse)
         guard()
+        return results
 
     async def apply(self, step, guard):
         guard()
@@ -419,7 +422,7 @@ class YAMLTransactionAdapter:
             if await self.observer.position(change) != Position.BEFORE:
                 raise Refused('yaml_native_before_unconfirmed')
             guard()
-            await self._write(change, guard, reverse=False)
+            return await self._write(change, guard, reverse=False)
 
     async def compensate(self, step, guard):
         guard()
@@ -429,7 +432,7 @@ class YAMLTransactionAdapter:
             if await self.observer.position(change) != Position.AFTER:
                 raise Refused('yaml_native_after_unconfirmed')
             guard()
-            await self._write(change, guard, reverse=True)
+            return await self._write(change, guard, reverse=True)
 
     async def verify(self, plan):
         return await self._verify(plan, rollback=False)
