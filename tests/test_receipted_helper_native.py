@@ -20,6 +20,7 @@ fixtures = quiescence.fixtures
 
 class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
     with_yaml = False
+    helper_domain = 'threshold'
 
     async def _before_start(self, hass, root):
         from homeassistant.const import __version__
@@ -47,7 +48,8 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
     async def test_threshold_supported_unload_own_mutations_setup_and_reverse(self):
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.config_entries import ConfigEntry, ConfigEntryState
-        from homeassistant.components.threshold.config_flow import ConfigFlowHandler
+        ConfigFlowHandler = importlib.import_module(
+            'homeassistant.components.' + self.helper_domain + '.config_flow').ConfigFlowHandler
         from homeassistant.helpers import entity_registry as er
         from homeassistant.helpers.entity_component import EntityComponent
         f, hass = self.f, self.f.hass
@@ -68,16 +70,32 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         component = EntityComponent(logging.getLogger(__name__), 'sensor', hass,
                                     timedelta(seconds=60))
         meter = Meter()
+        utility = self.helper_domain == 'utility_meter'
+        if utility:
+            from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+            meter._attr_native_unit_of_measurement = 'kWh'
+            meter._attr_device_class = SensorDeviceClass.ENERGY
+            meter._attr_state_class = SensorStateClass.TOTAL_INCREASING
         await component.async_add_entities([meter])
         old, new = meter.entity_id, 'sensor.receipted_helper_changed'
-        helper = ConfigEntry(domain='threshold', title='Receipted Threshold', data={},
-            options={'name': 'Receipted Threshold', 'entity_id': old, 'hysteresis': 0.0,
-                     'lower': None, 'upper': 42.5}, discovery_keys=MappingProxyType({}),
+        options = ({'name': 'Receipted Utility', 'source': old, 'cycle': 'none',
+                    'offset': 0, 'tariffs': [], 'net_consumption': False,
+                    'delta_values': False, 'periodically_resetting': False,
+                    'always_available': False} if utility else
+                   {'name': 'Receipted Threshold', 'entity_id': old, 'hysteresis': 0.0,
+                    'lower': None, 'upper': 42.5})
+        helper = ConfigEntry(domain=self.helper_domain, title='Receipted Helper', data={},
+            options=options, discovery_keys=MappingProxyType({}),
             source='user', version=ConfigFlowHandler.VERSION,
             minor_version=ConfigFlowHandler.MINOR_VERSION, subentries_data=[],
             unique_id='receipted-threshold', pref_disable_polling=True)
         await hass.config_entries.async_add(helper)
         await hass.async_block_till_done()
+        if utility:
+            for value in (43, 47):
+                meter._attr_native_value = value
+                meter.async_write_ha_state()
+                await hass.async_block_till_done()
         helper_row = er.async_entries_for_config_entry(f.entity, helper.entry_id)[0]
         f.entity.async_update_entity(helper_row.entity_id,
             hidden_by=er.RegistryEntryHider.USER, name='Retained helper preference')
@@ -140,6 +158,10 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         recorder = m['recorder_guard'].NativeRecorderGuard(hass)
         history = m['history_guard'].NativeHistoryGuard(recorder)
         historical = await history.capture({old: new})
+        helper_history = await history.capture({helper_row.entity_id: helper_row.entity_id})
+        if utility:
+            self.assertTrue(helper_history['state_ids'])
+            self.assertGreater(helper_history['content']['states']['count'], 0)
         io = nr.NativeRegistryIO(hass)
         bridge = nr.NativeRegistryBridge(io, recorder)
         registry_change = await bridge.prepare('entity', source_uuid, {'entity_id': new}, lambda: None)
@@ -192,7 +214,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             self.assertEqual(entry_id, helper.entry_id)
             self.assertIs(helper.state, ConfigEntryState.NOT_LOADED)
             self.assertFalse(any(platform.entities for platform in
-                ep.async_get_platforms(hass, 'threshold') if platform.config_entry is helper))
+                ep.async_get_platforms(hass, self.helper_domain) if platform.config_entry is helper))
             self.assertFalse(helper.update_listeners)
             self.assertEqual(m['helper_native'].read_entry(hass, entry_id), expected_config)
             self.assertEqual(f.entity.async_get(helper_row.entity_id).id, helper_row.id)
@@ -222,6 +244,8 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         lifecycle_callbacks = dict(guard=lambda: None, verify_original_native_inputs=original_source,
             settle=hass.async_block_till_done, verify_inactive=verify_inactive,
             verify_runtime=runtime, verify_accepted_native_chain=accepted_source)
+        if utility:
+            lifecycle_callbacks['runtime_baselines'] = loaded_observer.runtime_baselines()
         fault = getattr(self, 'lifecycle_save_fault', None)
         if fault is not None:
             native_save = lifecycle_store.store.save
@@ -258,6 +282,17 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             self.assertEqual(await observe(), before_readonly)
             return
         lifecycle = await lm.NativeHelperLifecycle.start(*lifecycle_args, **lifecycle_callbacks)
+        if utility:
+            self.assertEqual(lifecycle.root['schema'], 2)
+            self.assertEqual(lifecycle.runtime_baselines(), loaded_observer.runtime_baselines())
+            fresh_lifecycle_store = lm.native_helper_lifecycle_store(hass, preparations)
+            await fresh_lifecycle_store.initialize()
+            without_runtime = {k: v for k, v in lifecycle_callbacks.items() if k != 'runtime_baselines'}
+            recovered_lifecycle = lm.NativeHelperLifecycle.reopen(fresh_lifecycle_store,
+                *lifecycle_args[1:], **without_runtime)
+            self.assertEqual(recovered_lifecycle.runtime_baselines(), loaded_observer.runtime_baselines())
+            self.assertEqual(lm.stored_lifecycle_plan(fresh_lifecycle_store, lifecycle.root_id), plan)
+            self.assertFalse(recovered_lifecycle.writable)
         await lifecycle.quiesce()
         inactive = await m['helper_observers'].NativeHelperObservers.capture(
             hass, (original_snapshot,), proof)
@@ -354,7 +389,9 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             await lifecycle.restore(await authorization())
             await loaded_observer.verify_runtime(snapshot)
             self.assertEqual(f.entity.async_get(helper_row.entity_id).id, helper_row.id)
-            for value, expected in ((43, 'on'), (41, 'off')):
+            stimuli = (((48, '7'), (52, '11')) if snapshot == helper_change.after else
+                       ((54, '13'), (56, '15'))) if utility else ((43, 'on'), (41, 'off'))
+            for value, expected in stimuli:
                 meter._attr_native_value = value
                 meter.async_write_ha_state()
                 await hass.async_block_till_done()
@@ -367,6 +404,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                                                    blocking=True, context=Context())
                     self.assertEqual(captured_script_values, [str(value)])
             self.assertTrue(await history.verify(historical))
+            self.assertTrue(await history.verify(helper_history))
         with ExitStack() as effects:
             for key, bound in adapters.items():
                 original_apply = bound.apply
