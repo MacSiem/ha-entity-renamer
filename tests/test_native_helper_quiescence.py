@@ -35,6 +35,7 @@ class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
         hass.config_entries = ConfigEntries(hass, {})
         await loader.async_get_custom_components(hass)
         self.assertIsNot(await async_load_base_functionality(hass), False)
+        await self._before_start(hass, root)
         await hass.async_start()
         self.f = SimpleNamespace(hass=hass, root=root, version=__version__,
             entity=er.async_get(hass), device=dr.async_get(hass))
@@ -43,6 +44,9 @@ class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
                         for name in ('native_registry', 'native_registry_transition',
                                      'helper_native', 'helper_transaction',
                                      'native_config_transition')}
+
+    async def _before_start(self, hass, root):
+        """Optional actual-component bootstrap for derived integration probes."""
 
     async def _flush_documents(self, *, initialize=False):
         """Actual native Core Stores; independently read every full envelope."""
