@@ -8,13 +8,13 @@ import unittest
 from unittest.mock import AsyncMock
 
 import test_native_input_baseline as fixture
-from test_discovery_websocket import DiscoveryWebsocketTests
+import test_discovery_websocket as websocket_fixture
 
 
 @unittest.skipUnless(fixture.HAS_HA, 'native HA dependencies required')
 class SessionStatusTests(unittest.IsolatedAsyncioTestCase):
-    asyncSetUp = DiscoveryWebsocketTests.asyncSetUp
-    call_handler = DiscoveryWebsocketTests.call
+    asyncSetUp = websocket_fixture.DiscoveryWebsocketTests.asyncSetUp
+    call_handler = websocket_fixture.DiscoveryWebsocketTests.call
 
     async def setup_status(self):
         self.session = self.user
