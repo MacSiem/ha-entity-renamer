@@ -54,6 +54,7 @@ class NativeRegistryReceiptsTests(unittest.IsolatedAsyncioTestCase):
         await store.initialize()
         operation = 'coordinator-native-operation'
         chain = await rr.RegistryReceiptChain.start(store, operation, plan, f.receipt, digests)
+        bridge = nr.NativeRegistryBridge(io, None, native_images=chain.accepted_documents)
 
         async def observe():
             return await observation.async_observe_native_inputs(f.hass, f.receipt, guard=f.guard)

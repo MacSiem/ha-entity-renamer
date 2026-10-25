@@ -452,6 +452,15 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
         self._observe(observations, states)
         return head
 
+    def accepted_documents(self):
+        """Detached runtime expectations from ORIGINAL + accepted deltas only.
+
+        Pending intent adds no delta. These images are not live observations,
+        effect authorization or a replacement for any physical source fence.
+        """
+        states, _, _, _, _ = self._reconstruct()
+        return {key: deepcopy(value['document']) for key, value in states.items()}
+
     def verify_intent_source(self, intent, context, observations):
         """Final full source fence after intent ACK, immediately before API."""
         if not self.writable or intent is not self.active:

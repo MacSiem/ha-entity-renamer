@@ -95,7 +95,7 @@ class NativeNameObserver:
         # Canonical JSON also detaches nested native preference mappings.
         return json.dumps(payload, sort_keys=True)
 
-    def verify(self, change, target):
+    def verify(self, change, target, *, expected_documents=None):
         from homeassistant.helpers import device_registry as dr, entity_registry as er
         from homeassistant.helpers.typing import UNDEFINED
         from .native_registry import _content
@@ -104,18 +104,30 @@ class NativeNameObserver:
         require(bool(change.runtime_before_json), 'name_runtime_baseline_missing')
         baseline = json.loads(change.runtime_before_json)
         require(baseline['ha'] == version, 'name_runtime_version_drift')
+        # Trusted caller may supply ORIGINAL baseline + durable accepted own
+        # registry deltas. Only related registry rows use those expectations;
+        # runtime lifecycle/preferences/state remain pinned to original capture.
+        # A fresh live document or result overlay is never a valid provider.
+        expected_entities = expected_devices = None
+        if expected_documents is not None:
+            expected_entities = {row['id']: row for row in
+                expected_documents['core.entity_registry']['data']['entities']}
+            expected_devices = {row['id']: row for row in
+                expected_documents['core.device_registry']['data']['devices']}
         rows = self._rows(change)
         require(bool(rows) and {row.id for row in rows} == set(baseline['entities']),
                 'name_entity_membership_changed')
         native_rows = {row['id']: row for row in self.io.document('entity')['entities']}
         device_rows = {row['id']: row for row in self.io.document('device')['devices']}
         for identity, original in baseline['devices'].items():
-            expected = target if change.kind == 'device' and identity == change.identity else original
+            expected = (target if change.kind == 'device' and identity == change.identity
+                        else expected_devices.get(identity) if expected_devices is not None else original)
             require(identity in device_rows and _content(device_rows[identity]) == _content(expected),
                     'name_related_device_drift')
         for row in rows:
             saved = baseline['entities'][row.id]
-            expected = target if change.kind == 'entity' else saved['row']
+            expected = (target if change.kind == 'entity' else
+                        expected_entities.get(row.id) if expected_entities is not None else saved['row'])
             require(_content(native_rows[row.id]) == _content(expected)
                     and list(registry_identity(row)) == saved['identity'],
                     'name_entity_identity_or_preferences_changed')

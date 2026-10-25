@@ -131,10 +131,11 @@ class NativeRegistryIO:
     async def settle(self):
         await self.hass.async_block_till_done()
 
-    def runtime(self, prepared, target):
+    def runtime(self, prepared, target, *, expected_documents=None):
         if prepared.kind == "device" or not prepared.mapping:
             from .native_name_observers import NativeNameObserver
-            return NativeNameObserver(self).verify(prepared, target)
+            return NativeNameObserver(self).verify(prepared, target,
+                                                  expected_documents=expected_documents)
         old, new = prepared.before["entity_id"], prepared.after["entity_id"]
         other = new if target["entity_id"] == old else old
         if self.hass.states.get(other) is not None:
@@ -218,10 +219,15 @@ class NativeRegistryBridge:
     legacy baselines remain UNKNOWN. Injected probes remain a trusted IO seam.
     """
 
-    def __init__(self, io, recorder, runtime_probe=None, *, history_guard=None):
+    def __init__(self, io, recorder, runtime_probe=None, *, history_guard=None,
+                 native_images=None):
         self.io = io
         self.recorder = recorder
-        self.runtime_probe = runtime_probe or io.runtime
+        # Optional trusted immutable chain expectations allow preceding OWN
+        # related registry steps; never derive this callback from current IO.
+        self.runtime_probe = runtime_probe or (
+            (lambda change, target: io.runtime(change, target,
+                 expected_documents=native_images())) if native_images is not None else io.runtime)
         self.history_guard = history_guard
 
     def _history(self):
