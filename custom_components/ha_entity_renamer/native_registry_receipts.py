@@ -389,6 +389,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
 
     def _advance(self, states, payload, change):
         """Replay an already accepted immutable delta, never a fresh image."""
+        from .native_helper_placeholder_receipts import validate_placeholder_receipt
+        validate_placeholder_receipt(self, payload, change)
         if type(change) is PreparedHelper:
             return self._advance_config(states, payload, change)
         key = 'core.' + change.kind + '_registry'
@@ -761,7 +763,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                        before: tuple[RegistryRawObservation, ...],
                        after: tuple[RegistryRawObservation, ...], *,
                        mutation: NativeRegistryMutation | NativeConfigMutation,
-                       audit: NativeRegistryEffectAudit | NativeConfigEffectAudit) -> tuple[str, str]:
+                       audit: NativeRegistryEffectAudit | NativeConfigEffectAudit,
+                       placeholder_stamp=None, escrow_root_reference=None) -> tuple[str, str]:
         """Persist receipt only from actual call rows + full independent reads.
 
         No effect is performed here. Caller performs fresh auth/lock checks after
@@ -823,6 +826,10 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                    'binding': binding, 'source_chain': head, 'sequence': sequence,
                    'intent': list(intent.reference), 'mutation': asdict(mutation),
                    'audit': asdict(audit), 'result': self._summary(result_states)}
+        if placeholder_stamp is not None or escrow_root_reference is not None:
+            from .native_helper_placeholder_receipts import encode_placeholder_subeffect
+            payload['own_helper_placeholder'] = encode_placeholder_subeffect(
+                placeholder_stamp, escrow_root_reference)
         payload['source_index'] = self._row(states[key]['document'], kind, identity)[1]
         payload['result_index'] = self._row(result_states[key]['document'], kind, identity)[1]
         if self._summary(self._advance(states, payload, change)) != self._summary(result_states):
