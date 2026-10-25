@@ -1,0 +1,142 @@
+"""Actual typed escrow and own placeholder consumer. Not full migration acceptance."""
+import importlib
+import json
+from decimal import Decimal
+from pathlib import Path
+import unittest
+
+import test_own_helper_unload_lifecycle as base
+
+p = importlib.import_module(base.PACKAGE + '.native_helper_placeholder_effect')
+
+
+@unittest.skipUnless(base.fixture.fixtures.HAS_HA, 'requires actual pinned HA')
+class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
+    asyncSetUp = base.OwnHelperUnloadLifecycleTests.asyncSetUp
+    _before_start = base.OwnHelperUnloadLifecycleTests._before_start
+    _fixture = base.OwnHelperUnloadLifecycleTests._fixture
+    _emit = base.OwnHelperUnloadLifecycleTests._emit
+    _flush_documents = base.OwnHelperUnloadLifecycleTests._flush_documents
+    guard = base.OwnHelperUnloadLifecycleTests.guard
+    _lifecycle = base.OwnHelperUnloadLifecycleTests._lifecycle
+
+    async def test_typed_escrow_then_owned_placeholder_then_real_native_setup(self):
+        life = await self._lifecycle()
+        try:
+            await life.quiesce()
+            hass = self.f.hass
+            modules = {name: importlib.import_module(base.PACKAGE + '.' + name) for name in
+                ('native_registry', 'native_registry_receipts', 'native_input_observation',
+                 'native_input_baseline', 'native_restore_state_escrow_receipts',
+                 'native_restore_state_escrow_io', 'transaction', 'journal',
+                 'native_utility_setup_audit')}
+            rr, tx = modules['native_registry_receipts'], modules['transaction']
+            chain_store = rr.native_registry_receipt_store(hass, life.store.preparations)
+            await chain_store.initialize()
+            chain = await rr.RegistryReceiptChain.start(chain_store, life.operation_id,
+                life.plan, life.receipt, life.binding['preparations'])
+            inputs = chain.reconstruct_inputs()
+            managers = modules['native_input_baseline']._Managers(hass, life.receipt)
+            unload_slot = life._slot('unload', self.entry.entry_id, 'receipt')
+            unload = life.store.read(unload_slot)
+            unload_ref = (unload_slot, unload['digest'])
+            original_state = hass.states.get(self.old_helper)
+            def source_guard():
+                life.require_quiescent()
+                self.guard()
+                inputs.assert_current(life.receipt)
+                managers.check()
+                life.verify_live_unload_state(self.entry.entry_id, unload_ref, original_state)
+            from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
+            data = hass.data[DATA_RESTORE_STATE]
+            await data.async_dump_states()
+            source_guard()
+            escrow = modules['native_restore_state_escrow_receipts'].NativeRestoreStateEscrow(
+                life, self.entry.entry_id, data, source_guard=source_guard)
+            disk = modules['native_restore_state_escrow_io'].EscrowIO._read(data.store.path,
+                (self.old_helper, self.target))
+            token = await escrow.begin(disk_preimage=disk)
+            await escrow.execute(token)
+            escrow.require_completed(token)
+            journal = modules['journal'].native_journal(hass)
+            await journal.initialize()
+            record = tx.Record(life.operation_id, life.plan, status='applying', phases=('intent',))
+            await journal.create(record)
+            context = tx.PhaseContext(await journal.load(life.operation_id), 0)
+            async def observe():
+                result = await modules['native_input_observation'].async_observe_native_inputs(
+                    hass, life.receipt, guard=self.guard, input_state=inputs)
+                return tuple(rr.RegistryRawObservation(row.key, row.raw, row.identity)
+                             for row in result.files)
+            before = await observe()
+            intent = await chain.begin(context, before)
+            before = await observe()
+            chain.verify_intent_source(intent, context, before)
+            def fence(scope):
+                source_guard()
+                escrow.require_completed(token)
+                durable = modules['journal'].decode(json.loads(Path(journal.store.path).read_bytes())['data'])
+                self.assertEqual(durable[life.operation_id], context.record)
+                chain.verify_intent_source(intent, context, before)
+                return True
+            def validate_witness(scope):
+                parsed = base.lm.validate_lifecycle_receipt_witness(life.store,
+                    life.operation_id, life.plan, life.receipt, life.binding['preparations'],
+                    root_id=life.root_id)
+                self.assertTrue(parsed.inspect()['inactive_receipts_complete'])
+                self.assertEqual(scope['lifecycle_root'], [life.root_id, base.lm._digest(life.root)])
+                self.assertEqual(scope['unload_receipt'], list(unload_ref))
+                self.assertEqual(scope['registry_uuid'], life.own_registry_changes[self.entry.entry_id].identity)
+                return True
+            io = modules['native_registry'].NativeRegistryIO(hass)
+            node = p.OwnHelperPlaceholder.capture(io=io, lifecycle=life, chain=chain,
+                context=context, intent=intent, observations=before,
+                live_guard=self.guard, fresh_source_fence=fence,
+                validate_unload_witness=validate_witness,
+                verify_live_unload_state=lambda actual, ref, state:
+                    actual.verify_live_unload_state(self.entry.entry_id, ref, state))
+            mutation = node.mutate()
+            self.guard()
+            await io.settle()
+            self.guard()
+            await io.flush('entity')
+            self.guard()
+            stamp = node.finish()
+            from copy import deepcopy
+            attrs = json.loads(unload['payload']['native_unload']['payload']['state_json'])['attributes']
+            expected_scope = {'version': life.receipt.version,
+                'source_pins': {key: modules['native_utility_setup_audit']._SOURCES[life.receipt.version][key]
+                    for key in ('core.py', 'helpers/entity_registry.py', 'helpers/entity.py')},
+                'operation_id': life.operation_id, 'fingerprint': life.plan.fingerprint,
+                'chain_root': chain.root_id, 'registry_intent': list(intent.reference),
+                'phase': chain._context(context),
+                'lifecycle_root': [life.root_id, base.lm._digest(life.root)],
+                'unload_receipt': list(unload_ref), 'entry_id': self.entry.entry_id,
+                'registry_uuid': self.row['id'], 'prepared_digest': p.prepared_registry_digest(
+                    life.own_registry_changes[self.entry.entry_id]), 'direction': 'forward',
+                'source': self.old_helper, 'target': self.target,
+                'source_attrs': attrs,
+                'source_state_json': unload['payload']['native_unload']['payload']['state_json'],
+                'target_attrs': deepcopy(attrs)}
+            self.assertTrue(p.validate_effect(stamp, expected_scope=expected_scope,
+                change=life.own_registry_changes[self.entry.entry_id], mutation=mutation,
+                validate_unload_witness=validate_witness))
+            self.assertEqual(p.decode_effect(stamp.encode()), stamp)
+            self.assertIsNone(hass.states.get(self.old_helper))
+            self.assertTrue(hass.states.async_available(self.old_helper))
+            self.assertEqual(hass.states.get(self.target).state, 'unavailable')
+            self.assertEqual(self.f.entity.async_get(self.target).id, self.row['id'])
+            # Consumer check only: receipt subeffect and audited setup integration
+            # are tested separately before a complete migration can be accepted.
+            self.assertTrue(await self.lease.async_setup(self.entry.entry_id))
+            await hass.async_block_till_done()
+            from homeassistant.helpers.entity_platform import async_get_platforms
+            entity, = [e for platform in async_get_platforms(hass, 'utility_meter')
+                       if platform.config_entry is self.entry for e in platform.entities.values()]
+            self.assertEqual(entity.entity_id, self.target)
+            self.assertEqual(entity.native_value, Decimal('11'))
+            await self._emit('119')
+            self.assertEqual(entity.native_value, Decimal('19'))
+            self.assertEqual(self.f.entity.async_get(self.target).id, self.row['id'])
+        finally:
+            self.lease.release()
