@@ -185,7 +185,7 @@ def validate_registry_transition(source_raw, result_raw, prepared, *, version,
     if (type(version) is not str or version not in _SCHEMAS
             or prepared.kind not in ('entity', 'device')
             or type(prepared.identity) is not str or not prepared.identity
-            or direction not in ('forward', 'reverse')):
+            or type(direction) is not str or direction not in ('forward', 'reverse')):
         _fail('registry_transition_scope_invalid')
     if (type(source_raw) is not bytes or type(result_raw) is not bytes
             or max(len(source_raw), len(result_raw)) > MAX_DOCUMENT_BYTES):
@@ -249,6 +249,14 @@ def validate_registry_transition(source_raw, result_raw, prepared, *, version,
         expected_row[key] = deepcopy(destination[key])
     if audit.modified_at_after is not None:
         expected_row['modified_at'] = audit.modified_at_after
+    if prepared.kind == 'entity' and 'entity_id' in changed:
+        # Both pinned Core versions pop the old dictionary key and append the
+        # returned entry under its new ID. Model ONLY that deterministic native
+        # relocation. Every untouched row retains its exact value and relative
+        # order; name-only/device writes never gain reorder permission.
+        rows = expected['data']['entities']
+        rows.remove(expected_row)
+        rows.append(expected_row)
     if not _equal(expected, result):
         _fail('registry_transition_foreign_delta')
     return RegistryDeltaEvidence(prepared.kind, prepared.identity, direction,

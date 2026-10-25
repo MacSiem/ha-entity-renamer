@@ -44,8 +44,12 @@ def fixture(kind='entity', version='2026.10.2', audit=True):
     other['id'] = 'untouched'
     if kind == 'entity':
         other['entity_id'] = 'sensor.untouched'
+    third = deepcopy(other)
+    third['id'] = 'untouched-two'
+    if kind == 'entity':
+        third['entity_id'] = 'sensor.untouched_two'
     plural = 'entities' if kind == 'entity' else 'devices'
-    data = {plural: [row, other], 'deleted_' + plural: [{'id': 'deleted', 'unknown': [False]}, {'id': 'deleted-two'}],
+    data = {plural: [row, other, third], 'deleted_' + plural: [{'id': 'deleted', 'unknown': [False]}, {'id': 'deleted-two'}],
             'opaque_top': {'flag': True}}
     if version == '2026.10.2':
         data.update({'settings': {'entity_id_parts': ['name']}} if kind == 'entity'
@@ -60,15 +64,22 @@ def fixture(kind='entity', version='2026.10.2', audit=True):
     prepared = native.PreparedRegistryChange(kind, 'stable', json.dumps(row), json.dumps(after_row))
     after = deepcopy(before)
     after['data'][plural][0] = after_row
+    if kind == 'entity':
+        after['data'][plural].append(after['data'][plural].pop(0))
     if audit:
         after_row['modified_at'] = '2026-02-02T00:00:00+00:00'
     return before, after, prepared
 
 
+def target(document, kind='entity'):
+    plural = 'entities' if kind == 'entity' else 'devices'
+    return next(row for row in document['data'][plural] if row['id'] == 'stable')
+
+
 def make_audit(before, after, prepared, direction='forward'):
     key = 'entities' if prepared.kind == 'entity' else 'devices'
-    old = before['data'][key][0].get('modified_at')
-    new = after['data'][key][0].get('modified_at')
+    old = next((r for r in before['data'][key] if r.get('id') == prepared.identity), {}).get('modified_at')
+    new = next((r for r in after['data'][key] if r.get('id') == prepared.identity), {}).get('modified_at')
     return transition.NativeRegistryEffectAudit(prepared.kind, prepared.identity, direction,
         digest(raw(before)), digest(raw(after)), transition.prepared_registry_digest(prepared), old, new)
 
@@ -80,6 +91,19 @@ def validate(before, after, prepared, version='2026.10.2', direction='forward', 
 
 
 class RegistryTransitionTests(unittest.TestCase):
+    def test_only_deterministic_native_id_relocation_preserves_other_order(self):
+        before, after, prepared = fixture()
+        self.assertEqual([r['id'] for r in after['data']['entities']],
+                         ['untouched', 'untouched-two', 'stable'])
+        validate(before, after, prepared)
+        for order in (['stable', 'untouched', 'untouched-two'],
+                      ['untouched-two', 'untouched', 'stable']):
+            candidate = deepcopy(after)
+            rows = {r['id']: r for r in candidate['data']['entities']}
+            candidate['data']['entities'] = [rows[key] for key in order]
+            with self.assertRaises(transition.RegistryTransitionError):
+                validate(before, candidate, prepared)
+
     def test_both_schemas_kinds_forward_reverse_and_audit_absence(self):
         for version in ('2025.6.0', '2026.10.2'):
             for kind in ('entity', 'device'):
@@ -92,6 +116,8 @@ class RegistryTransitionTests(unittest.TestCase):
                         key = 'entities' if kind == 'entity' else 'devices'
                         if has_audit:
                             restored['data'][key][0]['modified_at'] = '2026-03-03T00:00:00+00:00'
+                        if kind == 'entity':
+                            restored['data'][key].append(restored['data'][key].pop(0))
                         result = validate(after, restored, prepared, version, 'reverse')
                         self.assertEqual(result.result_sha256, digest(raw(restored)))
                         self.assertEqual((before, after, prepared), original)
@@ -102,7 +128,10 @@ class RegistryTransitionTests(unittest.TestCase):
             origin = json.loads(prepared.before_json)
             target = dict(origin, **{key: json.loads(prepared.after_json)[key]})
             prepared = replace(prepared, after_json=json.dumps(target))
+            after = deepcopy(before)
             after['data']['entities'][0] = target
+            if key == 'entity_id':
+                after['data']['entities'].append(after['data']['entities'].pop(0))
             validate(before, after, prepared)
 
     def test_foreign_delta_refused_even_when_supplied_audit_binds_result_bytes(self):
@@ -123,31 +152,32 @@ class RegistryTransitionTests(unittest.TestCase):
                     elif mutation == 'unknown': data['opaque_top']['flag'] = 1
                     elif mutation == 'envelope': after['opaque_envelope']['counter'] = 1.0
                     elif mutation == 'settings': data.setdefault('settings', {})['alien'] = True
-                    elif mutation == 'target_foreign': data[plural][0]['area_id'] = 'other'
-                    elif mutation == 'target_type': data[plural][0]['id'] = 1
+                    elif mutation == 'target_foreign': target(after, kind)['area_id'] = 'other'
+                    elif mutation == 'target_type': target(after, kind)['id'] = 1
                     elif mutation == 'nested_type':
                         field = 'options' if kind == 'entity' else 'unknown'
-                        data[plural][0][field] = {'nested': [1]}
+                        target(after, kind)[field] = {'nested': [1]}
                     elif mutation == 'child': data.setdefault('child_devices', []).append({'id': 'x'})
                     elif mutation == 'membership': data[plural].append({'id': 'new'})
                     elif mutation == 'rename_other': data[plural][1]['name_by_user'] = 'foreign'
-                    elif mutation == 'audit_add': data[plural][0]['created_at'] = 'foreign'
+                    elif mutation == 'audit_add': target(after, kind)['created_at'] = 'foreign'
                     with self.assertRaises(transition.RegistryTransitionError):
                         validate(before, after, prepared)
 
     def test_reverse_foreign_changes_and_stale_original_audit_refuse(self):
         before, after, prepared = fixture()
         restored = deepcopy(before)
-        restored['data']['entities'][0]['modified_at'] = '2026-03-03T00:00:00+00:00'
+        target(restored)['modified_at'] = '2026-03-03T00:00:00+00:00'
+        restored['data']['entities'].append(restored['data']['entities'].pop(0))
         for mutation in ('other', 'order', 'deleted', 'target', 'stale_audit'):
             candidate = deepcopy(restored)
             audit = make_audit(after, candidate, prepared, 'reverse')
             if mutation == 'other': candidate['data']['entities'][1]['modified_at'] = 'foreign'
             elif mutation == 'order': candidate['data']['entities'].reverse()
             elif mutation == 'deleted': candidate['data']['deleted_entities'] = []
-            elif mutation == 'target': candidate['data']['entities'][0]['options']['opaque'][1] = 1
+            elif mutation == 'target': target(candidate)['options']['opaque'][1] = 1
             elif mutation == 'stale_audit':
-                audit = replace(audit, modified_at_before=before['data']['entities'][0]['modified_at'])
+                audit = replace(audit, modified_at_before=target(before)['modified_at'])
             # Bind actual modified bytes so the strict structural rule is exercised.
             audit = replace(audit, result_sha256=digest(raw(candidate)))
             with self.subTest(mutation=mutation):
@@ -164,8 +194,8 @@ class RegistryTransitionTests(unittest.TestCase):
                 elif mutation == 'duplicate': after['data']['entities'][1]['id'] = 'stable'
                 elif mutation == 'missing': after['data']['entities'].pop(0)
                 elif mutation == 'deleted_id': after['data']['deleted_entities'][0]['id'] = 'stable'
-                elif mutation == 'audit_null': after['data']['entities'][0]['modified_at'] = None
-                elif mutation == 'audit_removed': after['data']['entities'][0].pop('modified_at')
+                elif mutation == 'audit_null': target(after)['modified_at'] = None
+                elif mutation == 'audit_removed': target(after).pop('modified_at')
                 elif mutation == 'destination':
                     before['data']['entities'][1]['entity_id'] = 'sensor.new'
                     after['data']['entities'][1]['entity_id'] = 'sensor.new'
@@ -179,14 +209,14 @@ class RegistryTransitionTests(unittest.TestCase):
             before, after, prepared = fixture()
             target = dict(json.loads(prepared.after_json), **patch)
             prepared = replace(prepared, after_json=json.dumps(target))
-            after['data']['entities'][0].update(target)
+            next(r for r in after['data']['entities'] if r['id'] == 'stable').update(target)
             with self.assertRaises(transition.RegistryTransitionError):
                 validate(before, after, prepared)
 
     def test_source_full_target_must_match_original_prepared_content(self):
         before, after, prepared = fixture()
         before['data']['entities'][0]['options']['opaque'][0] = 0
-        after['data']['entities'][0]['options']['opaque'][0] = 0
+        target(after)['options']['opaque'][0] = 0
         with self.assertRaises(transition.RegistryTransitionError):
             validate(before, after, prepared)
 
