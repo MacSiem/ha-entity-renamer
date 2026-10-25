@@ -237,6 +237,23 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                 if error.name != PACKAGE + '.native_integration_source_clock':
                     raise
                 self.fail('actual Integration source-ID clock binding is not implemented')
+            actual_need = m['native_integration_source_clock']._need
+            def diagnostic_need(value, reason):
+                if not value:
+                    print('SOURCE_CLOCK_REFUSAL', reason, flush=True)
+                return actual_need(value, reason)
+            m['native_integration_source_clock']._need = diagnostic_need
+            self.addCleanup(setattr, m['native_integration_source_clock'], '_need', actual_need)
+            if 'helpers' in adapters:
+                actual_apply = adapters['helpers'].apply
+                async def diagnostic_helper_apply(*args, **kwargs):
+                    try:
+                        return await actual_apply(*args, **kwargs)
+                    except BaseException:
+                        import traceback
+                        traceback.print_exc()
+                        raise
+                adapters['helpers'].apply = diagnostic_helper_apply
             for reverse in (False,True):
                 if reverse:
                     await self.wait_tick()
@@ -256,6 +273,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                 endpoint=hass.states.get(self.producer.entity_id)
                 oracle_previous=[endpoint.state,endpoint.last_reported]
                 burst=[]
+                burst_events=[]
                 burst_base=[]
                 burst_done=[]
                 def origin(frame):
@@ -279,10 +297,12 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                     oracle_previous[:]=[new.state,nt]
                     if burst_base:
                         burst.append(record)
+                        burst_events.append(id(data))
                 origin_witness=m['native_utility_source_emissions'].NativeSourceEmissions(
                     scope.codes['fire'],hass.bus,origin,lambda reason:self.fail('oracle observer '+reason))
-                def assert_burst():
-                    if len(burst)==3 and not burst_done:
+                def assert_burst(event):
+                    if (len(burst)==3 and not burst_done
+                            and id(event.data)==burst_events[-1]):
                         expected=burst_base[0]
                         for left,right,ot,nt,*rest in burst:
                             expected=expected+self.area(left,right,Decimal((nt-ot).total_seconds()))
@@ -294,7 +314,8 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                     data=event.data
                     if data.get('entity_id') not in self.names or data.get('new_state') is None:
                         return
-                    if data.get('old_state') is None and data['entity_id']==scope.source_binding.to_name:
+                    if (event.event_type=='state_changed' and data.get('old_state') is None
+                            and data['entity_id']==scope.source_binding.to_name):
                         left,right,ot,nt,full,anchor,trigger=oracle_inputs[id(data)]
                         elapsed=Decimal((nt-(anchor if trigger=='TimeElapsed' else ot)).total_seconds())
                         self.assertEqual(scope.old._state,full+self.area(left,right,elapsed))
@@ -304,9 +325,9 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                         self.producer.async_write_ha_state()
                         self.producer.async_write_ha_state()
                         self.producer.async_write_ha_state()
-                        assert_burst()
+                        assert_burst(event)
                     elif burst_base:
-                        assert_burst()
+                        assert_burst(event)
                 unsubscribe=hass.bus.async_listen('state_changed',source_created)
                 # state_reported requires a genuine native event filter on HA.
                 @callback
