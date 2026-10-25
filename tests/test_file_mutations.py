@@ -2,8 +2,10 @@ from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from custom_components.ha_entity_renamer.file_mutations import FileConflict, apply_file_patch
+from custom_components.ha_entity_renamer import file_mutations
 from custom_components.ha_entity_renamer.yaml_plan import plan_yaml
 
 
@@ -47,6 +49,66 @@ class FileMutationTests(unittest.TestCase):
         (self.root/'.storage/ha_entity_renamer_backups').symlink_to(self.root, target_is_directory=True)
         with self.assertRaises(FileConflict): self.apply()
         self.assertEqual(self.file.read_bytes(), self.original)
+
+    def test_source_chmod_during_staging_refuses_without_reverting_foreign_mode(self):
+        original_write = file_mutations._write_all
+
+        def raced_write(fd, data):
+            original_write(fd, data)
+            if data == self.patch.proposed_bytes:
+                self.file.chmod(0o600)  # Same inode and content, new mode.
+
+        with mock.patch.object(file_mutations, '_write_all', raced_write):
+            with self.assertRaisesRegex(FileConflict, 'source_changed_before_replace'):
+                self.apply()
+        self.assertEqual(self.file.read_bytes(), self.original)
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
+
+    def test_staged_chmod_after_stat_refuses_and_preserves_source(self):
+        original_read = file_mutations._Reader.read
+        read_count = 0
+
+        def raced_read(reader, path):
+            nonlocal read_count
+            result = original_read(reader, path)
+            read_count += 1
+            if read_count == 2:
+                # Second source read is after fstat(temp), before stat(temp).
+                pending = list(self.root.glob('.renamer-op1-*.pending'))
+                self.assertEqual(len(pending), 1)
+                pending[0].chmod(0o600)
+            return result
+
+        with mock.patch.object(file_mutations._Reader, 'read', raced_read):
+            with self.assertRaisesRegex(FileConflict, 'staged_metadata_changed'):
+                self.apply()
+        self.assertEqual(self.file.read_bytes(), self.original)
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o640)
+
+    def test_last_guard_cannot_hide_foreign_source_or_staged_chmod(self):
+        for target, reason in (('source', 'source_changed_before_replace'),
+                               ('staged', 'staged_metadata_changed')):
+            with self.subTest(target=target):
+                self.file.chmod(0o640)
+                calls = 0
+                def guard():
+                    nonlocal calls
+                    calls += 1
+                    if calls == 4:
+                        if target == 'source':
+                            self.file.chmod(0o600)
+                        else:
+                            pending = list(self.root.glob('.renamer-op1-*.pending'))
+                            pending[-1].chmod(0o600)
+                with self.assertRaisesRegex(FileConflict, reason):
+                    apply_file_patch(self.root, self.patch, self.snapshot, 'op1', guard=guard)
+                self.assertEqual(calls, 4)
+                self.assertEqual(self.file.read_bytes(), self.original)
+                self.assertEqual(self.file.stat().st_mode & 0o777,
+                                 0o600 if target == 'source' else 0o640)
+                # Preserve failed staging artifacts outside the next attempt's glob.
+                for pending in self.root.glob('.renamer-op1-*.pending'):
+                    pending.rename(pending.with_suffix('.quarantined'))
 
 
 if __name__ == '__main__': unittest.main()
