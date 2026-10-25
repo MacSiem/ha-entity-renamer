@@ -354,6 +354,10 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                     with patch.object(m['yaml_transaction'],'apply_file_patch',pinned_write):
                         record=(await coordinator.rollback(chain.operation_id) if reverse else
                                 await coordinator.apply(plan,plan.fingerprint,chain.operation_id))
+                    transaction_hook=getattr(self,'source_clock_after_transaction_hook',None)
+                    if transaction_hook is not None:
+                        if await transaction_hook(record,negative_context,bridge,registry_change):
+                            return
                     self.assertEqual(record.status,'rolled_back' if reverse else 'applied',
                                      (record.status,record.reason,record.phases))
                     observed=await observe()

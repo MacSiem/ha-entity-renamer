@@ -26,12 +26,13 @@ class NativeIntegrationSourceClockIncompleteTests(unittest.IsolatedAsyncioTestCa
 
     async def test_actual_prepared_removal_without_creation_refuses_setup(self):
         self.source_clock_negative_hook = self.hook
+        self.source_clock_after_transaction_hook = self.after_transaction
         self.removals = []
         self.checked = False
         self.overridden = False
         try:
             await self._run_source_clock()
-            self.assertTrue(self.checked, 'terminal authorization seam was not reached')
+            self.assertTrue(self.checked, 'actual transaction result was not checked')
         finally:
             if self.overridden:
                 del self.producer.async_remove
@@ -63,35 +64,41 @@ class NativeIntegrationSourceClockIncompleteTests(unittest.IsolatedAsyncioTestCa
             producer.async_remove = remove_then_cancel
             self.overridden = True
             return False
-        if stage == 'before_setup':
-            del self.producer.async_remove
-            self.overridden = False
-            scope = context.scope
-            self.assertEqual(len(self.removals), 1)
-            self.assertIsNone(scope._error)
-            self.assertEqual(scope._phase, 'retained')
-            self.assertIs(scope._pending_move[0], self.removals[0])
-            self.assertFalse(scope.source_binding._creation_emitted)
-            self.assertEqual(scope.source_binding.transport_calls, 0)
-            self.assertFalse(scope.source_binding.flights)
-            self.assertFalse(scope._emitted)
-            self.assertIsNone(context.hass.states.get(self.names[0]))
-            self.assertIsNone(context.hass.states.get(self.names[1]))
-            # Authorization is real and terminal. Refusal must concern the
-            # missing native creation, rather than a missing/fabricated grant.
-            self.assertEqual(context.authorization.status, 'applied')
-            self.assertTrue(context.chain.verify_setup_authorization(context.authorization))
-            with self.assertRaisesRegex(ValueError, 'accepted_transport_complete'):
-                await context.m['native_integration_source_clock'].async_setup_source_clock(
-                    scope, context.authorization, observe=context.observe,
-                    load_record=context.load_record)
-            self.assertIsNone(scope._new)
-            self.assertIsNone(scope._transferred)
-            self.assertFalse(scope._new_timer_bound)
-            self.assertFalse(hasattr(scope, 'receipt'))
-            for row in context.store.rows.values():
-                self.assertNotIn(row['payload'].get('kind'),
-                                 ('integration_clock_receipt', 'helper_setup_receipt'))
-            self.checked = True
-            return True
         self.fail('unknown hook stage ' + stage)
+
+    async def after_transaction(self, record, context, bridge, change):
+        del self.producer.async_remove
+        self.overridden = False
+        scope = context.scope
+        self.assertEqual(len(self.removals), 1)
+        self.assertIsNone(scope._error)
+        self.assertEqual(scope._phase, 'retained')
+        self.assertIs(scope._pending_move[0], self.removals[0])
+        self.assertFalse(scope.source_binding._creation_emitted)
+        self.assertEqual(scope.source_binding.transport_calls, 0)
+        self.assertFalse(scope.source_binding.flights)
+        self.assertFalse(scope._emitted)
+        self.assertIsNone(context.hass.states.get(self.names[0]))
+        self.assertIsNone(context.hass.states.get(self.names[1]))
+        # The real coordinator already refuses completion. Require its durable
+        # intent and a fresh, genuine native readback identifying missing runtime;
+        # do not manufacture terminal authorization to reach a later seam.
+        self.assertEqual(record.status, 'unknown')
+        self.assertEqual(record.reason, 'effect_or_verification_uncertain')
+        self.assertEqual(record.phases, ('intent', 'pending', 'pending'))
+        observed = await bridge.inspect(change)
+        self.assertEqual(observed.position, 'unknown')
+        self.assertEqual(observed.reason, 'scoped_evidence_incomplete')
+        self.assertIs(observed.runtime, False)
+        self.assertIsNone(scope.source_binding.authorization)
+        with self.assertRaisesRegex(ValueError, 'accepted_transport_complete'):
+            await scope.setup()
+        self.assertIsNone(scope._new)
+        self.assertIsNone(scope._transferred)
+        self.assertFalse(scope._new_timer_bound)
+        self.assertFalse(hasattr(scope, 'receipt'))
+        for row in context.store.rows.values():
+            self.assertNotIn(row['payload'].get('kind'),
+                             ('integration_clock_receipt', 'helper_setup_receipt'))
+        self.checked = True
+        return True
