@@ -4,9 +4,11 @@ Pinned Core schemas only. No running QA API/config, endpoint or readiness claim.
 Lifecycle uses separate real private Stores in both forward and reverse cycles.
 """
 from datetime import timedelta
+from contextlib import ExitStack
 import importlib
 import json
 import logging
+import os
 from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import patch
@@ -17,6 +19,8 @@ fixtures = quiescence.fixtures
 
 
 class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
+    with_yaml = False
+
     async def _before_start(self, hass, root):
         from homeassistant.const import __version__
         if __version__ not in ('2025.6.0', '2026.10.2'):
@@ -27,6 +31,18 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         self.assertTrue(await async_setup_component(hass, 'recorder', {'recorder': {
             'db_url': 'sqlite:///' + str(root / 'fixture.db'), 'commit_interval': 0,
             'auto_purge': False, 'auto_repack': False}}))
+        if self.with_yaml:
+            import socket
+            from homeassistant import auth
+            hass.auth = await auth.auth_manager_from_config(hass, [], [])
+            with socket.socket() as sock:
+                sock.bind(('127.0.0.1', 0))
+                port = sock.getsockname()[1]
+            self.assertTrue(await async_setup_component(hass, 'http', {'http': {
+                'server_host': '127.0.0.1', 'server_port': port}}))
+            from homeassistant.components.config import automation, script, scene
+            for editor in (automation, script, scene):
+                self.assertTrue(editor.async_setup(hass))
 
     async def test_threshold_supported_unload_own_mutations_setup_and_reverse(self):
         from homeassistant.components.sensor import SensorEntity
@@ -39,7 +55,9 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             'native_registry', 'native_registry_receipts', 'native_registry_transaction',
             'native_helper_transaction', 'native_input_observation', 'helper_native',
             'helper_transaction', 'helper_observers', 'prepared', 'journal', 'transaction',
-            'recorder_guard', 'history_guard', 'native_helper_lifecycle')}
+            'recorder_guard', 'history_guard', 'native_helper_lifecycle',
+            'yaml_transaction', 'yaml_runtime_observer', 'yaml_editor_locks',
+            'native_yaml_transaction')}
         nr, rr, prep, tx = (m[k] for k in ('native_registry', 'native_registry_receipts',
                                           'prepared', 'transaction'))
         class Meter(SensorEntity):
@@ -75,6 +93,21 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         (f.root / 'configuration.yaml').write_text('script:\n  receipt_probe:\n'
             '    sequence:\n      - variables:\n'
             '          sample: "{{ states(\'' + old + '\') }}"\n')
+        captured_script_values = []
+        if self.with_yaml:
+            from homeassistant.config import async_hass_config_yaml
+            from homeassistant.setup import async_setup_component
+            (f.root / 'scripts').mkdir()
+            (f.root / 'configuration.yaml').write_text('script: !include_dir_merge_named scripts\n')
+            (f.root / 'scripts/probe.yaml').write_text('receipt_probe:\n  sequence:\n'
+                '    - action: renamer_probe.capture\n      data:\n'
+                '        value: "{{ states(\'' + old + '\') }}"\n')
+            async def capture_script(call):
+                captured_script_values.append(str(call.data['value']))
+            hass.services.async_register('renamer_probe', 'capture', capture_script)
+            self.assertTrue(await async_setup_component(hass, 'script',
+                await async_hass_config_yaml(hass)))
+            await self._flush_documents()
         yaml_plan = importlib.import_module(fixtures.PACKAGE + '.yaml_plan')
         proposed_yaml = yaml_plan.plan_yaml(f.root, {old: new})
         self.assertTrue(proposed_yaml.ready, proposed_yaml.issues)
@@ -98,15 +131,21 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         bridge = nr.NativeRegistryBridge(io, recorder)
         registry_change = await bridge.prepare('entity', source_uuid, {'entity_id': new}, lambda: None)
         helper_change = m['helper_transaction'].prepare_helper(original_snapshot, {old: new})
-        changes = (registry_change, helper_change)
+        changes = [registry_change, helper_change]
+        scopes = ['registry', 'helpers']
+        if self.with_yaml:
+            yaml_change = await fixtures.validation._settled_executor(
+                hass, m['yaml_transaction']._capture, receipt, proposed_yaml)
+            changes.append(yaml_change)
+            scopes.append('yaml')
         digests, steps = {}, []
-        for index, (change, adapter) in enumerate(zip(changes, ('registry', 'helpers'))):
+        for index, (change, adapter) in enumerate(zip(changes, scopes)):
             ref = 'mixed-helper-' + str(index)
             digests[ref] = await preparations.create(ref, prep.encode_change(change))
             steps.append(tx.Step(ref, adapter, change.identity, change.before_revision,
                                  change.after_revision, ref))
-        plan = tx.Plan('mixed-helper-plan', ('registry', 'helpers'), ('registry', 'helpers'),
-                       tuple(steps), 'isolated-threshold-receipts', ('registry', 'helpers'), inputs)
+        plan = tx.Plan('mixed-helper-plan', tuple(scopes), tuple(scopes),
+                       tuple(steps), 'isolated-threshold-receipts', tuple(scopes), inputs)
         log = m['journal'].native_journal(hass)
         await log.initialize()
         store = rr.native_registry_receipt_store(hass, preparations)
@@ -114,9 +153,21 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         operation = 'mixed-helper-native-operation'
         chain = await rr.RegistryReceiptChain.start(store, operation, plan, receipt, digests)
         bridge = nr.NativeRegistryBridge(io, recorder, native_images=chain.accepted_documents)
-        async def observe():
+        observation_state = chain.reconstruct_inputs() if self.with_yaml else None
+        async def observe(input_state=None):
+            nonlocal observation_state
+            if self.with_yaml and input_state is None:
+                try:
+                    observation_state = chain.reconstruct_inputs()
+                except rr.RegistryReceiptError:
+                    if chain.active is None or chain.store.read(chain.active.reference[0])[
+                            'payload']['kind'] != 'registry_intent':
+                        raise
+                    # This same live native intent may observe its direct result;
+                    # the old state's head/preparations remain independently fenced.
+                input_state = observation_state
             return await m['native_input_observation'].async_observe_native_inputs(
-                hass, receipt, guard=lambda: None)
+                hass, receipt, guard=lambda: None, input_state=input_state)
         async def original_source(reference, original_receipt):
             self.assertEqual((reference, original_receipt), (inputs, receipt))
             fixtures.validation.assert_validation_current(receipt)
@@ -212,6 +263,10 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                 return False
             callback = (inactive.verify_inventory if direction == 'after'
                         else inactive.verify_original_inventory)
+            if self.with_yaml:
+                expected = tx.Position.AFTER if direction == 'after' else tx.Position.BEFORE
+                if await yaml_observer.position(yaml_change) != expected:
+                    return False
             return await callback(plan)
         adapter = m['native_helper_transaction'].ReceiptedHelperTransactionAdapter(
             native, chain, observe, log.load, guarded_quiescence,
@@ -219,19 +274,31 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         registry = m['native_registry_transaction'].ReceiptedRegistryTransactionAdapter(
             bridge, resolver, chain, observe, log.load, adapter.guard,
             full_verify=lambda _: verify('after'), full_verify_rollback=lambda _: verify('before'))
-        coordinator = tx.Coordinator({'registry': registry, 'helpers': adapter}, log,
-                                    adapter.guard, required_scopes=('registry', 'helpers'))
+        adapters = {'registry': registry, 'helpers': adapter}
+        if self.with_yaml:
+            from homeassistant.core import Context
+            yaml_observer = m['yaml_runtime_observer'].NativeYAMLRuntimeReadback(hass)
+            locks = m['yaml_editor_locks'].NativeYAMLEditorLocks(hass)
+            self.assertGreaterEqual(len(locks.enumerate()), 3)
+            yaml_adapter = m['native_yaml_transaction'].ReceiptedYAMLTransactionAdapter(
+                hass, resolver, locks, yaml_observer, chain, observe, log.load, adapter.guard,
+                context=Context(), full_verify=lambda _: verify('after'),
+                full_verify_rollback=lambda _: verify('before'))
+            adapters['yaml'] = yaml_adapter
+        coordinator = tx.Coordinator(adapters, log, adapter.guard, required_scopes=tuple(scopes))
         calls = []
         def intents(index):
             durable = m['journal'].decode(json.loads(Path(hass.config.path('.storage',
                 'ha_entity_renamer.migrations')).read_bytes())['data'])[operation]
             expected = 'intent' if durable.direction == 'forward' else 'undo_intent'
             self.assertEqual(durable.phases[index], expected)
-            self.assertEqual((registry if index == 0 else adapter).context.record, durable)
+            active_adapter = (registry if index == 0 else adapter) if index < 2 else yaml_adapter
+            active_context = (active_adapter.context if index < 2 else active_adapter.phase_context)
+            self.assertEqual(active_context.record, durable)
             sidecar = json.loads(Path(hass.config.path('.storage',
                 'ha_entity_renamer.registry_receipts')).read_bytes())['data']
             self.assertEqual(sidecar['events'][chain.active.reference[0]]['payload']['kind'],
-                             'registry_intent')
+                             'registry_intent' if index < 2 else 'yaml_intent')
             calls.append((index, durable.direction))
         original_registry, original_helper = io.mutate, m['helper_native']._mutate_entry
         def registry_call(*args, **kwargs):
@@ -240,6 +307,15 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         def helper_call(*args, **kwargs):
             intents(1)
             return original_helper(*args, **kwargs)
+        original_file = m['yaml_transaction'].apply_file_patch
+        def file_call(*args, **kwargs):
+            intents(2)
+            result = original_file(*args, **kwargs)
+            # Keep this owned fixture's replaced inode pinned across subsequent
+            # effects on mounted filesystems; never adopt a changed lookup inode.
+            pin = os.open(f.root / result['path'], os.O_RDONLY | os.O_NOFOLLOW)
+            self.addCleanup(os.close, pin)
+            return result
         async def authorization():
             record = await log.load(operation)
             observed = await observe()
@@ -256,12 +332,22 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                 await hass.async_block_till_done()
                 await loaded_observer.verify_runtime(snapshot)
                 self.assertEqual(hass.states.get(helper_row.entity_id).state, expected)
+                if self.with_yaml:
+                    from homeassistant.core import Context
+                    captured_script_values.clear()
+                    await hass.services.async_call('script', 'receipt_probe', {},
+                                                   blocking=True, context=Context())
+                    self.assertEqual(captured_script_values, [str(value)])
             self.assertTrue(await history.verify(historical))
-        with patch.object(io, 'mutate', registry_call), patch.object(
-                m['helper_native'], '_mutate_entry', helper_call):
+        with ExitStack() as effects:
+            effects.enter_context(patch.object(io, 'mutate', registry_call))
+            effects.enter_context(patch.object(m['helper_native'], '_mutate_entry', helper_call))
+            if self.with_yaml:
+                effects.enter_context(patch.object(m['yaml_transaction'], 'apply_file_patch', file_call))
             applied = await coordinator.apply(plan, plan.fingerprint, operation)
             self.assertEqual(applied.status, 'applied', (applied.reason, applied.phases))
-            self.assertEqual(calls, [(0, 'forward'), (1, 'forward')])
+            expected_forward = [(i, 'forward') for i in range(len(steps))]
+            self.assertEqual(calls, expected_forward)
             self.assertEqual(await coordinator.apply(plan, plan.fingerprint, operation), applied)
             fresh_preparations = prep.native_prepared_store(hass)
             await fresh_preparations.initialize()
@@ -283,8 +369,8 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             self.assertIs(helper.state, ConfigEntryState.NOT_LOADED)
             restored = await coordinator.rollback(operation)
             self.assertEqual(restored.status, 'rolled_back', (restored.reason, restored.phases))
-            self.assertEqual(calls, [(0, 'forward'), (1, 'forward'),
-                                     (1, 'rollback'), (0, 'rollback')])
+            self.assertEqual(calls, expected_forward +
+                             [(i, 'rollback') for i in reversed(range(len(steps)))])
             expected_config = helper_change.before
             await restore_and_stimulate(helper_change.before)
         self.assertIs(component.get_entity(old), meter)
