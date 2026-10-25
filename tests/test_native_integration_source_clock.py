@@ -73,6 +73,9 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
         return elapsed*(left+right)/2
 
     async def test_real_coordinator_source_forward_reverse_with_timer_and_reports(self):
+        await self._run_source_clock()
+
+    async def _run_source_clock(self):
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.components.integration.config_flow import ConfigFlowHandler
         from homeassistant.config_entries import ConfigEntry
@@ -235,6 +238,13 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
         scopes_live=[]
         creation_checks=[]
         burst_checks=[]
+        negative_hook=getattr(self,'source_clock_negative_hook',None)
+        negative_context=None
+        if negative_hook is not None:
+            from types import SimpleNamespace
+            negative_context=SimpleNamespace(m=m,hass=hass,root=root,store=store,
+                chain=chain,lease=lease,observe=observe,load_record=journal.load,
+                entry=self.entry,producer=self.producer)
         try:
             try:
                 m['native_integration_source_clock'] = importlib.import_module(
@@ -244,6 +254,9 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                     raise
                 self.fail('actual Integration source-ID clock binding is not implemented')
             for reverse in (False,True):
+                if negative_hook is not None:
+                    self.assertFalse(reverse,'negative stops after the first real direction')
+                    await negative_hook('before_capture',negative_context)
                 if reverse:
                     await self.wait_tick()
                 self.scope=await m['native_integration_source_clock'].async_begin_source_clock(
@@ -253,6 +266,10 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                 await scope.unload()
                 await hass.async_block_till_done()
                 self.assertEqual(scope._phase,'retained')
+                if negative_hook is not None:
+                    negative_context.scope=scope
+                    if await negative_hook('retained',negative_context):
+                        return
                 # Genuine changed + reported inputs before actual registry migration.
                 self.producer._attr_native_value=Decimal('12' if not reverse else '14')
                 self.producer.async_write_ha_state()
@@ -343,6 +360,10 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                     raw=tuple(m['native_registry_receipts'].RegistryRawObservation(f.key,f.raw,f.identity) for f in observed.files)
                     head=chain.expected(m['transaction'].PhaseContext(record,0),raw)
                     auth=m['native_helper_lifecycle'].RestoreAuthorization(chain.operation_id,plan.fingerprint,head,record.status)
+                    if negative_hook is not None:
+                        negative_context.authorization=auth
+                        if await negative_hook('before_setup',negative_context):
+                            return
                     restored=await m['native_integration_source_clock'].async_setup_source_clock(
                         scope,auth,observe=observe,load_record=journal.load)
                     self.assertEqual(restored._sensor_source_id,scope.source_binding.to_name)
