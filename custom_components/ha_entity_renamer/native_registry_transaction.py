@@ -96,6 +96,13 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         context = await self._durable_context(guard)
         context.require_effect(step, direction)
         change = self._change(step)
+        from .native_helper_placeholder_receipts import _own_entry
+        if _own_entry(self.chain, change) is not None:
+            # This generic adapter has no installed live escrow/placeholder IO
+            # binding yet. Refuse BEFORE any bridge/intent/effect, not merely at
+            # post-effect receipt validation. The private scoped node is composed
+            # separately; historical receipts cannot make this path writable.
+            raise Refused('own_helper_effect_required')
         intent, before = None, None
 
         async def before_mutation():
