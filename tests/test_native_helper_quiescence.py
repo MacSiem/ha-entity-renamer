@@ -44,13 +44,16 @@ class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
                                      'helper_native', 'helper_transaction',
                                      'native_config_transition')}
 
-    async def _flush_documents(self):
+    async def _flush_documents(self, *, initialize=False):
         """Actual native Core Stores; independently read every full envelope."""
         from homeassistant.helpers.json import _orjson_bytes_default_encoder
         f = self.f
         await f.hass.async_block_till_done()
         for manager in f.managers:
-            await manager._store.async_save(manager._data_to_save())
+            store = manager._store
+            if (initialize or store._data is not None or store._delay_handle is not None
+                    or store._unsub_final_write_listener is not None):
+                await store.async_save(manager._data_to_save())
         await f.hass.async_block_till_done()
         result = {}
         for manager in f.managers:
@@ -154,7 +157,10 @@ class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
         source_uuid = f.entity.async_get(old).id
         before = m['helper_native'].read_entry(hass, helper.entry_id)
         prepared = m['helper_transaction'].prepare_helper(before, {old: new})
-        baseline = await self._flush_documents()
+        baseline = await self._flush_documents(initialize=True)
+        original_receipt = fixtures.receipt_for(f.root, f.version)
+        original_inputs = await fixtures.baseline.async_capture_native_input_baseline(
+            hass, original_receipt, guard=lambda: None)
         source_row = next(row for row in json.loads(baseline['core.entity_registry'])
                           ['data']['entities'] if row['id'] == source_uuid)
         registry_change = m['native_registry'].PreparedRegistryChange(
@@ -229,6 +235,11 @@ class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
                                    .attributes['sensor_value']), 41)
 
         await unload()
+        # Quiescing must preserve the ORIGINAL source fence, not obtain a new
+        # receipt by accepting arbitrary inputs after an activation change.
+        fixtures.validation.assert_validation_current(original_receipt)
+        self.assertEqual(await fixtures.baseline.async_capture_native_input_baseline(
+            hass, original_receipt, guard=lambda: None), original_inputs)
         self._same_documents(baseline, await self._flush_documents())
         registry_stamp = io.mutate(registry_change, registry_change.after)
         await hass.async_block_till_done()
