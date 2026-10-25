@@ -368,7 +368,62 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             effects.enter_context(patch.object(m['helper_native'], '_mutate_entry', helper_call))
             if self.with_yaml:
                 effects.enter_context(patch.object(m['yaml_transaction'], 'apply_file_patch', file_call))
+            yaml_fault = getattr(self, 'yaml_save_fault', None)
+            if yaml_fault:
+                native_save = store.store.save
+                async def lose_yaml_ack(document):
+                    await native_save(document)
+                    if any(row['payload']['kind'] == 'yaml_' + yaml_fault
+                           for row in document['events'].values()):
+                        raise OSError('actual YAML ' + yaml_fault + ' ACK lost after durable save')
+                effects.enter_context(patch.object(store.store, 'save', lose_yaml_ack))
             applied = await coordinator.apply(plan, plan.fingerprint, operation)
+            if yaml_fault:
+                self.assertEqual(applied.status, 'unknown')
+                self.assertEqual(applied.phases, ('verified', 'verified', 'intent'))
+                self.assertEqual(calls, [(0, 'forward'), (1, 'forward')] +
+                    ([(2, 'forward')] if yaml_fault == 'receipt' else []))
+                self.assertEqual(candidate_proofs, [])
+                self.assertTrue(store.poisoned)
+                self.assertIs(helper.state, ConfigEntryState.NOT_LOADED)
+                fresh_preparations = prep.native_prepared_store(hass)
+                await fresh_preparations.initialize()
+                fresh_store = rr.native_registry_receipt_store(hass, fresh_preparations)
+                await fresh_store.initialize()
+                fresh_chain = rr.RegistryReceiptChain.reopen(
+                    fresh_store, operation, plan, receipt, digests)
+                self.assertFalse(fresh_chain.writable)
+                async def fresh_observe(state):
+                    return await m['native_input_observation'].async_observe_native_inputs(
+                        hass, receipt, guard=adapter.guard, input_state=state)
+                fresh_adapter = m['native_yaml_transaction'].ReceiptedYAMLTransactionAdapter(
+                    hass, lambda ref: prep.decode_change(fresh_preparations.resolve(ref, digests[ref])),
+                    locks, yaml_observer, fresh_chain, fresh_observe, log.load, adapter.guard,
+                    context=Context(), full_verify=lambda _: verify('after'),
+                    full_verify_rollback=lambda _: verify('before'))
+                fresh_adapter.bind_phase_context(tx.PhaseContext(await log.load(operation), 2))
+                before_files = {row.path: Path(hass.config.path(row.path)).read_bytes()
+                                for row in yaml_change.files}
+                before_events = json.loads(Path(hass.config.path('.storage',
+                    'ha_entity_renamer.registry_receipts')).read_bytes())
+                expected_position = tx.Position.AFTER if yaml_fault == 'receipt' else tx.Position.UNKNOWN
+                self.assertEqual(await fresh_adapter.inspect(steps[2]), expected_position)
+                self.assertEqual(await fresh_adapter.inspect(steps[2]), expected_position)
+                for row in yaml_change.files:
+                    self.assertEqual(before_files[row.path],
+                        row.after if yaml_fault == 'receipt' else row.before)
+                    self.assertEqual(Path(hass.config.path(row.path)).read_bytes(), before_files[row.path])
+                self.assertEqual(json.loads(Path(hass.config.path('.storage',
+                    'ha_entity_renamer.registry_receipts')).read_bytes()), before_events)
+                with self.assertRaises(ValueError):
+                    await fresh_adapter.apply(steps[2], adapter.guard)
+                if yaml_fault == 'intent':
+                    with self.assertRaisesRegex(ValueError, 'unresolved_intent'):
+                        fresh_chain.reconstruct_inputs()
+                self.assertTrue(await history.verify(historical))
+                self.assertEqual(calls, [(0, 'forward'), (1, 'forward')] +
+                    ([(2, 'forward')] if yaml_fault == 'receipt' else []))
+                return
             self.assertEqual(applied.status, 'applied',
                              (applied.reason, applied.phases, calls, effect_errors))
             expected_forward = [(i, 'forward') for i in range(len(steps))]
