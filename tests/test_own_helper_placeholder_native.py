@@ -150,6 +150,32 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
                 life.plan, life.receipt, life.binding['preparations'])
             self.assertFalse(reopened.writable)
             self.assertEqual(reopened.reconstruct_inputs().documents(), chain.accepted_documents())
+            # Corruption tests use a detached READONLY view of the actual saved
+            # graph, never a manufactured successful native call or live effect.
+            def no_subeffect(payload):
+                payload.pop('own_helper_placeholder')
+            def foreign_escrow(payload):
+                payload['own_helper_placeholder']['escrow_root'][1] = '0' * 64
+            def invented_scope(payload):
+                sub = payload['own_helper_placeholder']['stamp']
+                scope = json.loads(sub['scope_json'])
+                scope['operation_id'] = 'foreign-operation'
+                sub['scope_json'] = json.dumps(scope)
+            def departed_state_retained(payload):
+                sub = payload['own_helper_placeholder']['stamp']
+                body = json.loads(sub['body_json'])
+                body['finish']['source_state'] = original_state.as_dict_json.decode()
+                sub['body_json'] = json.dumps(body)
+            for corrupt in (no_subeffect, foreign_escrow, invented_scope, departed_state_retained):
+                with self.subTest(corrupt=corrupt.__name__):
+                    view = rr.RegistryReceiptStore(None, life.store.preparations)
+                    view.rows = deepcopy(fresh_store.rows)
+                    changed = view.rows[completed[0]]['payload']
+                    corrupt(changed)
+                    view.rows[completed[0]]['digest'] = rr._digest(changed)
+                    with self.assertRaises(ValueError):
+                        rr.RegistryReceiptChain.reopen(view, life.operation_id,
+                            life.plan, life.receipt, life.binding['preparations'])
             # Consumer check only: audited setup integration
             # are tested separately before a complete migration can be accepted.
             self.assertTrue(await self.lease.async_setup(self.entry.entry_id))
