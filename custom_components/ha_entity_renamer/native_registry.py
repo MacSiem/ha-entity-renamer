@@ -366,13 +366,22 @@ class NativeRegistryBridge:
         expected = "before" if source == change.before else "after"
         if evidence.position != expected:
             raise RegistryConflict("inspect_before_write:" + evidence.reason)
+        node = None
         if before_mutation is not None:
             # Trusted whole-input/intent consumer runs AFTER the final async
             # runtime inspection. No await separates its final fence from API.
-            await before_mutation()
+            node = await before_mutation()
             self._fresh(change, source, guard)
         # No await between fresh authorization/revision and one native mutation.
-        stamp = self.io.mutate(change, target)
+        if node is None:
+            stamp = self.io.mutate(change, target)
+        else:
+            from .native_helper_placeholder_effect import OwnHelperPlaceholder
+            if (type(node) is not OwnHelperPlaceholder or node.io is not self.io
+                    or node.change != change or node.source != source['entity_id']
+                    or node.target != target['entity_id']):
+                raise RegistryConflict('own_helper_effect_binding_mismatch')
+            stamp = node.mutate()
         await self.io.settle()
         self._fresh(change, target, guard)
         await self.io.flush(change.kind)

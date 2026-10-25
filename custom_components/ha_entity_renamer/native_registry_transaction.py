@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 
 from .native_input_observation import NativeInputObservation
@@ -24,6 +25,86 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         self.chain, self.observer = chain, observer
         self.phase_loader, self.guard = phase_loader, guard
         self.context = None
+        self._own_escrows = {}
+
+    def bind_own_helper_escrow(self, escrow, token, *, source_fence):
+        """Trusted ephemeral composition; saved escrow data cannot bind a writer.
+
+        source_fence(context) synchronously checks the durable journal and the
+        caller's original/accepted input and manager fences. It returns None.
+        It is a source check, used only BEFORE mutation, never after rename.
+        """
+        from .native_restore_state_escrow_receipts import NativeRestoreStateEscrow, RestoreEscrowIntent
+        if (type(escrow) is not NativeRestoreStateEscrow
+                or type(token) is not RestoreEscrowIntent or token is not escrow.completed
+                or not callable(source_fence) or self.chain.active is not None):
+            raise Refused('own_helper_live_escrow_required')
+        escrow.require_completed(token)
+        self._own_escrows[escrow.entry_id] = (escrow, token, source_fence)
+
+    def _own_binding(self, entry_id, change, context, expected=None):
+        binding = self._own_escrows.get(entry_id)
+        if binding is None:
+            raise Refused('own_helper_effect_required')
+        from .native_registry import NativeRegistryIO, NativeRegistryBridge
+        from .native_helper_lifecycle import NativeHelperLifecycle
+        escrow, token, fence = binding
+        life = escrow.lifecycle
+        if (expected is not None and binding is not expected
+                or type(life) is not NativeHelperLifecycle
+                or type(self.bridge) is not NativeRegistryBridge
+                or type(self.bridge.io) is not NativeRegistryIO
+                or self.bridge.io.hass is not life.manager.hass
+                or life.operation_id != self.chain.operation_id
+                or life.plan != self.chain.plan or life.receipt != self.chain.original_receipt
+                or life.store.preparations is not self.chain.store.preparations
+                or life.own_registry_changes.get(entry_id) != change
+                or (life.source_authorization is not None) != (context.record.direction == 'rollback')
+                or not self.chain.writable):
+            raise Refused('own_helper_scope_mismatch')
+        result = fence(context)
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise Refused('own_helper_synchronous_source_fence_required')
+        if result is not None:
+            raise Refused('own_helper_source_fence_result')
+        escrow.require_completed(token)
+        return binding
+
+    def _own_node(self, binding, entry_id, change, context, intent, before, guard):
+        from .native_helper_placeholder_effect import OwnHelperPlaceholder
+        from .native_helper_lifecycle import validate_lifecycle_receipt_witness
+        from .native_registry_receipts import _digest
+        escrow, _, _ = binding
+        life = escrow.lifecycle
+        slot = life._slot('unload', entry_id, 'receipt')
+        row = life.store.read(slot)
+        if row is None:
+            raise Refused('own_helper_unload_receipt_required')
+        unload_ref = [slot, row['digest']]
+
+        def fresh(scope):
+            guard()
+            self._own_binding(entry_id, change, context, binding)
+            self.chain.verify_intent_source(intent, context, before)
+            return True
+
+        def witness(scope):
+            parsed = validate_lifecycle_receipt_witness(life.store, life.operation_id,
+                life.plan, life.receipt, life.binding['preparations'], root_id=life.root_id)
+            if (not parsed.inspect()['inactive_receipts_complete']
+                    or scope['lifecycle_root'] != [life.root_id, _digest(life.root)]
+                    or scope['unload_receipt'] != unload_ref
+                    or scope['registry_uuid'] != change.identity):
+                raise Refused('own_helper_unload_lineage_mismatch')
+            return True
+
+        return OwnHelperPlaceholder.capture(io=self.bridge.io, lifecycle=life,
+            chain=self.chain, context=context, intent=intent, observations=before,
+            live_guard=guard, fresh_source_fence=fresh, validate_unload_witness=witness,
+            verify_live_unload_state=lambda actual, ref, state:
+                actual.verify_live_unload_state(entry_id, ref, state))
 
     def bind_phase_context(self, context):
         if context is not None and type(context) is not PhaseContext:
@@ -97,16 +178,12 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         context.require_effect(step, direction)
         change = self._change(step)
         from .native_helper_placeholder_receipts import _own_entry
-        if _own_entry(self.chain, change) is not None:
-            # This generic adapter has no installed live escrow/placeholder IO
-            # binding yet. Refuse BEFORE any bridge/intent/effect, not merely at
-            # post-effect receipt validation. The private scoped node is composed
-            # separately; historical receipts cannot make this path writable.
-            raise Refused('own_helper_effect_required')
-        intent, before = None, None
+        own = _own_entry(self.chain, change)
+        binding = None if own is None else self._own_binding(own, change, context)
+        intent, before, node = None, None, None
 
         async def before_mutation():
-            nonlocal intent, before
+            nonlocal intent, before, node
             if intent is not None:
                 raise Refused('Registry mutation hook repeated')
             before = await self._read(guard)
@@ -118,6 +195,9 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
             before = await self._read(guard)
             self.chain.verify_intent_source(intent, context, before)
             guard()
+            if binding is not None:
+                node = self._own_node(binding, own, change, context, intent, before, guard)
+                return node
 
         method = self.bridge.apply if direction == 'forward' else self.bridge.compensate
         mutation = await method(change, guard, before_mutation=before_mutation)
@@ -125,13 +205,29 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         if intent is None or type(mutation) is not self._mutation_type():
             raise Refused('Native registry call not confirmed')
         await self._durable_context(guard, context)
+        extra = {}
+        if binding is not None:
+            if node is None:
+                raise Refused('own_helper_effect_not_confirmed')
+            from .native_restore_state_escrow_receipts import copy_escrow_witness
+            escrow = binding[0]
+            life = escrow.lifecycle
+            # require_completed is a source gate: it must NOT run after rename.
+            await copy_escrow_witness(life.store, self.chain.store,
+                self.chain.operation_id, self.chain.plan, self.chain.original_receipt,
+                life.binding['preparations'], escrow.root_reference)
+            guard()
+            await self._durable_context(guard, context)
+            extra['escrow_root_reference'] = escrow.root_reference
         after = await self._read(guard)
         key = self._native_key(change)
         source_raw = next(item.raw for item in before if item.key == key)
         result_raw = next(item.raw for item in after if item.key == key)
         audit = self._effect_audit(change, direction, source_raw, result_raw, mutation)
+        if node is not None:
+            extra['placeholder_stamp'] = node.finish()
         await self.chain.complete(intent, context, before, after,
-                                  mutation=mutation, audit=audit)
+                                  mutation=mutation, audit=audit, **extra)
         guard()
         return mutation
 
