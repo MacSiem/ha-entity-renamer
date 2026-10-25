@@ -48,6 +48,7 @@ class PowercalcAbsentNativeTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(fixtures.HAS_HA, 'requires actual pinned HA')
 class PowercalcRuntimeNativeTests(unittest.IsolatedAsyncioTestCase):
+    namespace_source_bytes = b''
     _flush_documents = quiescence.NativeHelperQuiescenceTests._flush_documents
 
     async def asyncSetUp(self):
@@ -81,7 +82,7 @@ class PowercalcRuntimeNativeTests(unittest.IsolatedAsyncioTestCase):
         root = Path(directory.name).resolve()
         components = root / 'custom_components'
         components.mkdir()
-        (components / '__init__.py').write_text('')
+        (components / '__init__.py').write_bytes(self.namespace_source_bytes)
         shutil.copytree(vendor, components / 'powercalc',
             ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.git'))
         # Standard Python namespace search path for the real public package.
@@ -134,6 +135,7 @@ class PowercalcRuntimeNativeTests(unittest.IsolatedAsyncioTestCase):
         config = ('powercalc:\n  discovery:\n    enabled: false\n'
             '  disable_library_download: true\n  enable_analytics: false\n'
             '  create_energy_sensors: false\n  create_standby_group: false\n'
+            '  group_power_update_interval: 0\n'
             '  sensors:\n    - entity_id: ' + self.yaml_source + '\n'
             '      unique_id: pc-readonly-yaml\n      fixed:\n        power: 7\n'
             '      create_energy_sensor: false\n')
