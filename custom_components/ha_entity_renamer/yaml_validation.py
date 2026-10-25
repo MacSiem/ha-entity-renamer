@@ -225,9 +225,10 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False):
                                        for path in sorted(directories)))
         if with_sources:
             from .yaml_source_ledger import (extract_source_ledger,
-                                              extract_template_source_ledger)
+                                              extract_template_source_ledger, extract_powercalc_source_ledger)
             return (*staged, extract_source_ledger(plan, original_bytes),
-                    extract_template_source_ledger(plan, original_bytes))
+                    extract_template_source_ledger(plan, original_bytes),
+                    extract_powercalc_source_ledger(plan, original_bytes))
         return staged
     except (OSError, ValueError) as exc:
         if isinstance(exc, YAMLValidationError):
@@ -274,7 +275,7 @@ async def _settled_executor(hass, function, *args):
     return result
 
 
-async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, with_sources=False):
+async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, with_sources=False, powercalc_bundle=None):
     """Return only after native validation of the entire proposed graph succeeds.
 
     scratch_parent must be private local storage OUTSIDE config_root. It contains
@@ -293,6 +294,9 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
             staged = await _settled_executor(hass, _stage, root, plan, before, after,
                                              *((True,) if with_sources else ()))
             sources, directories = staged[:2]
+            if powercalc_bundle is not None:
+                from .powercalc_source_binding import stage_powercalc_bundle
+                await _settled_executor(hass, stage_powercalc_bundle, powercalc_bundle, before, after)
             worker = str(Path(__file__).with_name('yaml_validation_worker.py'))
             process = await asyncio.create_subprocess_exec(
                 sys.executable, '-I', worker, str(before), str(after),
@@ -323,6 +327,11 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 evidence = seal_original_sources(receipt, plan, staged[2], result['source_runtime'],
                     template_ledger=staged[3], template_native=result['template_sources'],
                     template_candidate_native=result['template_candidate_sources'])
+                if powercalc_bundle is not None:
+                    from dataclasses import replace
+                    from .powercalc_source_binding import seal_powercalc_sources
+                    evidence = replace(evidence, powercalc_sources=seal_powercalc_sources(
+                        receipt, plan, staged[4], result['powercalc_sources']))
                 return receipt, evidence
             return receipt
     except (OSError, TimeoutError):
@@ -381,3 +390,23 @@ async def async_activate_yaml(hass, receipt, *, context, guard):
     except Exception:
         raise YAMLValidationError('yaml_activation_unconfirmed') from None
     return {'status': 'reloads_completed_readback_required', 'services': tuple(completed)}
+
+
+async def async_validate_proposed_with_powercalc_sources(hass, plan, scratch_parent, *, timeout=120):
+    """Exact ORIGINAL checker plus the supported official vendor source bundle.
+
+    Read-only prerequisite. Unsupported Powercalc apply stays unsupported.
+    """
+    from .powercalc_source_binding import PowercalcVendor
+    vendor = PowercalcVendor(hass)
+    bundle = await _settled_executor(hass, vendor.sources)
+    vendor.bindings()
+    result = await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
+                                          with_sources=True, powercalc_bundle=bundle)
+    def final_sources():
+        vendor.sources()
+        # SAME ORIGINAL receipt closes the final vendor-code executor await.
+        assert_validation_current(result[0])
+    await _settled_executor(hass, final_sources)
+    vendor.bindings()
+    return result

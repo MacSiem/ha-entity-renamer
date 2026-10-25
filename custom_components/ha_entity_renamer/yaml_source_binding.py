@@ -7,11 +7,15 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import re
+from typing import TYPE_CHECKING
 
 from .native_input_baseline import _receipt_bytes
 from .yaml_source_ledger import SourceLedger, source_graph_digest
 from .template_source_evidence import OriginalTemplateSources, CandidateTemplateSources
 from .yaml_validation import assert_proposal_matches
+
+if TYPE_CHECKING:
+    from .powercalc_source_binding import OriginalPowercalcSources
 
 _DOMAINS = ('automation', 'script')
 _SHA = re.compile(r'[0-9a-f]{64}\Z')
@@ -40,6 +44,7 @@ class OriginalSourceEvidence:
     domains: tuple[NativeSourceDomain, ...]
     template_sources: OriginalTemplateSources | None = None
     template_candidate_sources: CandidateTemplateSources | None = None
+    powercalc_sources: OriginalPowercalcSources | None = None
 
     @property
     def migration_ready(self):
@@ -56,6 +61,8 @@ class OriginalSourceEvidence:
             payload['template_sources'] = self.template_sources.sha256
         if self.template_candidate_sources is not None:
             payload['template_candidate_sources'] = self.template_candidate_sources.sha256
+        if self.powercalc_sources is not None:
+            payload['powercalc_sources'] = self.powercalc_sources.sha256
         return hashlib.sha256(json.dumps(payload, sort_keys=True,
             separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 

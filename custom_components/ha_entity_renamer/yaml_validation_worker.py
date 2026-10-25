@@ -292,6 +292,53 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
         await hass.async_stop(force=True)
 
 
+def powercalc_fixed_semantics(cfg):
+    """Read-only scalar fixed subset, shared by ORIGINAL checker/runtime binder.
+
+    Return None for every unverified profile/dynamic/adjustment alternative.
+    ConfigEntry private generated IDs are checked separately against registry.
+    """
+    from decimal import Decimal
+    allowed = {'name', 'entity_id', 'unique_id', 'fixed', 'create_energy_sensor',
+               'sensor_type', '_power_entity', '_energy_entity'}
+    if (not isinstance(cfg, dict) or set(cfg) - allowed
+            or cfg.get('sensor_type', 'virtual_power') != 'virtual_power'
+            or cfg.get('create_energy_sensor') is not False
+            or type(cfg.get('entity_id')) is not str):
+        return None
+    fixed = cfg.get('fixed')
+    if not isinstance(fixed, dict) or set(fixed) != {'power'} or type(fixed['power']) not in (int, float):
+        return None
+    value = Decimal(str(fixed['power']))
+    if not value.is_finite():
+        return None
+    return {'source': cfg['entity_id'], 'power': str(value)}
+
+
+async def _expected_powercalc_sources(root):
+    """Projection in the SAME isolated ORIGINAL checker; no vendor setup."""
+    from homeassistant import loader
+    from homeassistant.core import HomeAssistant
+    from homeassistant.const import __version__
+    from homeassistant.config import async_hass_config_yaml, async_process_component_and_handle_errors
+    from homeassistant.loader import async_get_integration
+    hass = HomeAssistant(root)
+    loader.async_setup(hass)
+    try:
+        cfg = await async_hass_config_yaml(hass)
+        checked = await async_process_component_and_handle_errors(
+            hass, cfg, await async_get_integration(hass, 'powercalc'))
+        if checked is None:
+            raise ValueError('powercalc_original_native_schema_rejected')
+        pc = checked.get('powercalc', {})
+        rows = [[row.get('unique_id'), _fingerprint(row), powercalc_fixed_semantics(row)]
+                for row in pc.get('sensors', [])]
+        return {'version': __version__, 'rows': rows,
+                'globals': {key: _fingerprint(value) for key, value in pc.items() if key != 'sensors'}}
+    finally:
+        await hass.async_stop(force=True)
+
+
 async def check(before_root, proposed_root, *, with_sources=False):
     from homeassistant.const import __version__
     from homeassistant.scripts.check_config import async_check_config
@@ -319,6 +366,8 @@ async def check(before_root, proposed_root, *, with_sources=False):
               'runtime_expected': [(domain, old_runtime.get(domain), new_runtime.get(domain))
                                    for domain in changed]}
     if with_sources:
+        if os.path.isfile(os.path.join(before_root, 'custom_components/powercalc/manifest.json')):
+            result['powercalc_sources'] = await _expected_powercalc_sources(before_root)
         result['template_sources'] = template_sources
         result['template_candidate_sources'] = candidate_templates
         result['source_runtime'] = {'version': __version__, 'domains': [

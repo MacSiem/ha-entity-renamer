@@ -140,8 +140,14 @@ def extract_template_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
     return _extract_source_ledger(plan, original, limits=limits, template=True)
 
 
+def extract_powercalc_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
+                                    limits: Limits = Limits()) -> SourceLedger:
+    """Schema 3: exact physical Powercalc occurrences in the SAME frozen graph."""
+    return _extract_source_ledger(plan, original, limits=limits, template=False, powercalc=True)
+
+
 def _extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
-                           limits: Limits, template: bool) -> SourceLedger:
+                           limits: Limits, template: bool, powercalc=False) -> SourceLedger:
     """Inventory configuration.yaml reachability using the existing frozen graph.
 
     Extra Plan roots (e.g. dashboards) remain in graph digest but are not treated
@@ -404,7 +410,29 @@ def _extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
     def sections(ref, package=None):
         for section, value, keyref in pairs(ref):
             domain = section.split(' ', 1)[0]
-            if template and domain == 'template':
+            if powercalc and domain == 'powercalc':
+                definition('powercalc.global', 'global', value, keyref, section, package)
+                for name, items, _ in pairs(mapping_ref(value)):
+                    if name != 'sensors':
+                        continue
+                    for item in expand(items, 'seq'):
+                        cfg = pairs(mapping_ref(item))
+                        ids = [(child, origin) for name, child, origin in cfg if name == 'unique_id']
+                        key, origin = None, item
+                        if (len(ids) == 1 and isinstance(ids[0][0].node, ScalarNode)
+                                and ids[0][0].node.tag == _STR):
+                            key, origin = ids[0][0].node.value, ids[0][1]
+                        definition('powercalc.sensor', key, item, origin, section, package)
+            elif powercalc and domain == 'sensor':
+                for item in template_items(value):
+                    resolved = mapping_ref(item)
+                    if isinstance(resolved.node, MappingNode) and any(
+                        isinstance(key, ScalarNode) and key.value == 'platform'
+                        and isinstance(child, ScalarNode) and child.value == 'powercalc'
+                        for key, child in resolved.node.value):
+                        flag(item, 'source_powercalc_legacy_unverified')
+                        definition('powercalc.legacy', None, item, keyref, section, package)
+            elif template and domain == 'template':
                 for item in template_items(value):
                     template_block(item, section, package)
             elif template and domain in template_platforms:
@@ -417,10 +445,10 @@ def _extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
                         and isinstance(child, ScalarNode) and child.value == 'template'
                         for key, child in resolved.node.value):
                         template_block(item, section, package, legacy=True)
-            elif not template and domain == 'automation':
+            elif not template and not powercalc and domain == 'automation':
                 for item in expand(value, 'seq'):
                     definition(domain, None, item, keyref, section, package)
-            elif not template and domain == 'script':
+            elif not template and not powercalc and domain == 'script':
                 for key, item, origin in pairs(value):
                     definition(domain, key, item, origin, section, package)
             elif section == 'homeassistant' and package is None:
@@ -447,7 +475,7 @@ def _extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
                 findings.append(Finding('source_duplicate_native_key', row.key_origin))
     # Stable encounter order is physical source order / frozen edge order. It
     # conveys no guessed native include-dir precedence.
-    schema = 2 if template else 1
+    schema = 3 if powercalc else 2 if template else 1
     payload = {'schema': schema, 'original_graph_sha256': graph_hash,
                'definitions': [asdict(row) for row in definitions],
                'findings': [asdict(row) for row in findings]}
