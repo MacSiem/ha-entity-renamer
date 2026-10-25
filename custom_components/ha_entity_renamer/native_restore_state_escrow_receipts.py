@@ -85,7 +85,7 @@ def _lifecycle_binding(lifecycle, entry_id):
           'own_registry_preparation_required')
     before, after = change.before, change.after
     _need(before['config_entry_id'] == entry_id and before['unique_id'] == entry_id
-          and before['platform'] == 'utility_meter' and before['id'] == change.identity
+          and before['platform'] in ('utility_meter', 'integration') and before['id'] == change.identity
           and all(after.get(k) == before.get(k) for k in
                   ('id', 'unique_id', 'platform', 'config_entry_id', 'config_subentry_id')),
           'helper_uuid_binding')
@@ -154,6 +154,18 @@ def _parse_root(store, context, root_ref, *, depth=0):
     _need(codec._parse(payload.before_json)['state']['entity_id'] == source
           and codec._parse(payload.after_json)['state']['entity_id'] == target,
           'payload_endpoints')
+    if change.before['platform'] == 'integration':
+        _need(type(payload) is codec.PreparedIntegrationPayload, 'integration_payload_required')
+        from .native_integration_unload_audit import (decode_integration_own_unload,
+                                                    integration_own_unload_doc)
+        unload = _read(store, binding['unload_receipt'])
+        doc = integration_own_unload_doc(decode_integration_own_unload(unload['native_unload']))
+        _need(codec._canonical(doc['capture']) == payload.capture_json
+              and doc['capture']['entry_id'] == binding['entry_id']
+              and doc['capture']['helper_uuid'] == binding['helper_uuid'],
+              'integration_unload_capture_binding')
+    else:
+        _need(type(payload) is codec.PreparedPayload, 'utility_payload_required')
     expected_target = _row_bytes(root['target_preimage'], target)
     disk = root['disk_preimage']
     _need(type(disk) is dict and set(disk) == {source, target}, 'disk_preimage_layout')
@@ -316,7 +328,7 @@ class NativeRestoreStateEscrow:
         row = registry.async_get(source)
         _need(row is not None and row.id == change.identity
               and row.config_entry_id == self.entry_id and row.unique_id == self.entry_id
-              and row.platform == 'utility_meter' and row.config_subentry_id is None
+              and row.platform == before['platform'] and row.config_subentry_id is None
               and registry.async_get(target) is None, 'current_helper_uuid_or_target')
 
     async def _fresh(self):
@@ -348,7 +360,12 @@ class NativeRestoreStateEscrow:
                 source, target = target, source
             source_object = self.data.last_states.get(source)
             _need(source_object is not None, 'post_unload_source_required')
-            payload = codec.prepare_payload(source_object, target)
+            if change.before['platform'] == 'integration':
+                _, witness = self.lifecycle._unload_witnesses[self.entry_id]
+                payload = codec.prepare_integration_payload(source_object, target, witness=witness)
+                self._integration_witness = witness
+            else:
+                payload = codec.prepare_payload(source_object, target)
             expected_target = (None if target not in self.data.last_states else
                                captured(self.data.last_states[target]))
             _need(type(disk_preimage) is dict and set(disk_preimage) == {source, target},
@@ -413,7 +430,8 @@ class NativeRestoreStateEscrow:
                   'intent_binding')
             result = await self.io.escrow(self._payload,
                 expected_source=self._source_object, expected_target=self._expected_target,
-                disk_preimage=self._disk_preimage)
+                disk_preimage=self._disk_preimage,
+                witness=getattr(self, '_integration_witness', None))
             _need(type(result) is Readback and result.source == self._payload.before_json
                   and result.target == self._payload.after_json, 'actual_readback_required')
             await self._fresh()

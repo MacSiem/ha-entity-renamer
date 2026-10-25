@@ -1,4 +1,4 @@
-"""Pure own-UtilityMeter placeholder evidence in the existing registry receipt.
+"""Pure own-Utility/Integration placeholder evidence in the existing registry receipt.
 
 No native mutation, live authority, new journal, recapture or result-only replay.
 The caller explicitly copies the completed escrow witness before complete().
@@ -29,9 +29,9 @@ def _own_entry(chain, change):
     entry_id = row.get('config_entry_id')
     configs = [entry for entry in documents['core.config_entries']['entries']
                if entry.get('entry_id') == entry_id]
-    if len(configs) != 1 or configs[0].get('domain') != 'utility_meter':
+    if len(configs) != 1 or configs[0].get('domain') not in ('utility_meter', 'integration'):
         return None
-    if row.get('platform') != 'utility_meter' or row.get('unique_id') != entry_id:
+    if row.get('platform') != configs[0]['domain'] or row.get('unique_id') != entry_id:
         return None  # An ordinary dependency entity, not this helper's own ID.
     if (type(entry_id) is not str or not entry_id or row.get('config_subentry_id') is not None
             or any(type(r.get('entity_id')) is not str or not r['entity_id'].startswith('sensor.')
@@ -89,15 +89,21 @@ def expected_placeholder_scope(chain, payload, change, escrow_root_reference):
             or lifecycle.own_registry_changes.get(entry_id) != change):
         _fail('placeholder_escrow_binding')
     original = [row for row in lifecycle.root['original'] if row['entry_id'] == entry_id]
-    if (len(original) != 1 or original[0]['domain'] != 'utility_meter'
+    if (len(original) != 1 or original[0]['domain'] != change.before['platform']
             or original[0]['state'] != 'loaded'):
         _fail('placeholder_actual_unload_required')
     unload = _read(chain.store, eb['unload_receipt'])
     if (unload.get('root') != lifecycle.root_id or unload.get('state') != 'not_loaded'
             or unload.get('api_called') is not True):
         _fail('placeholder_unload_binding')
-    data = decode_unload_audit(unload['native_unload'])
-    doc = _payload(data)  # Includes BOTH manager and writer rows and exact native JSON.
+    if change.before['platform'] == 'integration':
+        from .native_integration_unload_audit import (decode_integration_own_unload,
+                                                    integration_own_unload_doc)
+        data = decode_integration_own_unload(unload['native_unload'])
+        doc = integration_own_unload_doc(data)
+    else:
+        data = decode_unload_audit(unload['native_unload'])
+        doc = _payload(data)  # Includes BOTH manager and writer rows and exact native JSON.
     mutation = NativeRegistryMutation(**payload['mutation'])
     source = change.before if direction == 'forward' else change.after
     target = change.after if direction == 'forward' else change.before

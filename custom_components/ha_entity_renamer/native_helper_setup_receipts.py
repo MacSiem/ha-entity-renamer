@@ -1,4 +1,4 @@
-"""Offline fold of native utility setup effects into the original receipt chain.
+"""Offline fold of native Utility and own-ID Integration setup effects into the original receipt chain.
 
 No HA calls, saves of native registries, authorization grants, baseline capture,
 replay, timestamp normalization or result-only adoption. A typed native audit is
@@ -124,7 +124,7 @@ def _activation(chain, lifecycle, entry_id, *, live):
     if root_row != {'digest': root_ref[1], 'payload': lifecycle.root}:
         _fail('lifecycle_root')
     originals = [row for row in lifecycle.root['original'] if row['entry_id'] == entry_id]
-    if (len(originals) != 1 or originals[0]['domain'] != 'utility_meter'
+    if (len(originals) != 1 or originals[0]['domain'] not in ('utility_meter', 'integration')
             or originals[0]['state'] != 'loaded'):
         _fail('unsupported_activation')
     key = lifecycle._slot('setup', entry_id, 'intent')
@@ -134,9 +134,15 @@ def _activation(chain, lifecycle, entry_id, *, live):
             or row['payload'].get('original') != originals[0]):
         _fail('lifecycle_setup_binding')
     values = [value for value in lifecycle.runtime_baselines() if value.entry_id == entry_id]
-    if len(values) != 1:
-        _fail('runtime_baseline_required')
-    encoded = encode_runtime_baseline(values[0])
+    if originals[0]['domain'] == 'integration':
+        from .native_integration_setup_audit import activation_baseline
+        if values:
+            _fail('integration_does_not_use_utility_baseline')
+        encoded = activation_baseline(chain, lifecycle, entry_id)
+    else:
+        if len(values) != 1:
+            _fail('runtime_baseline_required')
+        encoded = encode_runtime_baseline(values[0])
     # Rebind the immutable typed counter and original registry preparation.
     if lifecycle._bind_runtime_baselines(lifecycle.root['original'],
             lifecycle.runtime_baselines()) != lifecycle.root.get('runtime_baselines'):
@@ -169,11 +175,16 @@ def _validate_activation(chain, activation):
             or intent['payload'].get('original') != activation['original']
             or intent['payload'].get('authorization') != activation['authorization']
             or activation['original'] not in obj.root['original']
-            or activation['original']['domain'] != 'utility_meter'
+            or activation['original']['domain'] not in ('utility_meter', 'integration')
             or activation['original']['state'] != 'loaded'):
         _fail('activation_binding')
     values = [value for value in obj.runtime_baselines()
               if value.entry_id == activation['entry_id']]
+    if activation['original']['domain'] == 'integration':
+        from .native_integration_setup_audit import activation_baseline
+        if values or activation_baseline(chain, obj, activation['entry_id']) != activation['baseline']:
+            _fail('integration_restore_binding')
+        return obj, activation['baseline']
     if len(values) != 1 or encode_runtime_baseline(values[0]) != activation['baseline']:
         _fail('runtime_baseline_binding')
     return obj, values[0]
@@ -277,10 +288,16 @@ def fold_receipt(chain, states, intent, receipt):
     rows = states[ENTITY]['document']['data']['entities']
     indices = [i for i, row in enumerate(rows) if row.get('config_entry_id') == entry_id]
     source = [deepcopy(rows[i]) for i in indices]
-    audit = decode_setup_audit(receipt['audit'])
-    final = validate_setup_audit(baseline, snapshot, source, audit,
-        own_registry_change=own_change,
-        direction=intent['binding']['direction'] if own_change else None)
+    if intent['activation']['original']['domain'] == 'integration':
+        from .native_integration_setup_audit import (decode_setup_audit as decode_integration,
+                                                  validate_setup_audit as validate_integration)
+        audit = decode_integration(receipt['audit'])
+        final = validate_integration(baseline, source, audit, core=chain.version, entry_id=entry_id)
+    else:
+        audit = decode_setup_audit(receipt['audit'])
+        final = validate_setup_audit(baseline, snapshot, source, audit,
+            own_registry_change=own_change,
+            direction=intent['binding']['direction'] if own_change else None)
     if (type(final) is not list or len(final) != len(source)
             or any(type(row) is not dict for row in final)
             or [row.get('id') for row in final] != [row.get('id') for row in source]):
@@ -393,11 +410,15 @@ async def complete(chain, intent, context, before, after, *, audit):
                        'identity': list(obs.identity)} for obs in after}
     chain._observe(after, result)
     from .native_utility_setup_audit import encode_setup_audit
+    from .native_integration_setup_audit import (IntegrationSetupAuditData,
+                                               encode_setup_audit as encode_integration)
+    encoded_audit = (encode_integration(audit) if type(audit) is IntegrationSetupAuditData
+                     else encode_setup_audit(audit))
     payload = {'kind': 'helper_setup_receipt', 'chain': chain.root_id,
         'binding': source['binding'], 'activation': source['activation'],
         'source_chain': head, 'sequence': sequence, 'intent': list(intent.reference),
         'source': chain._summary(states), 'result': chain._summary(result),
-        'audit': encode_setup_audit(audit)}
+        'audit': encoded_audit}
     if fold_receipt(chain, states, source, payload) != result:
         _fail('reconstruction_mismatch')
     ref = await chain.store.create(setup_slot(chain, 'receipt', source['activation']), payload)

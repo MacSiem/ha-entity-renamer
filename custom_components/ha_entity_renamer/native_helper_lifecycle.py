@@ -247,13 +247,13 @@ class NativeHelperLifecycle:
             entries = [row for row in configs if row['entry_id'] == key]
             if len(entries) != 1 or entries[0]['domain'] not in NATIVE_FIELDS:
                 continue
-            # Own-ID support is scoped to the pinned BASIC UtilityMeter relation.
-            # Other native helpers retain their existing configuration-step path.
-            if entries[0]['domain'] != 'utility_meter':
+            # Own-ID support is closed to pinned BASIC Utility and no-timer
+            # Integration. Other helpers retain their configuration-step path.
+            if entries[0]['domain'] not in ('utility_meter', 'integration'):
                 _fail('own_helper_domain_unsupported')
             original_rows = [row for row in self.original_entities if row.get('id') == change.identity]
             if (len(original_rows) != 1 or original_rows[0] != before
-                    or before.get('platform') != 'utility_meter'
+                    or before.get('platform') != entries[0]['domain']
                     or before.get('unique_id') != key
                     or before.get('config_subentry_id') is not None
                     or before.get('entity_id') == after.get('entity_id')
@@ -263,6 +263,9 @@ class NativeHelperLifecycle:
                        != {k: v for k, v in after.items() if k not in ('entity_id', 'modified_at')}
                     or key in self.own_registry_changes):
                 _fail('own_helper_registry_binding')
+            if (entries[0]['domain'] == 'integration' and key in self.helper_changes
+                    and self.helper_snapshots[key][0] != self.helper_snapshots[key][1]):
+                _fail('integration_own_id_configuration_must_be_unchanged')
             self.own_registry_changes[key] = change
             original = _projection(entries[0])
             if key in self.helper_snapshots:
@@ -517,9 +520,15 @@ class NativeHelperLifecycle:
 
     def _validate_unload_data(self, entry_id, encoded):
         from .native_utility_unload_audit import decode_unload_audit, _payload
-        data = decode_unload_audit(encoded)
-        doc = _payload(data)
         change = self.own_registry_changes.get(entry_id)
+        if change is not None and change.before.get('platform') == 'integration':
+            from .native_integration_unload_audit import (decode_integration_own_unload,
+                                                        integration_own_unload_doc)
+            data = decode_integration_own_unload(encoded)
+            doc = integration_own_unload_doc(data)
+        else:
+            data = decode_unload_audit(encoded)
+            doc = _payload(data)
         if change is None or data.entry_id != entry_id or doc['core'] != self.receipt.version:
             _fail('native_unload_scope')
         expected = change.after if self.source_authorization is not None else change.before
@@ -547,7 +556,9 @@ class NativeHelperLifecycle:
         if receipt['payload']['intent'] != intent_ref[1]:
             _fail('native_unload_intent_binding')
         data = self._validate_unload_data(entry_id, receipt['payload']['native_unload'])
-        return witness.check_live(hass=self.manager.hass,
+        check = (witness.check_placeholder_live if self.own_registry_changes[entry_id].before[
+            'platform'] == 'integration' else witness.check_live)
+        return check(hass=self.manager.hass,
             entry=self.manager.async_get_entry(entry_id), lease=self.activation_lease,
             actual_state=actual_state, expected_data=data)
 
@@ -603,7 +614,8 @@ class NativeHelperLifecycle:
                     'stage': stage, 'entry_id': key,
                     'api_called': original['state'] == 'loaded',
                     'state': 'not_loaded' if stage == 'unload' else original['state']}
-                if stage == 'setup' and original['state'] == 'loaded' and original['domain'] == 'utility_meter':
+                if stage == 'setup' and original['state'] == 'loaded' and (original['domain'] == 'utility_meter'
+                        or original['domain'] == 'integration' and key in self.own_registry_changes):
                     effect = receipt.get('native_effect')
                     if (type(effect) is not list or len(effect) != 2
                             or type(effect[0]) is not str or not re.fullmatch(r'rr-[0-9a-f]{64}', effect[0])
@@ -702,7 +714,8 @@ class NativeHelperLifecycle:
             self._inactive(original)
             await self._verify(self.verify_inactive, key)
             self._inactive(original)
-        audited_setup = stage == 'setup' and active and original['domain'] == 'utility_meter'
+        audited_setup = stage == 'setup' and active and (original['domain'] == 'utility_meter'
+            or original['domain'] == 'integration' and key in self.own_registry_changes)
         if audited_setup and not callable(self.setup_effect):
             _fail('installed_setup_effect_required')
         audited_unload = stage == 'unload' and active and key in self.own_registry_changes
@@ -749,8 +762,13 @@ class NativeHelperLifecycle:
                 if ({k: v for k, v in actual.items() if k not in ignored}
                         != {k: v for k, v in source.items() if k not in ignored}):
                     _fail('native_unload_original_row')
-                audit = NativeUtilityUnloadAudit(self.manager.hass,
-                    self.manager.async_get_entry(key), actual, guard=self._authorize)
+                if original['domain'] == 'integration':
+                    from .native_integration_unload_audit import NativeIntegrationUnloadAudit
+                    audit = NativeIntegrationUnloadAudit(self.manager.hass,
+                        self.manager.async_get_entry(key), actual)
+                else:
+                    audit = NativeUtilityUnloadAudit(self.manager.hass,
+                        self.manager.async_get_entry(key), actual, guard=self._authorize)
                 unload_witness = await audit.async_unload(self.activation_lease)
                 self._unload_witnesses[key] = (intent_reference, unload_witness)
             else:
@@ -787,9 +805,15 @@ class NativeHelperLifecycle:
             receipt['native_effect'] = list(effect_reference)
         if unload_witness is not None:
             from .native_utility_unload_audit import encode_unload_audit
-            receipt['native_unload'] = encode_unload_audit(unload_witness.data)
+            if original['domain'] == 'integration':
+                from .native_integration_unload_audit import encode_integration_own_unload
+                receipt['native_unload'] = encode_integration_own_unload(unload_witness.data)
+            else:
+                receipt['native_unload'] = encode_unload_audit(unload_witness.data)
             self._validate_unload_data(key, receipt['native_unload'])
-            unload_witness.check_live(hass=self.manager.hass,
+            check = (unload_witness.check_placeholder_live if original['domain'] == 'integration'
+                     else unload_witness.check_live)
+            check(hass=self.manager.hass,
                 entry=self.manager.async_get_entry(key), lease=self.activation_lease,
                 actual_state=self.manager.hass.states.get(actual['entity_id']),
                 expected_data=unload_witness.data)

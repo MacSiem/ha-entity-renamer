@@ -1,4 +1,4 @@
-"""Installed ordinary UtilityMeter setup IO under the existing lifecycle scope.
+"""Installed Utility and own-ID Integration setup IO under the existing lifecycle scope.
 
 Actual API, CPython call/return evidence, guarded native flush and independent
 full-three observations. No endpoint, replacement baseline or recovery replay.
@@ -77,7 +77,9 @@ class NativeHelperSetupEffects:
         before = await self._read(lifecycle)
         self.chain.expected(context, before)
         self.chain.verify_setup_authorization(authorization)
-        baseline, = tuple(value for value in lifecycle.runtime_baselines() if value.entry_id == entry_id)
+        integration = original['domain'] == 'integration'
+        if not integration:
+            baseline, = tuple(value for value in lifecycle.runtime_baselines() if value.entry_id == entry_id)
         before_snapshot, after_snapshot = lifecycle.helper_snapshots[entry_id]
         snapshot = after_snapshot if authorization.status == 'applied' else before_snapshot
         own_change = lifecycle.own_registry_changes.get(entry_id)
@@ -97,9 +99,15 @@ class NativeHelperSetupEffects:
               and type(self.hass.data.get(dr.DATA_REGISTRY)) is dr.DeviceRegistry)
         io = NativeRegistryIO(self.hass)
         gap = lifecycle._source_gaps.get(entry_id)
-        with NativeUtilitySetupAudit(self.hass, baseline, snapshot, source_rows,
+        if integration:
+            from .native_integration_setup_audit import NativeIntegrationSetupAudit
+            collector = NativeIntegrationSetupAudit(self.hass, lifecycle, self.chain, entry_id,
+                source_rows, guard=lambda: self._scope(lifecycle))
+        else:
+            collector = NativeUtilitySetupAudit(self.hass, baseline, snapshot, source_rows,
                 guard=lambda: self._scope(lifecycle), own_registry_change=own_change,
-                direction=direction) as collector:
+                direction=direction)
+        with collector:
             manager = lifecycle.activation_lease or self.hass.config_entries
             _need(await manager.async_setup(entry_id) is True)
             self._scope(lifecycle)

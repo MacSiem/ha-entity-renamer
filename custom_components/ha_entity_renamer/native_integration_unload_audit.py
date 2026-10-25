@@ -88,10 +88,33 @@ class NativeIntegrationUnloadWitness:
         raw = codec._canonical(codec._capture(expected, codec._native()))
         _need(raw == (audit._payload.after_json if audit._post is not None
                      else audit._before), 'stored_payload_changed')
+        if audit._target is not None:
+            target = codec._parse(audit._payload.after_json)['state']['entity_id']
+            _need(audit.data.last_states.get(target) is audit._target
+                  and codec._canonical(codec._capture(audit._target, codec._native()))
+                      == audit._payload.after_json, 'target_payload_changed')
         _need(str(audit.entity._state) == audit.capture.full_state_text
               and str(audit.entity._last_valid_state) == audit.capture.last_valid_state_text,
               'departed_entity_changed')
         return None
+
+    @property
+    def data(self):
+        return self._audit._own_data
+
+    def check_placeholder_live(self, *, hass, entry, lease, actual_state, expected_data=None):
+        self.check_live(lease=lease)
+        audit = self._audit
+        from .native_utility_unload_audit import _state
+        _need(hass is audit.hass and entry is audit.entry
+              and actual_state is audit._placeholder
+              and hass.states.get(audit.capture.entity_id) is actual_state
+              and _state(actual_state) == audit._placeholder_json
+              and (audit.capture.entity_id in hass.states._reservations) is audit._reserved
+              and (expected_data is None or expected_data == self.data),
+              'placeholder_live_continuity')
+        integration_own_unload_doc(self.data)
+        return True
 
     def _claim(self, io, payload):
         # One attempted operation, even if disk IO fails before mutation.
@@ -105,12 +128,17 @@ class NativeIntegrationUnloadWitness:
 
     def _written(self, io, clone):
         audit = self._audit
+        target = codec._parse(audit._payload.after_json)['state']['entity_id']
         _need(audit._attempted and audit._io is io and audit._post is None
-              and audit.data.last_states.get(audit.capture.entity_id) is clone,
+              and audit._target is None and audit.data.last_states.get(target) is clone,
               'actual_transfer_required')
         _need(codec._canonical(codec._capture(clone, codec._native()))
               == audit._payload.after_json, 'transfer_postimage')
-        audit._post = clone
+        target = codec._parse(audit._payload.after_json)['state']['entity_id']
+        if target == audit.capture.entity_id:
+            audit._post = clone
+        else:
+            audit._target = clone
         self.check_live(lease=io.lease, data=io.data)
 
 
@@ -155,6 +183,10 @@ class NativeIntegrationUnloadAudit:
         self._started = self._finished = self._attempted = False
         self._error = self._witness = self._post = self._payload = self._io = None
         self._extra = self._stored = self._before = self.capture = None
+        self._target = self._placeholder = self._writer_frame = None
+        self._native_set = None
+        self._placeholder_count = self._set_count = 0
+        self._own_data = None
         self._getter_count = self._remove_count = 0
         self._manager_frame = None
         self._manager_done = False
@@ -186,7 +218,10 @@ class NativeIntegrationUnloadAudit:
             (IntegrationSensorExtraStoredData, 'from_dict'),
             (SensorExtraStoredData, 'as_dict'), (SensorExtraStoredData, 'from_dict'),
             (IntegrationSensor, '__init__'),
-            (import_module('homeassistant.components.integration'), 'async_unload_entry'))
+            (import_module('homeassistant.components.integration'), 'async_unload_entry'),
+            (type(self.row), 'write_unavailable_state'),
+            (type(self.hass.states), 'async_set'),
+            (type(self.hass.states), 'async_set_internal'))
         self.methods, self.codes = prove_methods(self.root, self.pins, self.refs)
         self.extra_class = IntegrationSensorExtraStoredData
         self.class_refs = tuple((import_module('homeassistant.' + module), name, cls)
@@ -240,6 +275,40 @@ class NativeIntegrationUnloadAudit:
         if self._error is not None or event not in ('call', 'return'):
             return
         try:
+            if frame.f_code is self.codes[14] and frame.f_locals.get('self') is self.hass.states:
+                if frame.f_locals.get('entity_id') == self.row.entity_id:
+                    parent = frame.f_back
+                    _need(parent is not None and parent.f_code is self.codes[13]
+                          and parent.f_back is self._writer_frame, 'placeholder_native_set_cause')
+                    if event == 'call':
+                        self._set_count += 1
+                        _need(self._set_count == 1, 'one_placeholder_set')
+                    else:
+                        self._native_set = frame.f_locals.get('state')
+                        _need(arg is None and self.hass.states.get(self.row.entity_id)
+                              is self._native_set, 'placeholder_set_identity')
+            if frame.f_code is self.codes[12] and frame.f_locals.get('self') is self.entity.registry_entry:
+                if event == 'call':
+                    parent = frame.f_back
+                    _need(parent is not None and parent.f_code is self.codes[3]
+                          and parent.f_locals.get('self') is self.entity
+                          and parent.f_locals.get('force_remove') is False
+                          and frame.f_locals.get('hass') is self.hass
+                          and self._placeholder_count == 0, 'placeholder_writer_cause')
+                    self._writer_frame = frame
+                    self._writer_row = _row(frame.f_locals['self'])
+                else:
+                    from .native_utility_unload_audit import _expected_attrs, _state
+                    state = self.hass.states.get(self.row.entity_id)
+                    _need(frame is self._writer_frame and arg is None
+                          and self._set_count == 1 and state is self._native_set
+                          and state.state == 'unavailable'
+                          and dict(state.attributes) == _expected_attrs(self.row, self.version, self.hass),
+                          'placeholder_writer_result')
+                    self._placeholder, self._placeholder_json = state, _state(state)
+                    self._reserved = self.row.entity_id in self.hass.states._reservations
+                    self._placeholder_count += 1
+                    self._writer_frame = None
             if frame.f_code is self.codes[4]:
                 if frame.f_locals.get('entry_id') != self.entry.entry_id:
                     return
@@ -315,6 +384,18 @@ class NativeIntegrationUnloadAudit:
             self.capture = IntegrationUnloadCapture(self.version, self.entry.entry_id,
                 self.row.id, self.row.entity_id, self._full, self._last,
                 hashlib.sha256(self._before).hexdigest())
+            _need(self._placeholder_count == 1 and self._writer_frame is None,
+                  'native_placeholder_required')
+            from dataclasses import asdict
+            self._own_data = IntegrationOwnUnloadData(self.entry.entry_id, codec._canonical({
+                'schema': 1, 'domain': 'integration', 'core': self.version,
+                'entry_id': self.entry.entry_id, 'source_row': _row(self.row),
+                'writer_row': self._writer_row, 'state_json': self._placeholder_json,
+                'reserved': self._reserved, 'capture': asdict(self.capture),
+                'source_pins': self.pins,
+                'call': {'getter': 1, 'restore_remove': 1, 'native_set': 1,
+                         'placeholder_writer': 1, 'native_unload_true': True}}))
+            integration_own_unload_doc(self._own_data)
             self._finished = True
             witness = object.__new__(NativeIntegrationUnloadWitness)
             witness._audit = self
@@ -330,3 +411,77 @@ class NativeIntegrationUnloadAudit:
             elif self._error is None:
                 self._error = 'profiler_changed'
             self._manager_frame = None
+
+
+@dataclass(frozen=True)
+class IntegrationOwnUnloadData:
+    """Read-only historical receipt data; cannot recreate either live witness."""
+    entry_id: str
+    payload_json: bytes
+
+
+def integration_own_unload_doc(data):
+    _need(type(data) is IntegrationOwnUnloadData, 'own_unload_type')
+    doc = codec._parse(data.payload_json)
+    keys = {'schema', 'domain', 'core', 'entry_id', 'source_row', 'writer_row',
+            'state_json', 'reserved', 'capture', 'source_pins', 'call'}
+    _need(type(doc) is dict and set(doc) == keys and type(doc['schema']) is int
+          and doc['schema'] == 1 and doc['domain'] == 'integration'
+          and doc['core'] in _INTEGRATION and doc['entry_id'] == data.entry_id
+          and data.payload_json == codec._canonical(doc), 'own_unload_schema')
+    pins = {path: _SOURCES[doc['core']][path] for path in (
+        'components/sensor/__init__.py', 'helpers/restore_state.py', 'helpers/entity.py',
+        'config_entries.py', 'helpers/entity_platform.py', 'helpers/entity_registry.py', 'core.py')}
+    pins['components/integration/sensor.py'] = _INTEGRATION[doc['core']]
+    pins['components/integration/__init__.py'] = _INIT[doc['core']]
+    _need(doc['source_pins'] == pins, 'own_unload_pins')
+    row, writer = doc['source_row'], doc['writer_row']
+    _need(type(row) is dict and type(writer) is dict
+          and row.get('platform') == 'integration'
+          and row.get('config_entry_id') == row.get('unique_id') == data.entry_id
+          and row.get('config_subentry_id') is None and row.get('disabled_by') is None
+          and {k: v for k, v in row.items() if k not in ('options', 'modified_at')}
+           == {k: v for k, v in writer.items() if k not in ('options', 'modified_at')},
+          'own_unload_row')
+    capture = doc['capture']
+    _need(type(capture) is dict and set(capture) == {'core_version', 'entry_id', 'helper_uuid',
+        'entity_id', 'full_state_text', 'last_valid_state_text', 'before_sha256'}
+        and capture['core_version'] == doc['core'] and capture['entry_id'] == data.entry_id
+        and capture['helper_uuid'] == row['id'] and capture['entity_id'] == row['entity_id'],
+        'own_unload_capture')
+    from decimal import InvalidOperation
+    for key in ('full_state_text', 'last_valid_state_text'):
+        try:
+            valid = (type(capture[key]) is str and Decimal(capture[key]).is_finite()
+                     and str(Decimal(capture[key])) == capture[key])
+        except InvalidOperation:
+            valid = False
+        _need(valid, 'own_unload_decimal')
+    digest = capture['before_sha256']
+    _need(type(digest) is str and len(digest) == 64
+          and all(c in '0123456789abcdef' for c in digest), 'own_unload_digest')
+    state = codec._parse(doc['state_json'].encode())
+    _need(state['entity_id'] == row['entity_id'] and state['state'] == 'unavailable'
+          and state['attributes'].get('restored') is True and type(doc['reserved']) is bool,
+          'own_unload_placeholder')
+    _need(doc['call'] == {'getter': 1, 'restore_remove': 1, 'native_set': 1,
+                         'placeholder_writer': 1, 'native_unload_true': True}
+          and doc['call']['native_unload_true'] is True
+          and all(type(doc['call'][key]) is int for key in
+                  ('getter', 'restore_remove', 'native_set', 'placeholder_writer')),
+          'own_unload_calls')
+    return doc
+
+
+def encode_integration_own_unload(data):
+    return {'kind': 'integration_own_unload', 'schema': 1,
+            'entry_id': data.entry_id, 'payload': integration_own_unload_doc(data)}
+
+
+def decode_integration_own_unload(encoded):
+    _need(type(encoded) is dict and set(encoded) == {'kind', 'schema', 'entry_id', 'payload'}
+          and encoded['kind'] == 'integration_own_unload'
+          and type(encoded['schema']) is int and encoded['schema'] == 1, 'own_unload_envelope')
+    result = IntegrationOwnUnloadData(encoded['entry_id'], codec._canonical(encoded['payload']))
+    integration_own_unload_doc(result)
+    return result

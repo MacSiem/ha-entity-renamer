@@ -166,6 +166,8 @@ class PreparedPayload:
 
 
 def serialize(payload):
+    if type(payload) is PreparedIntegrationPayload:
+        return serialize_integration_payload(payload)
     _require(type(payload) is PreparedPayload, 'prepared_payload_type')
     return _canonical({'kind': 'native_restore_state_payload', 'schema': 1,
                        'core_version': payload.core_version, 'store': dict(_STORE),
@@ -177,6 +179,8 @@ def serialize(payload):
 
 def deserialize(raw):
     envelope = _parse(raw)
+    if type(envelope) is dict and envelope.get('schema') == 2:
+        return deserialize_integration_payload(raw)
     _require(type(envelope) is dict and set(envelope) == {
         'kind', 'schema', 'core_version', 'store', 'before', 'after',
         'before_digest', 'after_digest'}, 'envelope_schema')
@@ -285,6 +289,8 @@ def prepare_payload(stored, target_entity_id):
 
 def materialize(payload):
     """New native objects only; exact postimage proof before returning clone."""
+    if type(payload) is PreparedIntegrationPayload:
+        return materialize_integration_payload(payload)
     _require(type(payload) is PreparedPayload, 'prepared_payload_type')
     api = _native()
     version, Context, State, _, _, StoredState, RestoredExtraData, _, _ = api

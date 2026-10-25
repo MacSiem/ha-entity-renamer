@@ -1,4 +1,4 @@
-"""DRAFT: own UtilityMeter registry-ID placeholder compatibility, no authority.
+"""DRAFT: own Utility/Integration registry-ID placeholder compatibility, no authority.
 
 Install beside existing native modules only after owner integration/review.
 No async methods, lifecycle calls, storage, restore payload or counter writes.
@@ -211,7 +211,7 @@ def validate_effect(stamp, *, expected_scope, change, mutation,
     _need(scope['direction'] in ('forward', 'rollback')
           and (scope['source'], scope['target']) == (source['entity_id'], target['entity_id'])
           and source['config_entry_id'] == scope['entry_id'] == source['unique_id']
-          and source['platform'] == 'utility_meter' and source['config_subentry_id'] is None,
+          and source['platform'] in ('utility_meter', 'integration') and source['config_subentry_id'] is None,
           'own_helper_scope')
     before_row, after_row = json.loads(mutation.before_json), json.loads(mutation.after_json)
     # Exact modified_at is preserved and independently accepted by the normal
@@ -350,7 +350,7 @@ class OwnHelperPlaceholder:
         chain.verify_intent_source(intent, context, observations)
         binding = chain._context(context)
         original = next((row for row in lifecycle.root['original'] if row['entry_id'] == obj.entry_id), None)
-        _need(original is not None and original['domain'] == 'utility_meter'
+        _need(original is not None and original['domain'] == source['platform']
               and original['state'] == 'loaded', 'real_unload_required')
         unload_slot = lifecycle._slot('unload', obj.entry_id, 'receipt')
         unload = lifecycle.store.read(unload_slot)
@@ -478,7 +478,7 @@ class OwnHelperPlaceholder:
                   and actual_after['entity_id'] == self.target
                   and actual_after['config_entry_id'] == self.entry_id
                   and actual_after['unique_id'] == self.entry_id
-                  and actual_after['platform'] == 'utility_meter', 'actual_returned_identity')
+                  and actual_after['platform'] == self.change.before['platform'], 'actual_returned_identity')
             self._returned()
             self.scope['target_attrs'] = _attrs(self.returned_row, self.version, self.hass)
             self.events = []

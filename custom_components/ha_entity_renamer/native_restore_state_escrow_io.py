@@ -149,7 +149,7 @@ class EscrowIO:
             require(actual == disk, 'raw_disk_preimage_or_postimage_mismatch')
             return actual
 
-    async def escrow(self, payload, *, expected_source, expected_target, disk_preimage):
+    async def escrow(self, payload, *, expected_source, expected_target, disk_preimage, witness=None):
         """Copy captured source to target, retaining source. Reverse uses same API.
 
         expected_source is the actual captured native object; expected_target is
@@ -157,7 +157,9 @@ class EscrowIO:
         disk_preimage is explicit projection of BOTH keys, including stale source
         if a real unload has not yet dumped it. This API confers no ownership.
         """
-        require(type(payload) is codec.PreparedPayload, 'prepared_payload_required')
+        integration = type(payload) is codec.PreparedIntegrationPayload
+        require(type(payload) in (codec.PreparedPayload, codec.PreparedIntegrationPayload),
+                'prepared_payload_required')
         before, after = codec._parse(payload.before_json), codec._parse(payload.after_json)
         source, target = before['state']['entity_id'], after['state']['entity_id']
         require(captured(expected_source) == payload.before_json, 'capture_binding')
@@ -171,16 +173,27 @@ class EscrowIO:
         require(disk_preimage[target] == expected_target, 'disk_target_preimage_conflict')
         self._boundary(expected, inactive=True)
         require(self.data.last_states[source] is expected_source, 'source_object_changed')
+        if integration:
+            from .native_integration_unload_audit import NativeIntegrationUnloadWitness
+            require(type(witness) is NativeIntegrationUnloadWitness
+                    and self.entry.domain == 'integration', 'integration_live_witness_required')
+            witness._claim(self, payload)
         await self._raw(expected, disk_preimage)
         self._boundary(expected, inactive=True)
+        if integration:
+            witness.check_live(lease=self.lease, data=self.data, stored=expected_source)
         require(self.data.last_states[source] is expected_source, 'source_object_changed')
         clone = codec.materialize(payload)
         self.data.last_states[target] = clone  # source deliberately retained
+        if integration:
+            witness._written(self, clone)
         post = {source: payload.before_json, target: payload.after_json}
         self._boundary(post, inactive=True)
         await self.data.async_dump_states()  # NEVER while holding store._write_lock
         self._boundary(post, inactive=True)
         actual = await self._raw(post, post)
+        if integration:
+            witness.check_live(lease=self.lease, data=self.data)
         return Readback(actual[source], actual[target])
 
     async def cleanup(self, *, source, target, owned_source, expected_target,
