@@ -563,8 +563,12 @@ class NativeUtilitySetupAudit:
                 entity, event = local.get('self'), local.get('event')
                 _need(entity is self._new_entity and entity is not None, 'foreign_entity')
                 item = self._event_objects.get(id(event))
+                # Native keyed registry dispatch can run this callback before
+                # our bus monitor in the same synchronous dispatch. Constructor
+                # identity already proves the cause; finish still requires that
+                # the monitor actually received every owned Event exactly once.
                 _need(item is not None and item['event'] is event and item['ready']
-                      and item['observed'] and event.data is item['data'] and _same(self._native(event.data), item['payload']),
+                      and event.data is item['data'] and _same(self._native(event.data), item['payload']),
                       'unknown_event_cause')
                 _need(tuple(path) in _PATHS, 'caller_path')
                 return {'kind': 'registry_event', 'call': item['call']}, path
