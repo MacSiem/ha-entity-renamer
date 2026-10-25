@@ -152,6 +152,34 @@ class RegistryReceiptAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(h.bridge.effects, 0)
         self.assertEqual(len(h.f['store'].rows), 2)
 
+    async def test_own_helper_without_effect_binding_refuses_before_any_writer(self):
+        import test_own_helper_registry_binding as own
+        original, _, _ = await own.OwnHelperBindingTests().fixture()
+        chain = await fixture.receipts.RegistryReceiptChain.start(original.store,
+            original.operation_id, original.plan, original.receipt,
+            original.binding['preparations'])
+        record = tx.Record(original.operation_id, original.plan,
+            status='applying', phases=('intent',))
+        calls = []
+        class UnboundBridge:
+            async def apply(self, *args, **kwargs):
+                calls.append('write')
+                raise AssertionError('unbound own helper reached native writer')
+        async def load(operation):
+            self.assertEqual(operation, original.operation_id)
+            return record
+        async def observe():
+            calls.append('observe')
+            raise AssertionError('missing own helper binding was not rejected in preflight')
+        adapter = adapter_module.ReceiptedRegistryTransactionAdapter(UnboundBridge(),
+            lambda ref: fixture.prepared.decode_change(original.store.preparations.resolve(
+                ref, original.binding['preparations'][ref])), chain, observe, load, lambda: None)
+        adapter.bind_phase_context(tx.PhaseContext(record, 0))
+        with self.assertRaisesRegex(tx.Refused, 'own_helper_effect_required'):
+            await adapter.apply(original.plan.steps[0], lambda: None)
+        self.assertEqual(calls, [])
+        self.assertIsNone(chain.active)
+
     async def test_full_scope_verifier_remains_required(self):
         h = await Harness().initialize(self)
         h.final_result = False
