@@ -48,6 +48,34 @@ def native_helper_lifecycle_store(hass, preparations):
         writer.async_save, hass.async_add_executor_job), preparations)
 
 
+def stored_lifecycle_plan(store, root_id):
+    """Recover the immutable plan even before the inner journal was created.
+
+    Read-only discovery only. Caller still reopens the lifecycle and verifies
+    original preparations, activation, inputs and pending outcomes before use.
+    """
+    from .journal import decode
+    row = store.read(root_id)
+    try:
+        root = row['payload']
+        binding = root['binding']
+        operation = binding['operation_id']
+        if (row['digest'] != _digest(root) or root['kind'] != 'helper_lifecycle_root'
+                or root['schema'] != 1):
+            _fail('root_binding_mismatch')
+        raw_plan = binding['plan']
+        record = {'operation_id': operation, 'plan': raw_plan, 'status': 'prepared',
+                  'phases': ['pending'] * len(raw_plan['steps']), 'direction': 'forward', 'reason': ''}
+        plan = decode({'schema': 1, 'operations': {operation: record}})[operation].plan
+        if (plan.fingerprint != binding['fingerprint']
+                or list(plan.native_inputs) != binding['native_inputs']
+                or set(binding['preparations']) != {s.prepared_ref for s in plan.steps}):
+            _fail('root_binding_mismatch')
+        return plan
+    except (KeyError, TypeError, AttributeError):
+        _fail('root_binding_mismatch')
+
+
 @dataclass(frozen=True)
 class RestoreAuthorization:
     """Trusted chain verifier must authenticate all fields against durable state.
@@ -158,6 +186,7 @@ class NativeHelperLifecycle:
         self.root_id = _id(['helper_lifecycle', operation_id, plan.fingerprint])
         self.binding = {'operation_id': operation_id, 'fingerprint': plan.fingerprint,
                         'native_inputs': list(plan.native_inputs),
+                        'plan': canonical(asdict(plan))[0],
                         'preparations': deepcopy(prepared_digests)}
         self.source_authorization = source_authorization
         if source_authorization is not None:
