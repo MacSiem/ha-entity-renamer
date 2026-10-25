@@ -1,4 +1,6 @@
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
+import hashlib
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -30,6 +32,65 @@ class FileMutationTests(unittest.TestCase):
         self.assertEqual(self.file.stat().st_mode & 0o777, 0o640)
         self.assertEqual((self.root/receipt['backup']).read_bytes(), self.original)
         with self.assertRaises(FileConflict): self.apply()
+
+    def test_result_has_exact_source_and_final_readback_metadata(self):
+        source = self.file.stat()
+        result = self.apply()
+        final = self.file.stat()
+        self.assertIs(type(result), dict)
+        self.assertEqual(result, {
+            'operation_id': 'op1', 'path': 'configuration.yaml',
+            'before_sha256': hashlib.sha256(self.original).hexdigest(),
+            'after_sha256': hashlib.sha256(self.patch.proposed_bytes).hexdigest(),
+            'before_identity': (source.st_dev, source.st_ino, source.st_mode),
+            'after_identity': (final.st_dev, final.st_ino, final.st_mode),
+            'before_uid': source.st_uid, 'before_gid': source.st_gid,
+            'after_uid': final.st_uid, 'after_gid': final.st_gid,
+            'backup': result['backup'],
+            'sha256': hashlib.sha256(self.file.read_bytes()).hexdigest(),
+            'device': final.st_dev, 'inode': final.st_ino,
+        })
+        self.assertNotEqual(result['before_identity'][1], result['after_identity'][1])
+        self.assertEqual((self.root / result['backup']).read_bytes(), self.original)
+        self.assertEqual((final.st_mode, final.st_uid, final.st_gid),
+                         (source.st_mode, source.st_uid, source.st_gid))
+        # Internal typed construction rejects malformed evidence; dictionary
+        # compatibility does not introduce an external receipt acceptance path.
+        fields = {k: v for k, v in result.items() if k not in ('sha256', 'device', 'inode')}
+        evidence = file_mutations.FileMutationResult(**fields)
+        with self.assertRaises(FrozenInstanceError):
+            evidence.after_uid = 123
+        for invalid in ({'before_uid': True}, {'before_identity': [1, 2, 3]},
+                        {'after_sha256': 'not-a-sha'}, {'path': '../escape.yaml'}):
+            with self.assertRaises(ValueError):
+                file_mutations.FileMutationResult(**(fields | invalid))
+
+    def test_no_result_when_replace_effect_loses_fsync_ack(self):
+        original_fsync = os.fsync
+        returned = []
+        def lost_ack(fd):
+            if self.file.read_bytes() == self.patch.proposed_bytes:
+                raise OSError('lost directory fsync acknowledgement')
+            return original_fsync(fd)
+        with mock.patch.object(file_mutations.os, 'fsync', lost_ack):
+            with self.assertRaisesRegex(FileConflict, 'file_io_unconfirmed'):
+                returned.append(self.apply())
+        self.assertEqual(returned, [])
+        self.assertEqual(self.file.read_bytes(), self.patch.proposed_bytes)
+
+    def test_no_result_when_final_readback_is_unconfirmed(self):
+        original_read = file_mutations._Reader.read
+        returned = []
+        def lost_readback(reader, path):
+            result = original_read(reader, path)
+            if result[0] == self.patch.proposed_bytes:
+                raise OSError('lost final readback acknowledgement')
+            return result
+        with mock.patch.object(file_mutations._Reader, 'read', lost_readback):
+            with self.assertRaisesRegex(FileConflict, 'file_io_unconfirmed'):
+                returned.append(self.apply())
+        self.assertEqual(returned, [])
+        self.assertEqual(self.file.read_bytes(), self.patch.proposed_bytes)
 
     def test_foreign_edit_is_preserved(self):
         self.file.write_bytes(b'# somebody else\nentity_id: sensor.foreign\n')
@@ -100,8 +161,10 @@ class FileMutationTests(unittest.TestCase):
                         else:
                             pending = list(self.root.glob('.renamer-op1-*.pending'))
                             pending[-1].chmod(0o600)
+                returned = []
                 with self.assertRaisesRegex(FileConflict, reason):
-                    apply_file_patch(self.root, self.patch, self.snapshot, 'op1', guard=guard)
+                    returned.append(apply_file_patch(self.root, self.patch, self.snapshot, 'op1', guard=guard))
+                self.assertEqual(returned, [])
                 self.assertEqual(calls, 4)
                 self.assertEqual(self.file.read_bytes(), self.original)
                 self.assertEqual(self.file.stat().st_mode & 0o777,

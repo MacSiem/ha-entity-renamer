@@ -216,6 +216,60 @@ class Regressions(unittest.IsolatedAsyncioTestCase):
         for row in self.rows:
             self.assertEqual((self.root / row.path).read_bytes(), row.before)
 
+    async def test_apply_and_compensate_return_exact_actual_file_call_results(self):
+        original = module.apply_file_patch
+        calls = []
+        def captured(*args):
+            path = self.root / args[1].path
+            before, source = path.read_bytes(), path.stat()
+            result = original(*args)
+            after, final = path.read_bytes(), path.stat()
+            self.assertEqual(result['before_sha256'], hashlib.sha256(before).hexdigest())
+            self.assertEqual(result['after_sha256'], hashlib.sha256(after).hexdigest())
+            self.assertEqual(result['before_identity'], (source.st_dev, source.st_ino, source.st_mode))
+            self.assertEqual(result['after_identity'], (final.st_dev, final.st_ino, final.st_mode))
+            self.assertEqual((result['before_uid'], result['before_gid']), (source.st_uid, source.st_gid))
+            self.assertEqual((result['after_uid'], result['after_gid']), (final.st_uid, final.st_gid))
+            self.assertEqual(result['operation_id'], args[3])
+            self.assertEqual((self.root / result['backup']).read_bytes(), before)
+            calls.append(result)
+            return result
+        with patch.object(module, 'apply_file_patch', captured):
+            forward = await self.adapter.apply(self.step, lambda: None)
+            self.assertEqual([r['path'] for r in forward], [f.path for f in self.rows])
+            self.assertEqual(len(forward), 2)
+            for actual, returned in zip(calls, forward):
+                self.assertIs(actual, returned)  # No reconstructed later snapshot.
+            reverse = await self.adapter.compensate(self.step, lambda: None)
+            self.assertEqual([r['path'] for r in reverse], [f.path for f in reversed(self.rows)])
+            self.assertEqual(len(reverse), 2)
+            for actual, returned in zip(calls[2:], reverse):
+                self.assertIs(actual, returned)
+        by_path = {r['path']: r for r in forward}
+        for returned in reverse:
+            previous = by_path[returned['path']]
+            self.assertEqual(returned['before_identity'], previous['after_identity'])
+            self.assertEqual(returned['before_sha256'], previous['after_sha256'])
+            self.assertEqual(returned['after_sha256'], previous['before_sha256'])
+        self.assertEqual(self.reload_count, 2)
+
+    async def test_lost_file_call_ack_does_not_return_partial_or_fabricated_results(self):
+        original = module.apply_file_patch
+        calls, returned = [], []
+        def lost_ack(*args):
+            result = original(*args)
+            calls.append(result)
+            raise OSError('file call acknowledgement lost after actual replacement')
+        with patch.object(module, 'apply_file_patch', lost_ack):
+            with self.assertRaisesRegex(OSError, 'acknowledgement lost'):
+                returned.append(await self.adapter.apply(self.step, lambda: None))
+        self.assertEqual(returned, [])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.reload_count, 0)
+        self.assertFalse(self.locks.held)
+        self.assertEqual((self.root / self.rows[0].path).read_bytes(), self.rows[0].after)
+        self.assertEqual((self.root / self.rows[1].path).read_bytes(), self.rows[1].before)
+
     async def test_full_source_preflight_and_foreign_rollback_edit(self):
         (self.root / self.rows[1].path).write_bytes(b'foreign before\n')
         with self.assertRaises(transaction.Refused):
