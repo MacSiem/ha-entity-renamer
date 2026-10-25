@@ -214,3 +214,19 @@ Cancellation drains executor work before any held descriptor can be released.
     finally:
         if pinned is not None:
             pinned.close()
+
+
+def assert_discovery_managers_current(hass, observed, *, guard):
+    """Synchronous final manager fence after other discovery-family awaits.
+
+    No disk IO or continuing authority. Full native physical readback remains
+    the independent earlier capture; this closes late event-loop manager drift.
+    """
+    guard()
+    if type(observed) is not DiscoveryNativeInputs:
+        _reject()
+    location = _SourceLocation(observed.version, observed.config_root)
+    managers = _Managers(hass, location)
+    if managers.initial != tuple(row.manager_json for row in observed.files):
+        _reject()
+    guard()

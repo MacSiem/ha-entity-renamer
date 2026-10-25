@@ -348,6 +348,29 @@ async def async_discover(hass, proposal, guard):
                 families[name] = _unknown(name, 'source_changed_during_capture')
             bound = None
             conflicts.append('source_changed_during_capture')
+    # Every family await, including the final native readback, precedes this
+    # last graph comparison. Keep the first graph; never adopt the later one.
+    if families['yaml_sources'].status == 'COMPLETE':
+        try:
+            final_yaml = await _drained(hass.async_add_executor_job,
+                lambda: plan_yaml(hass.config.config_dir, mapping, yaml_dashboards=yaml_roots))
+            guard()
+            if final_yaml != yaml:
+                families['yaml_sources'] = _unknown('yaml_sources', 'source_changed_during_capture')
+                conflicts.append('source_changed_during_capture')
+        except PermissionError:
+            families['yaml_sources'] = _unknown('yaml_sources', 'read_access_denied', denied=True)
+        except (ValueError, OSError):
+            families['yaml_sources'] = _unknown('yaml_sources', 'yaml_graph_unavailable')
+    if native is not None:
+        from .native_discovery_inputs import assert_discovery_managers_current
+        try:
+            assert_discovery_managers_current(hass, native, guard=guard)
+        except (ValueError, OSError):
+            for name in ('entity_registry', 'device_registry', 'config_entries', 'template', 'powercalc'):
+                families[name] = _unknown(name, 'source_changed_during_capture')
+            bound = None
+            conflicts.append('source_changed_during_capture')
     guard()
     for domain, token in runtime_tokens.items():
         if token is not None:
