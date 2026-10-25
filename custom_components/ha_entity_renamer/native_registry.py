@@ -72,6 +72,21 @@ class RegistryEvidence:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class NativeRegistryMutation:
+    """Private synchronous native-call rows, including the exact audit values.
+
+    Captured from the source entry and the entry returned by HA's single update,
+    before yielding to any other loop job. Not a durable transition receipt or
+    authorization: caller must bind its intent, full documents and readback.
+    Never emit these private row bytes in status responses or telemetry.
+    """
+    kind: str
+    identity: str
+    before_json: str
+    after_json: str
+
+
 def _row(document, kind, identity):
     rows = [row for row in document.get("entities" if kind == "entity" else "devices", [])
             if row.get("id") == identity]
@@ -134,17 +149,27 @@ class NativeRegistryIO:
         return ""
 
     def mutate(self, prepared, target):
+        from homeassistant.helpers.json import _orjson_bytes_default_encoder
         registry = self.registries[prepared.kind]
+        source = prepared.after if target == prepared.before else prepared.before
+        previous = registry.async_get(source['entity_id'] if prepared.kind == 'entity'
+                                      else prepared.identity)
+        if previous is None or previous.id != prepared.identity:
+            raise RegistryConflict('native_mutation_source_missing')
+        before_json = _orjson_bytes_default_encoder(previous.as_storage_fragment).decode('utf-8')
         if prepared.kind == "entity":
-            source = prepared.after if target == prepared.before else prepared.before
             kwargs = {"name": target["name"]}
             if source["entity_id"] != target["entity_id"]:
                 kwargs["new_entity_id"] = target["entity_id"]
             # Exactly one native update retains registry id, unique_id, device id.
-            registry.async_update_entity(source["entity_id"], **kwargs)
+            updated = registry.async_update_entity(source["entity_id"], **kwargs)
         else:
-            registry.async_update_device(prepared.identity,
+            updated = registry.async_update_device(prepared.identity,
                                          name_by_user=target["name_by_user"])
+        if updated is None or updated.id != prepared.identity:
+            raise RegistryConflict('native_mutation_return_unconfirmed')
+        after_json = _orjson_bytes_default_encoder(updated.as_storage_fragment).decode('utf-8')
+        stamp = NativeRegistryMutation(prepared.kind, prepared.identity, before_json, after_json)
         if prepared.kind == 'device' or not prepared.mapping:
             # An unloaded config entry can retain HA's own restored unavailable
             # placeholder. Registry mutation alone does not refresh its name.
@@ -163,6 +188,7 @@ class NativeRegistryIO:
                         and {k: v for k, v in state.attributes.items() if k != 'friendly_name'}
                             == saved['inactive_attributes'], 'name_inactive_refresh_conflict')
                 row.write_unavailable_state(self.hass)
+        return stamp
 
     async def flush(self, kind):
         registry = self.registries[kind]
@@ -321,10 +347,10 @@ class NativeRegistryBridge:
                                     reason="native_readback_failed")
 
     async def apply(self, change, guard):
-        await self._write(change, change.before, change.after, guard)
+        return await self._write(change, change.before, change.after, guard)
 
     async def compensate(self, change, guard):
-        await self._write(change, change.after, change.before, guard)
+        return await self._write(change, change.after, change.before, guard)
 
     async def _write(self, change, source, target, guard):
         evidence = await self.inspect(change)
@@ -333,7 +359,7 @@ class NativeRegistryBridge:
         if evidence.position != expected:
             raise RegistryConflict("inspect_before_write:" + evidence.reason)
         # No await between fresh authorization/revision and one native mutation.
-        self.io.mutate(change, target)
+        stamp = self.io.mutate(change, target)
         await self.io.settle()
         self._fresh(change, target, guard)
         await self.io.flush(change.kind)
@@ -342,6 +368,7 @@ class NativeRegistryBridge:
         self._fresh(change, target, guard)
         if evidence.position != ("after" if expected == "before" else "before"):
             raise RegistryConflict("effect_uncertain:" + evidence.reason)
+        return stamp
 
 
 class RegistryTransactionAdapter:
@@ -374,10 +401,10 @@ class RegistryTransactionAdapter:
             evidence.position, Position.UNKNOWN)
 
     async def apply(self, step, guard):
-        await self.bridge.apply(self._change(step), guard)
+        return await self.bridge.apply(self._change(step), guard)
 
     async def compensate(self, step, guard):
-        await self.bridge.compensate(self._change(step), guard)
+        return await self.bridge.compensate(self._change(step), guard)
 
     async def verify(self, plan):
         return False if self.full_verify is None else await self.full_verify(plan)
