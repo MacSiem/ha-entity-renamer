@@ -153,6 +153,41 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         lifecycle_callbacks = dict(guard=lambda: None, verify_original_native_inputs=original_source,
             settle=hass.async_block_till_done, verify_inactive=verify_inactive,
             verify_runtime=runtime, verify_accepted_native_chain=accepted_source)
+        fault = getattr(self, 'lifecycle_save_fault', None)
+        if fault is not None:
+            native_save = lifecycle_store.store.save
+            async def lose_ack(document):
+                await native_save(document)
+                if any(row['payload']['kind'] == 'helper_lifecycle_' + fault
+                       for row in document['events'].values()):
+                    raise OSError('actual lifecycle save ACK lost after durable native save')
+            with patch.object(lifecycle_store.store, 'save', lose_ack):
+                with self.assertRaisesRegex(OSError, 'ACK lost'):
+                    lifecycle = await lm.NativeHelperLifecycle.start(
+                        *lifecycle_args, **lifecycle_callbacks)
+                    await lifecycle.quiesce()
+            fresh = prep.native_prepared_store(hass)
+            await fresh.initialize()
+            recovered_store = lm.native_helper_lifecycle_store(hass, fresh)
+            await recovered_store.initialize()
+            recovered = lm.NativeHelperLifecycle.reopen(recovered_store,
+                *lifecycle_args[1:], **lifecycle_callbacks)
+            report = await recovered.reconcile()
+            self.assertTrue(report['read_only'])
+            self.assertFalse(report['full_ready'])
+            if fault == 'intent':
+                self.assertEqual(report['pending'], [{'stage': 'unload', 'entry_id': helper.entry_id}])
+            elif fault == 'receipt':
+                self.assertTrue(report['inactive_receipts_complete'])
+            else:
+                self.assertFalse(report['inactive_receipts_complete'])
+            self.assertIs(helper.state, ConfigEntryState.NOT_LOADED if fault == 'receipt'
+                          else ConfigEntryState.LOADED)
+            before_readonly = await observe()
+            with self.assertRaisesRegex(lm.HelperLifecycleError, 'read_only'):
+                await recovered.quiesce()
+            self.assertEqual(await observe(), before_readonly)
+            return
         lifecycle = await lm.NativeHelperLifecycle.start(*lifecycle_args, **lifecycle_callbacks)
         await lifecycle.quiesce()
         inactive = await m['helper_observers'].NativeHelperObservers.capture(
@@ -250,3 +285,15 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         self.assertIs(component.get_entity(old), meter)
         self.assertEqual(f.entity.async_get(old).id, source_uuid)
         self.assertEqual(m['helper_native'].read_entry(hass, helper.entry_id), original_snapshot)
+
+
+class NativeLifecycleRootAckLossTests(NativeReceiptedHelperTests):
+    lifecycle_save_fault = 'root'
+
+
+class NativeLifecycleIntentAckLossTests(NativeReceiptedHelperTests):
+    lifecycle_save_fault = 'intent'
+
+
+class NativeLifecycleReceiptAckLossTests(NativeReceiptedHelperTests):
+    lifecycle_save_fault = 'receipt'
