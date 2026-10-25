@@ -8,6 +8,7 @@ import importlib
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import test_native_input_baseline as fixtures
 
@@ -23,6 +24,94 @@ class NativeRegistryReceiptsTests(unittest.IsolatedAsyncioTestCase):
                        for name in ('native_registry_receipts', 'native_registry',
                                     'native_registry_transition', 'native_input_observation',
                                     'prepared', 'journal', 'transaction')}
+
+    async def test_actual_coordinator_adapter_checks_both_intents_at_native_boundary(self):
+        f, m = self.f, self.modules
+        rr, nr, observation, prep, journal, tx = (m[name] for name in (
+            'native_registry_receipts', 'native_registry', 'native_input_observation',
+            'prepared', 'journal', 'transaction'))
+        adapter_module = importlib.import_module(fixtures.PACKAGE + '.native_registry_transaction')
+        captured = await f.capture()
+        preparations = prep.native_prepared_store(f.hass)
+        await preparations.initialize()
+        baseline_ref = await preparations.create_native_inputs('coordinator-inputs', captured)
+        io = nr.NativeRegistryIO(f.hass)
+        bridge = nr.NativeRegistryBridge(io, None)
+        changes = [await bridge.prepare('entity', f.row.id, {'name': 'Coordinator entity'}, f.guard),
+                   await bridge.prepare('device', f.native_device.id,
+                                        {'name_by_user': 'Coordinator device'}, f.guard)]
+        digests, steps = {}, []
+        for index, change in enumerate(changes):
+            ref = 'coordinator-' + str(index)
+            digests[ref] = await preparations.create(ref, prep.encode_change(change))
+            steps.append(tx.Step(ref, 'registry', change.identity, change.before_revision,
+                                 change.after_revision, ref))
+        plan = tx.Plan('coordinator-plan', ('registry',), ('registry',), tuple(steps),
+                       'scoped-native-registry-only', ('registry',), baseline_ref)
+        log = journal.native_journal(f.hass)
+        await log.initialize()
+        store = rr.native_registry_receipt_store(f.hass, preparations)
+        await store.initialize()
+        operation = 'coordinator-native-operation'
+        chain = await rr.RegistryReceiptChain.start(store, operation, plan, f.receipt, digests)
+
+        async def observe():
+            return await observation.async_observe_native_inputs(f.hass, f.receipt, guard=f.guard)
+
+        async def verify(direction):
+            for change in changes:
+                if (await bridge.inspect(change)).position != direction:
+                    return False
+            return True
+
+        adapter = adapter_module.ReceiptedRegistryTransactionAdapter(bridge,
+            lambda ref: prep.decode_change(preparations.resolve(ref, digests[ref])),
+            chain, observe, log.load, f.guard, full_verify=lambda _: verify('after'),
+            full_verify_rollback=lambda _: verify('before'))
+        coordinator = tx.Coordinator({'registry': adapter}, log, f.guard,
+                                     required_scopes=('registry',))
+        original_mutate, calls = io.mutate, []
+
+        def checked_mutate(change, target):
+            # Inspect independently persisted raw journal/sidecar at the exact
+            # synchronous native boundary, before calling the real HA API.
+            jdata = json.loads(Path(f.hass.config.path('.storage',
+                               'ha_entity_renamer.journal')).read_bytes())['data']
+            durable = journal.decode(jdata)[operation]
+            index = next(i for i, step in enumerate(plan.steps) if step.identity == change.identity)
+            expected = 'intent' if durable.direction == 'forward' else 'undo_intent'
+            self.assertEqual(durable.phases[index], expected)
+            self.assertEqual(adapter.context.record, durable)
+            self.assertIsNotNone(chain.active)
+            sdata = json.loads(Path(f.hass.config.path('.storage',
+                               'ha_entity_renamer.registry_receipts')).read_bytes())['data']
+            self.assertEqual(sdata['events'][chain.active.reference[0]]['payload']['kind'],
+                             'registry_intent')
+            calls.append((change.identity, durable.direction))
+            return original_mutate(change, target)
+
+        with patch.object(io, 'mutate', checked_mutate):
+            applied = await coordinator.apply(plan, plan.fingerprint, operation)
+            self.assertEqual(applied.status, 'applied')
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(await coordinator.apply(plan, plan.fingerprint, operation), applied)
+            self.assertEqual(len(calls), 2)
+            restored = await coordinator.rollback(operation)
+            self.assertEqual(restored.status, 'rolled_back')
+            self.assertEqual(len(calls), 4)
+        # Complete persisted chain survives wholly fresh Store and journal views.
+        reopened_preparations = prep.native_prepared_store(f.hass)
+        await reopened_preparations.initialize()
+        reopened_store = rr.native_registry_receipt_store(f.hass, reopened_preparations)
+        await reopened_store.initialize()
+        reopened_log = journal.native_journal(f.hass)
+        await reopened_log.initialize()
+        final = await reopened_log.load(operation)
+        reopened = rr.RegistryReceiptChain.reopen(reopened_store, operation, final.plan,
+                                                 f.receipt, digests)
+        observed = await observe()
+        reopened.expected(tx.PhaseContext(final, 0), tuple(rr.RegistryRawObservation(
+            item.key, item.raw, item.identity) for item in observed.files))
 
     async def test_actual_native_multi_step_chain_reopens_and_reverses(self):
         f, m = self.f, self.modules
