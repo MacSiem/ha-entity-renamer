@@ -76,6 +76,8 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.components.integration.config_flow import ConfigFlowHandler
         from homeassistant.config_entries import ConfigEntry
         from homeassistant.core import Context, callback
+        from homeassistant.helpers.event import (async_track_state_change_event,
+            async_track_state_report_event)
         from homeassistant.helpers.entity_component import EntityComponent
         from homeassistant.helpers import entity_registry as er
         from homeassistant.config import async_hass_config_yaml
@@ -274,6 +276,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                 oracle_previous=[endpoint.state,endpoint.last_reported]
                 burst=[]
                 burst_events=[]
+                burst_deliveries=set()
                 burst_base=[]
                 burst_done=[]
                 def origin(frame):
@@ -302,7 +305,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                     scope.codes['fire'],hass.bus,origin,lambda reason:self.fail('oracle observer '+reason))
                 def assert_burst(event):
                     if (len(burst)==3 and not burst_done
-                            and id(event.data)==burst_events[-1]):
+                            and set(burst_events) <= burst_deliveries):
                         expected=burst_base[0]
                         for left,right,ot,nt,*rest in burst:
                             expected=expected+self.area(left,right,Decimal((nt-ot).total_seconds()))
@@ -314,6 +317,8 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                     data=event.data
                     if data.get('entity_id') not in self.names or data.get('new_state') is None:
                         return
+                    if id(data) in burst_events:
+                        burst_deliveries.add(id(data))
                     if (event.event_type=='state_changed' and data.get('old_state') is None
                             and data['entity_id']==scope.source_binding.to_name):
                         left,right,ot,nt,full,anchor,trigger=oracle_inputs[id(data)]
@@ -328,12 +333,11 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                         assert_burst(event)
                     elif burst_base:
                         assert_burst(event)
-                unsubscribe=hass.bus.async_listen('state_changed',source_created)
-                # state_reported requires a genuine native event filter on HA.
-                @callback
-                def source_filter(data):
-                    return data.get('entity_id') in self.names
-                report_unsubscribe=hass.bus.async_listen('state_reported',source_created,event_filter=source_filter)
+                # Observe the actual keyed job AFTER the product bridge on both
+                # Core versions. Minimum queues changed but dispatches reports
+                # inline; count real deliveries before asserting the whole burst.
+                unsubscribe=async_track_state_change_event(hass,self.names,source_created)
+                report_unsubscribe=async_track_state_report_event(hass,self.names,source_created)
                 original_write=m['yaml_transaction'].apply_file_patch
                 def pinned_write(*args,**kwargs):
                     result=original_write(*args,**kwargs)
