@@ -225,12 +225,22 @@ async def async_discover(hass, proposal, guard):
     from .recorder_guard import NativeRecorderGuard, prepare as recorder_preflight
     from .history_guard import NativeHistoryGuard
     from .native_discovery_consumers import async_observe_discovery_consumers
+    from .powercalc_runtime_observer import (capture_powercalc_runtime,
+                                            assert_powercalc_runtime_current)
     proposal_json, manifest = _proposal(proposal)
     mapping = {row.old_id: row.new_id for row in manifest.entities if row.old_id != row.new_id}
     families = {name: _unknown(name, 'source_inventory_unavailable') for name in FAMILIES}
     conflicts, bound = [], None
     native = None
+    powercalc = None
+    powercalc_failure = None
     guard()
+    try:
+        powercalc = capture_powercalc_runtime(hass, guard=guard)
+    except PermissionError:
+        powercalc_failure = _unknown('powercalc', 'read_access_denied', denied=True)
+    except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        powercalc_failure = _unknown('powercalc', 'powercalc_runtime_inventory_unavailable')
     try:
         native = await async_observe_discovery_inputs(hass, guard=guard)
         guard()
@@ -384,5 +394,25 @@ async def async_discover(hass, proposal, guard):
             if token != final_token or final_family != families[domain]:
                 families[domain] = _unknown(domain, 'source_changed_during_capture')
                 conflicts.append('source_changed_during_capture')
+    if powercalc is not None:
+        try:
+            assert_powercalc_runtime_current(hass, powercalc, guard=guard)
+            current = families['powercalc']
+            # The collector adds private runtime inventory, not readiness. A failed
+            # full-three read/fence must never be overwritten by partial evidence.
+            if (native is not None and current.payload_json is not None
+                    and families['config_entries'].status == 'COMPLETE'):
+                payload = {'native_entries': json.loads(current.payload_json),
+                           'runtime': json.loads(powercalc.payload_json)}
+                families['powercalc'] = Family('powercalc', 'UNKNOWN', powercalc.reason,
+                    _json(payload), powercalc.rows, powercalc.blockers)
+        except PermissionError:
+            families['powercalc'] = _unknown('powercalc', 'read_access_denied', denied=True)
+        except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+            if families['powercalc'].status != 'DENIED':
+                families['powercalc'] = _unknown('powercalc', 'powercalc_runtime_changed_during_capture')
+            conflicts.append('source_changed_during_capture')
+    elif powercalc_failure is not None and families['powercalc'].status != 'DENIED':
+        families['powercalc'] = powercalc_failure
     return DiscoveryCapture(uuid.uuid4().hex, __version__, proposal_json, bound,
         tuple(families[name] for name in FAMILIES), tuple(sorted(set(conflicts))))
