@@ -104,7 +104,10 @@ class SetupReceiptsTests(unittest.IsolatedAsyncioTestCase):
         module = ModuleType(base.PACKAGE + '.native_utility_setup_audit')
         module.encode_setup_audit = deepcopy
         module.decode_setup_audit = deepcopy
-        def row_validator(baseline, expected, source, audit):
+        def row_validator(baseline, expected, source, audit, *,
+                          own_registry_change=None, direction=None):
+            if own_registry_change is not None or direction is not None:
+                raise ValueError('synthetic fixture covers configuration-only setup')
             if (audit['fixture'] != 'SYNTHETIC_ONLY' or audit['source_rows'] != source):
                 raise ValueError('synthetic row audit mismatch')
             return deepcopy(audit['result_rows'])
@@ -117,7 +120,8 @@ class SetupReceiptsTests(unittest.IsolatedAsyncioTestCase):
         # The production path has exact type/live/root validation. These two
         # deliberately scoped replacements allow testing chain state machinery
         # independently of HA managers and the owner's lifecycle witness hook.
-        obj = SimpleNamespace(helper_changes={'entry': SimpleNamespace(before={}, after={})})
+        obj = SimpleNamespace(helper_changes={'entry': SimpleNamespace(before={}, after={})},
+            helper_snapshots={'entry': ({}, {})}, own_registry_changes={})
         stack = __import__('contextlib').ExitStack()
         stack.enter_context(patch.object(s, '_activation', side_effect=lambda *_args, **_kwargs: deepcopy(act)))
         stack.enter_context(patch.object(s, '_validate_activation', return_value=(obj, object())))
