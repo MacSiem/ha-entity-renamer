@@ -1,7 +1,7 @@
 """Run synthetic Python tests with HA's installed dependencies in an owned container.
 
-Only repository sources are copied to a new temporary directory on the owned SSD
-mount. No existing HA configuration, API or database is opened.
+Repository sources and an optional full public Powercalc fixture are copied to
+a new temporary directory on the owned SSD mount. No existing HA configuration, API or database is opened.
 """
 import argparse
 import json
@@ -15,6 +15,7 @@ parser.add_argument('--pattern', default='test*.py')
 parser.add_argument('--repeat', type=int, default=1)
 parser.add_argument('--timeout', type=int, default=600, help='Container suite timeout in seconds')
 parser.add_argument('--test-filter', default='', help='Only discovered test IDs containing this string')
+parser.add_argument('--powercalc-component-dir', type=Path, help='Full public Powercalc fixture copied only to the isolated suite directory')
 args = parser.parse_args()
 assert args.repeat >= 1 and args.timeout > 0 and '/' not in args.pattern and '\\' not in args.pattern
 if not any(path.is_file() for path in (ROOT/'tests').glob(args.pattern)):
@@ -27,6 +28,19 @@ paths = list((ROOT/'custom_components/ha_entity_renamer').glob('*.py'))
 paths += list((ROOT/'tests').glob('test*.py'))
 paths += [ROOT/'ha-entity-renamer.js', ROOT/'scripts/stage_hacs_companion.py']
 sources = {str(p.relative_to(ROOT)): p.read_text() for p in paths}
+if args.powercalc_component_dir is not None:
+    vendor_root = args.powercalc_component_dir.resolve(strict=True)
+    if not vendor_root.is_relative_to(Path('/Volumes/Samsung_SSD')):
+        parser.error('public vendor fixture must be stored on the owned SSD')
+    manifest = json.loads((vendor_root / 'manifest.json').read_text())
+    if manifest.get('domain') != 'powercalc':
+        parser.error('Powercalc public component fixture required')
+    for vendor_file in vendor_root.rglob('*'):
+        if vendor_file.is_symlink():
+            parser.error('public vendor fixture cannot contain symlinks')
+        if vendor_file.is_file():
+            name = vendor_file.relative_to(vendor_root).as_posix()
+            sources['_public_vendor/powercalc/' + name] = vendor_file.read_text()
 program = r'''
 import os, sys, tempfile, pathlib, unittest, json
 with tempfile.TemporaryDirectory(prefix='renamer-unit-', dir='/config') as directory:
@@ -38,6 +52,8 @@ with tempfile.TemporaryDirectory(prefix='renamer-unit-', dir='/config') as direc
     os.chdir(root)
     os.environ['TMPDIR'] = directory
     tempfile.tempdir = directory
+    if VENDOR_FIXTURE:
+        os.environ['POWERCALC_COMPONENT_DIR'] = str(root / '_public_vendor/powercalc')
     sys.path.insert(0, str(root))
     suite = unittest.TestSuite(unittest.defaultTestLoader.discover('tests', pattern=PATTERN)
                                for _ in range(REPEAT))
@@ -60,7 +76,7 @@ with tempfile.TemporaryDirectory(prefix='renamer-unit-', dir='/config') as direc
 raise SystemExit(0 if success else 1)
 '''
 completed = subprocess.run(['docker','exec','-i',args.container,'python','-X','faulthandler','-B','-'],
-    input='SOURCES = '+repr(sources)+'\nPATTERN = '+repr(args.pattern)+'\nREPEAT = '+repr(args.repeat)+'\nTEST_FILTER = '+repr(args.test_filter)+'\n'+program, text=True, capture_output=True, timeout=args.timeout)
+    input='SOURCES = '+repr(sources)+'\nPATTERN = '+repr(args.pattern)+'\nREPEAT = '+repr(args.repeat)+'\nTEST_FILTER = '+repr(args.test_filter)+'\nVENDOR_FIXTURE = '+repr(args.powercalc_component_dir is not None)+'\n'+program, text=True, capture_output=True, timeout=args.timeout)
 print(completed.stdout)
 print(completed.stderr)
 completed.check_returncode()
