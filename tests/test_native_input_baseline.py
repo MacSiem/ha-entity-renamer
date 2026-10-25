@@ -366,21 +366,27 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_mutation_returns_exact_api_row_audit_before_any_await(self):
         native = importlib.import_module(PACKAGE + '.native_registry')
+        from homeassistant.helpers import entity_registry as er
+        # Registry-only audit fixture: no restored unavailable placeholder may
+        # occupy the old ID during the direct synchronous reverse API call.
+        row = self.entity.async_get_or_create('sensor', 'input_boolean', 'audit-only',
+            suggested_object_id='baseline_audit_only', config_entry=self.entry,
+            disabled_by=er.RegistryEntryDisabler.USER)
         io = native.NativeRegistryIO(self.hass)
-        before = next(r for r in io.document('entity')['entities'] if r['id'] == self.row.id)
+        before = next(r for r in io.document('entity')['entities'] if r['id'] == row.id)
         after = dict(before, entity_id='sensor.baseline_renamed')
-        change = native.PreparedRegistryChange('entity', self.row.id,
+        change = native.PreparedRegistryChange('entity', row.id,
                     json.dumps(before), json.dumps(after))
         stamp = io.mutate(change, after)
         self.assertEqual(json.loads(stamp.before_json), before)
-        observed = next(r for r in io.document('entity')['entities'] if r['id'] == self.row.id)
+        observed = next(r for r in io.document('entity')['entities'] if r['id'] == row.id)
         self.assertEqual(json.loads(stamp.after_json), observed)
-        self.assertEqual(stamp.identity, self.row.id)
+        self.assertEqual(stamp.identity, row.id)
         self.assertEqual(stamp.kind, 'entity')
         self.assertEqual(observed['entity_id'], after['entity_id'])
         reverse = io.mutate(change, before)
         self.assertEqual(json.loads(reverse.before_json), observed)
-        restored = next(r for r in io.document('entity')['entities'] if r['id'] == self.row.id)
+        restored = next(r for r in io.document('entity')['entities'] if r['id'] == row.id)
         self.assertEqual(json.loads(reverse.after_json), restored)
         self.assertEqual(restored['entity_id'], before['entity_id'])
         self.assertEqual(restored['id'], before['id'])
