@@ -608,10 +608,10 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                 else:
                     self.assertTrue(fresh_chain.verify_setup_authorization(auth))
                     self.assertEqual(hass.states.get(helper_row.entity_id).state, '6')
-                before_rows = f.entity.async_get(helper_row.entity_id).as_dict()
+                before_rows = f.entity.async_get(helper_row.entity_id)
                 with self.assertRaises(ValueError):
                     await lifecycle.restore(auth)
-                self.assertEqual(f.entity.async_get(helper_row.entity_id).as_dict(), before_rows)
+                self.assertEqual(f.entity.async_get(helper_row.entity_id), before_rows)
                 self.assertEqual(calls, expected_forward)
                 self.assertTrue(await history.verify(historical))
                 self.assertTrue(await history.verify(helper_history))
