@@ -102,11 +102,34 @@ def _fingerprint(value):
     return hashlib.sha256(payload).hexdigest()
 
 
+def simple_template_sensor_semantics(cfg):
+    """One explicit state-only native sensor subset; no render or conversion.
+
+    Used by the SAME original checker and the actual runtime consumer adapter.
+    Other native configs keep their existing full source projection + UNKNOWN.
+    """
+    from homeassistant.helpers.template import Template
+    allowed = {'state', 'name', 'unique_id', 'unit_of_measurement', 'device_class',
+        'state_class', 'availability', 'attributes', 'icon', 'picture', 'variables',
+        'last_reset', 'device_id', 'default_entity_id', 'object_id',
+        'raw_configs', 'raw_blueprint_inputs'}
+    if set(cfg) - allowed or any(cfg.get(key) for key in ('availability',
+            'attributes', 'icon', 'picture', 'variables', 'last_reset',
+            'device_id', 'raw_blueprint_inputs')):
+        raise ValueError('sensor_semantics_subset_unverified')
+    state, name = cfg.get('state'), cfg.get('name')
+    if type(state) is not Template or type(name) is not Template or not name.is_static:
+        raise ValueError('sensor_semantics_subset_unverified')
+    return ['state_sensor_v1', state.template, name.template,
+        cfg.get('unit_of_measurement'), cfg.get('device_class'), cfg.get('state_class')]
+
+
 def _template_source_projection(checked):
     """Native validated ORIGINAL blocks + every platform entity, no rendering.
 
-    This is distinct from _expected_runtime: there is no Template live observer
-    yet. Native conversion/defaults/variables are retained in each hashed row.
+    Distinct from _expected_runtime: Template apply remains unsupported. The
+    state_sensor_v1 row can be checked by the separate read-only consumer proof;
+    all other native conversion/defaults/variables remain full source rows.
     """
     from homeassistant.components.template.const import PLATFORMS
     rows = []
@@ -133,8 +156,15 @@ def _template_source_projection(checked):
         block_key = ('id:' + prefix if prefix else 'entities:' +
             json.dumps(keys, separators=(',', ':'), ensure_ascii=True))
         rows.append(['template.' + mode, block_key, cfg])
-        rows.extend([domain, key, [block_key, cfg, entity]]
-                    for domain, key, entity in entities)
+        for domain, key, entity in entities:
+            payload = [block_key, cfg, entity]  # preserve previous source proof
+            if (mode == 'state' and domain == 'template.sensor' and not any(
+                    cfg.get(key) for key in ('variables', 'actions', 'conditions'))):
+                try:
+                    payload = [block_key, simple_template_sensor_semantics(entity)]
+                except ValueError:
+                    pass  # unsupported remains full source inventory, not empty
+            rows.append([domain, key, payload])
     keys = [(row[0], row[1]) for row in rows]
     if len(set(keys)) != len(keys):
         raise ValueError('template_duplicate_native_key')
