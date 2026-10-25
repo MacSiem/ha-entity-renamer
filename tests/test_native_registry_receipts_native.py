@@ -76,7 +76,7 @@ class NativeRegistryReceiptsTests(unittest.IsolatedAsyncioTestCase):
             # Inspect independently persisted raw journal/sidecar at the exact
             # synchronous native boundary, before calling the real HA API.
             jdata = json.loads(Path(f.hass.config.path('.storage',
-                               'ha_entity_renamer.journal')).read_bytes())['data']
+                               'ha_entity_renamer.migrations')).read_bytes())['data']
             durable = journal.decode(jdata)[operation]
             index = next(i for i, step in enumerate(plan.steps) if step.identity == change.identity)
             expected = 'intent' if durable.direction == 'forward' else 'undo_intent'
