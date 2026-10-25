@@ -193,6 +193,9 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         await store.initialize()
         operation = 'mixed-helper-native-operation'
         chain = await rr.RegistryReceiptChain.start(store, operation, plan, receipt, digests)
+        if utility:
+            setup_effects = importlib.import_module(fixtures.PACKAGE + '.native_helper_setup_effects')
+            loaded_observer.bind_native_chain(chain)
         bridge = nr.NativeRegistryBridge(io, recorder, native_images=chain.accepted_documents)
         observation_state = chain.reconstruct_inputs() if self.with_yaml else None
         async def observe(input_state=None):
@@ -202,7 +205,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                     observation_state = chain.reconstruct_inputs()
                 except rr.RegistryReceiptError:
                     if chain.active is None or chain.store.read(chain.active.reference[0])[
-                            'payload']['kind'] != 'registry_intent':
+                            'payload']['kind'] not in ('registry_intent', 'helper_setup_intent'):
                         raise
                     # This same live native intent may observe its direct result;
                     # the old state's head/preparations remain independently fenced.
@@ -236,13 +239,13 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             observed = await observe()
             head = chain.expected(tx.PhaseContext(record, 0), tuple(
                 rr.RegistryRawObservation(item.key, item.raw, item.identity) for item in observed.files))
-            return head == authorization.head
+            return chain.verify_setup_authorization(authorization) if utility else head == authorization.head
         async def runtime(entry_id, activation, authorization):
             self.assertEqual(entry_id, helper.entry_id)
             self.assertEqual(activation['state'], 'loaded')
             if utility:
                 current_rows = loaded_observer._rows(entry_id)
-                expected_rows = loaded_observer.helper_rows[entry_id]
+                expected_rows = loaded_observer.expected_registry_rows(entry_id)
                 self.assertEqual(current_rows, expected_rows, (registry_events, {
                     key: (expected_rows[0].get(key), current_rows[0].get(key))
                     for key in set(current_rows[0]) | set(expected_rows[0])
@@ -261,6 +264,8 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             um = importlib.import_module(fixtures.PACKAGE + '.utility_meter_observers')
             values = loaded_observer.runtime_baselines()
             lifecycle_callbacks['runtime_baselines'] = values
+            lifecycle_callbacks['setup_effect'] = setup_effects.NativeHelperSetupEffects(
+                hass, chain, observe, log.load, guard=lambda: None)
             event_count = len(lifecycle_store.rows)
             encoded = um.encode_runtime_baseline(values[0])
             encoded['payload']['source_identity'][0] = 'unproven-source-uuid'
@@ -333,6 +338,8 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         await lifecycle.quiesce()
         inactive = await m['helper_observers'].NativeHelperObservers.capture(
             hass, (original_snapshot,), proof)
+        if utility:
+            inactive.bind_native_chain(chain)
         def guarded_quiescence():
             lifecycle.require_quiescent()
         resolver = lambda ref: prep.decode_change(preparations.resolve(ref, digests[ref]))
