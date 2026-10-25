@@ -436,8 +436,16 @@ class NativeUtilitySetupAudit:
         budget[0] -= 1
         _need(depth <= 16 and budget[0] >= 0, 'native_bounds')
         if type(value) in (dict, self._er.ReadOnlyDict):
-            _need(len(value) <= 4096 and all(type(k) is str for k in value), 'native_keys')
-            return {key: self._native(child, depth + 1, budget) for key, child in value.items()}
+            _need(len(value) <= 4096 and all(isinstance(k, str) for k in value), 'native_keys')
+            # Core uses native StrEnum keys (for example Platform.SENSOR).
+            # Read the underlying str without invoking user conversion hooks,
+            # and refuse any collision in the detached JSON representation.
+            result = {}
+            for key, child in value.items():
+                plain_key = str.__str__(key)
+                _need(plain_key not in result, 'native_key_collision')
+                result[plain_key] = self._native(child, depth + 1, budget)
+            return result
         if type(value) in (list, tuple):
             _need(len(value) <= 4096, 'native_bounds')
             return [self._native(child, depth + 1, budget) for child in value]

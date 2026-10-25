@@ -215,6 +215,9 @@ class SetupAuditNativeContractTests(unittest.IsolatedAsyncioTestCase):
         old = self.entity
         hass = self.f.hass
         with a.NativeUtilitySetupAudit(hass, baseline, snapshot, rows, guard=lambda: True) as collector:
+            from homeassistant.const import Platform
+            self.assertEqual(collector._native({Platform.SENSOR: {'precision': 2}}),
+                             {'sensor': {'precision': 2}})
             self.assertTrue(await hass.config_entries.async_setup(self.entry.entry_id))
             await hass.async_block_till_done()
             audit = collector.finish()

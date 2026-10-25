@@ -119,7 +119,7 @@ class SetupReceiptsTests(unittest.IsolatedAsyncioTestCase):
         # independently of HA managers and the owner's lifecycle witness hook.
         obj = SimpleNamespace(helper_changes={'entry': SimpleNamespace(before={}, after={})})
         stack = __import__('contextlib').ExitStack()
-        stack.enter_context(patch.object(s, '_activation', return_value=deepcopy(act)))
+        stack.enter_context(patch.object(s, '_activation', side_effect=lambda *_args, **_kwargs: deepcopy(act)))
         stack.enter_context(patch.object(s, '_validate_activation', return_value=(obj, object())))
         return stack
 
