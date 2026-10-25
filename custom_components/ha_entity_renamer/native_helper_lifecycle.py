@@ -176,7 +176,7 @@ class NativeHelperLifecycle:
     def __init__(self, store, manager, operation_id, plan, receipt, prepared_digests,
                  *, guard, verify_original_native_inputs, settle,
                  verify_inactive, verify_runtime, verify_accepted_native_chain,
-                 source_authorization=None, runtime_baselines=None):
+                 source_authorization=None, runtime_baselines=None, setup_effect=None):
         if (type(store) is not RegistryReceiptStore or type(plan) is not Plan
                 or type(operation_id) is not str or not operation_id):
             _fail('binding_invalid')
@@ -247,6 +247,9 @@ class NativeHelperLifecycle:
             self.root_id = _id(['helper_lifecycle_rollback', self.binding])
         if runtime_baselines is not None and type(runtime_baselines) is not tuple:
             _fail('runtime_baseline_type')
+        if setup_effect is not None and not callable(setup_effect):
+            _fail('installed_setup_effect_required')
+        self.setup_effect = setup_effect
         self._runtime_baselines = runtime_baselines
         self.root = None
         self.writable = False
@@ -453,6 +456,13 @@ class NativeHelperLifecycle:
                     'stage': stage, 'entry_id': key,
                     'api_called': original['state'] == 'loaded',
                     'state': 'not_loaded' if stage == 'unload' else original['state']}
+                if stage == 'setup' and original['state'] == 'loaded' and original['domain'] == 'utility_meter':
+                    effect = receipt.get('native_effect')
+                    if (type(effect) is not list or len(effect) != 2
+                            or type(effect[0]) is not str or not re.fullmatch(r'rr-[0-9a-f]{64}', effect[0])
+                            or type(effect[1]) is not str or not re.fullmatch(r'[0-9a-f]{64}', effect[1])):
+                        _fail('native_setup_effect_required')
+                    expected_receipt['native_effect'] = effect
                 if receipt != expected_receipt:
                     _fail('receipt_binding_mismatch')
                 previous = _digest(receipt)
@@ -533,13 +543,17 @@ class NativeHelperLifecycle:
             self._inactive(original)
             await self._verify(self.verify_inactive, key)
             self._inactive(original)
+        audited_setup = stage == 'setup' and active and original['domain'] == 'utility_meter'
+        if audited_setup and not callable(self.setup_effect):
+            _fail('installed_setup_effect_required')
+        effect_reference = None
         previous = self.inspect()['head']
         intent = {'kind': 'helper_lifecycle_intent', 'root': self.root_id,
                   'stage': stage, 'entry_id': key, 'previous': previous,
                   'original': original}
         if stage == 'setup':
             intent['authorization'] = asdict(authorization)
-        await self.store.create(self._slot(stage, key, 'intent'), intent)
+        intent_reference = await self.store.create(self._slot(stage, key, 'intent'), intent)
         self._authorize()
         # A durable intent is not a source fence: check again after save's await.
         await self._source(stage, authorization)
@@ -547,9 +561,18 @@ class NativeHelperLifecycle:
         if stage == 'setup' or not active:
             self._inactive(original)
         if active:
-            api = self.manager.async_unload if stage == 'unload' else self.manager.async_setup
-            if await api(key) is not True:
-                _fail('native_call_unconfirmed')
+            if audited_setup:
+                effect_reference = await self.setup_effect(key, self, intent_reference, authorization)
+                if (type(effect_reference) is not tuple or len(effect_reference) != 2
+                        or type(effect_reference[0]) is not str
+                        or not re.fullmatch(r'rr-[0-9a-f]{64}', effect_reference[0])
+                        or type(effect_reference[1]) is not str
+                        or not re.fullmatch(r'[0-9a-f]{64}', effect_reference[1])):
+                    _fail('native_setup_effect_required')
+            else:
+                api = self.manager.async_unload if stage == 'unload' else self.manager.async_setup
+                if await api(key) is not True:
+                    _fail('native_call_unconfirmed')
             self._authorize()
         if await self.settle() is False:
             _fail('idle_barrier_rejected')
@@ -575,6 +598,8 @@ class NativeHelperLifecycle:
                    'intent': _digest(intent), 'stage': stage, 'entry_id': key,
                    'api_called': active,
                    'state': 'not_loaded' if stage == 'unload' else original['state']}
+        if effect_reference is not None:
+            receipt['native_effect'] = list(effect_reference)
         await self.store.create(self._slot(stage, key, 'receipt'), receipt)
         self._authorize()
 

@@ -345,6 +345,46 @@ class NativeUtilityMeterObservers:
             self._objects[key] = entity
         return self
 
+    def bind_native_chain(self, chain):
+        """Use ONLY ORIGINAL + accepted native effects for expected registry rows.
+
+        Counter A0/S0 and original rows stay immutable; no live manager image is
+        captured or adopted. Both loaded and inactive observer scopes may bind.
+        """
+        from .native_registry_receipts import RegistryReceiptChain, _config_projection
+        require(type(chain) is RegistryReceiptChain and getattr(self, '_native_chain', None) is None
+                and chain.version == self.core
+                and chain.original_receipt.config_root == self.hass.config.config_dir,
+                'utility_native_chain_binding')
+        docs = {row.key: json.loads(row.raw) for row in chain.baseline.files}
+        entities = docs['core.entity_registry']['data']['entities']
+        configs = docs['core.config_entries']['data']['entries']
+        for key in self.before:
+            original_rows = sorted((row for row in entities if row.get('config_entry_id') == key),
+                                   key=lambda row: row['id'])
+            entries = [row for row in configs if row['entry_id'] == key]
+            require(original_rows == self.helper_rows[key] and len(entries) == 1
+                    and snapshot_equal(_config_projection(entries[0]), self.before[key]),
+                    'utility_original_chain_rows')
+            changes = [change for step, change in zip(chain.plan.steps, chain.changes)
+                       if step.adapter == 'helpers'
+                       and change.before['identity']['entry_id'] == key]
+            require((not changes and snapshot_equal(self.before[key], self.after[key]))
+                    or len(changes) == 1 and snapshot_equal(changes[0].before, self.before[key])
+                    and snapshot_equal(changes[0].after, self.after[key]),
+                    'utility_original_chain_preparation')
+        self._native_chain = chain
+        return self
+
+    def expected_registry_rows(self, entry_id):
+        require(entry_id in self.before, 'utility_outside_prepared_scope')
+        chain = getattr(self, '_native_chain', None)
+        if chain is None:
+            return deepcopy(self.helper_rows[entry_id])
+        document = chain.accepted_documents()['core.entity_registry']
+        return sorted((deepcopy(row) for row in document['data']['entities']
+                       if row.get('config_entry_id') == entry_id), key=lambda row: row['id'])
+
     def runtime_baselines(self):
         return tuple(self._baselines[k] for k in sorted(self._baselines))
 
@@ -425,7 +465,7 @@ class NativeUtilityMeterObservers:
         require(key in self.before and (snapshot_equal(snapshot, self.before[key])
                 or snapshot_equal(snapshot, self.after[key])), 'utility_outside_prepared_scope')
         require(snapshot_equal(read_entry(self.hass, key), snapshot), 'utility_manager_snapshot_mismatch')
-        require(self._rows(key) == self.helper_rows[key], 'utility_helper_registry_changed')
+        require(self._rows(key) == self.expected_registry_rows(key), 'utility_helper_registry_changed')
         entry = self.hass.config_entries.async_get_entry(key)
         require(entry.state.value == self.modes[key], 'utility_lifecycle_changed')
         require(not entry.setup_lock.locked() and entry._async_cancel_retry_setup is None
