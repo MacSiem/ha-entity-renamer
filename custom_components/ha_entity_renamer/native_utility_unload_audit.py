@@ -534,10 +534,22 @@ class NativeUtilityUnloadAudit:
                 self._captured, self._state_json = state, _state(state)
                 self._return_none = True
                 self._write_frame = None
-        except BaseException:
-            # Includes guard/cancellation, malformed native data and IO failures.
-            # Never throw into HA's native state writer or alter its return.
-            self._poison('profile_observation_refused')
+        except BaseException as error:
+            # Never throw into HA's writer. Retain only a fixed public reason,
+            # never arbitrary exception text, row values, paths or native data.
+            reason = 'profile_observation_refused'
+            known = {'actual_unloader_scope', 'multiple_native_unloaders',
+                'native_unloader_return', 'native_set_cause', 'multiple_native_sets',
+                'native_set_object_replaced_or_noop', 'writer_hass', 'duplicate_write',
+                'native_causal_frame', 'writer_row_binding', 'writer_return',
+                'native_unavailable_state', 'missing_state', 'native_state_json'}
+            if (type(error) is UtilityUnloadAuditError and len(error.args) == 1
+                    and type(error.args[0]) is str):
+                prefix = 'utility_unload_audit_'
+                code = error.args[0][len(prefix):] if error.args[0].startswith(prefix) else ''
+                if code in known:
+                    reason = 'profile_' + code
+            self._poison(reason)
 
     def _cleanup(self):
         if self._active:
