@@ -388,8 +388,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
             activation_lease=self.activation_lease)
         registry = m['native_registry_transaction'].ReceiptedRegistryTransactionAdapter(
             bridge, resolver, chain, observe, log.load, adapter.guard,
-            full_verify=lambda _: verify('after'), full_verify_rollback=lambda _: verify('before'),
-            activation_lease=self.activation_lease)
+            full_verify=lambda _: verify('after'), full_verify_rollback=lambda _: verify('before'))
         adapters = {'registry': registry, 'helpers': adapter}
         candidate_proofs = []
         if self.with_yaml:
