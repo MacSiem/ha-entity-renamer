@@ -297,6 +297,24 @@ class NativeYAMLRuntimeReadback:
                         or not self.hass.services.has_service('script', entity.unique_id)
                         or getattr(script.change_listener, '__self__', None) is not entity):
                     raise ValueError('native_script_not_settled')
+                from homeassistant.core import Service, ServiceRegistry, HassJob
+                from homeassistant.helpers.script import Script
+                services = self.hass.services
+                if type(services) is not ServiceRegistry or services._hass is not self.hass:
+                    raise ValueError('native_script_service_registry')
+                service = services._services.get('script', {}).get(entity.unique_id)
+                job = getattr(service, 'job', None)
+                target = getattr(job, 'target', None)
+                if (type(script) is not Script or type(service) is not Service
+                        or type(job) is not HassJob
+                        or getattr(target, '__self__', None) is not entity
+                        or getattr(target, '__func__', None) is not ScriptEntity._service_handler
+                        or getattr(script.change_listener, '__func__', None)
+                            is not ScriptEntity.async_change_listener):
+                    raise ValueError('native_script_service_owner')
+                identities[-1] = (entity.entity_id, id(entity), id(script),
+                    id(entity.raw_config), id(entity.registry_entry),
+                    id(services), id(service), id(job), id(target), id(service.schema))
                 rows.append([entity.unique_id, entity.raw_config, script.sequence,
                     script.script_mode, script.max_runs, script._max_exceeded, script.variables,
                     entity.icon, entity.description, entity.fields, entity._trace_config])
@@ -309,12 +327,17 @@ class NativeYAMLRuntimeReadback:
                         or entity._blueprint_inputs is not None
                         or script.is_running or (script._unloaded if __version__ == '2026.10.2' else False)
                         or script._hass is not self.hass or script.domain != domain
-                        or getattr(script.change_listener, '__self__', None) is not entity):
+                        or getattr(script.change_listener, '__self__', None) is not entity
+                        or getattr(script.change_listener, '__func__', None)
+                            is not AutomationEntity.async_change_listener):
                     raise ValueError('automation_listener_proof_unavailable')
                 if entity._is_enabled is True:
-                    identities[-1] = (entity.entity_id, id(entity), _automation_registrations(self.hass, entity))
+                    identities[-1] = (entity.entity_id, id(entity), id(script),
+                        id(entity.raw_config), id(entity.registry_entry),
+                        _automation_registrations(self.hass, entity))
                 elif entity._is_enabled is False and entity._async_detach_triggers is None:
-                    identities[-1] = (entity.entity_id, id(entity), ('disabled',))
+                    identities[-1] = (entity.entity_id, id(entity), id(script),
+                        id(entity.raw_config), id(entity.registry_entry), ('disabled',))
                 else:
                     raise ValueError('automation_listener_proof_unavailable')
                 rows.append([entity.unique_id, entity.raw_config, entity._trigger_config,
