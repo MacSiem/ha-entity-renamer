@@ -40,6 +40,12 @@ class NativeDiscoveryFlowTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.f.asyncTearDown)
         self.runtime = backend.Runtime('fixture', object(), object())
         self.f.hass.data[backend.DATA_RUNTIME] = self.runtime
+        options = json.loads(json.dumps(dict(self.f.entry.options)))
+        options['foreign_options']['entity_id'] = self.f.row.entity_id
+        self.f.hass.config_entries.async_update_entry(self.f.entry, options=options)
+        await self.f.hass.config_entries._store.async_save(
+            self.f.hass.config_entries._data_to_save())
+        await self.f.hass.async_block_till_done()
         self.proposal = {'entities': [{'entity_id': self.f.row.entity_id,
             'proposed_entity_id': 'sensor.discovery_destination',
             'device_id': self.f.row.device_id}], 'devices': [], 'statistics': []}
