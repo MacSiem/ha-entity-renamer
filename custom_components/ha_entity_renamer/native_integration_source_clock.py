@@ -104,6 +104,7 @@ class IntegrationSourceClockBinding:
         self.root_ref = (chain.root_id, root['digest'])
         self.scope = self.authorization = None
         self.flights = deque()
+        self._native_events = {}
         self._emission_endpoint = None
         self._endpoint_time = None
         self._report_updates = {}
@@ -148,9 +149,10 @@ class IntegrationSourceClockBinding:
         core = import_module('homeassistant.core')
         if scope.version == '2026.10.2':
             refs.append((core.EventBus,'_async_dispatch'))
+        refs.append((scope.event, '_async_dispatch_entity_id_event'))
         self.refs = tuple(refs)
         self.methods, self.codes = prove_methods(scope.root, scope.pins, self.refs)
-        self.dispatch_code = (self.codes[-1] if scope.version == '2026.10.2' else scope.codes['fire'])
+        self.dispatch_code = (self.codes[-2] if scope.version == '2026.10.2' else scope.codes['fire'])
 
     def check(self, scope):
         _need(scope is self.scope and self.chain.writable and not self.chain.store.poisoned
@@ -278,12 +280,41 @@ class IntegrationSourceClockBinding:
         self._report_updates = {key:value for key,value in self._report_updates.items()
                                 if key in retained}
 
+    def capture_native_event(self, scope, frame):
+        # Minimum Core defers keyed state_changed delivery with call_soon. Its
+        # original EventBus frame has returned by then: bind the actual Event
+        # created by that native frame before its queued dispatcher can run.
+        if scope.version != '2025.6.0' or scope._new is not None:
+            return
+        data, event = frame.f_locals.get('event_data'), frame.f_locals.get('event')
+        item = scope._emitted.get(id(data))
+        if item is not None and item[0] is data:
+            _need(event is not None and event.data is data, 'actual_native_event')
+            self._native_events[id(data)] = event
+
+    def _retire(self, scope, data):
+        scope._emitted.pop(id(data))
+        self._native_events.pop(id(data), None)
+
     def _dispatch(self, scope, event):
         frame = sys._getframe(1)
         try:
             while frame is not None:
                 if (frame.f_code is self.dispatch_code and frame.f_locals.get('self') is scope.hass.bus
                         and frame.f_locals.get('event') is event and frame.f_locals.get('event_data') is event.data):
+                    return
+                if (scope.version == '2025.6.0'
+                        and frame.f_code is self.codes[-1]
+                        and frame.f_locals.get('hass') is scope.hass
+                        and frame.f_locals.get('event') is event
+                        and self._native_events.get(id(event.data)) is event):
+                    tracker_key = (scope.event._TRACK_STATE_CHANGE_DATA
+                        if event.event_type == 'state_changed'
+                        else scope.event._TRACK_STATE_REPORT_DATA)
+                    tracker = scope.hass.data.get(tracker_key)
+                    _need(tracker is not None
+                          and frame.f_locals.get('callbacks') is tracker.callbacks,
+                          'actual_native_keyed_dispatcher')
                     return
                 frame = frame.f_back
             _need(False,'native_bus_delivery')
@@ -307,20 +338,20 @@ class IntegrationSourceClockBinding:
                 event_kind = current.interval.kind.removeprefix('state_')
                 self.validate_emission(scope,current.event,event_kind,retained=scope._retained)
                 if current.consumed:
-                    scope._emitted.pop(id(current.data))
+                    self._retire(scope,current.data)
                     continue
                 _need(scope._retained and scope._phase in ('unloading','retained','setting_up'),
                       'owned_retained_consumer')
                 interval = current.interval
                 if interval.transport == 'remove':
-                    scope._emitted.pop(id(current.data))
+                    self._retire(scope,current.data)
                     continue  # Transport must not cancel/reset the native timer.
                 if interval.transport == 'creation':
                     scope.source = interval.name
                     self.transport_calls += 1
                 self._consume(scope,current.event,interval)
                 self.validate_emission(scope,current.event,event_kind,retained=scope._retained)
-                scope._emitted.pop(id(current.data))
+                self._retire(scope,current.data)
                 if interval.transport == 'creation':
                     scope._pending_move = None
             self._prune_reports(scope)

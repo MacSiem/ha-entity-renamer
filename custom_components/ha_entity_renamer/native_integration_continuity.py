@@ -268,7 +268,7 @@ class NativeIntegrationContinuity:
         monitor.use_tool_id(key, _NAME)
         self._tool = key
         self._watched = tuple(self.codes[name] for name in
-                              ('remove_callbacks', 'schedule', 'changed', 'reported'))
+                              ('remove_callbacks', 'schedule', 'changed', 'reported', 'fire'))
         def started(code, offset):
             self._observe(sys._getframe(1), 'start')
         def returned(code, offset, result):
@@ -282,6 +282,10 @@ class NativeIntegrationContinuity:
     def _observe(self, frame, phase):
         try:
             entity = frame.f_locals.get('self')
+            if frame.f_code is self.codes['fire']:
+                if self.source_binding is not None and phase == 'return':
+                    self.source_binding.capture_native_event(self, frame)
+                return
             if frame.f_code in (self.codes['changed'], self.codes['reported']):
                 if entity is self.old and not self._bridge_depth:
                     event_object = frame.f_locals.get('event')

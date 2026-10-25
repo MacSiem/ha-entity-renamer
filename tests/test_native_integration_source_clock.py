@@ -175,7 +175,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
         locks=m['yaml_editor_locks'].NativeYAMLEditorLocks(hass)
         def retained_guard():
             self.guard()
-            self.scope._check(owner=True)
+            self.scope._check()
             self.assertTrue(self.scope._retained)
             self.assertEqual(self.scope._phase,'retained')
             m['native_helper_transaction']._require_inactive(self.entry,lease)
