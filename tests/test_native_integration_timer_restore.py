@@ -22,6 +22,7 @@ class NativeIntegrationTimerRestoreTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.components.integration.config_flow import ConfigFlowHandler
         from homeassistant.config_entries import ConfigEntry
+        from homeassistant.core import callback
         from homeassistant.helpers.entity_component import EntityComponent
         from homeassistant.helpers.entity_platform import async_get_platforms
         from homeassistant.helpers.event import async_track_state_change_event
@@ -57,6 +58,7 @@ class NativeIntegrationTimerRestoreTests(unittest.IsolatedAsyncioTestCase):
         old = current()
         first_tick = asyncio.get_running_loop().create_future()
 
+        @callback
         def observe_timer(event):
             # A real timer changes helper state while the source stays constant.
             if old._state is not None and old._state > 0 and not first_tick.done():
