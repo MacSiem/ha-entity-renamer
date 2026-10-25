@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+import json
 import re
 
 from .helper_plan import NATIVE_FIELDS
@@ -186,7 +187,7 @@ class NativeHelperLifecycle:
         self.root_id = _id(['helper_lifecycle', operation_id, plan.fingerprint])
         self.binding = {'operation_id': operation_id, 'fingerprint': plan.fingerprint,
                         'native_inputs': list(plan.native_inputs),
-                        'plan': canonical(asdict(plan))[0],
+                        'plan': canonical(json.loads(json.dumps(asdict(plan), allow_nan=False)))[0],
                         'preparations': deepcopy(prepared_digests)}
         self.source_authorization = source_authorization
         if source_authorization is not None:
