@@ -72,7 +72,8 @@ class OwnHelperUnloadLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.entry.state.value, 'not_loaded')
             self.assertFalse(any(p.entities for p in async_get_platforms(hass, 'utility_meter')
                                  if p.config_entry is self.entry))
-            self.assertEqual(utility._row(self.f.entity.async_get(self.old_helper)), self.row)
+            self.assertEqual(self.own_observer._rows(entry_id),
+                self.own_observer.expected_registry_rows(entry_id))
             return True
         async def unused(*args):
             raise AssertionError('unused setup/reverse verifier invoked during unload')
