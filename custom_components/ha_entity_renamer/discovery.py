@@ -139,6 +139,34 @@ def _native_families(observed):
     return result, entities, devices
 
 
+def _runtime_family(hass, domain):
+    """Reuse exact native consumer projections without executing user actions."""
+    from homeassistant.const import __version__
+    from homeassistant.helpers.entity_component import DATA_INSTANCES
+    from .yaml_runtime_observer import NativeYAMLRuntimeReadback, _pending_native_work
+    from .yaml_validation_worker import _normal, _fingerprint
+    try:
+        if (__version__ not in ('2025.6.0', '2026.10.2')
+                or _pending_native_work(hass, (domain,))):
+            raise ValueError('runtime_unsettled')
+        rows, identities = NativeYAMLRuntimeReadback(hass)._projection(domain)
+        component = hass.data.get(DATA_INSTANCES, {}).get(domain)
+        locators = {entity.unique_id: entity.entity_id for entity in component.entities}
+        if (len(locators) != len(rows) or any(type(row[0]) is not str
+                                            or row[0] not in locators for row in rows)):
+            raise ValueError('runtime_identity_ambiguous')
+        digest = _fingerprint(rows)
+        family = _family(domain, {'scope': 'native_runtime_entities',
+                                 'projection': _normal(rows)},
+            [(locators[row[0]], row[0], _fingerprint(row)) for row in rows],
+            blockers=('runtime_source_binding_unverified',))
+        return family, (id(component), identities, digest)
+    except PermissionError:
+        return _unknown(domain, 'read_access_denied', denied=True), None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return _unknown(domain, 'runtime_inventory_unavailable'), None
+
+
 async def async_discover(hass, proposal, guard):
     """Capture native sources and dependent families without any mutation API."""
     from homeassistant.const import __version__
@@ -177,6 +205,9 @@ async def async_discover(hass, proposal, guard):
         for name in ('entity_registry', 'device_registry', 'config_entries', 'template', 'powercalc'):
             families[name] = _unknown(name, 'native_input_unavailable')
     guard()
+    runtime_tokens = {}
+    for domain in ('automation', 'script'):
+        families[domain], runtime_tokens[domain] = _runtime_family(hass, domain)
     # YAML dashboard filenames are supplied only by server runtime discovery.
     # Until that runtime-source binding is proved, keep those family claims
     # UNKNOWN rather than silently dropping sources from the graph.
@@ -248,5 +279,11 @@ async def async_discover(hass, proposal, guard):
             bound = None
             conflicts.append('source_changed_during_capture')
     guard()
+    for domain, token in runtime_tokens.items():
+        if token is not None:
+            final_family, final_token = _runtime_family(hass, domain)
+            if token != final_token or final_family != families[domain]:
+                families[domain] = _unknown(domain, 'source_changed_during_capture')
+                conflicts.append('source_changed_during_capture')
     return DiscoveryCapture(uuid.uuid4().hex, __version__, proposal_json, bound,
         tuple(families[name] for name in FAMILIES), tuple(sorted(set(conflicts))))
