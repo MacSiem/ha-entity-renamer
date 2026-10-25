@@ -556,7 +556,11 @@ class _Pinned:
             else:
                 baseline = _ObservedNativeFiles(tuple(self.files))
                 expected_documents = self.input_state.documents()
+                total = 0
                 for item in self.files:
+                    total += len(item.manager_json) + len(item.raw or b'')
+                    if total > MAX_TOTAL_BYTES:
+                        _fail('native_input_limit')
                     path = '.storage/' + item.key
                     source = dict((row[0], row[1:]) for row in self.input_state.source_files).get(path)
                     if (item.raw is None or source is None
