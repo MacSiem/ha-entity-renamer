@@ -43,6 +43,7 @@ class NativeRegistryReceiptsTests(unittest.IsolatedAsyncioTestCase):
             before = next(row for row in rows if row['id'] == identity)
             change = nr.PreparedRegistryChange(kind, identity, json.dumps(before),
                                                json.dumps(dict(before, **updates)))
+            change = replace(change, runtime_before_json=io.capture_runtime(change))
             ref = 'native-chain-' + kind
             digests[ref] = await preparations.create(ref, prep.encode_change(change))
             changes.append(change)
