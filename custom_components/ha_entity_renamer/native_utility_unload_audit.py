@@ -114,10 +114,15 @@ def _payload(data):
     _need(type(data) is NativeUtilityUnloadAuditData, 'typed_data_required')
     doc = _load(data.payload_json)
     _need(type(doc) is dict and set(doc) == {'schema', 'core', 'entry_id', 'source_row',
-        'source_pins', 'state_json', 'reserved', 'call'}, 'data_layout')
+        'source_pins', 'state_json', 'reserved', 'call', 'writer_row'}, 'data_layout')
     _need(type(doc['schema']) is int and doc['schema'] == 1 and doc['core'] in _SOURCES
           and doc['entry_id'] == data.entry_id, 'data_binding')
     _bind(doc['source_row'], data.entry_id)
+    _bind(doc['writer_row'], data.entry_id)
+    ignored = {'options', 'modified_at'} if doc['core'] == '2025.6.0' else set()
+    _need(_same({k: v for k, v in doc['source_row'].items() if k not in ignored},
+                {k: v for k, v in doc['writer_row'].items() if k not in ignored}),
+          'writer_row_binding')
     _need(_same(doc['source_pins'], _SOURCES[doc['core']]), 'data_source_pins')
     _need(type(doc['reserved']) is bool and doc['reserved'], 'reservation')
     call = doc['call']
@@ -130,7 +135,7 @@ def _payload(data):
           and all(call[k] is True for k in ('return_none', 'same_actor', 'same_hass',
                    'same_row', 'same_state_at_finish', 'native_unloader_return_true',
                    'same_native_set_state')), 'call_proof')
-    _need(type(call['row_json']) is str and _same(_exact_json(call['row_json']), doc['source_row']),
+    _need(type(call['row_json']) is str and _same(_exact_json(call['row_json']), doc['writer_row']),
           'call_row')
     _need(type(doc['state_json']) is str and len(doc['state_json'].encode()) <= 1048576,
           'state_json')
@@ -342,8 +347,10 @@ class NativeUtilityUnloadAudit:
               'native_descriptor_changed')
         _need(self.hass.states is self._machine and self.hass.data.get(self.er.DATA_REGISTRY)
               is self._registry, 'native_manager_changed')
-        _need(self._registry.async_get(self.expected_row['entity_id']) is self._row_object
-              and _same(_row(self._row_object), self.expected_row), 'source_row_changed')
+        _need(self._registry.async_get(self.expected_row['entity_id']) is self._manager_row
+              and _same(_row(self._manager_row), self.expected_row), 'source_row_changed')
+        _need(self._entity.registry_entry is self._row_object
+              and _same(_row(self._row_object), self._writer_row), 'writer_row_changed')
         _need(all(getattr(module, name) is cls for module, name, cls in self._class_refs),
               'native_class_changed')
         for obj, name, method in ((self._row_object, 'write_unavailable_state', self._methods[0]),
@@ -416,7 +423,7 @@ class NativeUtilityUnloadAudit:
         rows = list(self.er.async_entries_for_config_entry(self._registry, self.entry.entry_id))
         _need(len(rows) == 1 and type(rows[0]) is self.er.RegistryEntry
               and _same(_row(rows[0]), self.expected_row), 'accepted_registry_row')
-        self._row_object = rows[0]
+        self._manager_row = rows[0]
         ep = self._modules['helpers.entity_platform']
         matches = [(p, e) for p in ep.async_get_platforms(self.hass, 'utility_meter')
             if p.config_entry is self.entry for e in p.entities.values()]
@@ -426,14 +433,28 @@ class NativeUtilityUnloadAudit:
         _need(type(self._entity) is cls and self._platform.hass is self.hass
               and self._entity.hass is self.hass
               and self._entity.platform is self._platform
-              and self._entity.registry_entry is self._row_object
+              and type(self._entity.registry_entry) is self.er.RegistryEntry
               and self._entity.entity_id == self.expected_row['entity_id']
               and self._entity.unique_id == self.entry.entry_id
               and self._entity._parent_meter == self.entry.entry_id, 'bound_entity_identity')
+        self._row_object = self._entity.registry_entry
+        self._writer_row = _bind(_row(self._row_object), self.entry.entry_id)
+        # Minimum Core retains an older row object after native sensor display
+        # options updates. The actual unload writer reads no options or audit
+        # timestamp. Preserve BOTH complete rows; every writer-relevant field
+        # and the actual produced attributes must still match independently.
+        ignored = {'options', 'modified_at'} if self.core == '2025.6.0' else set()
+        _need(_same({k: v for k, v in self._writer_row.items() if k not in ignored},
+                    {k: v for k, v in self.expected_row.items() if k not in ignored}),
+              'bound_writer_row')
+        if not ignored:
+            _need(self._row_object is self._manager_row, 'bound_current_row_object')
         restore = self._modules['helpers.restore_state']
         self._restore = self.hass.data.get(restore.DATA_RESTORE_STATE)
         _need(type(self._restore) is restore.RestoreStateData, 'restore_manager')
-        self._attrs = _expected_attrs(self._row_object, self.core, self.hass)
+        self._attrs = _expected_attrs(self._manager_row, self.core, self.hass)
+        _need(_same(_expected_attrs(self._row_object, self.core, self.hass), self._attrs),
+              'bound_writer_attributes')
         self._check_runtime(owner=True)
         _need(sys.getprofile() is None, 'existing_profile')
         self._active = True
@@ -498,8 +519,8 @@ class NativeUtilityUnloadAudit:
                       and outer.f_locals.get('force_remove') is False,
                       'native_causal_frame')
                 _need(self._entity.registry_entry is row and self._entity.hass is hass
-                      and self._registry.async_get(row.entity_id) is row
-                      and _same(_row(row), self.expected_row), 'writer_row_binding')
+                      and self._registry.async_get(row.entity_id) is self._manager_row
+                      and _same(_row(row), self._writer_row), 'writer_row_binding')
                 self._write_frame = frame
                 self._count += 1
                 self._row_json = _native(row.as_storage_fragment)
@@ -547,7 +568,8 @@ class NativeUtilityUnloadAudit:
             self._quiescent()
             self._continuity()
             doc = {'schema': 1, 'core': self.core, 'entry_id': self.entry.entry_id,
-                'source_row': self.expected_row, 'source_pins': self._pins,
+                'source_row': self.expected_row, 'writer_row': self._writer_row,
+                'source_pins': self._pins,
                 'state_json': self._state_json, 'reserved': True,
                 'call': {'count': 1, 'path': ['RegistryEntry.write_unavailable_state',
                     'Entity.__async_remove_impl', 'Entity.async_remove'],
