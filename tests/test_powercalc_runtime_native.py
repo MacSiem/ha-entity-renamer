@@ -120,6 +120,7 @@ class PowercalcRuntimeNativeTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.setup import async_setup_component
         from custom_components.powercalc.config_flow import PowercalcConfigFlow
         hass = self.f.hass
+        self.assertTrue(await async_setup_component(hass, 'network', {}))
         class Source(SwitchEntity):
             _attr_should_poll = False
             _attr_is_on = True

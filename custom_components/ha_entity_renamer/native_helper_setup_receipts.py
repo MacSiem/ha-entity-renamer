@@ -409,11 +409,14 @@ async def complete(chain, intent, context, before, after, *, audit):
     result = {obs.key: {'document': api._loads(obs.raw), 'sha256': api._sha(obs.raw),
                        'identity': list(obs.identity)} for obs in after}
     chain._observe(after, result)
-    from .native_utility_setup_audit import encode_setup_audit
-    from .native_integration_setup_audit import (IntegrationSetupAuditData,
-                                               encode_setup_audit as encode_integration)
-    encoded_audit = (encode_integration(audit) if type(audit) is IntegrationSetupAuditData
-                     else encode_setup_audit(audit))
+    domain = source['activation']['original']['domain']
+    if domain == 'integration':
+        from .native_integration_setup_audit import encode_setup_audit
+    elif domain == 'utility_meter':
+        from .native_utility_setup_audit import encode_setup_audit
+    else:
+        _fail('helper_domain_unsupported')
+    encoded_audit = encode_setup_audit(audit)
     payload = {'kind': 'helper_setup_receipt', 'chain': chain.root_id,
         'binding': source['binding'], 'activation': source['activation'],
         'source_chain': head, 'sequence': sequence, 'intent': list(intent.reference),
