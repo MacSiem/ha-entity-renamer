@@ -49,7 +49,7 @@ with tempfile.TemporaryDirectory(prefix='renamer-unit-', dir='/config') as direc
     success = result.wasSuccessful()
 raise SystemExit(0 if success else 1)
 '''
-completed = subprocess.run(['docker','exec','-i',args.container,'python','-B','-'],
+completed = subprocess.run(['docker','exec','-i',args.container,'python','-X','faulthandler','-B','-'],
     input='SOURCES = '+repr(sources)+'\nPATTERN = '+repr(args.pattern)+'\nREPEAT = '+repr(args.repeat)+'\n'+program, text=True, capture_output=True, timeout=120)
 print(completed.stdout)
 print(completed.stderr)
