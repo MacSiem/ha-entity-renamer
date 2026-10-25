@@ -640,9 +640,17 @@ class ReceiptedOwnHelperMixedYAMLNativeTests(ReceiptedOwnHelperNativeTests):
                 except Exception as error:
                     # Observe a refused real call; never manufacture its result.
                     import traceback
+                    source_drift = []
+                    trace = error.__traceback__
+                    while trace is not None:
+                        if trace.tb_frame.f_code.co_name == 'assert_current':
+                            values = trace.tb_frame.f_locals
+                            source_drift.append(tuple(values.get(key) for key in
+                                ('path', 'observed', 'expected')))
+                        trace = trace.tb_next
                     effect_errors.append((type(error).__name__, str(error),
                         [(item.name, item.lineno) for item in
-                         traceback.extract_tb(error.__traceback__)]))
+                         traceback.extract_tb(error.__traceback__)], source_drift))
                     raise
             yaml_adapter.apply = diagnosed_yaml_apply
             coordinator = tx.Coordinator({'registry': registry, 'yaml': yaml_adapter}, journal,
