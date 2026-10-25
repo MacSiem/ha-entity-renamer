@@ -215,6 +215,21 @@ class HelperLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     if boundary != 'runtime':
                         self.assertEqual(len(h.calls), 1)
 
+    async def test_failed_setup_source_cannot_reauthorize_inner_migration(self):
+        h = await Harness().initialize(self)
+        await h.obj.quiesce()
+        h.obj.require_quiescent()
+        h.chain_valid = False
+        with self.assertRaises(module.HelperLifecycleError):
+            await h.obj.restore(h.authorization)
+        self.assertTrue(h.obj.failed)
+        self.assertEqual(h.obj.inspect()['pending'], [])
+        h.chain_valid = True
+        # Current observations cannot restore a failed writer's authority.
+        with self.assertRaises(module.HelperLifecycleError):
+            h.obj.require_quiescent()
+        self.assertEqual(len(h.calls), 1)
+
     async def test_task_listener_retry_or_reactivation_refuse_quiescent_guard(self):
         for field in ('task', 'listener', 'retry', 'loaded'):
             with self.subTest(field=field):
