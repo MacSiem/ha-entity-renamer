@@ -167,13 +167,25 @@ class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
         activation_before = (helper.state, helper.disabled_by,
             helper.pref_disable_new_entities, helper.pref_disable_polling)
 
+        def inactive():
+            from homeassistant.helpers import entity_platform as ep
+            self.assertIs(helper.state, ConfigEntryState.NOT_LOADED)
+            self.assertFalse(any(entity.entity_id == helper_id for platform in
+                ep.async_get_platforms(hass, 'threshold') for entity in platform.entities.values()))
+            # Native HA retains a registry-derived unavailable placeholder for
+            # an unloaded integration. It is not an active helper/consumer.
+            state = hass.states.get(helper_id)
+            self.assertIsNotNone(state)
+            self.assertEqual(state.state, 'unavailable')
+            self.assertEqual(dict(state.attributes), {'restored': True,
+                'friendly_name': 'Preserved threshold name', 'supported_features': 0})
+            self.assertFalse(helper.update_listeners)
+
         async def unload():
             self.assertTrue(await hass.config_entries.async_unload(helper.entry_id))
             # Keep this barrier in the test task (no new task, sleep or fake ACK).
             await hass.async_block_till_done()
-            self.assertIs(helper.state, ConfigEntryState.NOT_LOADED)
-            self.assertIsNone(hass.states.get(helper_id))
-            self.assertFalse(helper.update_listeners)
+            inactive()
             # The Threshold source listener is registered with async_on_unload
             # in both pinned cores. The rename+unchanged-options check below is
             # the independent behavioral probe of its actual removal.
@@ -224,9 +236,7 @@ class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
         self._prove_registry(baseline, registry_after, registry_change,
                              registry_stamp, 'forward')
         self.assertEqual(helper.options['entity_id'], old)
-        self.assertIs(helper.state, ConfigEntryState.NOT_LOADED)
-        self.assertIsNone(hass.states.get(helper_id))
-        self.assertFalse(helper.update_listeners)
+        inactive()
         self.assertIs(component.get_entity(new), meter)
         self.assertEqual(meter.entity_id, new)
         self.assertEqual(hass.states.get(new).state, '41')
@@ -238,8 +248,7 @@ class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
             data=prepared.after['data'], options=prepared.after['options'])
         config_after = await self._flush_documents()
         self._prove_config(registry_after, config_after, prepared, stamp, 'forward')
-        self.assertIs(helper.state, ConfigEntryState.NOT_LOADED)
-        self.assertIsNone(hass.states.get(helper_id))
+        inactive()
         await loaded(new)
         self._same_documents(config_after, await self._flush_documents())
         await stimulate(new)
@@ -253,8 +262,7 @@ class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
             data=prepared.before['data'], options=prepared.before['options'])
         config_reverse = await self._flush_documents()
         self._prove_config(config_after, config_reverse, prepared, reverse_stamp, 'reverse')
-        self.assertIs(helper.state, ConfigEntryState.NOT_LOADED)
-        self.assertFalse(helper.update_listeners)
+        inactive()
         registry_reverse_stamp = io.mutate(registry_change, registry_change.before)
         await hass.async_block_till_done()
         registry_reverse = await self._flush_documents()
