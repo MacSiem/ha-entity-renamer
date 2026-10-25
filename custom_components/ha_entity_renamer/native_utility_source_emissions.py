@@ -53,7 +53,11 @@ class NativeSourceEmissions:
             raise ValueError('utility_source_emission_native_code_changed')
         _witnesses.append(self)
         self.live = True
-        self.check()
+        try:
+            self.check()
+        except BaseException:
+            self.close()
+            raise
 
     def check(self):
         monitor = sys.monitoring

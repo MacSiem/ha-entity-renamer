@@ -111,3 +111,52 @@ class NativeUtilitySourceGapGuardTests(unittest.IsolatedAsyncioTestCase):
                 self.gap.check()
             self.assertIs(self.f.hass.states.get(self.old), source)
             self.unchanged_unloaded_helper()
+
+
+class NativeMappedUtilitySourceGapGuardTests(NativeUtilitySourceGapGuardTests):
+    mapped_source = True
+
+    async def emit_nested(self, values):
+        from homeassistant.core import callback
+        @callback
+        def emit(event):
+            for value in values:
+                self.source._attr_native_value = Decimal(value)
+                self.source.async_write_ha_state()
+        unsubscribe = self.f.hass.bus.async_listen('renamer_source_emission_probe', emit)
+        try:
+            self.f.hass.bus.async_fire('renamer_source_emission_probe')
+            await self.f.hass.async_block_till_done()
+        finally:
+            unsubscribe()
+
+    async def test_actual_nested_emissions_bind_latest_queued_event(self):
+        async with self.captured():
+            await self.emit_nested(('115', '119'))
+            self.gap.check()
+            self.assertIs(self.gap._latest_event.data['new_state'],
+                          self.f.hass.states.get(self.old))
+            self.assertEqual(self.gap._latest_value, Decimal('119'))
+            self.unchanged_unloaded_helper()
+
+    async def test_reset_between_queued_emissions_cannot_be_erased_by_good_head(self):
+        async with self.captured():
+            await self.emit_nested(('115', '110', '119'))
+            with self.assertRaises(gap_module.UtilitySourceGapError):
+                self.gap.check()
+            self.assertEqual(self.f.hass.states.get(self.old).state, '119')
+            self.unchanged_unloaded_helper()
+
+    async def test_emission_monitor_loss_refuses_and_frees_own_tool(self):
+        import sys
+        em = importlib.import_module(fixture.fixtures.PACKAGE + '.native_utility_source_emissions')
+        async with self.captured():
+            key, code = em._tool, em._code
+            profile = sys.getprofile()
+            sys.monitoring.set_local_events(key, code, 0)
+            with self.assertRaises(ValueError):
+                self.gap.check()
+            self.gap.close()
+            self.assertIsNone(sys.monitoring.get_tool(key))
+            self.assertIs(sys.getprofile(), profile)
+
