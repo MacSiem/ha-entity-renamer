@@ -25,6 +25,12 @@ def _hash(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+def _metadata_equal(before, after):
+    """Fail closed on an in-window source or staged-file metadata change."""
+    return (stat.S_IMODE(before.st_mode) == stat.S_IMODE(after.st_mode)
+            and before.st_uid == after.st_uid and before.st_gid == after.st_gid)
+
+
 def _write_all(fd, data):
     remaining = memoryview(data)
     while remaining:
@@ -103,6 +109,7 @@ def apply_file_patch(config_root, patch, expected_snapshot, operation_id, guard=
         pinned = os.fstat(source_pin)
         before, info = reader.read(path)
         if ((info.st_dev, info.st_ino) != (pinned.st_dev, pinned.st_ino)
+                or not _metadata_equal(info, pinned)
                 or _hash(before) != patch.expected_sha256 or info.st_dev != expected_snapshot.device
                 or info.st_ino != expected_snapshot.inode):
             raise FileConflict('source_changed')
@@ -125,24 +132,40 @@ def apply_file_patch(config_root, patch, expected_snapshot, operation_id, guard=
         guard()
         temporary_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                      stat.S_IMODE(info.st_mode), dir_fd=parent)
-        os.fchmod(temporary_fd, stat.S_IMODE(info.st_mode))
         if (info.st_uid, info.st_gid) != (os.geteuid(), os.getegid()):
             os.fchown(temporary_fd, info.st_uid, info.st_gid)
+        os.fchmod(temporary_fd, stat.S_IMODE(info.st_mode))
         _write_all(temporary_fd, projected)
         new_info = os.fstat(temporary_fd)
         # Re-open through the held root: catch source or path replacement while
         # staging the backup/temp. Native editor locks must span this operation.
         current, current_info = reader.read(path)
-        if (current != before or (current_info.st_dev, current_info.st_ino) != (info.st_dev, info.st_ino)):
+        if (current != before or (current_info.st_dev, current_info.st_ino) != (info.st_dev, info.st_ino)
+                or not _metadata_equal(current_info, info)):
             raise FileConflict('source_changed_before_replace')
         staged = os.stat(temporary, dir_fd=parent, follow_symlinks=False)
         if (staged.st_dev, staged.st_ino) != (new_info.st_dev, new_info.st_ino):
             raise FileConflict('staged_identity_changed')
+        if not _metadata_equal(staged, new_info):
+            raise FileConflict('staged_metadata_changed')
         guard()
+        # guard() may block or yield while an external writer changes source
+        # or pending metadata. Repeat both checks after it returns, before
+        # replacement. These checks narrow a race; they are not OS-wide CAS.
+        late, late_info = reader.read(path)
+        if (late != before or (late_info.st_dev, late_info.st_ino) != (info.st_dev, info.st_ino)
+                or not _metadata_equal(late_info, info)):
+            raise FileConflict('source_changed_before_replace')
+        late_staged = os.stat(temporary, dir_fd=parent, follow_symlinks=False)
+        if (late_staged.st_dev, late_staged.st_ino) != (new_info.st_dev, new_info.st_ino):
+            raise FileConflict('staged_identity_changed')
+        if not _metadata_equal(late_staged, new_info):
+            raise FileConflict('staged_metadata_changed')
         os.replace(temporary, filename, src_dir_fd=parent, dst_dir_fd=parent)
         os.fsync(parent)
         after, after_info = reader.read(path)
-        if after != projected or (after_info.st_dev, after_info.st_ino) != (new_info.st_dev, new_info.st_ino):
+        if (after != projected or (after_info.st_dev, after_info.st_ino) != (new_info.st_dev, new_info.st_ino)
+                or not _metadata_equal(after_info, new_info)):
             raise FileConflict('file_write_unconfirmed')
         return {'path': path, 'sha256': _hash(after), 'backup': backup,
                 'device': after_info.st_dev, 'inode': after_info.st_ino}
