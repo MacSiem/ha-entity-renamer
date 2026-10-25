@@ -306,10 +306,17 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                 self.assertFalse(report['inactive_receipts_complete'])
             self.assertIs(helper.state, ConfigEntryState.NOT_LOADED if fault == 'receipt'
                           else ConfigEntryState.LOADED)
-            before_readonly = await observe()
+            # ACK loss poisons the old shared preparations. Reconciliation
+            # observes through the independently reopened read-only chain.
+            fresh_receipts = rr.native_registry_receipt_store(hass, fresh)
+            await fresh_receipts.initialize()
+            fresh_chain = rr.RegistryReceiptChain.reopen(fresh_receipts,
+                operation, plan, receipt, digests)
+            fresh_state = fresh_chain.reconstruct_inputs() if self.with_yaml else None
+            before_readonly = await observe(fresh_state)
             with self.assertRaisesRegex(lm.HelperLifecycleError, 'read_only'):
                 await recovered.quiesce()
-            self.assertEqual(await observe(), before_readonly)
+            self.assertEqual(await observe(fresh_state), before_readonly)
             return
         lifecycle = await lm.NativeHelperLifecycle.start(*lifecycle_args, **lifecycle_callbacks)
         if utility:
