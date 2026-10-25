@@ -149,8 +149,17 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         proposed_yaml = yaml_plan.plan_yaml(f.root, {old: new})
         self.assertTrue(proposed_yaml.ready, proposed_yaml.issues)
         self.assertEqual(len(proposed_yaml.patches), 1)
-        receipt = await fixtures.validation.async_validate_proposed(
-            hass, proposed_yaml, f.root.parent)
+        if self.with_yaml:
+            receipt, source_evidence = await fixtures.validation.async_validate_proposed_with_sources(
+                hass, proposed_yaml, f.root.parent)
+            source_binding = importlib.import_module(fixtures.PACKAGE + '.yaml_source_binding')
+            bound_sources = await source_binding.async_bind_original_runtime(
+                hass, receipt, source_evidence, guard=lambda: None)
+            self.assertTrue(bound_sources.verified, bound_sources.blockers)
+            self.assertFalse(bound_sources.migration_ready)
+        else:
+            receipt = await fixtures.validation.async_validate_proposed(
+                hass, proposed_yaml, f.root.parent)
         self.assertTrue(receipt.ready_for_apply)
         self.assertEqual(receipt.changed_domains, ('script',))
         self.assertTrue(all(before is not None and after is not None

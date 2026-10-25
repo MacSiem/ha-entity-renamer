@@ -11,7 +11,7 @@ class NativeYAMLSourceBindingTests(unittest.IsolatedAsyncioTestCase):
     _before_start = fixture.NativeHelperQuiescenceTests._before_start
     _flush_documents = fixture.NativeHelperQuiescenceTests._flush_documents
 
-    async def prepare(self, *, foreign_runtime=False, duplicate=False):
+    async def prepare(self, *, foreign_runtime=False, duplicate=False, registry_state=None):
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.setup import async_setup_component
         hass, root = self.f.hass, self.f.root
@@ -20,6 +20,14 @@ class NativeYAMLSourceBindingTests(unittest.IsolatedAsyncioTestCase):
         (root / 'scripts/one.yaml').write_text('source_probe:\n  sequence:\n    - variables:\n        sample: "{{ states(\'sensor.original\') }}"\n')
         if duplicate:
             (root / 'scripts/two.yaml').write_bytes((root / 'scripts/one.yaml').read_bytes())
+        if registry_state:
+            from homeassistant.helpers import entity_registry as er
+            entry = self.f.entity.async_get_or_create('script', 'script', 'source_probe')
+            if registry_state == 'renamed':
+                self.f.entity.async_update_entity(entry.entity_id,
+                    new_entity_id='script.user_renamed_source')
+            else:
+                self.f.entity.async_update_entity(entry.entity_id, disabled_by=er.RegistryEntryDisabler.USER)
         config = await async_hass_config_yaml(hass)
         if foreign_runtime:
             config['script']['source_probe']['sequence'] = [{'variables': {'sample': 'foreign'}}]
@@ -80,3 +88,45 @@ class NativeYAMLSourceBindingTests(unittest.IsolatedAsyncioTestCase):
             raise PermissionError('revoked')
         with self.assertRaises(PermissionError):
             await binding.async_bind_original_runtime(self.f.hass, receipt, evidence, guard=revoked)
+
+    async def test_user_renamed_registry_id_binds_original_source_key_and_uuid(self):
+        receipt, evidence = await self.prepare(registry_state='renamed')
+        binding = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_source_binding')
+        result = await binding.async_bind_original_runtime(self.f.hass, receipt, evidence,
+                                                          guard=lambda: None)
+        self.assertTrue(result.verified, result.blockers)
+        row, = result.rows
+        self.assertEqual((row.native_key, row.entity_id),
+                         ('source_probe', 'script.user_renamed_source'))
+        self.assertEqual(row.registry_id, self.f.entity.async_get(row.entity_id).id)
+
+    async def test_registry_disabled_definition_is_visible_and_remains_unverified(self):
+        receipt, evidence = await self.prepare(registry_state='disabled')
+        binding = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_source_binding')
+        result = await binding.async_bind_original_runtime(self.f.hass, receipt, evidence,
+                                                          guard=lambda: None)
+        self.assertFalse(result.verified)
+        self.assertIn('runtime_source_disabled_entry_unverified', result.blockers)
+        self.assertEqual([(row.native_key, row.disposition) for row in result.rows],
+                         [('source_probe', 'registry_disabled')])
+
+    async def test_edit_in_last_source_await_is_not_accepted_as_new_original(self):
+        from unittest.mock import patch
+        receipt, evidence = await self.prepare()
+        binding = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_source_binding')
+        validation = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_validation')
+        original = validation._settled_executor
+        calls = 0
+        path = self.f.root / 'scripts/one.yaml'
+        async def edit_before_final(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                path.write_text(path.read_text() + '# late foreign edit\n')
+            return await original(*args)
+        with patch.object(validation, '_settled_executor', edit_before_final):
+            result = await binding.async_bind_original_runtime(self.f.hass, receipt, evidence,
+                                                              guard=lambda: None)
+        self.assertFalse(result.verified)
+        self.assertTrue(result.blockers)
+        self.assertTrue(path.read_text().endswith('# late foreign edit\n'))
