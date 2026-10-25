@@ -145,7 +145,7 @@ def _activation(chain, lifecycle, entry_id, *, live):
         encoded = encode_runtime_baseline(values[0])
     # Rebind the immutable typed counter and original registry preparation.
     if lifecycle._bind_runtime_baselines(lifecycle.root['original'],
-            lifecycle.runtime_baselines()) != lifecycle.root.get('runtime_baselines'):
+            lifecycle.runtime_baselines()) != lifecycle.root.get('runtime_baselines', []):
         _fail('runtime_baseline_binding')
     return {'entry_id': entry_id, 'root': root_ref,
             'setup_intent': [key, row['digest']],

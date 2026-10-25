@@ -166,7 +166,9 @@ class NativeIntegrationContinuityTests(unittest.IsolatedAsyncioTestCase):
             actual_delta = restored._state - full_before
             left_time = anchor_before if trigger_before == 'TimeElapsed' else previous_report
             continuous_delta = Decimal((source_after.last_reported - left_time).total_seconds()) * 10
-            self.assertEqual(actual_delta, continuous_delta)
+            # Native Decimal addition rounds in its current context; subtraction
+            # of that accumulated value is not the exact inverse operation.
+            self.assertEqual(restored._state, full_before + continuous_delta)
             self.assertEqual(restored._last_valid_state, restored._state)
             self.assertEqual(Decimal(hass.states.get(restored.entity_id).state), restored._state)
             if not gap_report and trigger_before == 'TimeElapsed':
