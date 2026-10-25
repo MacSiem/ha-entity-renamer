@@ -1,4 +1,4 @@
-"""Private registry-only intent/receipt sidecar; no HA effects or YAML grants.
+"""Private registry/config-entry intent/receipt sidecar; no HA effects or YAML grants.
 
 Trusted callers supply durable PhaseContext, independently authenticated raw
 observations and the actual synchronous NativeRegistryMutation return. These
@@ -25,6 +25,12 @@ from .native_registry import NativeRegistryMutation, PreparedRegistryChange
 from .native_registry_transition import (
     NativeRegistryEffectAudit, prepared_registry_digest,
     validate_registry_transition, _loads, _json,
+)
+from .helper_native import NativeConfigMutation
+from .helper_transaction import PreparedHelper
+from .native_config_transition import (
+    NativeConfigEffectAudit, prepared_helper_digest, validate_config_transition,
+    _projection as _config_projection,
 )
 from .prepared import PreparedStore, canonical, decode_change
 from .transaction import PhaseContext, Plan
@@ -156,8 +162,8 @@ class RegistryReceiptChain:
 
 start() must run before any effect. prepared_digests is trusted backend metadata
 for the ORIGINAL immutable preparations, not a client-selected resolver. All
-steps must be plain registry steps. Helpers, listeners, YAML, config-entry and
-unknown predecessors are deliberately unsupported, with named gap refusals.
+steps must be plain registry or adapter-owned helpers steps. Listeners, YAML
+and unknown predecessors remain unsupported, with named gap refusals.
 """
 
     def __init__(self, store: RegistryReceiptStore, operation_id: str, plan: Plan,
@@ -171,7 +177,7 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
         for step in plan.steps:
             if step.caused_by:
                 _fail('gap_native_listeners')
-            if step.adapter != 'registry':
+            if step.adapter not in ('registry', 'helpers'):
                 _fail({'helper': 'gap_config_entry_mapping', 'yaml': 'gap_yaml_predecessor',
                        'dashboard': 'gap_nonnative_predecessor',
                        'energy': 'gap_nonnative_predecessor'}.get(step.adapter, 'gap_unknown_predecessor'))
@@ -181,21 +187,45 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
         self.version = receipt.version
         self.root_id = _event_id(['root', operation_id, plan.fingerprint])
         self.changes, bindings = [], []
+        self._helper_origins = {}  # Immutable target-row bytes, never current IO.
+        original_config = None
         if (type(prepared_digests) is not dict
                 or set(prepared_digests) != {s.prepared_ref for s in plan.steps}):
             _fail('preparation_binding_invalid')
         for step in plan.steps:
             digest = prepared_digests[step.prepared_ref]
-            change = decode_change(self.preparations.resolve(step.prepared_ref, digest))
-            if (type(change) is not PreparedRegistryChange
-                    or change.kind not in ('entity', 'device')
-                    or change.identity != step.identity
+            original_payload = self.preparations.resolve(step.prepared_ref, digest)
+            if step.adapter == 'helpers' and _digest(original_payload) != digest:
+                _fail('preparation_binding_invalid')
+            change = decode_change(original_payload)
+            expected_type = PreparedHelper if step.adapter == 'helpers' else PreparedRegistryChange
+            if type(change) is not expected_type:
+                _fail('preparation_mismatch')
+            if (change.identity != step.identity
                     or change.before_revision != step.before_revision
                     or change.after_revision != step.after_revision):
                 _fail('preparation_mismatch')
+            if step.adapter == 'registry':
+                if type(change) is not PreparedRegistryChange or change.kind not in ('entity', 'device'):
+                    _fail('preparation_mismatch')
+                binding = {'ref': step.prepared_ref, 'digest': digest,
+                           'registry_digest': prepared_registry_digest(change)}
+            else:
+                if type(change) is not PreparedHelper:
+                    _fail('preparation_mismatch')
+                entry_id = change.before['identity']['entry_id']
+                if original_config is None:
+                    original_config = _loads(next(item.raw for item in self.baseline.files
+                        if item.key == 'core.config_entries'))
+                rows, index = self._row(original_config, 'config', entry_id)
+                if _json(_config_projection(rows[index])) != _json(change.before):
+                    _fail('preparation_source_mismatch')
+                self._helper_origins[len(self.changes)] = _json(rows[index])
+                binding = {'ref': step.prepared_ref, 'digest': digest,
+                           'helper_digest': prepared_helper_digest(change),
+                           'entry_id': entry_id, 'baseline_row_digest': _sha(_json(rows[index]))}
             self.changes.append(change)
-            bindings.append({'ref': step.prepared_ref, 'digest': digest,
-                             'registry_digest': prepared_registry_digest(change)})
+            bindings.append(binding)
         self.root = {'kind': 'registry_chain', 'schema': 1,
                      'operation_id': operation_id, 'fingerprint': plan.fingerprint,
                      'native_inputs': list(plan.native_inputs), 'bindings': bindings}
@@ -232,12 +262,39 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
         context.require_effect(context.step, direction)
         if context.record.status != ('applying' if direction == 'forward' else 'rolling_back'):
             _fail('phase_status_mismatch')
-        return {'index': context.index, 'key': context.step.key,
-                'identity': context.step.identity, 'prepared_ref': context.step.prepared_ref,
-                'prepared_digest': self.root['bindings'][context.index]['digest'],
-                'registry_digest': self.root['bindings'][context.index]['registry_digest'],
-                'direction': direction, 'phases': list(context.record.phases),
-                'status': context.record.status}
+        binding = self.root['bindings'][context.index]
+        result = {'index': context.index, 'key': context.step.key,
+                  'identity': context.step.identity, 'prepared_ref': context.step.prepared_ref,
+                  'prepared_digest': binding['digest'],
+                  'direction': direction, 'phases': list(context.record.phases),
+                  'status': context.record.status}
+        name = 'helper_digest' if context.step.adapter == 'helpers' else 'registry_digest'
+        result[name] = binding[name]
+        return result
+
+    def _original_change(self, index):
+        """Re-resolve immutable original; never validate mutable cached helpers."""
+        if self.plan.steps[index].adapter != 'helpers':
+            return self.changes[index]
+        binding = self.root['bindings'][index]
+        payload = self.preparations.resolve(binding['ref'], binding['digest'])
+        if _digest(payload) != binding['digest']:
+            _fail('preparation_binding_invalid')
+        change = decode_change(payload)
+        step = self.plan.steps[index]
+        if (type(change) is not PreparedHelper
+                or prepared_helper_digest(change) != binding['helper_digest']
+                or change.before['identity']['entry_id'] != binding['entry_id']
+                or (change.identity, change.before_revision, change.after_revision)
+                   != (step.identity, step.before_revision, step.after_revision)):
+            _fail('preparation_mismatch')
+        # Revalidate the original target, not every multi-MiB baseline document
+        # once per helper per source check. No source is derived from current.
+        origin = self._helper_origins[index]
+        if (_sha(origin) != binding['baseline_row_digest']
+                or _json(_config_projection(_loads(origin))) != _json(change.before)):
+            _fail('preparation_source_mismatch')
+        return change
 
     def _slot(self, kind, index, direction):
         return _event_id([self.root_id, kind, index, direction])
@@ -253,9 +310,10 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
 
     @staticmethod
     def _row(document, kind, identity):
-        plural = 'entities' if kind == 'entity' else 'devices'
+        plural = {'entity': 'entities', 'device': 'devices', 'config': 'entries'}[kind]
+        identity_key = 'entry_id' if kind == 'config' else 'id'
         rows = document['data'][plural]
-        indices = [i for i, row in enumerate(rows) if row.get('id') == identity]
+        indices = [i for i, row in enumerate(rows) if row.get(identity_key) == identity]
         if len(indices) != 1:
             _fail('identity_mismatch')
         return rows, indices[0]
@@ -267,6 +325,8 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
 
     def _advance(self, states, payload, change):
         """Replay an already accepted immutable delta, never a fresh image."""
+        if type(change) is PreparedHelper:
+            return self._advance_config(states, payload, change)
         key = 'core.' + change.kind + '_registry'
         result = deepcopy(states)
         rows, index = self._row(result[key]['document'], change.kind, change.identity)
@@ -324,6 +384,47 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
             _fail('reconstruction_mismatch')
         return result
 
+    def _advance_config(self, states, payload, change):
+        """Replay exact accepted full target rows; retain entries list order."""
+        key = 'core.config_entries'
+        entry_id = change.before['identity']['entry_id']
+        result = deepcopy(states)
+        rows, index = self._row(result[key]['document'], 'config', entry_id)
+        if (type(payload['source_index']) is not int or payload['source_index'] != index
+                or type(payload['result_index']) is not int or payload['result_index'] != index):
+            _fail('native_order_mismatch')
+        mutation = NativeConfigMutation(**payload['mutation'])
+        audit = NativeConfigEffectAudit(**payload['audit'])
+        rows[index] = _loads(mutation.after_json.encode())
+        direction = 'forward' if payload['binding']['direction'] == 'forward' else 'reverse'
+        if (audit.source_sha256 != states[key]['sha256']
+                or audit.result_sha256 != payload['result'][key]['sha256']):
+            _fail('audit_binding_mismatch')
+        source_raw, result_raw = _json(states[key]['document']), _json(result[key]['document'])
+        content_audit = NativeConfigEffectAudit(audit.entry_id, audit.direction,
+            _sha(source_raw), _sha(result_raw), audit.prepared_sha256,
+            audit.modified_at_before, audit.modified_at_after)
+        validate_config_transition(source_raw, result_raw, change, version=self.version,
+            direction=direction, native_effect_audit=content_audit, native_mutation=mutation)
+        observed = payload['result']
+        for item_key in KEYS:
+            identity = observed[item_key]['identity']
+            if (type(identity) is not list or len(identity) != 3
+                    or any(type(value) is not int or value < 0 for value in identity)
+                    or identity[1] == 0 or not stat.S_ISREG(identity[2])
+                    or identity[0] != states[item_key]['identity'][0]
+                    or identity[2] != states[item_key]['identity'][2]
+                    or type(observed[item_key]['sha256']) is not str
+                    or not re.fullmatch(r'[0-9a-f]{64}', observed[item_key]['sha256'])):
+                _fail('file_identity_invalid')
+            if item_key != key and observed[item_key] != self._summary(states)[item_key]:
+                _fail('foreign_native_delta')
+            result[item_key]['sha256'] = observed[item_key]['sha256']
+            result[item_key]['identity'] = identity
+        if self._summary(result) != observed:
+            _fail('reconstruction_mismatch')
+        return result
+
     def _cache_key(self):
         self.store._ready()
         return tuple((key, row['digest']) for key, row in self.store.rows.items())
@@ -335,6 +436,10 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
     def _reconstruct(self):
         if self.store.read(self.root_id) != {'digest': self.root_digest, 'payload': self.root}:
             _fail('root_binding_mismatch')
+        # Even a cached reconstruction must resolve the ORIGINAL preparations.
+        for index, step in enumerate(self.plan.steps):
+            if step.adapter == 'helpers':
+                self._original_change(index)
         token = self._cache_key()
         if self._cache is not None and self._cache[0] == token:
             return self._cache[1]
@@ -383,7 +488,7 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
                     or receipt.get('sequence') != sequence
                     or receipt.get('source_chain') != head):
                 _fail('receipt_binding_mismatch')
-            states = self._advance(states, receipt, self.changes[index])
+            states = self._advance(states, receipt, self._original_change(index))
             completed[index] = direction
             events.remove((rkey, rrow))
             head, sequence = rrow['digest'], sequence + 1
@@ -530,8 +635,8 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
     async def complete(self, intent: RegistryIntent, context: PhaseContext,
                        before: tuple[RegistryRawObservation, ...],
                        after: tuple[RegistryRawObservation, ...], *,
-                       mutation: NativeRegistryMutation,
-                       audit: NativeRegistryEffectAudit) -> tuple[str, str]:
+                       mutation: NativeRegistryMutation | NativeConfigMutation,
+                       audit: NativeRegistryEffectAudit | NativeConfigEffectAudit) -> tuple[str, str]:
         """Persist receipt only from actual call rows + full independent reads.
 
         No effect is performed here. Caller performs fresh auth/lock checks after
@@ -547,9 +652,15 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
                 or row['payload']['binding'] != binding):
             _fail('intent_binding_mismatch')
         self._observe(before, states)
-        change = self.changes[context.index]
-        key = 'core.' + change.kind + '_registry'
-        if (type(mutation) is not NativeRegistryMutation
+        change = self._original_change(context.index)
+        config = type(change) is PreparedHelper
+        kind = 'config' if config else change.kind
+        identity = change.before['identity']['entry_id'] if config else change.identity
+        key = 'core.config_entries' if config else 'core.' + change.kind + '_registry'
+        if config:
+            if type(mutation) is not NativeConfigMutation or type(audit) is not NativeConfigEffectAudit:
+                _fail('mutation_invalid')
+        elif (type(mutation) is not NativeRegistryMutation
                 or (mutation.kind, mutation.identity) != (change.kind, change.identity)
                 or type(audit) is not NativeRegistryEffectAudit):
             _fail('mutation_invalid')
@@ -570,19 +681,23 @@ unknown predecessors are deliberately unsupported, with named gap refusals.
         source = next(obs.raw for obs in before if obs.key == key)
         result = next(obs.raw for obs in after if obs.key == key)
         direction = 'forward' if binding['direction'] == 'forward' else 'reverse'
-        validate_registry_transition(source, result, change, version=self.version,
-                                     direction=direction, native_effect_audit=audit)
+        if config:
+            validate_config_transition(source, result, change, version=self.version,
+                direction=direction, native_effect_audit=audit, native_mutation=mutation)
+        else:
+            validate_registry_transition(source, result, change, version=self.version,
+                                         direction=direction, native_effect_audit=audit)
         for document, stamp in ((states[key]['document'], mutation.before_json),
                                 (result_states[key]['document'], mutation.after_json)):
-            rows, index = self._row(document, change.kind, change.identity)
+            rows, index = self._row(document, kind, identity)
             if _json(rows[index]) != _json(_loads(stamp.encode())):
                 _fail('mutation_observation_mismatch')
         payload = {'kind': 'registry_receipt', 'chain': self.root_id,
                    'binding': binding, 'source_chain': head, 'sequence': sequence,
                    'intent': list(intent.reference), 'mutation': asdict(mutation),
                    'audit': asdict(audit), 'result': self._summary(result_states)}
-        payload['source_index'] = self._row(states[key]['document'], change.kind, change.identity)[1]
-        payload['result_index'] = self._row(result_states[key]['document'], change.kind, change.identity)[1]
+        payload['source_index'] = self._row(states[key]['document'], kind, identity)[1]
+        payload['result_index'] = self._row(result_states[key]['document'], kind, identity)[1]
         if self._summary(self._advance(states, payload, change)) != self._summary(result_states):
             _fail('reconstruction_mismatch')
         ref = await self.store.create(self._slot('receipt', context.index,
