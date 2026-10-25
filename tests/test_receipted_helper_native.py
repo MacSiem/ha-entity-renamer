@@ -4,7 +4,6 @@ Current Core only: installed helper runtime observers/persistence intentionally
 refuse older layouts. No running QA API/config, endpoint or readiness claim.
 Lifecycle uses separate real private Stores in both forward and reverse cycles.
 """
-from dataclasses import replace
 from datetime import timedelta
 import importlib
 import json
@@ -69,18 +68,23 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
         proof = (m['helper_observers'].RegistryMappingProof(old, new, source_uuid),)
         loaded_observer = await m['helper_observers'].NativeHelperObservers.capture(
             hass, (original_snapshot,), proof)
-        # Same scope as the native checker: configuration and its three native
-        # inputs. Recorder DB/WAL are output, never source authorization inputs.
-        receipt = fixtures.receipt_for(f.root, f.version)
-        names = {'configuration.yaml', '.storage'}
-        receipt = replace(receipt,
-            source_files=tuple(row for row in receipt.source_files
-                if row[0] == 'configuration.yaml' or row[0] in
-                    {'.storage/' + key for key in fixtures.KEYS}),
-            source_directories=tuple((relative,
-                tuple(row for row in entries if relative != '.' or row[0] in names),
-                tuple(sorted(names)) if relative == '.' else selected)
-                for relative, entries, selected in receipt.source_directories))
+        # Produce the ORIGINAL receipt with the real isolated native checker.
+        # The inner migration below covers registry/helpers only; YAML remains
+        # unchanged and its independently projected proposal stays pinned.
+        (f.root / 'configuration.yaml').write_text('script:\n  receipt_probe:\n'
+            '    sequence:\n      - variables:\n'
+            '          sample: "{{ states(\'' + old + '\') }}"\n')
+        yaml_plan = importlib.import_module(fixtures.PACKAGE + '.yaml_plan')
+        proposed_yaml = yaml_plan.plan_yaml(f.root, {old: new})
+        self.assertTrue(proposed_yaml.ready, proposed_yaml.issues)
+        self.assertEqual(len(proposed_yaml.patches), 1)
+        receipt = await fixtures.validation.async_validate_proposed(
+            hass, proposed_yaml, f.root.parent)
+        self.assertTrue(receipt.ready_for_apply)
+        self.assertEqual(receipt.changed_domains, ('script',))
+        self.assertTrue(all(before is not None and after is not None
+                            for _, before, after in receipt.runtime_expected))
+        self.assertFalse(any('fixture.db' in row[0] for row in receipt.source_files))
         original = await fixtures.baseline.async_capture_native_input_baseline(
             hass, receipt, guard=lambda: None)
         preparations = prep.native_prepared_store(hass)
