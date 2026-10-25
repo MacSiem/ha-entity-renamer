@@ -246,16 +246,21 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                 return actual_need(value, reason)
             m['native_integration_source_clock']._need = diagnostic_need
             self.addCleanup(setattr, m['native_integration_source_clock'], '_need', actual_need)
-            if 'helpers' in adapters:
-                actual_apply = adapters['helpers'].apply
-                async def diagnostic_helper_apply(*args, **kwargs):
-                    try:
-                        return await actual_apply(*args, **kwargs)
-                    except BaseException:
-                        import traceback
-                        traceback.print_exc()
-                        raise
-                adapters['helpers'].apply = diagnostic_helper_apply
+            for adapter in adapters.values():
+                for action in ('apply', 'rollback'):
+                    actual = getattr(adapter, action, None)
+                    if actual is None:
+                        continue
+                    def traced(method):
+                        async def run(*args, **kwargs):
+                            try:
+                                return await method(*args, **kwargs)
+                            except BaseException:
+                                import traceback
+                                traceback.print_exc()
+                                raise
+                        return run
+                    setattr(adapter, action, traced(actual))
             for reverse in (False,True):
                 if reverse:
                     await self.wait_tick()
