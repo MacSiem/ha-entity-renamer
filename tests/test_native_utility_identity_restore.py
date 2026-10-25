@@ -40,7 +40,7 @@ class NativeUtilityIdentityRestoreTests(unittest.IsolatedAsyncioTestCase):
         restored = self.current()
         self.assertEqual(self.f.entity.async_get(target).id, uuid)
         self.assertIsNot(restored, self.entity)
-        self.assertEqual(restored.native_value, Decimal('0'))
+        self.assertIsNone(restored.native_value)
         self.assertNotEqual(restored.extra_restore_state_data.as_dict(), original)
 
     async def test_live_rename_keeps_counter_but_reverse_uses_stale_target_cache(self):
