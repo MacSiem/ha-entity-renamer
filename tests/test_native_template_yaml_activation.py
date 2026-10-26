@@ -193,31 +193,58 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(await observer.position_at_inputs(change, chain.reconstruct_inputs()),
                       tx.Position.BEFORE)
         if fault == 'cancel_reload':
-            native = importlib.import_module('homeassistant.components.template')
+            discovery = importlib.import_module('homeassistant.helpers.discovery')
+            native_code = discovery.async_load_platform.__code__
             monitor = sys.monitoring
             key = next((key for key in range(6) if monitor.get_tool(key) is None), None)
             self.assertIsNotNone(key)
-            captured = {'tasks': (), 'locks_held': False}
+            captured = {'tasks': (), 'locks_held': False, 'native_starts': 0,
+                        'native_pending': False, 'cancel_requested': False}
             running = None
-            def native_returned(code, offset, result):
+            def native_started(code, offset):
                 frame = sys._getframe(1)
-                if (captured['tasks'] or running is None
-                        or frame.f_locals.get('hass') is not hass):
-                    return
-                actual_tasks = self.module('native_template_yaml')._pending_template_tasks(hass)
-                if actual_tasks:
+                try:
+                    if (frame.f_code is not native_code
+                            or frame.f_locals.get('hass') is not hass
+                            or frame.f_locals.get('platform') != 'template'):
+                        return
+                    captured['native_starts'] += 1
+                    if captured['tasks'] or running is None:
+                        return
+                    # Eager discovery can finish before _process_config returns
+                    # and before HA registers it in _tasks. Observe its actual
+                    # currently executing Task, without delaying native work.
+                    task = asyncio.current_task()
+                    captured['native_pending'] = (
+                        task is not None and task is not running
+                        and task.get_loop() is hass.loop and not task.done()
+                        and getattr(task.get_coro(), 'cr_code', None) is native_code)
+                    if not captured['native_pending']:
+                        return
+                    actual_tasks = self.module('native_template_yaml')._pending_template_tasks(hass)
+                    actual_tasks.add(task)  # sampler deliberately excludes current_task
                     captured['tasks'] = tuple(actual_tasks)
                     captured['locks_held'] = all(row[3].locked() for row in locks.enumerate())
-                    running.cancel()
+                    captured['cancel_requested'] = running.cancel()
+                finally:
+                    del frame
             monitor.use_tool_id(key, 'renamer_template_cancel_regression')
-            monitor.register_callback(key, monitor.events.PY_RETURN, native_returned)
-            monitor.set_local_events(key, native._process_config.__code__, monitor.events.PY_RETURN)
+            monitor.register_callback(key, monitor.events.PY_START, native_started)
+            monitor.set_local_events(key, native_code, monitor.events.PY_START)
             try:
                 running = asyncio.create_task(coordinator.apply(plan, plan.fingerprint, operation))
-                with self.assertRaises(asyncio.CancelledError):
+                cancelled = False
+                try:
                     await running
-                self.assertTrue(captured['tasks'], 'must observe REAL native reload descendants')
-                self.assertTrue(captured['locks_held'])
+                except asyncio.CancelledError:
+                    cancelled = True
+                diagnostics = {name: value for name, value in captured.items() if name != 'tasks'}
+                self.assertTrue(captured['tasks'],
+                                f'must observe REAL native reload descendants: {diagnostics}')
+                self.assertTrue(captured['native_pending'], diagnostics)
+                self.assertTrue(captured['cancel_requested'], diagnostics)
+                self.assertTrue(cancelled, diagnostics)
+                self.assertTrue(captured['locks_held'], diagnostics)
                 # Assert BEFORE emergency cleanup: no orphaned own descendant
                 # can outlive lock release/cancellation propagation.
                 self.assertTrue(all(task.done() for task in captured['tasks']))
@@ -227,8 +254,8 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ValueError):
                     chain.reconstruct_inputs()  # actual pending effect is UNKNOWN
             finally:
-                monitor.set_local_events(key, native._process_config.__code__, 0)
-                monitor.register_callback(key, monitor.events.PY_RETURN, None)
+                monitor.set_local_events(key, native_code, 0)
+                monitor.register_callback(key, monitor.events.PY_START, None)
                 monitor.free_tool_id(key)
                 if running is not None and not running.done():
                     await asyncio.gather(running, return_exceptions=True)
