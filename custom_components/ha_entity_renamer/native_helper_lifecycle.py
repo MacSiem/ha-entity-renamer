@@ -293,7 +293,9 @@ class NativeHelperLifecycle:
         for key,scope in self._integration_clocks.items():
             from .native_integration_clock_lifecycle import describe
             describe(scope)
-            if (key not in self.ids or key in self.own_registry_changes
+            from .native_integration_own_clock import IntegrationOwnClockBinding
+            own_clock = type(scope.source_binding) is IntegrationOwnClockBinding
+            if (key not in self.ids or (key in self.own_registry_changes) != own_clock
                     or self.helper_snapshots[key][0]['domain'] != 'integration'
                     or scope.entry.entry_id != key or scope.lease is not activation_lease):
                 _fail('integration_clock_scope_binding')
@@ -807,8 +809,24 @@ class NativeHelperLifecycle:
             elif stage == 'unload' and key in self.root.get('integration_clocks', {}):
                 from .native_integration_clock_lifecycle import live
                 scope = live(self,key)
-                clock_unload = {'intent':list(scope.intent),
-                                'actual':asdict(await scope.unload())}
+                if key in self.own_registry_changes:
+                    from .native_integration_unload_audit import NativeIntegrationUnloadAudit
+                    from .native_utility_unload_audit import _row
+                    change = self.own_registry_changes[key]
+                    expected = change.after if self.source_authorization is not None else change.before
+                    actual = _row(scope.row)
+                    ignored = {'modified_at'} if self.source_authorization is not None else set()
+                    if ({k:v for k,v in actual.items() if k not in ignored}
+                            != {k:v for k,v in expected.items() if k not in ignored}):
+                        _fail('native_unload_original_row')
+                    audit = NativeIntegrationUnloadAudit(self.manager.hass, scope.entry,
+                                                        actual, clock=scope)
+                    actual_clock = await scope.unload(own_audit=audit)
+                    unload_witness = scope._own_unload_witness
+                    self._unload_witnesses[key] = (intent_reference, unload_witness)
+                else:
+                    actual_clock = await scope.unload()
+                clock_unload = {'intent':list(scope.intent), 'actual':asdict(actual_clock)}
             elif audited_unload:
                 from .native_utility_unload_audit import NativeUtilityUnloadAudit, _row
                 from homeassistant.helpers import entity_registry as er

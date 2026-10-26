@@ -1,10 +1,10 @@
-"""Bounded same-ID Integration timer continuation prerequisite.
+"""Bounded native Integration timer continuation.
 
 Actual native objects remain the only arithmetic writers. This product adapter
 migrates their actual fields and timer ownership at a pinned synchronous setup
-seam. Optional source-ID policy binds the existing ORIGINAL/accepted chain.
+seam. Typed source-ID/own-ID policies bind the existing ORIGINAL/accepted chain.
 An owner must supply the existing full-source guard, lease and immutable store.
-Restart recovery and own-ID composition are separate capabilities.
+Restart recovery remains a separate capability.
 """
 from __future__ import annotations
 
@@ -114,7 +114,9 @@ class NativeIntegrationContinuity:
         self._pending_move = None
         if source_binding is not None:
             from .native_integration_source_clock import IntegrationSourceClockBinding
-            _need(type(source_binding) is IntegrationSourceClockBinding, 'typed_source_binding')
+            from .native_integration_own_clock import IntegrationOwnClockBinding
+            _need(type(source_binding) in (IntegrationSourceClockBinding, IntegrationOwnClockBinding),
+                  'typed_source_binding')
             source_binding.bind(self)
         self.root = Path(import_module('homeassistant').__file__).resolve().parent
         self.pins = dict(_SOURCES[version])
@@ -227,7 +229,9 @@ class NativeIntegrationContinuity:
         _need(self.guard() is True and self.lease.owns_entry(self.entry)
               and self.hass.config_entries.async_get_entry(self.entry.entry_id) is self.entry,
               'guard_or_lease')
-        _need(self.registry.async_get(self.row.entity_id) is self.row, 'same_helper_id_changed')
+        from .native_integration_own_clock import IntegrationOwnClockBinding
+        if type(self.source_binding) is not IntegrationOwnClockBinding:
+            _need(self.registry.async_get(self.row.entity_id) is self.row, 'same_helper_id_changed')
         if self.source_binding is None:
             _need(self.registry.async_get(self.source) is self.source_row
                   and canonical(read_entry(self.hass, self.entry.entry_id))[0] == self._config,
@@ -499,10 +503,13 @@ class NativeIntegrationContinuity:
         self._check()
         if self.source_binding is not None:
             self.source_binding.require_accepted(self, seam=True)
+        from .native_integration_own_clock import IntegrationOwnClockBinding
+        target_row = (self.source_binding.transfer_row(self)
+                      if type(self.source_binding) is IntegrationOwnClockBinding else self.row)
         _need(self._new is None and self._retained and not self._bridge_depth
               and not self._emitted and not self._consumed and self._pending_move is None
               and self.old._platform_state is EntityPlatformState.REMOVED
-              and entity.entity_id == self.row.entity_id and entity.registry_entry is self.row
+              and entity.entity_id == target_row.entity_id and entity.registry_entry is target_row
               and entity.platform.config_entry is self.entry and entity.hass is self.hass
               and entity._sensor_source_id == self.source and entity._source_entity == self.source
               and entity._max_sub_interval == self.old._max_sub_interval, 'atomic_setup_seam')
@@ -544,13 +551,23 @@ class NativeIntegrationContinuity:
         _need(self.store.read(key) == {'digest': digest, 'payload': payload}, 'receipt_readback')
         return reference
 
-    async def unload(self):
+    async def unload(self, *, own_audit=None):
         self._check(owner=True)
         _need(self._phase == 'capture', 'one_unload')
         self._phase = 'unloading'
-        result = await self.lease.async_unload(self.entry.entry_id)
+        if own_audit is None:
+            result = await self.lease.async_unload(self.entry.entry_id)
+        else:
+            from .native_integration_unload_audit import NativeIntegrationUnloadAudit
+            from .native_integration_own_clock import IntegrationOwnClockBinding
+            _need(type(own_audit) is NativeIntegrationUnloadAudit
+                  and own_audit.clock is self
+                  and type(self.source_binding) is IntegrationOwnClockBinding, 'own_unload_audit')
+            result = await own_audit.async_unload(self.lease)
+            self._own_unload_witness = result
         self._check(owner=True)
-        _need(result is True and self._retained and not self.old._on_remove
+        _need((result is True if own_audit is None else result is own_audit._witness)
+              and self._retained and not self.old._on_remove
               and self.entry.state.value == 'not_loaded', 'actual_unload')
         self._phase = 'retained'
         return self._snapshot(self.old)

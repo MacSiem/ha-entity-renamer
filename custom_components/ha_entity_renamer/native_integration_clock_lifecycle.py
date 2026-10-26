@@ -1,8 +1,8 @@
-"""Source-clock composition in the existing helper lifecycle and setup ledger.
+"""Typed clock composition in the existing helper lifecycle and setup ledger.
 
 The already live clock scope is an owned retained engine, never an inactive
 engine. Historical descriptions do not create a live clock or authorize replay.
-Own-ID escrow remains a separate no-timer contract.
+Own-ID keeps its immutable escrow/parser proof alongside current clock transfer.
 """
 from __future__ import annotations
 
@@ -35,10 +35,14 @@ def snapshot(value):
 def describe(scope):
     from .native_integration_continuity import NativeIntegrationContinuity
     from .native_integration_source_clock import IntegrationSourceClockBinding
+    from .native_integration_own_clock import IntegrationOwnClockBinding
     _need(type(scope) is NativeIntegrationContinuity
-          and type(scope.source_binding) is IntegrationSourceClockBinding, 'live_scope_required')
+          and type(scope.source_binding) in (IntegrationSourceClockBinding, IntegrationOwnClockBinding),
+          'live_scope_required')
     scope._check()
-    return {'kind':'integration_source_clock_lifecycle_v1',
+    return {'kind':('integration_own_clock_lifecycle_v1'
+                    if type(scope.source_binding) is IntegrationOwnClockBinding
+                    else 'integration_source_clock_lifecycle_v1'),
             'intent':list(scope.intent), 'binding':scope.source_binding.description()}
 
 
@@ -46,12 +50,14 @@ def validate_roots(life):
     values = life.root.get('integration_clocks', {})
     _need(type(values) is dict, 'root_layout')
     for key,value in values.items():
-        _need(key in life.ids and key not in life.own_registry_changes
+        own = value.get('kind') == 'integration_own_clock_lifecycle_v1' if type(value) is dict else False
+        _need(key in life.ids and (key in life.own_registry_changes) == own
               and life.helper_snapshots[key][0]['domain'] == 'integration'
               and any(row['entry_id'] == key and row['state'] == 'loaded'
                       for row in life.root['original'])
               and type(value) is dict and set(value) == {'kind','intent','binding'}
-              and value['kind'] == 'integration_source_clock_lifecycle_v1'
+              and value['kind'] in ('integration_source_clock_lifecycle_v1',
+                                    'integration_own_clock_lifecycle_v1')
               and type(value['intent']) is list and len(value['intent']) == 2
               and type(value['binding']) is dict
               and value['binding'].get('entry_id') == key, 'root_binding')
@@ -99,6 +105,9 @@ def retained(life, key):
 def baseline(chain,life,key):
     """Pure binding of the existing clock intent to ORIGINAL preparations."""
     descriptor = validate_roots(life)[key]
+    if descriptor['kind'] == 'integration_own_clock_lifecycle_v1':
+        from .native_integration_own_clock import own_baseline
+        return own_baseline(chain,life,key,descriptor)
     ref = descriptor['intent']
     row = chain.store.read(ref[0])
     _need(row is not None and row['digest'] == ref[1]
@@ -157,9 +166,11 @@ def validate_unload(life,key,data):
 
 
 def validate_audit(baseline_value,source_rows,doc,*,chain,core,entry_id):
+    own = baseline_value.get('kind') == 'integration_own_clock_restore_v1'
     _need(chain is not None and set(doc) == {'kind','schema','core','entry_id',
         'baseline','source_rows','result_rows','clock_receipt','source_pins'}
-        and doc['kind'] == 'integration_source_clock_setup' and doc['schema'] == 1
+        and doc['kind'] == ('integration_own_clock_transfer' if own
+                            else 'integration_source_clock_setup') and doc['schema'] == 1
         and doc['core'] == core and doc['entry_id'] == entry_id
         and doc['baseline'] == baseline_value and doc['source_rows'] == source_rows
         and doc['result_rows'] == source_rows and len(source_rows) == 1
@@ -192,7 +203,7 @@ def validate_audit(baseline_value,source_rows,doc,*,chain,core,entry_id):
     binding = dict(receipt['source_binding'])
     auth = binding.pop('authorization',None)
     transport = binding.pop('transport_calls',None)
-    _need(type(transport) is int and transport == 1, 'one_source_transport')
+    _need(type(transport) is int and transport == (0 if own else 1), 'source_transport_count')
     frozen = binding.pop('frozen_calls',None)
     _need(type(frozen) is int and frozen >= 0, 'frozen_call_shape')
     _need(all(type(receipt[k]) is int and receipt[k] >= 0
@@ -225,7 +236,9 @@ class NativeIntegrationClockSetupAudit:
               and self.scope._new_timer_bound and self.scope._old_cancelled.cancelled(),
               'one_native_transfer')
         self.scope._timer(self.scope._new)
-        doc = {'kind':'integration_source_clock_setup','schema':1,
+        own = self.baseline.get('kind') == 'integration_own_clock_restore_v1'
+        doc = {'kind':('integration_own_clock_transfer' if own else 'integration_source_clock_setup'),
+            'schema':1,
             'core':self.scope.version,'entry_id':self.key,'baseline':self.baseline,
             'source_rows':self.rows,'result_rows':self.rows,
             'clock_receipt':list(self.scope.receipt),'source_pins':self.scope.pins}

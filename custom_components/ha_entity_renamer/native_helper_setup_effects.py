@@ -109,8 +109,13 @@ class NativeHelperSetupEffects:
         gap = lifecycle._source_gaps.get(entry_id)
         if clock is not None:
             from .native_integration_clock_lifecycle import NativeIntegrationClockSetupAudit
-            collector = NativeIntegrationClockSetupAudit(self.hass,lifecycle,self.chain,
-                entry_id,source_rows,guard=lambda:self._scope(lifecycle),setup_intent=intent)
+            if own_change is not None:
+                from .native_integration_own_clock import NativeIntegrationOwnClockSetupAudit
+                collector_type = NativeIntegrationOwnClockSetupAudit
+            else:
+                collector_type = NativeIntegrationClockSetupAudit
+            collector = collector_type(self.hass,lifecycle,self.chain,entry_id,source_rows,
+                guard=lambda:self._scope(lifecycle),setup_intent=intent)
         elif integration:
             from .native_integration_setup_audit import NativeIntegrationSetupAudit
             collector = NativeIntegrationSetupAudit(self.hass, lifecycle, self.chain, entry_id,

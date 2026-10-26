@@ -31,6 +31,10 @@ def activation_baseline(chain, lifecycle, entry_id):
     if entry_id in lifecycle.root.get('integration_clocks', {}):
         from .native_integration_clock_lifecycle import baseline
         return baseline(chain,lifecycle,entry_id)
+    return exact_restore_baseline(chain, lifecycle, entry_id)
+
+
+def exact_restore_baseline(chain, lifecycle, entry_id):
     from .native_restore_state_escrow_receipts import _parse_root, inspect_escrow
     change = lifecycle.own_registry_changes.get(entry_id)
     _need(change is not None and change.before['platform'] == 'integration', 'own_id_required')
@@ -78,7 +82,7 @@ def encode_setup_audit(data):
 
 
 def decode_setup_audit(raw):
-    _need(type(raw) is dict and raw.get('kind') in ('integration_own_setup','integration_source_clock_setup'), 'audit_kind')
+    _need(type(raw) is dict and raw.get('kind') in ('integration_own_setup','integration_source_clock_setup','integration_own_clock_setup'), 'audit_kind')
     return IntegrationSetupAuditData(codec._canonical(raw))
 
 
@@ -87,10 +91,18 @@ def validate_setup_audit(baseline, source_rows, data, *, core, entry_id, chain=N
     if baseline.get('kind') == 'integration_source_clock_restore_v1':
         from .native_integration_clock_lifecycle import validate_audit
         return validate_audit(baseline,source_rows,doc,chain=chain,core=core,entry_id=entry_id)
+    if baseline.get('kind') == 'integration_own_clock_restore_v1':
+        from .native_integration_own_clock import validate_composite
+        return validate_composite(baseline,source_rows,doc,chain=chain,core=core,entry_id=entry_id)
+    return validate_exact_audit(baseline,source_rows,doc,core=core,entry_id=entry_id)
+
+
+def validate_exact_audit(baseline, source_rows, doc, *, core, entry_id, clock_parser=False):
     keys = {'kind', 'schema', 'core', 'entry_id', 'baseline', 'source_rows', 'result_rows',
             'parser_input', 'full_state_text', 'last_valid_state_text', 'source_pins', 'call'}
     _need(set(doc) == keys and type(doc['schema']) is int and doc['schema'] == 1
-          and doc['kind'] == 'integration_own_setup' and doc['core'] == core
+          and doc['kind'] == ('integration_own_clock_parser' if clock_parser
+                              else 'integration_own_setup') and doc['core'] == core
           and doc['entry_id'] == entry_id and doc['baseline'] == baseline
           and doc['source_rows'] == source_rows and doc['result_rows'] == source_rows,
           'audit_binding_or_native_metadata_delta')
@@ -114,10 +126,17 @@ def validate_setup_audit(baseline, source_rows, data, *, core, entry_id, chain=N
 
 
 class NativeIntegrationSetupAudit:
-    def __init__(self, hass, lifecycle, chain, entry_id, source_rows, *, guard):
+    def __init__(self, hass, lifecycle, chain, entry_id, source_rows, *, guard, clock_scope=None):
         self.hass, self.life, self.chain, self.entry_id = hass, lifecycle, chain, entry_id
         self.guard = guard
-        self.baseline = activation_baseline(chain, lifecycle, entry_id)
+        self.clock_scope = clock_scope
+        if clock_scope is not None:
+            from .native_integration_clock_lifecycle import live
+            from .native_integration_own_clock import IntegrationOwnClockBinding
+            _need(live(lifecycle,entry_id) is clock_scope
+                  and type(clock_scope.source_binding) is IntegrationOwnClockBinding, 'own_clock_setup')
+        self.baseline = (exact_restore_baseline(chain,lifecycle,entry_id) if clock_scope is not None
+                         else activation_baseline(chain, lifecycle, entry_id))
         self.payload = codec.deserialize(codec._canonical(self.baseline['payload']))
         self.after = codec._parse(self.payload.after_json)
         self.capture = codec._parse(self.payload.capture_json)
@@ -134,6 +153,7 @@ class NativeIntegrationSetupAudit:
         self.task = asyncio.current_task()
         self.error = self.entity = self.data = None
         self.parser_count = self.added_count = 0
+        self.parser_values = None
         self.setup_true = False
         self.callback = self._profile
 
@@ -206,13 +226,14 @@ class NativeIntegrationSetupAudit:
                       and str(arg.last_valid_state) == self.capture['last_valid_state_text'],
                       'native_parser_cause_or_value')
                 self.entity = entity
+                self.parser_values = (arg.native_value, str(arg.last_valid_state))
                 self.parser_count += 1
                 _need(self.parser_count == 1, 'one_parser')
             if frame.f_code is self.codes[2] and frame.f_locals.get('self') is self.entity:
                 if self.entity is not None and arg is None:
                     self.added_count += 1
                     _need(self.added_count == 1, 'one_native_added')
-                    self._counter()
+                    self._counter(at_added=True)
             if (frame.f_code is self.codes[3] and frame.f_locals.get('entry_id') == self.entry_id
                     and arg is True):
                 _need(frame.f_locals.get('self') is self.hass.config_entries
@@ -222,7 +243,25 @@ class NativeIntegrationSetupAudit:
         except BaseException:
             self.error = 'native_setup_observation_refused'
 
-    def _counter(self):
+    def _counter(self, *, at_added=False):
+        if self.clock_scope is not None:
+            scope = self.clock_scope
+            # Native added-to-hass can run in HA's own entity-add child Task.
+            # Only the final owner audit requires the owner Task identity.
+            scope._check(owner=not at_added)
+            _need(self.entity is scope._new and scope._new_timer_bound
+                  and scope._old_cancelled.cancelled()
+                  and type(self.entity._state) is type(self.entity._last_valid_state) is Decimal
+                  and self.entity._state.is_finite() and self.entity._last_valid_state.is_finite()
+                  and self.entity._sensor_source_id == self.source['entity_id']
+                  and self.entity._max_sub_interval == scope.old._max_sub_interval
+                  and self.entity.native_unit_of_measurement
+                      == self.after['extra_data']['native_unit_of_measurement'], 'clock_restored_fields')
+            if at_added:
+                _need(str(self.entity._state) == scope._transfer_readback['full']
+                      and str(self.entity._last_valid_state) == scope._transfer_readback['last_valid'],
+                      'actual_added_clock_transfer')
+            return
         _need(self.entity is not None and type(self.entity._state) is Decimal
               and type(self.entity._last_valid_state) is Decimal
               and self.entity._state.as_tuple() == Decimal(self.capture['full_state_text']).as_tuple()
@@ -242,17 +281,20 @@ class NativeIntegrationSetupAudit:
         entities = [e for p in async_get_platforms(self.hass, 'integration')
                     if p.config_entry is self.entry for e in p.entities.values()]
         _need(entities == [self.entity], 'actual_setup_entity')
-        doc = {'kind': 'integration_own_setup', 'schema': 1, 'core': self.core,
+        doc = {'kind': ('integration_own_clock_parser' if self.clock_scope is not None
+                        else 'integration_own_setup'), 'schema': 1, 'core': self.core,
             'entry_id': self.entry_id, 'baseline': self.baseline,
             'source_rows': self.source_rows, 'result_rows': self.source_rows,
             'parser_input': self.after['extra_data'], 'source_pins': self.pins,
-            'full_state_text': str(self.entity._state),
-            'last_valid_state_text': str(self.entity._last_valid_state),
+            'full_state_text': (self.parser_values[0] if self.clock_scope is not None
+                                else str(self.entity._state)),
+            'last_valid_state_text': (self.parser_values[1] if self.clock_scope is not None
+                                      else str(self.entity._last_valid_state)),
             'call': {'native_parser': self.parser_count, 'native_added': self.added_count,
                      'same_stored_object': True, 'native_setup_true': self.setup_true}}
         result = IntegrationSetupAuditData(codec._canonical(doc))
-        validate_setup_audit(self.baseline, self.source_rows, result,
-                            core=self.core, entry_id=self.entry_id)
+        validate_exact_audit(self.baseline, self.source_rows, doc,
+            core=self.core, entry_id=self.entry_id, clock_parser=self.clock_scope is not None)
         return result
 
     def __exit__(self, exc_type, exc, traceback):

@@ -1,5 +1,6 @@
-"""One actual leased, no-timer Integration unload and its exact native data.
+"""One actual leased Integration unload and its exact immutable native data.
 
+Default mode has no timer; optional typed own clock retains the same engine.
 Witness authenticates capture only, never a plan/rename/recovery authorization.
 Uses the Utility unload audit's pinned-code proof and native registry projection.
 No native field/method replacement, synthetic event or expected counter input.
@@ -93,9 +94,18 @@ class NativeIntegrationUnloadWitness:
             _need(audit.data.last_states.get(target) is audit._target
                   and codec._canonical(codec._capture(audit._target, codec._native()))
                       == audit._payload.after_json, 'target_payload_changed')
-        _need(str(audit.entity._state) == audit.capture.full_state_text
-              and str(audit.entity._last_valid_state) == audit.capture.last_valid_state_text,
-              'departed_entity_changed')
+        if audit.clock is None:
+            _need(str(audit.entity._state) == audit.capture.full_state_text
+                  and str(audit.entity._last_valid_state) == audit.capture.last_valid_state_text,
+                  'departed_entity_changed')
+        else:
+            # Capture/stored payload stays immutable. Only the same owned native
+            # engine may progress during escrow awaits; it is not a new capture.
+            audit.clock._check(owner=True)
+            _need(audit.clock.old is audit.entity and audit.clock.lease is audit.lease
+                  and audit.clock._retained
+                  and audit.clock._phase in ('unloading', 'retained'), 'retained_clock_lost')
+            audit.clock._timer(audit.entity)
         return None
 
     @property
@@ -148,7 +158,7 @@ class NativeIntegrationUnloadAudit:
     Caller supplies its authenticated row and holds its own plan/admin fences.
     This prerequisite does not implement own-ID registry or source/time-gap AC.
     """
-    def __init__(self, hass, entry, expected_row):
+    def __init__(self, hass, entry, expected_row, *, clock=None):
         from homeassistant.config_entries import ConfigEntries, ConfigEntry
         from homeassistant.core import HomeAssistant
         from homeassistant.helpers import entity_registry as er
@@ -171,10 +181,21 @@ class NativeIntegrationUnloadAudit:
                     if p.config_entry is entry for e in p.entities.values()]
         _need(len(rows) == 1 and len(entities) == 1, 'single_helper_required')
         platform, entity = entities[0]
+        if clock is not None:
+            from .native_integration_continuity import NativeIntegrationContinuity
+            from .native_integration_own_clock import IntegrationOwnClockBinding
+            _need(type(clock) is NativeIntegrationContinuity
+                  and type(clock.source_binding) is IntegrationOwnClockBinding
+                  and clock.hass is hass and clock.entry is entry and clock.old is entity
+                  and clock.row is row and clock._phase == 'capture', 'own_clock_binding')
+            clock._check(owner=True)
+        self.clock = clock
         _need(type(entity) is IntegrationSensor and entity.entity_id == row.entity_id
               and entity.unique_id == entry.entry_id and entity.hass is hass
               and entity.platform is platform and platform.hass is hass
-              and entity._max_sub_interval is None, 'native_no_timer_helper')
+              and ((clock is None and entity._max_sub_interval is None)
+                   or (clock is not None and entity._max_sub_interval is not None)),
+              'native_no_timer_helper')
         data = hass.data.get(DATA_RESTORE_STATE)
         _need(type(data) is RestoreStateData and data.entities.get(row.entity_id) is entity,
               'native_restore_manager')

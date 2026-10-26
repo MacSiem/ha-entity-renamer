@@ -174,6 +174,9 @@ class IntegrationSourceClockBinding:
             _need(snapshot == self.target_snapshot and row.entity_id == self.to_name,
                   'accepted_source_changed')
 
+    def physical_uuid(self):
+        return self.change.identity
+
     def emission(self, scope, frame):
         data, parent = frame.f_locals.get('event_data'), frame.f_back
         kind = frame.f_locals.get('event_type')
@@ -183,7 +186,7 @@ class IntegrationSourceClockBinding:
         _need(parent is not None and parent.f_locals.get('self') is scope.hass.states
               and parent.f_code in (scope.codes['source_set'],scope.codes['source_remove']), 'native_source_origin')
         name, old, new = data['entity_id'], data.get('old_state'), data.get('new_state')
-        physical = next(row for row in scope.registry.entities.values() if row.id == self.change.identity).entity_id
+        physical = next(row for row in scope.registry.entities.values() if row.id == self.physical_uuid()).entity_id
         move = None
         predecessor = old
         if kind == 'state_changed':
@@ -441,7 +444,7 @@ class IntegrationSourceClockBinding:
               'one_typed_helper_setup_intent')
         self._helper_setup_intent = intent
 
-    def require_accepted(self, scope, *, seam=False):
+    def _require_accepted_head(self, scope, *, seam=False):
         from .native_helper_lifecycle import RestoreAuthorization
         _need(self.authorization is not None and not self.flights and scope._pending_move is None
               and scope.source == self.to_name and not scope._emitted, 'accepted_transport_complete')
@@ -475,6 +478,10 @@ class IntegrationSourceClockBinding:
             managers = _Managers(scope.hass,self.chain.original_receipt)
             _need(managers.initial == tuple(_json(docs[key]['data']) for key in _KEYS),
                   'accepted_setup_manager_image')
+        return docs
+
+    def require_accepted(self, scope, *, seam=False):
+        docs = self._require_accepted_head(scope, seam=seam)
         actual = _row(next(r for r in scope.registry.entities.values() if r.id == self.change.identity))
         accepted = [r for r in docs['core.entity_registry']['data']['entities'] if r['id'] == self.change.identity]
         _need(accepted == [actual] and read_entry(scope.hass,self.entry_id) == self.target_snapshot,
