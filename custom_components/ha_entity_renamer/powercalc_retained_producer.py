@@ -544,15 +544,24 @@ class _RetainedProducerOwner:
         elif tag == 'producer_update':
             from homeassistant.helpers.entity import EntityPlatformState
             _need(entity._platform_state is EntityPlatformState.REMOVED, 'removed_write_guard')
-            _need(frame.f_back is not None and frame.f_back.f_code is self.vc[2]
-                  and frame.f_locals.get('power') is flight.calculated, 'native_update_parent_and_argument')
+            _need(frame.f_back is not None and frame.f_back.f_code is self.vc[2],
+                  'native_update_parent')
             if phase == 'start':
+                _need(frame.f_locals.get('power') is flight.calculated,
+                      'actual_calculated_update_argument')
                 _need(flight.update_started_at is None, 'one_native_update')
                 flight.update_started_at = datetime.now(timezone.utc)
                 flight.previous_native_power = entity._power
                 flight.previous_available = entity._attr_available
                 flight.update_argument = frame.f_locals['power']
             else:
+                # The pinned native body replaces its local argument with
+                # round(power, precision). Keep the original entry argument
+                # separately and verify the actual normalized field on return.
+                normalized = frame.f_locals.get('power')
+                _need(type(normalized) is Decimal and normalized.is_finite()
+                      and type(entity._power) is Decimal and normalized == entity._power,
+                      'actual_normalized_update_result')
                 flight.update_returned_at = datetime.now(timezone.utc)
                 flight.writes += 1
         elif tag == 'producer_ha_write':
