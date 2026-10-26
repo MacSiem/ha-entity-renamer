@@ -4,6 +4,8 @@ Repository sources and an optional full public Powercalc fixture are copied to
 a new temporary directory on the owned SSD mount. No existing HA configuration, API or database is opened.
 """
 import argparse
+import base64
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -16,6 +18,7 @@ parser.add_argument('--repeat', type=int, default=1)
 parser.add_argument('--timeout', type=int, default=600, help='Container suite timeout in seconds')
 parser.add_argument('--test-filter', default='', help='Only discovered test IDs containing this string')
 parser.add_argument('--powercalc-component-dir', type=Path, help='Full public Powercalc fixture copied only to the isolated suite directory')
+parser.add_argument('--powercalc-profile-dir', type=Path, help='Exact public binary profile inputs copied only into the isolated suite directory')
 args = parser.parse_args()
 assert args.repeat >= 1 and args.timeout > 0 and '/' not in args.pattern and '\\' not in args.pattern
 if not any(path.is_file() for path in (ROOT/'tests').glob(args.pattern)):
@@ -42,19 +45,50 @@ if args.powercalc_component_dir is not None:
         if vendor_file.is_file():
             name = vendor_file.relative_to(vendor_root).as_posix()
             sources['_public_vendor/powercalc/' + name] = vendor_file.read_text()
+binary_sources = {}
+if args.powercalc_profile_dir is not None:
+    profile_root = args.powercalc_profile_dir.resolve(strict=True)
+    if not profile_root.is_relative_to(Path('/Volumes/Samsung_SSD')):
+        parser.error('public profile fixture must be on owned SSD')
+    raw_manifest = (profile_root / 'PUBLIC-INPUTS.json').read_bytes()
+    profile_manifest = json.loads(raw_manifest)
+    if profile_manifest.get('commit') != 'fcb7736b2cbf64649487c1708d10093f25ec1b21':
+        parser.error('immutable official v1.26.1 profile input manifest required')
+    for row in profile_manifest['blobs']:
+        if not row['selected']:
+            continue
+        name = row['path']
+        if (not name.startswith('profile_library/') or Path(name).is_absolute()
+                or any(piece in ('', '.', '..') for piece in name.split('/'))):
+            parser.error('invalid public profile path')
+        file = profile_root / name
+        if file.is_symlink() or any(parent.is_symlink() for parent in file.parents
+                                    if parent.is_relative_to(profile_root)):
+            parser.error('public profile symlink refused')
+        raw = file.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != row['sha256']:
+            parser.error('public profile content mismatch')
+        binary_sources['_public_profiles/' + name] = base64.b64encode(raw).decode('ascii')
+    binary_sources['_public_profiles/PUBLIC-INPUTS.json'] = base64.b64encode(raw_manifest).decode('ascii')
 program = r'''
-import os, sys, tempfile, pathlib, unittest, json
+import os, sys, tempfile, pathlib, unittest, json, base64
 with tempfile.TemporaryDirectory(prefix='renamer-unit-', dir='/config') as directory:
     root = pathlib.Path(directory)
     for name, source in SOURCES.items():
         path = root/name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(source)
+    for name, encoded in BINARY_SOURCES.items():
+        path = root/name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(base64.b64decode(encoded, validate=True))
     os.chdir(root)
     os.environ['TMPDIR'] = directory
     tempfile.tempdir = directory
     if VENDOR_FIXTURE:
         os.environ['POWERCALC_COMPONENT_DIR'] = str(root / '_public_vendor/powercalc')
+    if PROFILE_FIXTURE:
+        os.environ['POWERCALC_PROFILE_DIR'] = str(root / '_public_profiles')
     sys.path.insert(0, str(root))
     suite = unittest.TestSuite(unittest.defaultTestLoader.discover('tests', pattern=PATTERN)
                                for _ in range(REPEAT))
@@ -77,7 +111,7 @@ with tempfile.TemporaryDirectory(prefix='renamer-unit-', dir='/config') as direc
 raise SystemExit(0 if success else 1)
 '''
 completed = subprocess.run(['docker','exec','-i',args.container,'python','-X','faulthandler','-B','-'],
-    input='SOURCES = '+repr(sources)+'\nPATTERN = '+repr(args.pattern)+'\nREPEAT = '+repr(args.repeat)+'\nTEST_FILTER = '+repr(args.test_filter)+'\nVENDOR_FIXTURE = '+repr(args.powercalc_component_dir is not None)+'\n'+program, text=True, capture_output=True, timeout=args.timeout)
+    input='SOURCES = '+repr(sources)+'\nBINARY_SOURCES = '+repr(binary_sources)+'\nPROFILE_FIXTURE = '+repr(args.powercalc_profile_dir is not None)+'\nPATTERN = '+repr(args.pattern)+'\nREPEAT = '+repr(args.repeat)+'\nTEST_FILTER = '+repr(args.test_filter)+'\nVENDOR_FIXTURE = '+repr(args.powercalc_component_dir is not None)+'\n'+program, text=True, capture_output=True, timeout=args.timeout)
 print(completed.stdout)
 print(completed.stderr)
 completed.check_returncode()
