@@ -26,6 +26,8 @@ PACKAGE = fixture.PACKAGE
 @unittest.skipUnless(fixture.HAS_HA, 'requires actual pinned HA')
 class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
     method = 'left'
+    shared_lifecycle = False
+    initial_power = '10'
     saved_uuid = False
     with_yaml = True
     asyncSetUp = quiescence.NativeHelperQuiescenceTests.asyncSetUp
@@ -91,6 +93,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
             'native_registry','native_registry_receipts','native_registry_transaction',
             'native_helper_activation_lease','native_helper_transaction','helper_native','helper_transaction',
             'native_input_observation','native_input_baseline','native_helper_lifecycle',
+            'native_helper_setup_effects',
             'recorder_guard','history_guard','prepared','journal','transaction',
             'yaml_plan','yaml_validation','yaml_transaction','yaml_editor_locks','yaml_runtime_observer',
             'native_yaml_transaction','native_candidate_validation','native_utility_source_emissions')}
@@ -100,7 +103,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
             _attr_unique_id = 'source-clock-producer'
             _attr_should_poll = False
             _attr_native_unit_of_measurement = 'W'
-            _attr_native_value = Decimal('10')
+            _attr_native_value = Decimal(self.initial_power)
         self.producer = Producer()
         component = EntityComponent(logging.getLogger(__name__),'sensor',hass,timedelta(seconds=60))
         await component.async_add_entities([self.producer])
@@ -176,6 +179,9 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
         lease=await m['native_helper_activation_lease'].NativeHelperActivationLease.acquire(
             hass,hass.config_entries,(self.entry,),guard=self.guard)
         self.scope=None
+        life=None
+        source_auth=None
+        lives=[]
         candidate_proofs=[]
         yaml_observer=m['yaml_runtime_observer'].NativeYAMLRuntimeReadback(hass)
         locks=m['yaml_editor_locks'].NativeYAMLEditorLocks(hass)
@@ -190,6 +196,8 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
             m['native_helper_transaction']._require_inactive(self.entry,lease)
             self.assertEqual(self.entry.state.value,'not_loaded')
             self.scope._timer(self.scope.old)  # Explicit owned retained exception.
+            if self.shared_lifecycle:
+                life.require_quiescent()
         async def validate_snapshot(snapshot):
             self.assertIn(snapshot,(before,helper_change.after if helper_change else before))
             self.assertEqual(snapshot['domain'],'integration')
@@ -263,7 +271,61 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                     hass,self.entry,lease,chain,guard=self.guard,observe=observe,load_record=journal.load,reverse=reverse)
                 scopes_live.append(self.scope)
                 scope=self.scope
-                await scope.unload()
+                if self.shared_lifecycle:
+                    try:
+                        m['native_integration_clock_lifecycle']=importlib.import_module(
+                            PACKAGE+'.native_integration_clock_lifecycle')
+                    except ModuleNotFoundError as error:
+                        if error.name != PACKAGE+'.native_integration_clock_lifecycle':
+                            raise
+                        self.fail('actual Integration clock shared lifecycle is not implemented')
+                    self.assertFalse(self.saved_uuid,
+                        'this draft requires the existing source ConfigEntry preparation')
+                    lm=m['native_helper_lifecycle']
+                    life_store=lm.native_helper_lifecycle_store(hass,preparations)
+                    await life_store.initialize()
+                    async def original_inputs(reference,actual_receipt):
+                        self.assertEqual((reference,actual_receipt),(inputs,receipt))
+                        value=await m['native_input_baseline'].async_capture_native_input_baseline(
+                            hass,receipt,guard=self.guard)
+                        self.assertEqual(value,original)
+                        return True
+                    async def inactive_clock(key):
+                        self.assertEqual(key,self.entry.entry_id)
+                        self.assertIs(m['native_integration_clock_lifecycle'].retained(life,key),scope)
+                        return True
+                    async def accepted_clock(auth):
+                        actual_record=await journal.load(chain.operation_id)
+                        actual_observation=await observe()
+                        raw=tuple(m['native_registry_receipts'].RegistryRawObservation(f.key,f.raw,f.identity)
+                                  for f in actual_observation.files)
+                        chain.expected(m['transaction'].PhaseContext(actual_record,0),raw)
+                        return chain.verify_setup_authorization(auth)
+                    async def runtime_clock(key,activation,auth):
+                        self.assertEqual(key,self.entry.entry_id)
+                        self.assertEqual(activation['state'],'loaded')
+                        scope._check(owner=True)
+                        scope.source_binding.require_accepted(scope,seam=True)
+                        self.assertIs(scope._new,self.current())
+                        scope._timer(scope._new)
+                        return True
+                    setup_effect=m['native_helper_setup_effects'].NativeHelperSetupEffects(
+                        hass,chain,observe,journal.load,guard=self.guard)
+                    life=await lm.NativeHelperLifecycle.start(life_store,hass.config_entries,
+                        chain.operation_id,plan,receipt,digests,guard=self.guard,
+                        verify_original_native_inputs=original_inputs,settle=hass.async_block_till_done,
+                        verify_inactive=inactive_clock,verify_runtime=runtime_clock,
+                        verify_accepted_native_chain=accepted_clock,setup_effect=setup_effect,
+                        activation_lease=lease,source_authorization=source_auth if reverse else None,
+                        runtime_baselines=(),integration_clocks={self.entry.entry_id:scope})
+                    lives.append(life)
+                    await life.quiesce()
+                    self.assertTrue(life.inspect()['inactive_receipts_complete'])
+                    if self.initial_power=='0' and not reverse:
+                        self.assertEqual(Decimal(scope.initial.full),0)
+                        self.assertEqual(Decimal(scope.initial.last_valid),0)
+                else:
+                    await scope.unload()
                 await hass.async_block_till_done()
                 self.assertEqual(scope._phase,'retained')
                 if negative_hook is not None:
@@ -368,8 +430,27 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                         negative_context.authorization=auth
                         if await negative_hook('before_setup',negative_context):
                             return
-                    restored=await m['native_integration_source_clock'].async_setup_source_clock(
-                        scope,auth,observe=observe,load_record=journal.load)
+                    if self.shared_lifecycle:
+                        await life.restore(auth)
+                        restored=scope._new
+                        self.assertTrue(life.inspect()['activation_receipts_complete'])
+                        setup_slot=life._slot('setup',self.entry.entry_id,'receipt')
+                        effect_ref=life.store.read(setup_slot)['payload']['native_effect']
+                        effect_row=store.read(effect_ref[0])
+                        self.assertEqual(effect_row['digest'],effect_ref[1])
+                        self.assertEqual(effect_row['payload']['kind'],'helper_setup_receipt')
+                        self.assertEqual(effect_row['payload']['audit']['kind'],'integration_source_clock_setup')
+                        self.assertEqual(effect_row['payload']['audit']['clock_receipt'],list(scope.receipt))
+                        fresh_record=await journal.load(chain.operation_id)
+                        fresh_observed=await observe()
+                        source_auth=m['native_helper_lifecycle'].RestoreAuthorization(
+                            chain.operation_id,plan.fingerprint,chain.expected(
+                                m['transaction'].PhaseContext(fresh_record,0),tuple(
+                                m['native_registry_receipts'].RegistryRawObservation(f.key,f.raw,f.identity)
+                                for f in fresh_observed.files)),fresh_record.status)
+                    else:
+                        restored=await m['native_integration_source_clock'].async_setup_source_clock(
+                            scope,auth,observe=observe,load_record=journal.load)
                     self.assertEqual(restored._sensor_source_id,scope.source_binding.to_name)
                     self.assertEqual(self.f.entity.async_get(restored._sensor_source_id).id,self.source_uuid)
                     self.assertEqual(self.f.entity.async_get(restored.entity_id).id,self.helper_uuid)
@@ -413,12 +494,27 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(reopened.writable)
                 self.assertEqual(reopened.accepted_documents(),chain.accepted_documents())
                 self.assertTrue(reopened.verify_setup_authorization(auth))
+                if self.shared_lifecycle:
+                    witness=m['native_helper_lifecycle'].validate_lifecycle_receipt_witness(
+                        fresh_store,chain.operation_id,plan,receipt,digests,root_id=life.root_id,
+                        source_authorization=life.source_authorization)
+                    self.assertFalse(witness.writable)
+                    # The chain copies the pending lifecycle setup intent; the
+                    # final lifecycle receipt stays in its established store.
+                    self.assertEqual(witness.inspect()['pending'],[
+                        {'stage':'setup','entry_id':self.entry.entry_id}])
+                    before_tick=restored._state
+                    await self.wait_tick()
+                    self.assertGreater(restored._state,before_tick)
+                    self.assertEqual(restored._last_integration_trigger.name,'TimeElapsed')
             self.assertEqual(len(creation_checks),2)
             self.assertEqual(len(burst_checks),2)
             self.assertEqual([p.direction for p in candidate_proofs],['forward','rollback'])
         finally:
             for scope in scopes_live:
                 scope.close()
+            for active_life in lives:
+                active_life.close_source_gaps()
             lease.release()
 
 
