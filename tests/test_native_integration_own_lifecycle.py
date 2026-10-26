@@ -256,8 +256,57 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
                          traceback.extract_tb(error.__traceback__)], source_drift))
                     raise
             yaml_adapter.apply = diagnosed_yaml_apply
+            adapter_diagnostics = []
+            def remember_failure(stage, error):
+                # Test-only metadata from the REAL refused call; no frame locals,
+                # expected/native values, replacement results or acceptance proof.
+                try:
+                    frames = []
+                    trace = error.__traceback__
+                    while trace is not None:
+                        code = trace.tb_frame.f_code
+                        frames.append((code.co_filename, code.co_qualname, trace.tb_lineno))
+                        trace = trace.tb_next
+                    reason = None
+                    if (len(error.args) == 1 and type(error.args[0]) is str
+                            and error.args[0].startswith(('own_helper_', 'registry_',
+                                'restore_', 'native_', 'input_', 'helper_',
+                                'integration_', 'source_', 'accepted_', 'yaml_'))
+                            and all(c in 'abcdefghijklmnopqrstuvwxyz0123456789_'
+                                    for c in error.args[0])):
+                        reason = error.args[0]
+                    adapter_diagnostics.append((stage, type(error).__module__ + '.' +
+                        type(error).__qualname__, reason, tuple(frames)))
+                except BaseException:
+                    pass  # Diagnostics must never change the original failure.
+            actual_registry_compensate = registry.compensate
+            actual_registry_inspect = registry.inspect
+            async def diagnosed_registry_compensate(step, guard):
+                try:
+                    return await actual_registry_compensate(step, guard)
+                except BaseException as error:
+                    remember_failure('registry.compensate', error)
+                    raise
+            async def diagnosed_registry_inspect(step):
+                try:
+                    result = await actual_registry_inspect(step)
+                except BaseException as error:
+                    remember_failure('registry.inspect', error)
+                    raise
+                # inspect deliberately translates caught errors to UNKNOWN. Keep
+                # that ACTUAL result; never invent the swallowed exception/cause.
+                adapter_diagnostics.append(('registry.inspect.return', result.value))
+                return result
+            def diagnosed_coordinator_guard():
+                try:
+                    return quiescent()
+                except BaseException as error:
+                    remember_failure('coordinator.guard', error)
+                    raise
+            registry.compensate = diagnosed_registry_compensate
+            registry.inspect = diagnosed_registry_inspect
             coordinator = tx.Coordinator({'registry': registry, 'yaml': yaml_adapter}, journal,
-                quiescent, required_scopes=('registry', 'yaml'))
+                diagnosed_coordinator_guard, required_scopes=('registry', 'yaml'))
 
             async def authorization():
                 record = await journal.load(life.operation_id)
@@ -351,7 +400,7 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     record = (await coordinator.rollback(life.operation_id) if reverse else
                         await coordinator.apply(life.plan, life.plan.fingerprint, life.operation_id))
                 self.assertEqual(record.status, 'rolled_back' if reverse else 'applied',
-                    (record.status, record.reason, record.phases, effect_errors))
+                    (record.status, record.reason, record.phases, effect_errors, adapter_diagnostics))
                 self.assertEqual(record.phases, ('undone', 'undone') if reverse else
                     ('verified', 'verified'))
                 # Both effects are actual accepted native returns in one ledger.
