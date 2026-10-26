@@ -318,8 +318,11 @@ class _RetainedProducerOwner:
             from homeassistant.helpers.entity import Entity
             # Reuse the existing actual-instance proof for every already-pinned
             # method used by this producer, not only the observed frame methods.
+            # Read-only native properties use the existing class/getter code
+            # proof; reading native_value/source_entity is not a bound method.
             _dispatch_token(old, self.cls, tuple(dict.fromkeys(method for owner, method
-                in self.scope.vendor.refs if owner is self.cls)))
+                in self.scope.vendor.refs if owner is self.cls
+                and not isinstance(getattr(self.cls, method), property))))
             _dispatch_token(old, Entity, ('async_write_ha_state', '_async_write_ha_state'))
             _dispatch_token(factory, self.scope.vendor.classes['PowerCalculatorStrategyFactory'],
                             ('create', '_create_lut'))
