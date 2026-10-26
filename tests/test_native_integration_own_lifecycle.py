@@ -75,6 +75,27 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await async_setup_component(hass, 'script', await async_hass_config_yaml(hass)))
         await self._assert_script(hass.states.get(self.old_helper).state)
 
+    async def _start_own_lifecycle(self, *args, **kwargs):
+        return await base.lm.NativeHelperLifecycle.start(*args, **kwargs)
+
+    async def _start_own_chain(self, chain_store, life):
+        rr = importlib.import_module(PACKAGE + '.native_registry_receipts')
+        return await rr.RegistryReceiptChain.start(chain_store, life.operation_id,
+            life.plan, life.receipt, life.binding['preparations'])
+
+    def _assert_own_counter(self, entity):
+        self.assertEqual(entity._state.as_tuple(), self.expected_counter[0])
+        self.assertEqual(entity._last_valid_state.as_tuple(), self.expected_counter[1])
+
+    async def _after_own_escrow(self, life, escrow, counter_before):
+        self.assertEqual(self.expected_counter, counter_before)
+
+    async def _before_own_restore(self, life):
+        pass
+
+    async def _after_own_restore(self, life):
+        pass
+
     async def _lifecycle(self):
         await self.prepare(zero=self.zero)
         hass = self.f.hass
@@ -136,7 +157,7 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
             verify_original_native_inputs=original_source, settle=hass.async_block_till_done,
             verify_inactive=inactive, verify_runtime=unused, verify_accepted_native_chain=unused,
             runtime_baselines=())
-        return await base.lm.NativeHelperLifecycle.start(*self.args, **self.kwargs)
+        return await self._start_own_lifecycle(*self.args, **self.kwargs)
 
     async def test_typed_escrow_then_owned_placeholder_then_real_native_setup(self):
         from homeassistant.core import Context
@@ -159,8 +180,7 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(tuple(step.adapter for step in life.plan.steps), ('registry', 'yaml'))
             chain_store = rr.native_registry_receipt_store(hass, life.store.preparations)
             await chain_store.initialize()
-            chain = await rr.RegistryReceiptChain.start(chain_store, life.operation_id,
-                life.plan, life.receipt, life.binding['preparations'])
+            chain = await self._start_own_chain(chain_store, life)
             inputs = chain.reconstruct_inputs()
             managers = m['native_input_baseline']._Managers(hass, life.receipt)
             journal = m['journal'].native_journal(hass)
@@ -327,8 +347,7 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(entry_id, self.entry.entry_id)
                 self.assertEqual(original_activation['state'], 'loaded')
                 entity = self.current()
-                self.assertEqual(entity._state.as_tuple(), self.expected_counter[0])
-                self.assertEqual(entity._last_valid_state.as_tuple(), self.expected_counter[1])
+                self._assert_own_counter(entity)
                 self.assertEqual(entity._sensor_source_id, self.producer.entity_id)
                 self.assertEqual(self.f.entity.async_get(self.producer.entity_id).id, self.source_uuid)
                 return True
@@ -343,7 +362,7 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
             for reverse in (False, True):
                 if reverse:
                     source_auth = await authorization()
-                    life = await base.lm.NativeHelperLifecycle.start(*self.args,
+                    life = await self._start_own_lifecycle(*self.args,
                         **dict(self.kwargs, verify_accepted_native_chain=accepted_source,
                             verify_runtime=runtime, setup_effect=setup_effect,
                             source_authorization=source_auth))
@@ -375,7 +394,7 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 capture = json.loads(escrow._payload.capture_json)
                 self.expected_counter = (Decimal(capture['full_state_text']).as_tuple(),
                     Decimal(capture['last_valid_state_text']).as_tuple())
-                self.assertEqual(self.expected_counter, counter_before)
+                await self._after_own_escrow(life, escrow, counter_before)
                 self.assertIs(type(escrow._payload), self.codec.PreparedIntegrationPayload)
                 if self.zero:
                     self.assertEqual(Decimal(capture['full_state_text']), 0)
@@ -418,7 +437,9 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.f.entity.async_get(target_id).id, self.row['id'])
                 # The reloaded script now resolves the newly selected placeholder.
                 await self._assert_script('unavailable')
+                await self._before_own_restore(life)
                 await life.restore(await authorization())
+                await self._after_own_restore(life)
                 self.assertTrue(life.inspect()['activation_receipts_complete'])
                 self.assertTrue(chain.verify_setup_authorization(await authorization()))
                 entity, = [e for platform in async_get_platforms(hass, 'integration')
@@ -427,8 +448,7 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(entity.unique_id, self.entry.entry_id)
                 hn = importlib.import_module(PACKAGE + '.helper_native')
                 self.assertEqual(hn.read_entry(hass, self.entry.entry_id), self.before)
-                self.assertEqual(entity._state.as_tuple(), self.expected_counter[0])
-                self.assertEqual(entity._last_valid_state.as_tuple(), self.expected_counter[1])
+                self._assert_own_counter(entity)
                 self.assertEqual(self.f.entity.async_get(target_id).id, self.row['id'])
                 await self._assert_script(hass.states.get(target_id).state)
                 self.assertTrue(await self.native_history.verify(self.own_history))
