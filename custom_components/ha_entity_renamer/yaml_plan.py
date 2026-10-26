@@ -98,6 +98,14 @@ class VariableBindingProof:
 
 
 @dataclass(frozen=True)
+class PowercalcSourceInputs:
+    """Opaque immutable profile/settings inputs, not YAML parser roots."""
+    files: tuple[FileSnapshot, ...]
+    # Existing receipt directory shape: path, entries, optional filtered names.
+    directories: tuple[tuple[str, tuple, tuple[str, ...] | None], ...]
+
+
+@dataclass(frozen=True)
 class Plan:
     files: tuple[FileSnapshot, ...]
     directories: tuple[DirectorySnapshot, ...]
@@ -106,6 +114,7 @@ class Plan:
     issues: tuple[Issue, ...]
     coverage: str = "declared_yaml_graph_static_reference_fields_only"
     variable_bindings: tuple[VariableBindingProof, ...] = ()
+    powercalc_inputs: PowercalcSourceInputs | None = None
 
     @property
     def ready(self) -> bool:

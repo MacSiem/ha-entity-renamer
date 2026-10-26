@@ -384,7 +384,7 @@ def powercalc_fixed_semantics(cfg):
     return {'source': cfg['entity_id'], 'power': str(value)}
 
 
-async def _expected_powercalc_sources(root):
+async def _expected_powercalc_sources(root, *, profiles=False):
     """Projection in the SAME isolated ORIGINAL checker; no vendor setup."""
     from homeassistant import loader
     from homeassistant.core import HomeAssistant
@@ -402,13 +402,24 @@ async def _expected_powercalc_sources(root):
         pc = checked.get('powercalc', {})
         rows = [[row.get('unique_id'), _fingerprint(row), powercalc_fixed_semantics(row)]
                 for row in pc.get('sensors', [])]
-        return {'version': __version__, 'rows': rows,
-                'globals': {key: _fingerprint(value) for key, value in pc.items() if key != 'sensors'}}
+        result = {'version': __version__, 'rows': rows,
+                  'globals': {key: _fingerprint(value) for key, value in pc.items() if key != 'sensors'}}
+        if profiles:
+            # Companion is product code beside this -I worker, not config input.
+            import importlib.util
+            from pathlib import Path
+            spec = importlib.util.spec_from_file_location('_renamer_profile_inputs',
+                Path(__file__).with_name('powercalc_profile_inputs.py'))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            result['closed_graph'] = await module.compile_closed_graph(hass, checked, root)
+        return result
     finally:
         await hass.async_stop(force=True)
 
 
-async def check(before_root, proposed_root, *, with_sources=False):
+async def check(before_root, proposed_root, *, with_sources=False, powercalc_profiles=False):
     from homeassistant.const import __version__
     from homeassistant.scripts.check_config import async_check_config
     if __version__ not in ('2025.6.0', '2026.10.2'):
@@ -441,7 +452,7 @@ async def check(before_root, proposed_root, *, with_sources=False):
                                    for domain in changed]}
     if with_sources:
         if os.path.isfile(os.path.join(before_root, 'custom_components/powercalc/manifest.json')):
-            result['powercalc_sources'] = await _expected_powercalc_sources(before_root)
+            result['powercalc_sources'] = await _expected_powercalc_sources(before_root, profiles=powercalc_profiles)
         result['template_sources'] = template_sources
         result['template_candidate_sources'] = candidate_templates
         result['source_runtime'] = {'version': __version__, 'domains': [
@@ -456,7 +467,8 @@ def main():
         from homeassistant import runner
         with open(os.devnull, 'w') as sink, redirect_stdout(sink), redirect_stderr(sink):
             result = asyncio.run(check(sys.argv[1], sys.argv[2],
-                                       with_sources=len(sys.argv) == 4 and sys.argv[3] == '--source-evidence'),
+                                       with_sources='--source-evidence' in sys.argv[3:],
+                                       powercalc_profiles='--powercalc-profile-inputs' in sys.argv[3:]),
                                  loop_factory=getattr(runner, 'create_event_loop', None))
     except BaseException:
         result = {'status': 'checker_failed'}

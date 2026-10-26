@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from datetime import timedelta
 from types import MappingProxyType
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -143,34 +144,45 @@ class PowercalcProfileEnergyNativeTests(unittest.IsolatedAsyncioTestCase):
         return verified
 
     async def test_real_public_lut_selector_signed_groups_and_native_energy(self):
-        self.assert_bound(await self.prepare())
-        evidence, capture = self.evidence.sha256, self.first.structural_token
-        original_strategy = self.dynamic_power._strategy_instance
-        await self.sources[0].async_turn_on(brightness=255)
-        for option, watts in [('25%', '2.71'), ('50%', '4.72'), ('100%', '8.52'), ('Disabled', '0.73')]:
-            await self.selector.async_select_option(option)
+        inputs = importlib.import_module(fixtures.PACKAGE + '.powercalc_profile_inputs')
+        native_read, loop_thread, reads = inputs.read_bundle, threading.get_ident(), []
+        def observe_actual_read(root):
+            # Observe only Renamer's real read. Never return a substitute bundle,
+            # invoke a vendor calculator or change a native producer/counter.
+            self.assertNotEqual(threading.get_ident(), loop_thread)
+            value = native_read(root)
+            reads.append(threading.get_ident())
+            return value
+        with patch.object(inputs, 'read_bundle', observe_actual_read):
+            self.assert_bound(await self.prepare())
+            evidence, capture = self.evidence.sha256, self.first.structural_token
+            original_strategy = self.dynamic_power._strategy_instance
+            await self.sources[0].async_turn_on(brightness=255)
+            for option, watts in [('25%', '2.71'), ('50%', '4.72'), ('100%', '8.52'), ('Disabled', '0.73')]:
+                await self.selector.async_select_option(option)
+                await self.f.hass.async_block_till_done()
+                def power(entity):
+                    return Decimal(self.f.hass.states.get(entity.entity_id).state)
+                self.assertEqual(power(self.static_power), Decimal('8.51'))
+                self.assertEqual(power(self.dynamic_power), Decimal(watts))
+                self.assertEqual(power(self.sum_power), Decimal('8.51') + Decimal(watts))
+                self.assertEqual(power(self.subtract_power), Decimal('8.51'))
+                self.assert_bound(await self.bind())
+                self.assertEqual((self.evidence.sha256, self.first.structural_token), (evidence, capture))
+            self.assertIsNot(self.dynamic_power._strategy_instance, original_strategy)
+            # Wait for real wall-clock native integration, with no synthetic time event.
+            before = self.static_energy._state
+            async with asyncio.timeout(8):
+                while self.static_energy._state is None or self.static_energy._state == before:
+                    await asyncio.sleep(0.02)
+            self.assertGreater(self.static_energy._state, before or Decimal(0))
             await self.f.hass.async_block_till_done()
-            def power(entity):
-                return Decimal(self.f.hass.states.get(entity.entity_id).state)
-            self.assertEqual(power(self.static_power), Decimal('8.51'))
-            self.assertEqual(power(self.dynamic_power), Decimal(watts))
-            self.assertEqual(power(self.sum_power), Decimal('8.51') + Decimal(watts))
-            self.assertEqual(power(self.subtract_power), Decimal('8.51'))
+            for entity in (self.static_energy, self.dynamic_energy, self.sum_energy, self.subtract_energy):
+                value = Decimal(self.f.hass.states.get(entity.entity_id).state)
+                self.assertTrue(value.is_finite())
+                self.assertGreater(value, Decimal(0))
             self.assert_bound(await self.bind())
-            self.assertEqual((self.evidence.sha256, self.first.structural_token), (evidence, capture))
-        self.assertIsNot(self.dynamic_power._strategy_instance, original_strategy)
-        # Wait for real wall-clock native integration, with no synthetic time event.
-        before = self.static_energy._state
-        async with asyncio.timeout(8):
-            while self.static_energy._state is None or self.static_energy._state == before:
-                await asyncio.sleep(0.02)
-        self.assertGreater(self.static_energy._state, before or Decimal(0))
-        await self.f.hass.async_block_till_done()
-        for entity in (self.static_energy, self.dynamic_energy, self.sum_energy, self.subtract_energy):
-            value = Decimal(self.f.hass.states.get(entity.entity_id).state)
-            self.assertTrue(value.is_finite())
-            self.assertGreater(value, Decimal(0))
-        self.assert_bound(await self.bind())
+        self.assertTrue(reads, 'positive must traverse the actual executor profile read')
 
     async def test_inactive_raw_gzip_drift_is_not_adopted(self):
         self.assert_bound(await self.prepare())
@@ -213,6 +225,26 @@ class PowercalcProfileEnergyNativeTests(unittest.IsolatedAsyncioTestCase):
                 await self.bind()
         finally:
             method.__code__ = code
+
+    async def test_actual_loaded_lookup_mode_code_drift_is_rejected(self):
+        self.assert_bound(await self.prepare())
+        from custom_components.powercalc.strategy.lut import LookupMode
+        method = LookupMode.from_color_mode
+        code = method.__code__
+        original = self.evidence, self.first
+        original_bytes = self.evidence.sha256, self.first.structural_token
+        try:
+            # Negative only: the same real dispatch function, no substitute
+            # class/callback and no calculation or producer event under fault.
+            method.__code__ = code.replace(co_firstlineno=code.co_firstlineno + 1)
+            with self.assertRaises(ValueError):
+                await self.bind()
+        finally:
+            method.__code__ = code
+        self.assertIs(self.evidence, original[0])
+        self.assertIs(self.first, original[1])
+        self.assertEqual((self.evidence.sha256, self.first.structural_token), original_bytes)
+        self.assert_bound(await self.bind())
 
     async def test_actual_gui_source_drift_is_not_rebaselined(self):
         self.assert_bound(await self.prepare())

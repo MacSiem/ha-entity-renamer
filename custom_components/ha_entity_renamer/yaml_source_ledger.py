@@ -103,9 +103,12 @@ def _hash(value):
 
 def source_graph_digest(plan: Plan) -> str:
     """Same immutable graph binding for extraction and its native consumer."""
-    return _hash({'root': 'configuration.yaml', 'files': [asdict(x) for x in plan.files],
-                  'directories': [asdict(x) for x in plan.directories],
-                  'edges': [asdict(x) for x in plan.edges]})
+    value = {'root': 'configuration.yaml', 'files': [asdict(x) for x in plan.files],
+             'directories': [asdict(x) for x in plan.directories],
+             'edges': [asdict(x) for x in plan.edges]}
+    if plan.powercalc_inputs is not None:
+        value['powercalc_inputs'] = asdict(plan.powercalc_inputs)
+    return _hash(value)
 
 
 @dataclass(frozen=True)

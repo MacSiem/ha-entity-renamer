@@ -95,11 +95,22 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False):
             parent = parent.parent
     directories = {item.path: item.entries for item in plan.directories}
     directory_names = {item.path: None for item in plan.directories}
+    auxiliary = plan.powercalc_inputs
+    if auxiliary is not None:
+        from .yaml_plan import PowercalcSourceInputs
+        if (type(auxiliary) is not PowercalcSourceInputs
+                or {r.path for r in auxiliary.files} & {r.path for r in plan.files}):
+            raise YAMLValidationError('powercalc_auxiliary_input_invalid')
+        paths.update(row.path for row in auxiliary.files)
+        for path, entries, names in auxiliary.directories:
+            if path in directories:
+                raise YAMLValidationError('powercalc_auxiliary_directory_overlap')
+            directories[path], directory_names[path] = entries, names
     def remember_directory(relative):
         # Include graph directories are complete enumerations. Ancestors and
         # storage only guard inputs actually used by the checker, including
         # absent secrets. Unrelated HA logs/traces/backups may change normally.
-        names = None
+        names = directory_names.get(relative)
         if relative not in directories:
             names = {'secrets.yaml'}
             prefix = '' if relative == '.' else relative + '/'
@@ -122,6 +133,10 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False):
                 directory_names[relative] = None if names is None else tuple(sorted(names))
         finally:
             os.close(fd)
+    # Auxiliary directory identities/absences came from the SAME prepared Plan.
+    if auxiliary is not None:
+        for path, _, _ in auxiliary.directories:
+            remember_directory(path)
     # Track absence as well as presence (new secrets, auxiliary dirs or registry files).
     remember_directory('.')
     for path in tuple(paths):
@@ -154,8 +169,14 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False):
                         paths.add(path)
                     else:
                         raise YAMLValidationError('unsafe_validation_input')
-            directories[relative] = tuple(sorted(entries))
-            directory_names[relative] = None
+            if auxiliary is not None and relative in {r[0] for r in auxiliary.directories}:
+                names = directory_names[relative]
+                selected = tuple(sorted(row for row in entries if names is None or row[0] in names))
+                if selected != directories[relative]:
+                    raise YAMLValidationError('powercalc_auxiliary_directory_changed')
+            else:
+                directories[relative] = tuple(sorted(entries))
+                directory_names[relative] = None
         finally:
             os.close(fd)
     try:
@@ -188,6 +209,8 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False):
                 (baseline / path).mkdir(parents=True, exist_ok=True, mode=0o700)
                 (proposed / path).mkdir(parents=True, exist_ok=True, mode=0o700)
         snapshots = {item.path: item for item in plan.files}
+        if auxiliary is not None:
+            snapshots.update((item.path, item) for item in auxiliary.files)
         sources, total = [], 0
         original_bytes = {} if with_sources else None
         for path in sorted(paths):
@@ -200,7 +223,7 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False):
                 snap = snapshots[path]
                 if (digest, info.st_dev, info.st_ino) != (snap.sha256, snap.device, snap.inode):
                     raise YAMLValidationError('validation_source_changed')
-                if original_bytes is not None:
+                if original_bytes is not None and path in {r.path for r in plan.files}:
                     original_bytes[path] = raw
             replacement = raw
             if patch := patches.get(path):
@@ -301,6 +324,7 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
             process = await asyncio.create_subprocess_exec(
                 sys.executable, '-I', worker, str(before), str(after),
                 *(('--source-evidence',) if with_sources else ()),
+                *(('--powercalc-profile-inputs',) if plan.powercalc_inputs is not None else ()),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                 start_new_session=True)
             try:
@@ -404,7 +428,7 @@ async def async_validate_proposed_with_powercalc_sources(hass, plan, scratch_par
     Read-only prerequisite. Unsupported Powercalc apply stays unsupported.
     """
     from .powercalc_source_binding import PowercalcVendor
-    vendor = PowercalcVendor(hass)
+    vendor = PowercalcVendor(hass, with_profiles=plan.powercalc_inputs is not None)
     bundle = await _settled_executor(hass, vendor.sources)
     vendor.bindings()
     result = await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,

@@ -75,7 +75,7 @@ def stage_powercalc_bundle(bundle, before, after):
 
 class PowercalcVendor:
     """Process-local exact class/method bindings + full official source file pin."""
-    def __init__(self, hass):
+    def __init__(self, hass, *, with_profiles=False):
         from homeassistant.const import __version__
         from homeassistant import loader
         _need(__version__ == '2026.10.2', 'vendor_core_pair_unverified')
@@ -139,8 +139,12 @@ class PowercalcVendor:
             '_remove_listener', '_async_dispatch_entity_id_event', '_async_state_filter',
             '_async_track_event', '_async_track_state_change_event',
             'async_track_state_change_event')) + ((EventBus, '_async_remove_listener'),)
+        if with_profiles:
+            from .powercalc_profile_binding import extend_vendor
+            extend_vendor(self)
         self.ha_methods = tuple(getattr(owner, name) for owner, name in self.ha_refs)
-        self.ha_codes = tuple(method.__code__ for method in self.ha_methods)
+        self.ha_codes = tuple((method.fget if type(method) is property else method).__code__
+                              for method in self.ha_methods)
         self.methods = tuple(getattr(owner, name) for owner, name in self.refs)
         self.codes = tuple((method.fget if type(method) is property else method).__code__
                            for method in self.methods)
@@ -190,10 +194,14 @@ class OriginalPowercalcSources:
     ledger: SourceLedger
     receipt_json: bytes
     native_json: bytes
+    closed_graph_json: bytes | None = None
 
     @property
     def sha256(self):
-        return _sha(_json([_TREE, self.ledger.sha256, self.receipt_json.decode(), self.native_json.decode()]))
+        value = [_TREE, self.ledger.sha256, self.receipt_json.decode(), self.native_json.decode()]
+        if self.closed_graph_json is not None:
+            value.append(self.closed_graph_json.decode())
+        return _sha(_json(value))
 
     @property
     def migration_ready(self):
@@ -208,14 +216,25 @@ def seal_powercalc_sources(receipt, plan, ledger, native):
     sources = {row[0]: row[1:] for row in receipt.source_files}
     _need(all(sources.get(row.path) == (row.sha256, row.device, row.inode) for row in plan.files),
           'original_receipt_mismatch')
-    _need(native['version'] == receipt.version and set(native) == {'version', 'rows', 'globals'},
+    _need(native['version'] == receipt.version and set(native) ==
+          ({'version', 'rows', 'globals'} | ({'closed_graph'} if plan.powercalc_inputs is not None else set())),
           'original_projection_mismatch')
     keys = [row[0] for row in native['rows']]
     if not ledger.findings:
         expected = [row.native_key for row in ledger.definitions if row.domain == 'powercalc.sensor']
         _need(None not in keys and sorted(keys) == sorted(expected)
               and len(keys) == len(set(keys)), 'original_source_membership_mismatch')
-    return OriginalPowercalcSources(ledger, _receipt_bytes(receipt), _json(native))
+    closed = native.get('closed_graph')
+    if plan.powercalc_inputs is not None:
+        _need(type(closed) is dict and closed.get('schema') == 1, 'profile_graph_required')
+        _need(all(sources.get(row.path) == (row.sha256, row.device, row.inode)
+                  for row in plan.powercalc_inputs.files), 'profile_receipt_mismatch')
+        planned = {row.path: row.sha256 for row in plan.powercalc_inputs.files
+                   if row.path.startswith('powercalc/profiles/')}
+        _need(dict(closed['files']) == planned, 'profile_graph_membership_mismatch')
+    plain = {k: v for k, v in native.items() if k != 'closed_graph'}
+    return OriginalPowercalcSources(ledger, _receipt_bytes(receipt), _json(plain),
+                                   None if closed is None else _json(closed))
 
 
 @dataclass(frozen=True)
@@ -231,6 +250,7 @@ class PowercalcBoundRow:
     # producer -> consumer; sign preserves custom group sum semantics.
     edges: tuple[tuple[str, str, int], ...] = ()
     runtime_identities: tuple[int, ...] = ()
+    relation_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -244,6 +264,8 @@ class PowercalcSourceBindings:
     core_version: str = '2026.10.2'
     blockers: tuple[str, ...] = ('powercalc_profiles_dynamic_unverified',
         'powercalc_energy_topology_unverified', 'powercalc_continuity_unverified')
+    relationships: tuple[tuple[str, str, str, int], ...] = ()
+    energy_settings_sha256: str | None = None
 
     @property
     def migration_ready(self):
@@ -269,7 +291,7 @@ def _dispatch_token(entity, expected_class, names):
     return tuple(token)
 
 
-def _sample(hass, vendor, evidence, observed, captured):
+def _sample(hass, vendor, evidence, observed, captured, prepared=None):
     from homeassistant.helpers import entity_platform as ep, entity_registry as er
     from homeassistant.helpers.entity import Entity
     original = evidence.powercalc_sources
@@ -475,6 +497,10 @@ def _sample(hass, vendor, evidence, observed, captured):
         except (ValueError, KeyError, TypeError, AttributeError):
             results.append(PowercalcBoundRow(eid, inventory['registry_id'], False,
                                             'custom_group_sources_unverified'))
+    if original.closed_graph_json is not None:
+        from .powercalc_profile_binding import bind_graph
+        return bind_graph(hass, vendor, evidence, observed, captured, results,
+                          row_identity, listeners, global_ok, prepared)
     return tuple(sorted(results, key=lambda row: (str(row.entity_id), str(row.registry_id))))
 
 
@@ -495,8 +521,15 @@ async def async_bind_powercalc_sources(hass, receipt, evidence, captured, *, gua
         _guard(guard)
         evidence.assert_receipt(receipt)
     check()
-    vendor = PowercalcVendor(hass)
-    await _settled_executor(hass, vendor.sources)
+    closed = evidence.powercalc_sources.closed_graph_json is not None
+    vendor = PowercalcVendor(hass, with_profiles=closed)
+    def initial_sources():
+        vendor.sources()
+        if closed:
+            from .powercalc_profile_inputs import prepare_profile_files
+            return prepare_profile_files(receipt, evidence.powercalc_sources)
+        return None
+    prepared = await _settled_executor(hass, initial_sources)
     check()
     observed = await async_observe_discovery_inputs(hass, guard=check)
     sources = {row[0]: row[1:] for row in receipt.source_files}
@@ -506,15 +539,29 @@ async def async_bind_powercalc_sources(hass, receipt, evidence, captured, *, gua
     await _settled_executor(hass, assert_validation_current, receipt)
     check()
     vendor.bindings()
-    assert_powercalc_runtime_current(hass, captured, guard=check)
-    first = _sample(hass, vendor, evidence, observed, captured)
-    await _settled_executor(hass, vendor.sources)
-    check()
-    await _settled_executor(hass, assert_validation_current, receipt)
+    if not closed:
+        assert_powercalc_runtime_current(hass, captured, guard=check)
+    first = _sample(hass, vendor, evidence, observed, captured, prepared)
+    if closed:
+        from .powercalc_profile_binding import runtime_current
+        runtime_current(hass, captured, first, guard=check)
+    def final_sources():
+        vendor.sources()
+        assert_validation_current(receipt)
+    await _settled_executor(hass, final_sources)
     check()
     assert_discovery_managers_current(hass, observed, guard=check)
-    assert_powercalc_runtime_current(hass, captured, guard=check)
+    if not closed:
+        assert_powercalc_runtime_current(hass, captured, guard=check)
     vendor.bindings()
-    second = _sample(hass, vendor, evidence, observed, captured)
+    second = _sample(hass, vendor, evidence, observed, captured, prepared)
+    if closed:
+        runtime_current(hass, captured, second, guard=check)
     _need(first == second, 'source_binding_changed_during_capture')
-    return PowercalcSourceBindings(evidence.sha256, _sha(captured.payload_json), second)
+    relationships = tuple(sorted((row.relation_kind, source, target, sign)
+        for row in second if row.source_verified and row.relation_kind is not None
+        for source, target, sign in row.edges))
+    settings = (json.loads(evidence.powercalc_sources.closed_graph_json)['energy_settings_sha256']
+                if closed else None)
+    return PowercalcSourceBindings(evidence.sha256, _sha(captured.payload_json), second,
+                                   relationships=relationships, energy_settings_sha256=settings)
