@@ -134,3 +134,25 @@ class PowercalcNumericContinuityNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(new['last_valid'], old['last_valid'])
         self.assertEqual(new['anchor'], old['anchor'])
         self.assertEqual(new['trigger'], old['trigger'])
+
+    async def test_actual_source_change_keeps_native_W_calculator_live_during_reload_RED(self):
+        # Actual Light change in the native unload gap must still reach the
+        # original real W calculator; recomputing only after setup loses time.
+        result, rows = await self.collect(gap_event=True)
+        old_id, new_id = next((old, new) for name, old, new in result.lifecycle.instance_pairs
+                              if name == self.static_power.entity_id)
+        emissions = [r for r in rows if r['tag'] == 'fire' and r['phase'] == 'start'
+                     and r.get('entity_id') == self.yaml_source
+                     and r.get('new') is not None
+                     and r['new']['attributes'].get('brightness') == 1]
+        self.assertEqual(len(emissions), 1, 'one actual Light brightness change')
+        source = emissions[0]
+        new_calls = [r for r in rows if r['tag'] == 'power_source'
+                     and r['phase'] == 'start' and r['snapshot']['process_id'] == new_id]
+        self.assertTrue(new_calls, 'actual replacement calculator was not invoked')
+        retained = [r for r in rows if r['tag'] == 'power_calculate'
+                    and r['phase'] == 'return' and r['snapshot']['process_id'] == old_id
+                    and source['seq'] < r['seq'] < new_calls[0]['seq']
+                    and r.get('state', {}).get('process_id') == source['new']['process_id']]
+        self.assertTrue(retained, 'actual source event had no retained native W calculation in unload gap')
+        self.assertTrue(all(Decimal(r['returned_decimal']['decimal']).is_finite() for r in retained))
