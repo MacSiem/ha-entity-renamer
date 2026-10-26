@@ -77,6 +77,7 @@ class _Reload:
         self.inflight={}
         self.listener_owner=None
         self.exact_owner=None
+        self.producer_owner=None
 
     def check(self):
         _guard(self.guard)
@@ -92,6 +93,8 @@ class _Reload:
         unchanged(self.ha_refs,self.ha_methods,self.ha_codes)
         if self.exact_owner is not None:
             self.exact_owner.check()
+        if self.producer_owner is not None:
+            self.producer_owner.check()
         entries=tuple(self.hass.config_entries.async_entries('powercalc'))
         _need(len(entries)==len(self.entries)
               and all(a is b for a,b in zip(entries,self.entries,strict=True)),
@@ -219,6 +222,10 @@ class _Reload:
             code=frame.f_code
             entity=frame.f_locals.get('self')
             tag=self.tags.get(code)
+            if tag.startswith('producer_'):
+                _need(self.producer_owner is not None,'producer_owner_missing')
+                self.producer_owner.observe(tag,frame,phase,result)
+                return
             if tag in ('exact_vendor_schedule','exact_base_schedule'):
                 _need(self.exact_owner is not None,'exact_owner_missing')
                 self.exact_owner.observe(tag,frame,phase)
@@ -304,6 +311,8 @@ class _Reload:
                 else:
                     _need(not entity._on_remove,'old_callbacks_left')
                     self.removed.add(entity.entity_id)
+                    if self.producer_owner is not None:
+                        self.producer_owner.removed(entity)
             elif tag=='add' and phase=='return':
                 _need(entity is not self.old.get(entity.entity_id)
                       and entity.entity_id not in self.added,'one_replacement')
@@ -316,7 +325,7 @@ class _Reload:
                 try:
                     detail=(error.args[0] if type(error) is ValueError
                         and len(error.args)==1 and type(error.args[0]) is str
-                        and error.args[0].startswith(('powercalc_reload_','powercalc_exact_fields_')) else None)
+                        and error.args[0].startswith(('powercalc_reload_','powercalc_exact_fields_','powercalc_retained_producer_')) else None)
                     self.first_failure=(tag,phase,frame.f_code.co_qualname,
                         frame.f_lineno,type(error).__module__+'.'+type(error).__qualname__,detail)
                 except BaseException:
@@ -331,6 +340,11 @@ class _Reload:
             children=[task for task in asyncio.all_tasks(self.loop)
                 if task not in (self.owner,current) and not task.done()
                 and task.get_context().get(self.causal,None) is self.marker]
+            if self.producer_owner is not None:
+                # Finite real Tasks observed at exact native old-W frames,
+                # including refused pre-boundary input; never a global HA drain.
+                children.extend(task for task in self.producer_owner.pending_tasks()
+                    if task not in (self.owner,current) and task not in children)
             ready=[handle for handle in self.loop._ready
                 if not handle.cancelled()
                 and handle._context.get(self.causal,None) is self.marker
@@ -381,7 +395,8 @@ class _Reload:
 
 
 async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,original,*,guard,
-                                                  _manage_global_rename=False, _exact_fields=None):
+                                                  _manage_global_rename=False, _exact_fields=None,
+                                                  _retain_producers=False):
     """Own ONE real service call under unchanged ORIGINAL. Caller owns admin/IO lease.
 
     PERFORMS a real vendor reload, which may reset numeric state. This function
@@ -395,6 +410,8 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
     from homeassistant.helpers.entity_platform import EntityPlatform
     from .yaml_validation import _settled_executor
     _need(type(_manage_global_rename) is bool,'global_policy_shape')
+    _need(type(_retain_producers) is bool
+          and (not _retain_producers or _exact_fields is not None),'typed_producer_policy')
     _need(__version__=='2026.10.2' and type(hass) is HomeAssistant,'supported_pair')
     if _exact_fields is not None:
         from .powercalc_exact_fields import _ExactFieldsPolicy
@@ -423,6 +440,9 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
     if _exact_fields is not None:
         from .powercalc_exact_fields import _ExactFieldsOwner
         scope.exact_owner=_ExactFieldsOwner(scope,_exact_fields)
+    if _retain_producers:
+        from .powercalc_retained_producer import _RetainedProducerOwner
+        scope.producer_owner=_RetainedProducerOwner(scope)
     native=import_module('custom_components.powercalc')
     scope.vendor_refs=tuple((native,name) for name in ('register_services','async_setup_entry',
                                                        'async_unload_entry','_async_load_yaml_sensor'))
@@ -440,6 +460,9 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
     if scope.exact_owner is not None:
         scope.vendor_refs+=scope.exact_owner.vrefs
         scope.ha_refs+=scope.exact_owner.hrefs
+    if scope.producer_owner is not None:
+        scope.vendor_refs+=scope.producer_owner.vrefs
+        scope.ha_refs+=scope.producer_owner.hrefs
     def prove():
         scope.vendor.sources()
         if scope.exact_owner is not None:
@@ -472,6 +495,8 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
                            scope.rename_target:'global_effect'})
     if scope.exact_owner is not None:
         scope.tags.update(scope.exact_owner.bind_codes())
+    if scope.producer_owner is not None:
+        scope.tags.update(scope.producer_owner.bind_codes())
     scope.codes=tuple(scope.tags)
     scope.context=Context()
     scope.call_class=ServiceCall
@@ -487,6 +512,8 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
         scope.listener_owner=_GlobalRenameOwner(scope,rename_before,second)
     if scope.exact_owner is not None:
         scope.exact_owner.bind_original(second)
+    if scope.producer_owner is not None:
+        scope.producer_owner.bind_original(second)
     token=scope.causal.set(scope.marker)
     task=None
     try:
@@ -584,7 +611,12 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
             from .powercalc_global_listener_ownership import PowercalcOwnedReloadWitness
             # Complete exact-fields validation before committing global ownership.
             exact_receipt=(None if scope.exact_owner is None else scope.exact_owner.finish(current))
+            producer_receipt=(None if scope.producer_owner is None else scope.producer_owner.finish(current))
             native_receipt=scope.listener_owner.finish(rename_after)
+            if producer_receipt is not None:
+                from .powercalc_retained_producer import PowercalcRetainedProducerReloadWitness
+                return PowercalcRetainedProducerReloadWitness(
+                    lifecycle,native_receipt,exact_receipt,producer_receipt)
             if exact_receipt is not None:
                 from .powercalc_exact_fields import PowercalcExactFieldsReloadWitness
                 return PowercalcExactFieldsReloadWitness(lifecycle,native_receipt,exact_receipt)
@@ -594,6 +626,14 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
         scope.annotate(error)
         if scope.exact_owner is not None:
             scope.exact_owner.annotate(error)
+        if scope.producer_owner is not None:
+            scope.producer_owner.annotate(error)
+            try:
+                scope.producer_owner.close()
+            except BaseException as cleanup_error:
+                error.add_note('powercalc_retained_producer_cleanup_refused')
+                # Keep trying the independent existing global-owner cleanup.
+                error.add_note(type(cleanup_error).__name__)
         if scope.listener_owner is not None:
             try:
                 scope.listener_owner.abort()
@@ -603,4 +643,8 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
         raise
     finally:
         scope.causal.reset(token)
-        scope.close()
+        try:
+            if scope.producer_owner is not None:
+                scope.producer_owner.close()
+        finally:
+            scope.close()

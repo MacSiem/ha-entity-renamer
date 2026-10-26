@@ -43,7 +43,16 @@ class PowercalcNumericContinuityNativeTests(unittest.IsolatedAsyncioTestCase):
         # Missing product API is an explicit RED after genuine preparation.
         self.numeric = self.module('powercalc_numeric_continuity_probe')
 
-    async def collect(self, *, gap_event=False, exact_fields=False):
+    async def collect(self, *, gap_event=False, exact_fields=False,
+                      retain_producers=False, gap_selector=False):
+        if gap_selector:
+            # Real native preparation: warm a profile through the public Select
+            # producer and return it to ORIGINAL before chain capture. No cache
+            # entry/strategy replacement. Cold/in-flight handoff may refuse.
+            await self.selector.async_select_option('25%')
+            await self.f.hass.async_block_till_done()
+            await self.selector.async_select_option('Disabled')
+            await self.f.hass.async_block_till_done()
         await self.ready()
         completion = self.f.hass.loop.create_future() if gap_event else None
         if completion is not None:
@@ -51,7 +60,7 @@ class PowercalcNumericContinuityNativeTests(unittest.IsolatedAsyncioTestCase):
             # awaiting this same real completion still raises the original error.
             completion.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         started = False
-        removed_power_id = self.static_power.entity_id
+        removed_power_id = (self.dynamic_power if gap_selector else self.static_power).entity_id
         async def real_producer_after_power_removal(event):
             nonlocal started
             state = event.data.get('new_state')
@@ -66,7 +75,10 @@ class PowercalcNumericContinuityNativeTests(unittest.IsolatedAsyncioTestCase):
             try:
                 # Real Light API, scheduled normally by native EventBus. Never
                 # invoke a retained calculator/bridge/monitor or create a State.
-                await self.sources[0].async_turn_on(brightness=1)
+                if gap_selector:
+                    await self.selector.async_select_option('25%')
+                else:
+                    await self.sources[0].async_turn_on(brightness=1)
             except BaseException as error:
                 completion.set_exception(error)
             else:
@@ -75,7 +87,7 @@ class PowercalcNumericContinuityNativeTests(unittest.IsolatedAsyncioTestCase):
         try:
             result = await self.numeric.async_capture_powercalc_numeric_reload(
                 self.f.hass, self.chain, self.evidence, self.original_runtime, guard=self.guard,
-                exact_fields=exact_fields)
+                exact_fields=exact_fields, retain_producers=retain_producers)
             if gap_event:
                 async with asyncio.timeout(8):
                     await asyncio.shield(completion)
@@ -242,3 +254,195 @@ class PowercalcNumericContinuityNativeTests(unittest.IsolatedAsyncioTestCase):
             await witness.async_witness_unchanged_powercalc_reload(
                 self.f.hass, self.chain.original_receipt, self.evidence, self.original_runtime,
                 guard=self.guard, _manage_global_rename=True, _exact_fields=object())
+
+    async def _assert_retained_result(self, *, selector=False):
+        result, rows = await self.collect(gap_event=True, exact_fields=True,
+                                          retain_producers=True, gap_selector=selector)
+        receipt = result.retained_producers
+        self.assertIsNotNone(receipt)
+        self.assertTrue(receipt.retained_calculations_verified)
+        self.assertFalse(receipt.continuity_verified)
+        self.assertFalse(receipt.counter_ownership_verified)
+        self.assertFalse(receipt.migration_ready)
+        old = self.dynamic_power if selector else self.static_power
+        source = self.selector if selector else self.sources[0]
+        old_id, new_id = next((a, b) for name, a, b in result.lifecycle.instance_pairs
+                              if name == old.entity_id)
+        outcomes = [outcome for outcome in receipt.calculations if outcome.producer is old
+                    and outcome.input_state.entity_id == source.entity_id]
+        self.assertEqual(len(outcomes), 1)
+        outcome = outcomes[0]
+        self.assertIs(outcome.event.data['new_state'], outcome.input_state)
+        self.assertIs(outcome.old_profile, old._power_profile)
+        self.assertIs(outcome.actual_strategy, old._strategy_instance)
+        self.assertEqual(outcome.ownership_phase, 'retained_removed')
+        self.assertEqual(outcome.native_power, old._power)
+        self.assertTrue(outcome.available)
+        self.assertTrue(outcome.calculated_value.is_finite())
+        self.assertTrue(outcome.native_power.is_finite())
+        self.assertLessEqual(outcome.calculation_returned_at, outcome.update_started_at)
+        self.assertLessEqual(outcome.update_started_at, outcome.update_returned_at)
+        self.assertLessEqual(outcome.update_returned_at, outcome.completed_at)
+        self.assertTrue(outcome.native_value_changed)
+        self.assertTrue(outcome.native_write_attempted)
+        self.assertIsNotNone(outcome.native_write_returned_at)
+        first_new = min(row['seq'] for row in rows if row['tag'] == 'power_source'
+                        and row['phase'] == 'start' and row['snapshot']['process_id'] == new_id)
+        retained = [row for row in rows if row['tag'] == 'power_calculate'
+                    and row['phase'] == 'return' and row['snapshot']['process_id'] == old_id
+                    and row['seq'] < first_new
+                    and row.get('state', {}).get('process_id') == id(outcome.input_state)]
+        self.assertEqual(len(retained), 1, 'actual retained calculation before new producer')
+        if selector:
+            self.assertEqual(outcome.input_state.state, '25%')
+            self.assertIsNot(outcome.input_state, outcome.resolved_light_state)
+            self.assertEqual(outcome.resolved_light_state.entity_id, self.gui_source)
+        else:
+            self.assertEqual(outcome.input_state.attributes['brightness'], 1)
+            self.assertIs(outcome.input_state, outcome.resolved_light_state)
+        operations = json.loads(receipt.native_operations_json)
+        for name in (self.static_power.entity_id, self.dynamic_power.entity_id):
+            self.assertEqual(sum(row[:2] == ['bridge_add', name] for row in operations), 1)
+            self.assertEqual(sum(row[:2] == ['bridge_remove', name] for row in operations), 1)
+            self.assertEqual(sum(row[:2] == ['native_handoff', name] for row in operations), 1)
+        self.assertFalse(result.continuity_verified)
+        self.assertFalse(result.counter_ownership_verified)
+        return outcome
+
+    async def test_typed_retained_producer_actual_brightness_calculates_before_new_W(self):
+        await self._assert_retained_result()
+
+    async def test_typed_retained_producer_actual_selector_calculates_before_new_W(self):
+        await self._assert_retained_result(selector=True)
+
+    def _assert_no_retained_bridges_or_tasks(self):
+        from homeassistant.helpers import event
+        data = self.f.hass.data.get(event._TRACK_STATE_CHANGE_DATA)
+        if data is not None:
+            for jobs in data.callbacks.values():
+                for job in jobs:
+                    self.assertNotEqual(getattr(job.target, '__qualname__', ''),
+                        '_RetainedProducerOwner.removed.<locals>.bridge')
+        self.assertFalse([task for task in asyncio.all_tasks(self.f.hass.loop)
+                          if not task.done() and task.get_name().startswith('renamer.powercalc.retained.')])
+
+    async def test_typed_retained_producer_cancellation_after_actual_gap_input_cleans_scope(self):
+        await self.ready()
+        completed = self.f.hass.loop.create_future()
+        seen = False
+        task = None
+        async def actual_input_then_cancel(event):
+            nonlocal seen
+            state = event.data.get('new_state')
+            if (seen or event.data.get('entity_id') != self.static_power.entity_id
+                    or state is None or state.state != 'unavailable'
+                    or state.attributes.get('restored') is not True):
+                return
+            seen = True
+            try:
+                await self.sources[0].async_turn_on(brightness=1)
+                task.cancel()
+            except BaseException as error:
+                completed.set_exception(error)
+            else:
+                completed.set_result(None)
+        remove = self.f.hass.bus.async_listen('state_changed', actual_input_then_cancel)
+        try:
+            task = asyncio.create_task(self.numeric.async_capture_powercalc_numeric_reload(
+                self.f.hass, self.chain, self.evidence, self.original_runtime, guard=self.guard,
+                exact_fields=True, retain_producers=True))
+            with self.assertRaises(asyncio.CancelledError) as caught:
+                await task
+            async with asyncio.timeout(8):
+                await completed
+            self.assertTrue(seen)
+            self.assertTrue(any(note.startswith('powercalc_retained_producer_partial_results=')
+                                for note in getattr(caught.exception, '__notes__', ())))
+            self._assert_no_retained_bridges_or_tasks()
+        finally:
+            remove()
+
+    async def test_typed_retained_producer_foreign_physical_identity_refuses_and_cleans_scope(self):
+        await self.ready()
+        completed = self.f.hass.loop.create_future()
+        seen = False
+        before = self.static_power._power
+        async def actual_foreign_identity(event):
+            nonlocal seen
+            state = event.data.get('new_state')
+            if (seen or event.data.get('entity_id') != self.static_power.entity_id
+                    or state is None or state.state != 'unavailable'
+                    or state.attributes.get('restored') is not True):
+                return
+            seen = True
+            try:
+                # A real registry takeover, followed by a real Light write.
+                # No vendor method, bridge, Event or W State is invoked/created.
+                self.f.entity.async_update_entity(self.yaml_source, new_unique_id='foreign-native-input')
+                await self.sources[0].async_turn_on(brightness=1)
+            except BaseException as error:
+                completed.set_exception(error)
+            else:
+                completed.set_result(None)
+        remove = self.f.hass.bus.async_listen('state_changed', actual_foreign_identity)
+        try:
+            with self.assertRaises(ValueError):
+                await self.numeric.async_capture_powercalc_numeric_reload(
+                    self.f.hass, self.chain, self.evidence, self.original_runtime, guard=self.guard,
+                    exact_fields=True, retain_producers=True)
+            async with asyncio.timeout(8):
+                await completed
+            self.assertTrue(seen)
+            self.assertEqual(self.static_power._power, before)
+            self._assert_no_retained_bridges_or_tasks()
+        finally:
+            remove()
+
+    async def test_typed_retained_producer_quiet_reload_has_no_calculation_claim(self):
+        result, rows = await self.collect(exact_fields=True, retain_producers=True)
+        receipt = result.retained_producers
+        self.assertTrue(receipt.retained_producer_lifecycle_verified)
+        self.assertEqual(receipt.calculations, ())
+        self.assertFalse(receipt.retained_calculations_verified)
+        self.assertFalse(receipt.continuity_verified)
+        self._assert_no_retained_bridges_or_tasks()
+
+    async def test_typed_retained_producer_foreign_instance_dispatch_refuses_before_call(self):
+        await self.ready()
+        completed = self.f.hass.loop.create_future()
+        seen, calls = False, []
+        original = self.static_power._has_valid_state
+        def foreign_dispatch(*args):
+            calls.append(args)
+            return True
+        async def actual_input_after_dispatch_drift(event):
+            nonlocal seen
+            state = event.data.get('new_state')
+            if (seen or event.data.get('entity_id') != self.static_power.entity_id
+                    or state is None or state.state != 'unavailable'
+                    or state.attributes.get('restored') is not True):
+                return
+            seen = True
+            try:
+                # Negative only: a foreign instance method must never run.
+                # The input itself still comes from the real native Light.
+                self.static_power._has_valid_state = foreign_dispatch
+                await self.sources[0].async_turn_on(brightness=1)
+            except BaseException as error:
+                completed.set_exception(error)
+            else:
+                completed.set_result(None)
+        remove = self.f.hass.bus.async_listen('state_changed', actual_input_after_dispatch_drift)
+        try:
+            with self.assertRaises(ValueError):
+                await self.numeric.async_capture_powercalc_numeric_reload(
+                    self.f.hass, self.chain, self.evidence, self.original_runtime, guard=self.guard,
+                    exact_fields=True, retain_producers=True)
+            async with asyncio.timeout(8):
+                await completed
+            self.assertTrue(seen)
+            self.assertEqual(calls, [])
+            self._assert_no_retained_bridges_or_tasks()
+        finally:
+            remove()
+            self.static_power._has_valid_state = original
