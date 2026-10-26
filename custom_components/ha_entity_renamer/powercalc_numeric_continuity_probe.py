@@ -45,7 +45,8 @@ def _value(value, depth=0):
     if type(value) in (tuple, list, set, frozenset):
         values = [_value(v, depth + 1) for v in value]
         return sorted(values, key=_json) if type(value) in (set, frozenset) else values
-    _need(type(value) is dict and all(type(k) is str for k in value), 'value_type')
+    _need(type(value) is dict and all(type(k) is str for k in value),
+          'value_type_' + type(value).__module__ + '.' + type(value).__qualname__)
     return {k: _value(v, depth + 1) for k, v in value.items()}
 
 
