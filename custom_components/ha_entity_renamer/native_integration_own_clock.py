@@ -38,7 +38,8 @@ def original_binding(chain, entry_id, reverse):
     _need(config['options'].get('method') in ('left', 'right', 'trapezoidal')
           and config['options'].get('unit_time') == 's'
           and config['options'].get('unit_prefix') is None
-          and config['options']['source'] == source['entity_id'], 'bounded_source_configuration')
+          and config['options']['source'] in (source['id'], source['entity_id']),
+          'bounded_source_configuration')
     indices = [i for i,s in enumerate(chain.plan.steps)
                if s.adapter == 'registry' and s.identity == helper['id']]
     _need(len(indices) == 1 and not any(s.identity == source['id'] for s in chain.plan.steps),
