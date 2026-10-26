@@ -164,7 +164,8 @@ class CandidateTests(unittest.IsolatedAsyncioTestCase):
                       changed_domains=list(self.original.changed_domains),
                       unsupported_domains=list(self.original.unsupported_domains),
                       runtime_expected=[list(row) for row in self.original.runtime_expected])
-        async def checker(before, after, timeout, checkpoint):
+        async def checker(before, after, timeout, checkpoint, *, with_sources):
+            self.assertIs(with_sources, False)
             await checkpoint()
             self.assertEqual((after / 'configuration.yaml').read_bytes(), self.new)
             self.assertEqual((before / 'configuration.yaml').read_bytes(), self.old)

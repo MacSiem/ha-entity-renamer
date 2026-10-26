@@ -1,4 +1,7 @@
-"""Offline, real copied discovery.py plus synthetic native Store/manager plans."""
+"""UNIT source/consumer binding with copied discovery and synthetic Store/plans.
+
+This fixture supplies no native physical-source, Recorder or runtime evidence.
+"""
 from copy import deepcopy
 import importlib,json,sys,types,unittest
 from pathlib import Path
@@ -62,6 +65,14 @@ async def evaluate(native,plans):
  install('native_discovery_inputs',async_observe_discovery_inputs=observe,
          assert_discovery_managers_current=lambda *a,**kw:None)
  install('helper_native',inventory=lambda *a:plans)
+ # Optional runtime collection is outside this UNIT's structural binding scope.
+ # Refuse it explicitly; do not extend helper_native with fake native readers.
+ def powercalc_unavailable(*a,**kw):
+  raise ValueError('synthetic_powercalc_not_in_unit_scope')
+ def unexpected_powercalc_fence(*a,**kw):
+  raise AssertionError('unit fixture has no Powercalc runtime capture to fence')
+ install('powercalc_runtime_observer',capture_powercalc_runtime=powercalc_unavailable,
+         assert_powercalc_runtime_current=unexpected_powercalc_fence)
  def yaml_unavailable(*a,**kw):raise ValueError('synthetic_yaml_unavailable')
  install('yaml_plan',plan_yaml=yaml_unavailable)
  async def drained(executor,callback):return await executor(callback)
@@ -95,9 +106,27 @@ async def evaluate(native,plans):
   data={}
   @staticmethod
   async def async_add_executor_job(callback):return callback()
- with patch.dict(sys.modules, ha_modules):
+ # Keep the REAL final continuation and synchronous structural checks. Only
+ # the physical worker is an explicit UNIT seam: synthetic native has no root,
+ # Store files, HA manager identity, or SQL authority. Never execute its closure
+ # or manufacture successful native readback/physical evidence here.
+ final_fence=importlib.import_module(NAME+'.discovery_final_fence')
+ physical_requests=[]
+ async def unit_without_physical_io(hass,callback):
+  if not callable(callback):raise AssertionError('physical worker contract changed')
+  physical_requests.append(callback)
+ with patch.dict(sys.modules, ha_modules), patch.object(
+     final_fence,'_settled_physical',new=unit_without_physical_io):
   capture=await discovery.async_discover(Hass(),{'entities':[{
     'entity_id':'sensor.synthetic_old','proposed_entity_id':'sensor.synthetic_new'}]},lambda:None)
+  if len(physical_requests)!=1:
+   raise AssertionError('UNIT fixture must exercise the final continuation once')
+  outside_scope={'powercalc','history','statistics','yaml_sources',
+                 'dashboard','energy','automation','script'}
+  if any(row.status!='UNKNOWN' for row in capture.families if row.name in outside_scope):
+   raise AssertionError('UNIT fixture must not promote unobserved native families')
+  if discovery.compose_preview(capture)['plan_supported']:
+   raise AssertionError('structural UNIT evidence must not become apply readiness')
   return next(row for row in capture.families if row.name=='config_entries'),capture
 
 class Pipeline(unittest.IsolatedAsyncioTestCase):
