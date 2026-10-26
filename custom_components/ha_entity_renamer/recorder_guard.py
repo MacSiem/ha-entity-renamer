@@ -49,26 +49,28 @@ def verify(mapping: dict[str, str], before: dict, after: dict) -> bool:
     return True
 
 
-def _read(instance, ids: tuple[str, ...]) -> dict:
-    """Read through HA's configured SQLAlchemy session on Recorder's executor."""
+def _read_session(session, ids):
     from sqlalchemy import select
     from homeassistant.components.recorder.db_schema import StatesMeta, StatisticsMeta
-    from homeassistant.components.recorder.util import session_scope
-
     result = {"states": {}, "statistics": {}}
-    with session_scope(session=instance.get_session(), read_only=True) as session:
-        for model, kind, identifier in ((StatesMeta, "states", "entity_id"),
-                                        (StatisticsMeta, "statistics", "statistic_id")):
-            rows = session.execute(select(model).where(getattr(model, identifier).in_(ids))).scalars()
-            for row in rows:
-                key = getattr(row, identifier)
-                if key in result[kind]:
-                    raise RecorderConflict("recorder_ambiguous_metadata")
-                result[kind][key] = {
-                    column.name: getattr(row, column.name)
-                    for column in model.__table__.columns if column.name != identifier
-                }
+    for model, kind, identifier in ((StatesMeta, "states", "entity_id"),
+                                    (StatisticsMeta, "statistics", "statistic_id")):
+        rows = session.execute(select(model).where(getattr(model, identifier).in_(ids))).scalars()
+        for row in rows:
+            key = getattr(row, identifier)
+            if key in result[kind]:
+                raise RecorderConflict("recorder_ambiguous_metadata")
+            result[kind][key] = {
+                column.name: getattr(row, column.name)
+                for column in model.__table__.columns if column.name != identifier
+            }
     return result
+
+
+def _read(instance, ids: tuple[str, ...]) -> dict:
+    from homeassistant.components.recorder.util import session_scope
+    with session_scope(session=instance.get_session(), read_only=True) as session:
+        return _read_session(session, ids)
 
 
 class NativeRecorderGuard:
@@ -79,9 +81,9 @@ class NativeRecorderGuard:
         self.hass = hass
         self.instance = get_instance(hass)
 
-    async def snapshot(self, mapping):
-        # Registry callbacks must enqueue migration work before the commit barrier.
-        await self.hass.async_block_till_done()
+    async def async_synchronize(self):
+        # Native commit-before barrier only. Never await HA's global tracked
+        # task set while a final reader holds the Renamer operation lock.
         # async_get_commit_future has an empty-queue fast path: a worker may
         # already have dequeued an event without marking its writes pending.
         # Always enqueue HA's own synchronization task behind prior events.
@@ -93,6 +95,12 @@ class NativeRecorderGuard:
         future = self.hass.loop.create_future()
         self.instance.queue_task(SynchronizeTask(future))
         await asyncio.wait_for(asyncio.shield(future), timeout=60)
+
+    async def snapshot(self, mapping):
+        # Preserve existing synchronization for the original snapshot consumers.
+        # Registry callbacks must enqueue migration work before the barrier.
+        await self.hass.async_block_till_done()
+        await self.async_synchronize()
         ids = tuple(sorted(set(mapping) | set(mapping.values())))
         return await self.instance.async_add_executor_job(partial(_read, self.instance, ids))
 
@@ -101,3 +109,43 @@ class NativeRecorderGuard:
 
     async def readback(self, mapping, before):
         return verify(mapping, before, await self.snapshot(mapping))
+
+
+async def async_final_comparison(guard, mapping, metadata, historical, physical):
+    """Last read job: physical graph around finite SQL; no Recorder queue hold.
+
+    A native synchronization barrier precedes the job. Recorder keeps processing
+    its own queue while the read-only executor session runs. No future/loop wait
+    or native mutation runs inside this job. This is point-in-time evidence,
+    never DB/filesystem atomicity or a permission to mutate later.
+    """
+    from .history_guard import _read_session as read_history
+    from homeassistant.components.recorder import get_instance
+    from homeassistant.components.recorder.util import session_scope
+    if get_instance(guard.hass) is not guard.instance:
+        raise RecorderConflict('recorder_instance_changed')
+    await guard.async_synchronize()
+    ids = tuple(sorted(set(mapping) | set(mapping.values())))
+    def compare():
+        physical()
+        with session_scope(session=guard.instance.get_session(), read_only=True) as session:
+            content = read_history(session, historical['state_ids'],
+                                   historical['statistic_ids'], historical['content'])
+            # Metadata is the last SQL read, after every finite content query.
+            current = _read_session(session, ids)
+        physical()
+        return current == metadata and content == historical['content']
+    import asyncio
+    task = asyncio.ensure_future(guard.instance.async_add_executor_job(compare))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    if get_instance(guard.hass) is not guard.instance:
+        raise RecorderConflict('recorder_instance_changed')
+    return result

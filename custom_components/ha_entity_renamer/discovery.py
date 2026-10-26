@@ -234,6 +234,7 @@ async def async_discover(hass, proposal, guard):
     native = None
     powercalc = None
     powercalc_failure = None
+    recorder = metadata = historical = yaml = None
     guard()
     try:
         powercalc = capture_powercalc_runtime(hass, guard=guard)
@@ -414,5 +415,98 @@ async def async_discover(hass, proposal, guard):
             conflicts.append('source_changed_during_capture')
     elif powercalc_failure is not None and families['powercalc'].status != 'DENIED':
         families['powercalc'] = powercalc_failure
-    return DiscoveryCapture(uuid.uuid4().hex, __version__, proposal_json, bound,
-        tuple(families[name] for name in FAMILIES), tuple(sorted(set(conflicts))))
+    from .discovery_final_fence import _ConsumerFence, _FinalFence, _attach, async_finalize_discovery
+    consumer_fence = None
+    try:
+        consumer_fence = _ConsumerFence(hass,consumers,_plain)
+    except Exception:
+        for name in ('dashboard','energy'):
+            if families[name].status == 'COMPLETE':
+                families[name] = _unknown(name,'source_changed_during_capture')
+        conflicts.append('source_changed_during_capture')
+    capture_id = uuid.uuid4().hex
+    nonlocal_bound = [bound]
+    from .persistence import PersistenceError
+    physical_errors = set()
+    def physical_sources():
+        # Reuse strict full-three physical reader with ORIGINAL manager bytes.
+        # This worker never touches a native cache, manager or Recorder queue.
+        if native is not None:
+            from .native_discovery_inputs import _DiscoveryPinned, _SourceLocation
+            pinned = _DiscoveryPinned(_SourceLocation(native.version,native.config_root),
+                                      tuple(row.manager_json for row in native.files))
+            try:
+                if pinned.capture() != native:
+                    raise ValueError('discovery_native_source_changed')
+            finally:
+                pinned.close()
+        if yaml is not None and plan_yaml(hass.config.config_dir,mapping,
+                                          yaml_dashboards=yaml_roots) != yaml:
+            raise ValueError('discovery_yaml_source_changed')
+        if consumer_fence is not None:
+            consumer_fence.physical()
+
+    def physical():
+        try:
+            physical_sources()
+        except (ValueError,OSError,KeyError,TypeError,RuntimeError,PersistenceError):
+            physical_errors.add('source_changed_during_capture')
+
+    async def finish(output_guard):
+        def current():
+            guard()
+            output_guard()
+        current()
+        if (recorder is not None and metadata is not None and historical is not None
+                and any(families[k].status == 'COMPLETE' for k in ('history','statistics'))):
+            from .recorder_guard import async_final_comparison
+            if await async_final_comparison(recorder,mapping,metadata,historical,physical) is not True:
+                for name in ('history','statistics'):
+                    families[name] = _unknown(name,'recorder_changed_during_capture')
+                conflicts.append('source_changed_during_capture')
+        else:
+            from .discovery_final_fence import _settled_physical
+            await _settled_physical(hass,physical)
+        # No awaits after this point: preserve live authorization, manager,
+        # runtime and Powercalc guards at the same output continuation.
+        current()
+        if consumer_fence is not None:
+            try:
+                consumer_fence.check()
+            except (ValueError,OSError,KeyError,TypeError,RuntimeError,PersistenceError):
+                physical_errors.add('source_changed_during_capture')
+        if native is not None:
+            from .native_discovery_inputs import assert_discovery_managers_current
+            try:
+                assert_discovery_managers_current(hass,native,guard=current)
+            except (ValueError,OSError):
+                physical_errors.add('source_changed_during_capture')
+        if physical_errors:
+            for name in ('entity_registry','device_registry','config_entries','template','powercalc',
+                         'yaml_sources','history','statistics','dashboard','energy'):
+                if families[name].status != 'DENIED':
+                    families[name] = _unknown(name,'source_changed_during_capture')
+            conflicts.append('source_changed_during_capture')
+            nonlocal_bound[0] = None
+        for domain,token in runtime_tokens.items():
+            if token is not None:
+                actual,actual_token = _runtime_family(hass,domain)
+                if token != actual_token or actual != families[domain]:
+                    families[domain] = _unknown(domain,'source_changed_during_capture')
+                    conflicts.append('source_changed_during_capture')
+        if powercalc is not None:
+            try:
+                assert_powercalc_runtime_current(hass,powercalc,guard=current)
+            except PermissionError:
+                families['powercalc'] = _unknown('powercalc','read_access_denied',denied=True)
+            except (ValueError,KeyError,TypeError,AttributeError,RecursionError):
+                if families['powercalc'].status != 'DENIED':
+                    families['powercalc'] = _unknown('powercalc','powercalc_runtime_changed_during_capture')
+                conflicts.append('source_changed_during_capture')
+        current()
+        return _attach(DiscoveryCapture(capture_id,__version__,proposal_json,nonlocal_bound[0],
+            tuple(families[name] for name in FAMILIES),tuple(sorted(set(conflicts)))),fence)
+    fence = _FinalFence(hass,finish)
+    initial = _attach(DiscoveryCapture(capture_id,__version__,proposal_json,bound,
+        tuple(families[name] for name in FAMILIES),tuple(sorted(set(conflicts)))),fence)
+    return await async_finalize_discovery(hass,initial,guard)

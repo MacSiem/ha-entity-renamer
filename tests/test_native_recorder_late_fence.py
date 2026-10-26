@@ -194,6 +194,12 @@ class NativeRecorderLateFenceTests(unittest.IsolatedAsyncioTestCase):
         self.assert_refused(capture)
 
     async def test_websocket_final_real_user_refresh_cannot_send_stale_complete(self):
+        await self._websocket_final_user_refresh(preview=False)
+
+    async def test_websocket_preview_final_real_user_refresh_cannot_send_stale_complete(self):
+        await self._websocket_final_user_refresh(preview=True)
+
+    async def _websocket_final_user_refresh(self,*,preview):
         from homeassistant import auth
         self.f.hass.auth = await auth.auth_manager_from_config(self.f.hass, [], [])
         from homeassistant.auth.const import GROUP_ID_ADMIN
@@ -222,7 +228,7 @@ class NativeRecorderLateFenceTests(unittest.IsolatedAsyncioTestCase):
             return result
         with patch.object(manager_type, 'async_get_user', read_real_user_then_mutate):
             await ws._read_discovery(self.f.hass, connection,
-                {'id': 1, 'proposal': self.proposal}, preview=False)
+                {'id': 1, 'proposal': self.proposal}, preview=preview)
         self.assertEqual(len(calls), 4)
         self.assertEqual(self.mutations, ['unit'])
         self.assertIsNotNone(connection.output)

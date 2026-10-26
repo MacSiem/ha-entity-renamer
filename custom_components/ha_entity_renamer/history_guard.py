@@ -28,47 +28,51 @@ def _encoded(value):
                       default=special).encode()
 
 
-def _read(recorder, state_ids, statistic_ids, expected=None):
+def _read_session(session, state_ids, statistic_ids, expected=None):
     from sqlalchemy import select, func
     from homeassistant.components.recorder.db_schema import (
         States, StateAttributes, Statistics, StatisticsShortTerm)
-    from homeassistant.components.recorder.util import session_scope
 
     definitions = (('states', States, States.state_id, States.metadata_id, state_ids),
                    ('short_term', StatisticsShortTerm, StatisticsShortTerm.id,
                     StatisticsShortTerm.metadata_id, statistic_ids),
                    ('hourly', Statistics, Statistics.id, Statistics.metadata_id, statistic_ids))
     result = {}
-    with session_scope(session=recorder.get_session(), read_only=True) as session:
-        for name, model, primary, metadata, ids in definitions:
-            ceiling = (expected[name]['ceiling'] if expected is not None else
-                       session.scalar(select(func.max(primary)).where(metadata.in_(ids))))
-            count, digest = 0, hashlib.sha256()
-            if ceiling is not None:
-                columns = [column for column in model.__table__.columns
-                           if not (name == 'states' and column.name == 'last_reported_ts')]
-                query = select(*columns).where(
-                    metadata.in_(ids), primary <= ceiling).order_by(primary)
-                for row in session.execute(query.execution_options(yield_per=1000)):
-                    raw = _encoded(tuple(row))
-                    digest.update(len(raw).to_bytes(8, 'big'))
-                    digest.update(raw)
-                    count += 1
-            result[name] = {'ceiling': ceiling, 'count': count, 'sha256': digest.hexdigest()}
-        ceiling = result['states']['ceiling']
+    for name, model, primary, metadata, ids in definitions:
+        ceiling = (expected[name]['ceiling'] if expected is not None else
+                   session.scalar(select(func.max(primary)).where(metadata.in_(ids))))
         count, digest = 0, hashlib.sha256()
         if ceiling is not None:
-            query = select(*StateAttributes.__table__.columns).where(
-                StateAttributes.attributes_id.in_(select(States.attributes_id).where(
-                    States.metadata_id.in_(state_ids), States.state_id <= ceiling))
-            ).order_by(StateAttributes.attributes_id)
+            columns = [column for column in model.__table__.columns
+                       if not (name == 'states' and column.name == 'last_reported_ts')]
+            query = select(*columns).where(
+                metadata.in_(ids), primary <= ceiling).order_by(primary)
             for row in session.execute(query.execution_options(yield_per=1000)):
                 raw = _encoded(tuple(row))
                 digest.update(len(raw).to_bytes(8, 'big'))
                 digest.update(raw)
                 count += 1
-        result['attributes'] = {'count': count, 'sha256': digest.hexdigest()}
+        result[name] = {'ceiling': ceiling, 'count': count, 'sha256': digest.hexdigest()}
+    ceiling = result['states']['ceiling']
+    count, digest = 0, hashlib.sha256()
+    if ceiling is not None:
+        query = select(*StateAttributes.__table__.columns).where(
+            StateAttributes.attributes_id.in_(select(States.attributes_id).where(
+                States.metadata_id.in_(state_ids), States.state_id <= ceiling))
+        ).order_by(StateAttributes.attributes_id)
+        for row in session.execute(query.execution_options(yield_per=1000)):
+            raw = _encoded(tuple(row))
+            digest.update(len(raw).to_bytes(8, 'big'))
+            digest.update(raw)
+            count += 1
+    result['attributes'] = {'count': count, 'sha256': digest.hexdigest()}
     return result
+
+
+def _read(recorder, state_ids, statistic_ids, expected=None):
+    from homeassistant.components.recorder.util import session_scope
+    with session_scope(session=recorder.get_session(), read_only=True) as session:
+        return _read_session(session, state_ids, statistic_ids, expected)
 
 
 class NativeHistoryGuard:

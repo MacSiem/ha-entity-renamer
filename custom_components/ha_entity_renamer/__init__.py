@@ -43,13 +43,21 @@ class Runtime:
             current()
             await refresh()
             current()
+            from .discovery_final_fence import async_finalize_discovery
+            result = await async_finalize_discovery(hass,result,current)
+            current()
             return result
 
     async def preview(self, hass, proposal, *, guard, refresh):
         """Use the very same discovery for the server's conflict preview."""
         from .discovery import compose_preview
         capture = await self.discover(hass, proposal, guard=guard, refresh=refresh)
-        return compose_preview(capture)
+        result = compose_preview(capture)
+        from .discovery import DiscoveryCapture
+        if type(capture) is DiscoveryCapture:
+            from .discovery_final_fence import _Preview
+            return _Preview(result,capture)
+        return result
 
 
 async def async_setup(hass, config):

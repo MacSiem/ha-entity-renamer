@@ -93,3 +93,46 @@ class DiscoveryRuntimeTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await pending
         self.assertFalse(self.runtime.operation_lock.locked())
+
+
+    async def test_final_native_read_continuation_follows_last_authorization_io(self):
+        # Explicit fake read IO proves topology only, never native SQL/history.
+        from custom_components.ha_entity_renamer.discovery import DiscoveryCapture
+        from custom_components.ha_entity_renamer.discovery_final_fence import _FinalFence,_attach
+        discovery = importlib.import_module(backend.__name__ + '.discovery')
+        calls=[]
+        async def refresh():
+            calls.append('auth')
+        async def finish(guard):
+            self.assertTrue(self.runtime.operation_lock.locked())
+            guard()
+            calls.append('final-read')
+            return capture
+        capture=_attach(DiscoveryCapture('id','test',b'{}',None,(),()),_FinalFence(self.hass,finish))
+        async def source(*args):
+            calls.append('source')
+            return capture
+        with patch.object(discovery,'async_discover',source):
+            result=await self.runtime.discover(self.hass,self.proposal,guard=self.guard,refresh=refresh)
+        self.assertIs(result,capture)
+        self.assertEqual(calls,['auth','source','auth','final-read'])
+
+    async def test_revocation_during_final_read_refuses_the_capture(self):
+        # A new await exists after the final refresh; its synchronous guard must
+        # still reject a current user's revocation before output.
+        from custom_components.ha_entity_renamer.discovery import DiscoveryCapture
+        from custom_components.ha_entity_renamer.discovery_final_fence import _FinalFence,_attach
+        discovery = importlib.import_module(backend.__name__ + '.discovery')
+        authorized=True
+        def guard():
+            if not authorized:
+                raise PermissionError('revoked')
+        async def finish(current):
+            nonlocal authorized
+            authorized=False
+            return capture
+        capture=_attach(DiscoveryCapture('id','test',b'{}',None,(),()),_FinalFence(self.hass,finish))
+        with patch.object(discovery,'async_discover',new=AsyncMock(return_value=capture)):
+            with self.assertRaises(PermissionError):
+                await self.runtime.discover(self.hass,self.proposal,guard=guard,refresh=self.refresh)
+        self.assertFalse(self.runtime.operation_lock.locked())
