@@ -14,6 +14,126 @@ import os
 import sys
 
 
+# Only explicit source-owned machine literals may leave the isolated process.
+# Never emit exception str/repr, native checker errors, locals or chained errors.
+_DIAGNOSTIC_REASONS = frozenset({
+    'powercalc_original_native_schema_rejected',
+    'powercalc_profile_alternative_loader_unverified',
+    'powercalc_profile_csv_shape',
+    'powercalc_profile_csv_size',
+    'powercalc_profile_directory_limit',
+    'powercalc_profile_empty_lut',
+    'powercalc_profile_entry_options_unverified',
+    'powercalc_profile_fresh_plan_required',
+    'powercalc_profile_group_variant_unverified',
+    'powercalc_profile_input_depth',
+    'powercalc_profile_input_limit',
+    'powercalc_profile_inputs_changed',
+    'powercalc_profile_lut_missing',
+    'powercalc_profile_lut_modes_unverified',
+    'powercalc_profile_lut_shape',
+    'powercalc_profile_manual_subprofiles_unverified',
+    'powercalc_profile_mode_unverified',
+    'powercalc_profile_nonfinite_lut',
+    'powercalc_profile_offline_energy_globals_required',
+    'powercalc_profile_original_profile_bytes_changed',
+    'powercalc_profile_original_sources_required',
+    'powercalc_profile_profile_adjustment_unverified',
+    'powercalc_profile_profile_depth',
+    'powercalc_profile_profile_directory_limit',
+    'powercalc_profile_profile_file_type',
+    'powercalc_profile_profile_loader_unverified',
+    'powercalc_profile_profile_membership',
+    'powercalc_profile_profile_receipt_mismatch',
+    'powercalc_profile_profile_size',
+    'powercalc_profile_profile_total_limit',
+    'powercalc_profile_root_changed',
+    'powercalc_profile_root_required',
+    'powercalc_profile_selector_override_unverified',
+    'powercalc_profile_selector_targets_unverified',
+    'powercalc_profile_selector_variant_unverified',
+    'powercalc_profile_source_registry_required',
+    'powercalc_profile_source_variant_unverified',
+    'powercalc_profile_standby_unverified',
+    'powercalc_profile_strategy_unverified',
+    'powercalc_profile_unsafe_input',
+    'powercalc_profile_yaml_overlap',
+})
+_DIAGNOSTIC_IDENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,95}\Z')
+_DIAGNOSTIC_FILE = re.compile(r'[A-Za-z_][A-Za-z0-9_.-]{0,127}\.py\Z')
+_DIAGNOSTIC_REASON = re.compile(r'powercalc_[a-z0-9_]{1,95}\Z')
+_CHECKER_FAILURE_STATUSES = frozenset({
+    'checker_failed', 'invalid', 'unsupported_runtime', 'no_effective_config_change', 'valid'})
+
+
+def safe_checker_diagnostic(value):
+    """Revalidate a tiny diagnostic schema, including the subprocess boundary."""
+    if type(value) is not dict:
+        return {}
+    result = {}
+    name = value.get('exception_type')
+    if type(name) is str and _DIAGNOSTIC_IDENT.fullmatch(name):
+        result['exception_type'] = name
+    reason = value.get('reason')
+    if (type(reason) is str and reason in _DIAGNOSTIC_REASONS
+            and _DIAGNOSTIC_REASON.fullmatch(reason)):
+        result['reason'] = reason
+    frames = value.get('traceback')
+    if type(frames) is list:
+        clean = []
+        for frame in frames[-8:]:
+            if type(frame) is not dict:
+                continue
+            file, function, line = frame.get('file'), frame.get('function'), frame.get('line')
+            if (type(file) is str and _DIAGNOSTIC_FILE.fullmatch(file)
+                    and type(function) is str and _DIAGNOSTIC_IDENT.fullmatch(function)
+                    and type(line) is int and 0 < line <= 1_000_000):
+                clean.append({'file': file, 'function': function, 'line': line})
+        if clean:
+            result['traceback'] = clean
+    return result
+
+
+def _checker_diagnostic(error):
+    """Metadata only: filename basename, code name, line, and static reason."""
+    value = {'exception_type': type(error).__name__}
+    args = BaseException.args.__get__(error)
+    if type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+        # Membership in the literal catalog is mandatory, not prefix alone.
+        if args[0] in _DIAGNOSTIC_REASONS:
+            value['reason'] = args[0]
+    frames, node = [], BaseException.__traceback__.__get__(error)
+    special = {'<module>': 'module', '<lambda>': 'lambda', '<listcomp>': 'listcomp',
+               '<dictcomp>': 'dictcomp', '<setcomp>': 'setcomp', '<genexpr>': 'genexpr'}
+    while node is not None:
+        code = node.tb_frame.f_code
+        frames.append({'file': os.path.basename(code.co_filename),
+                       'function': special.get(code.co_name, code.co_name), 'line': node.tb_lineno})
+        node = node.tb_next
+    value['traceback'] = frames[-8:]
+    return safe_checker_diagnostic(value)
+
+
+def checker_failure_note(result, returncode):
+    """No opaque worker fields or arbitrary values cross into exception notes."""
+    value = {}
+    if type(returncode) is int and -128 <= returncode <= 255:
+        value['returncode'] = returncode
+    if type(result) is dict:
+        status = result.get('status')
+        if type(status) is str and status in _CHECKER_FAILURE_STATUSES:
+            value['status'] = status
+        for key in ('errors', 'warnings'):
+            count = result.get(key)
+            if type(count) is int and 0 <= count <= 1_000_000:
+                value[key] = count
+        diagnostic = safe_checker_diagnostic(result.get('diagnostic'))
+        if diagnostic:
+            value['diagnostic'] = diagnostic
+    return 'native_checker_diagnostic=' + json.dumps(value, sort_keys=True, separators=(',', ':'))
+
+
+
 async def _effective(root):
     from homeassistant import loader
     from homeassistant.core import HomeAssistant
@@ -470,8 +590,8 @@ def main():
                                        with_sources='--source-evidence' in sys.argv[3:],
                                        powercalc_profiles='--powercalc-profile-inputs' in sys.argv[3:]),
                                  loop_factory=getattr(runner, 'create_event_loop', None))
-    except BaseException:
-        result = {'status': 'checker_failed'}
+    except BaseException as error:
+        result = {'status': 'checker_failed', 'diagnostic': _checker_diagnostic(error)}
     print(json.dumps(result, separators=(',', ':')))
 
 

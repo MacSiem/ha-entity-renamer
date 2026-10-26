@@ -340,7 +340,10 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
             except (ValueError, UnicodeError):
                 raise YAMLValidationError('native_checker_failed') from None
             if process.returncode or result.get('status') != 'valid':
-                raise YAMLValidationError('native_config_rejected')
+                from .yaml_validation_worker import checker_failure_note
+                error = YAMLValidationError('native_config_rejected')
+                error.add_note(checker_failure_note(result, process.returncode))
+                raise error
             if ('template' in result['changed_domains']
                     and (not with_sources or staged[3].findings
                          or any(row.domain not in ('template.state', 'template.sensor')
