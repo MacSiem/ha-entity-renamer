@@ -18,12 +18,14 @@ PACKAGE = quiet.PACKAGE
 
 @unittest.skipUnless(quiet.fixture.HAS_HA, 'requires actual pinned HA')
 class NativeIntegrationOwnTimerLifecycleTests(quiet.NativeIntegrationOwnLifecycleTests):
+    method = 'left'
+
     async def prepare(self, *, zero=False):
         await super().prepare(zero=zero)
         hass = self.f.hass
         # Ordinary native configuration+reload, before capturing ORIGINAL.
         self.assertTrue(await hass.config_entries.async_unload(self.entry.entry_id))
-        options = dict(self.entry.options, max_sub_interval={'seconds': 1})
+        options = dict(self.entry.options, method=self.method, max_sub_interval={'seconds': 1})
         hass.config_entries.async_update_entry(self.entry, options=options)
         self.assertTrue(await hass.config_entries.async_setup(self.entry.entry_id))
         await hass.async_block_till_done()
@@ -35,6 +37,7 @@ class NativeIntegrationOwnTimerLifecycleTests(quiet.NativeIntegrationOwnLifecycl
         self.seam_checks = []
         self.waiters = []
         self.pending_areas = {}
+        self.method_intervals = []
         self.pending_origin = {}
         self.oracle_origins = {}
         self.frozen_oracle_updates = 0
@@ -65,7 +68,13 @@ class NativeIntegrationOwnTimerLifecycleTests(quiet.NativeIntegrationOwnLifecycl
         emissions = importlib.import_module(PACKAGE + '.native_utility_source_emissions')
         self.consume_code = shared.IntegrationSourceClockBinding._consume.__code__
         self.interval_class = shared.SourceInterval
-        self.left_class = sensor._Left
+        self.method_class = {'left': sensor._Left, 'right': sensor._Right,
+                             'trapezoidal': sensor._Trapezoidal}[self.method]
+        self.method_refs = ((self.method_class, 'validate_states'),
+                            (self.method_class, 'calculate_area_with_two_states'),
+                            (sensor._IntegrationMethod, 'calculate_area_with_one_state'))
+        self.method_codes = tuple(getattr(cls, name).__code__
+                                  for cls, name in self.method_refs)
         self.fire_code = EventBus.async_fire_internal.__code__
         self.source_set_code = StateMachine.async_set_internal.__code__
         self.addCleanup(self._close_source_oracle)
@@ -104,6 +113,29 @@ class NativeIntegrationOwnTimerLifecycleTests(quiet.NativeIntegrationOwnLifecycl
         for code in self.observed_codes:
             sys.monitoring.set_local_events(key, code,
                 sys.monitoring.events.PY_START | sys.monitoring.events.PY_RETURN)
+
+    def _assert_native_method(self, entity, scope=None):
+        self.assertIs(type(entity._method), self.method_class)
+        self.assertEqual((entity._unit_prefix, entity._unit_time), (1, 1))
+        for ref, code in zip(self.method_refs, self.method_codes, strict=True):
+            self.assertIs(getattr(*ref).__code__, code)
+            if scope is not None:
+                index = scope.source_binding.refs.index(ref)
+                self.assertIs(scope.source_binding.codes[index], code)
+
+    def _two_state_area(self, elapsed, left, right):
+        # Independent Decimal arithmetic from real scalar inputs, never native
+        # calculate() or the area argument of _update_integral. Preserve the
+        # pinned native operator order, including trapezoidal division by 2.
+        left, right = Decimal(left), Decimal(right)
+        if left != right and elapsed != 0:
+            self.method_intervals.append((elapsed, left, right))
+        if self.method == 'left':
+            return left * elapsed
+        if self.method == 'right':
+            return right * elapsed
+        self.assertEqual(self.method, 'trapezoidal')
+        return elapsed * (left + right) / 2
 
     def _remove_numeric_observer(self):
         key = self.observer_tool
@@ -180,8 +212,7 @@ class NativeIntegrationOwnTimerLifecycleTests(quiet.NativeIntegrationOwnLifecycl
             self.assertIs(frame.f_code, scope.source_binding.codes[1])
             self.assertIs(scope.codes['fire'], self.fire_code)
             self.assertIs(scope.codes['source_set'], self.source_set_code)
-            self.assertIs(type(entity._method), self.left_class)
-            self.assertEqual((entity._unit_prefix, entity._unit_time), (1, 1))
+            self._assert_native_method(entity, scope)
             event, interval = parent.f_locals['event'], parent.f_locals['interval']
             self.assertIs(type(interval), self.interval_class)
             record = self.oracle_origins[id(event.data)]
@@ -201,7 +232,8 @@ class NativeIntegrationOwnTimerLifecycleTests(quiet.NativeIntegrationOwnLifecycl
             # Signed elapsed follows native arithmetic; no area argument is read.
             self.assertNotIn(id(entity), self.pending_areas)
             self.pending_areas[id(entity)] = ((Decimal(0) if self.oracle_expected is None
-                                              else self.oracle_expected) + elapsed * Decimal(left))
+                                              else self.oracle_expected)
+                                             + self._two_state_area(elapsed, left, right))
             self.pending_origin[id(entity)] = id(data)
         finally:
             del parent
@@ -240,6 +272,7 @@ class NativeIntegrationOwnTimerLifecycleTests(quiet.NativeIntegrationOwnLifecycl
                 self.getter_captures.append((entity.entity_id, entity._state.as_tuple(),
                                              entity._last_valid_state.as_tuple()))
             if code in (self.timer_code, self.change_code) and phase == 'start':
+                self._assert_native_method(entity)
                 self.assertEqual(entity._state, self.oracle_expected)
                 local = frame.f_locals
                 if code is self.timer_code:
@@ -249,6 +282,7 @@ class NativeIntegrationOwnTimerLifecycleTests(quiet.NativeIntegrationOwnLifecycl
                     old, new = local['old_state'], local['new_state']
                     self.assertIsNotNone(new)
                     left = old.state if old is not None else new.state
+                    right = new.state
                     if self.f.version == '2026.10.2':
                         origin = old.last_reported if old is not None else local['old_timestamp']
                         end = new.last_updated if old is not None else local['new_timestamp']
@@ -260,10 +294,12 @@ class NativeIntegrationOwnTimerLifecycleTests(quiet.NativeIntegrationOwnLifecycl
                     if origin is None:  # Native initial report performs no integration.
                         return
                 elapsed = Decimal((end - origin).total_seconds())
+                area = (Decimal(left) * elapsed if code is self.timer_code
+                        else self._two_state_area(elapsed, left, right))
                 self.assertNotIn(id(entity), self.pending_areas)
                 self.pending_areas[id(entity)] = ((Decimal(0) if self.oracle_expected is None
                                                   else self.oracle_expected)
-                                                 + elapsed * Decimal(left))
+                                                 + area)
             if code is self.update_code and phase == 'start' and id(entity) not in self.pending_areas:
                 self._frozen_update_start(frame, entity)
             if code is self.update_code and phase == 'return':
@@ -406,7 +442,18 @@ class NativeIntegrationOwnTimerLifecycleTests(quiet.NativeIntegrationOwnLifecycl
         await self._next_actual_tick()  # Natural new-owner timer AFTER scope close.
         self._assert_own_counter(scope._new)
         self.assertGreater(self.oracle_updates, 0)
+        if self.method != 'left':
+            # A constant-state timer alone cannot distinguish the methods.
+            self.assertTrue(self.method_intervals, 'no real unequal source operands')
 
 
 class NativeIntegrationOwnZeroTimerLifecycleTests(NativeIntegrationOwnTimerLifecycleTests):
     zero = True
+
+
+class NativeIntegrationOwnRightTimerLifecycleTests(NativeIntegrationOwnTimerLifecycleTests):
+    method = 'right'
+
+
+class NativeIntegrationOwnTrapezoidalTimerLifecycleTests(NativeIntegrationOwnTimerLifecycleTests):
+    method = 'trapezoidal'
