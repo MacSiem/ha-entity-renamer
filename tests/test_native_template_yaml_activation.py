@@ -7,6 +7,7 @@ receipts. Only the producer receives ordinary events; no helper output seeds.
 import asyncio
 import importlib
 import sys
+import traceback
 import unittest
 
 import test_native_template_consumers as consumers
@@ -30,6 +31,7 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
     async def transaction(self, *, fault=None):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_platform import async_get_platforms
+        unknown_errors = []
         await self.prepare('yaml')
         hass, receipt = self.f.hass, self.receipt
         self.assertEqual(receipt.changed_domains, ('template',))
@@ -161,9 +163,17 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
                         detach_actual_consumer()
                     return value
                 log.save = detach_after_actual_save
-            return self.module('native_template_yaml').compose_template_yaml_coordinator(
+            coordinator = self.module('native_template_yaml').compose_template_yaml_coordinator(
                 {'registry': registry, 'yaml': yaml}, log, lambda: None,
-                required_scopes=scopes), observer
+                required_scopes=scopes)
+            actual_unknown = coordinator._unknown
+            async def remember_actual_exception(record, reason):
+                # Observe the real caught exception; preserve its native result.
+                if (error := sys.exception()) is not None:
+                    unknown_errors.append(''.join(traceback.format_exception(error)))
+                return await actual_unknown(record, reason)
+            coordinator._unknown = remember_actual_exception
+            return coordinator, observer
         coordinator, observer = compose(journal)
         self.assertIs(await observer.position_at_inputs(change, chain.reconstruct_inputs()),
                       tx.Position.BEFORE)
@@ -267,7 +277,7 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
                             'stale genuine runtime proof must not confirm applied')
             return
         result = await coordinator.apply(plan, plan.fingerprint, operation)
-        self.assertEqual(result.status, 'applied', result.reason)
+        self.assertEqual(result.status, 'applied', (result.reason, unknown_errors))
         self.assertEqual(result.phases, ('verified', 'verified'))
         self.assertEqual(self.producer.entity_id, 'sensor.accepted_next')
         self.assertEqual(self.f.entity.async_get(self.producer.entity_id).id, source_uuid)
