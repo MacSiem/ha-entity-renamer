@@ -228,24 +228,32 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
             resolver = lambda ref: prep.decode_change(life.store.preparations.resolve(
                 ref, life.binding['preparations'][ref]))
             async def verify(position):
-                quiescent()
-                change = life.own_registry_changes[self.entry.entry_id]
-                self.assertEqual((await self.native_bridge.inspect(change)).position,
-                    'after' if position == tx.Position.AFTER else 'before')
-                self.assertEqual(await yaml_runtime.position(self.yaml_change), position)
-                self.assertTrue(await self.native_history.verify(self.own_history))
-                return True
+                try:
+                    quiescent()
+                    change = life.own_registry_changes[self.entry.entry_id]
+                    self.assertEqual((await self.native_bridge.inspect(change)).position,
+                        'after' if position == tx.Position.AFTER else 'before')
+                    self.assertEqual(await yaml_runtime.position(self.yaml_change), position)
+                    self.assertTrue(await self.native_history.verify(self.own_history))
+                    return True
+                except BaseException as error:
+                    remember_failure('full_verify', error)
+                    raise
 
             async def verify_yaml(position):
-                await verify(position)
-                async with locks.hold(quiescent):
-                    proof = await m['native_candidate_validation'].async_revalidate_accepted_candidate(
-                        hass, chain, journal.load, self.f.root.parent, quiescent)
-                    self.assertEqual(proof.direction,
-                        'forward' if position == tx.Position.AFTER else 'rollback')
-                    self.assertEqual(proof.fingerprint, original[0].fingerprint)
-                    proofs.append(proof)
-                return True
+                try:
+                    await verify(position)
+                    async with locks.hold(quiescent):
+                        proof = await m['native_candidate_validation'].async_revalidate_accepted_candidate(
+                            hass, chain, journal.load, self.f.root.parent, quiescent)
+                        self.assertEqual(proof.direction,
+                            'forward' if position == tx.Position.AFTER else 'rollback')
+                        self.assertEqual(proof.fingerprint, original[0].fingerprint)
+                        proofs.append(proof)
+                    return True
+                except BaseException as error:
+                    remember_failure('full_verify_yaml', error)
+                    raise
 
             registry = m['native_registry_transaction'].ReceiptedRegistryTransactionAdapter(
                 self.native_bridge, resolver, chain, observe, journal.load, quiescent,
