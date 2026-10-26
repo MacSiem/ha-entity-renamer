@@ -210,14 +210,36 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
                 if captured['tasks']:
                     await asyncio.gather(*captured['tasks'], return_exceptions=True)
             return
-        if fault == 'schema':
+        if fault in ('schema', 'schema_compiled'):
             registered = hass.services._services['template']['reload']
             original_schema = registered.schema
             invoked = []
+            if fault == 'schema_compiled':
+                # Ordinary native reload builds a genuinely lazy current default
+                # if necessary. Authenticate first; never call an unverified
+                # candidate validator to manufacture a positive proof.
+                observer.assert_reload_current()
+                if observer.native.version == '2026.10.2' and not original_schema._built:
+                    await hass.services.async_call('template','reload',{},
+                                                   blocking=True,context=Context())
+                    await observer.settle_reload()
+                    self.assertTrue(original_schema._built)
+                    observer.assert_reload_current()
+                original_compiled = original_schema._compiled
+                from homeassistant.helpers import service as native_service
+                self.assertIs(original_schema,
+                              native_service.async_register_admin_service.__defaults__[0])
             def foreign_schema(data):
                 invoked.append(True)
                 raise AssertionError('foreign schema must not execute')
-            registered.schema = foreign_schema
+            def foreign_compiled(*args):
+                invoked.append(args)
+                raise AssertionError('foreign compiled validator must not execute')
+            if fault == 'schema_compiled':
+                original_schema._compiled = foreign_compiled  # Negative-only fault.
+                self.assertIs(registered.schema,original_schema)
+            else:
+                registered.schema = foreign_schema
             try:
                 with self.assertRaises(ValueError):
                     observer.assert_reload_current()
@@ -229,7 +251,11 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(invoked, [])
                 self.assertEqual((self.f.root / change.files[0].path).read_bytes(), change.files[0].before)
             finally:
-                registered.schema = original_schema
+                if fault == 'schema_compiled':
+                    original_schema._compiled = original_compiled
+                    self.assertIs(registered.schema,original_schema)
+                else:
+                    registered.schema = original_schema
             return
         if fault in ('adapter_detach', 'terminal_detach'):
             try:
@@ -337,3 +363,6 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_actual_service_schema_drift_refuses_before_foreign_callable(self):
         await self.transaction(fault='schema')
+
+    async def test_same_native_schema_compiled_drift_refuses_before_write_or_callable(self):
+        await self.transaction(fault='schema_compiled')
