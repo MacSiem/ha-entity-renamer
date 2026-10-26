@@ -42,13 +42,13 @@ async def async_finalize_discovery(hass, capture, guard):
 
 class _ConsumerFence:
     """Keep existing COMPLETE consumer bytes/identities through later auth IO."""
-    def __init__(self,hass,observed,plain):
+    def __init__(self,hass,observed,plain,*,names):
         from .native_discovery_consumers import _inventory,_energy_manager
         from .lovelace_native import NativeLovelace,revision
         from .energy_native import NativeEnergy
         self.hass,self.observed,self.plain = hass,observed,plain
         self.dashboard=self.energy=None
-        if observed.dashboard.status=='COMPLETE':
+        if 'dashboard' in names and observed.dashboard.status=='COMPLETE':
             native=NativeLovelace(hass)
             token=_inventory(hass,native,observed.version)
             value=observed.dashboard.value
@@ -58,7 +58,7 @@ class _ConsumerFence:
             self.collection_rows=sorted(revision(plain(manager.config))
                 for manager in native._managers().values()
                 if type(manager) is native._storage_class and manager.config is not None)
-        if observed.energy.status=='COMPLETE':
+        if 'energy' in names and observed.energy.status=='COMPLETE':
             self.energy=NativeEnergy(hass,_energy_manager(hass))
         self.check()
 

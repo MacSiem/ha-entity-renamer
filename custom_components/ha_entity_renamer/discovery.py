@@ -416,18 +416,24 @@ async def async_discover(hass, proposal, guard):
     elif powercalc_failure is not None and families['powercalc'].status != 'DENIED':
         families['powercalc'] = powercalc_failure
     from .discovery_final_fence import _ConsumerFence, _FinalFence, _attach, async_finalize_discovery
-    consumer_fence = None
-    try:
-        consumer_fence = _ConsumerFence(hass,consumers,_plain)
-    except Exception:
-        for name in ('dashboard','energy'):
-            if families[name].status == 'COMPLETE':
-                families[name] = _unknown(name,'source_changed_during_capture')
-        conflicts.append('source_changed_during_capture')
+    consumer_fences = {}
+    # Keep each still-COMPLETE consumer's ORIGINAL evidence independently.
+    # A dashboard already refused above cannot erase unchanged Energy evidence.
+    for name in ('dashboard','energy'):
+        if families[name].status != 'COMPLETE':
+            continue
+        try:
+            consumer_fences[name] = _ConsumerFence(hass,consumers,_plain,names=(name,))
+        except Exception:
+            families[name] = _unknown(name,'source_changed_during_capture')
+            if name == 'dashboard':
+                families['yaml_sources'] = _unknown('yaml_sources','source_changed_during_capture')
+            conflicts.append('source_changed_during_capture')
     capture_id = uuid.uuid4().hex
     nonlocal_bound = [bound]
     from .persistence import PersistenceError
     physical_errors = set()
+    consumer_errors = set()
     def physical_sources():
         # Reuse strict full-three physical reader with ORIGINAL manager bytes.
         # This worker never touches a native cache, manager or Recorder queue.
@@ -443,14 +449,17 @@ async def async_discover(hass, proposal, guard):
         if yaml is not None and plan_yaml(hass.config.config_dir,mapping,
                                           yaml_dashboards=yaml_roots) != yaml:
             raise ValueError('discovery_yaml_source_changed')
-        if consumer_fence is not None:
-            consumer_fence.physical()
 
     def physical():
         try:
             physical_sources()
         except (ValueError,OSError,KeyError,TypeError,RuntimeError,PersistenceError):
             physical_errors.add('source_changed_during_capture')
+        for name,consumer_fence in consumer_fences.items():
+            try:
+                consumer_fence.physical()
+            except (ValueError,OSError,KeyError,TypeError,RuntimeError,PersistenceError):
+                consumer_errors.add(name)
 
     async def finish(output_guard):
         def current():
@@ -470,11 +479,11 @@ async def async_discover(hass, proposal, guard):
         # No awaits after this point: preserve live authorization, manager,
         # runtime and Powercalc guards at the same output continuation.
         current()
-        if consumer_fence is not None:
+        for name,consumer_fence in consumer_fences.items():
             try:
                 consumer_fence.check()
             except (ValueError,OSError,KeyError,TypeError,RuntimeError,PersistenceError):
-                physical_errors.add('source_changed_during_capture')
+                consumer_errors.add(name)
         if native is not None:
             from .native_discovery_inputs import assert_discovery_managers_current
             try:
@@ -488,6 +497,12 @@ async def async_discover(hass, proposal, guard):
                     families[name] = _unknown(name,'source_changed_during_capture')
             conflicts.append('source_changed_during_capture')
             nonlocal_bound[0] = None
+        for name in consumer_errors:
+            if families[name].status != 'DENIED':
+                families[name] = _unknown(name,'source_changed_during_capture')
+            if name == 'dashboard' and families['yaml_sources'].status != 'DENIED':
+                families['yaml_sources'] = _unknown('yaml_sources','source_changed_during_capture')
+            conflicts.append('source_changed_during_capture')
         for domain,token in runtime_tokens.items():
             if token is not None:
                 actual,actual_token = _runtime_family(hass,domain)
