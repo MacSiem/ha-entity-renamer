@@ -313,8 +313,8 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 # Detached native evidence fields only. Observe the real return;
                 # do not replace its result, callbacks, errors or native state.
                 adapter_diagnostics.append(('bridge.inspect.return', result.position,
-                    result.registry, result.runtime, result.durable, result.metadata,
-                    result.history, result.reason))
+                    result.identity, result.runtime, result.durability, result.recorder_metadata,
+                    result.complete_history, result.reason))
                 return result
             self.native_bridge.inspect = diagnosed_bridge_inspect
             actual_registry_apply = registry.apply
