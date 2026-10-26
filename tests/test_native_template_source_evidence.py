@@ -15,7 +15,8 @@ class NativeTemplateSourceEvidenceTests(unittest.IsolatedAsyncioTestCase):
         (root / 'configuration.yaml').write_text('template: !include template.yaml\n')
         text = '- unique_id: section\n  sensor:\n  - unique_id: value\n    state: "{{ states(\'sensor.original\') }}"\n'
         if extra:
-            text += '  binary_sensor:\n  - unique_id: flag\n    state: "{{ is_state(\'sensor.original\', \'on\') }}"\n'
+            # A delayed binary stays outside the new literal state-only subset.
+            text += '  binary_sensor:\n  - unique_id: flag\n    state: "{{ is_state(\'sensor.original\', \'on\') }}"\n    delay_on: "00:00:01"\n'
         if duplicate:
             text += '- unique_id: section\n  sensor:\n  - unique_id: value\n    state: "{{ states(\'sensor.original\') }}"\n'
         (root / 'template.yaml').write_text(text)
