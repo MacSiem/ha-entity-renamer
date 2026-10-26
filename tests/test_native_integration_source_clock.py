@@ -431,6 +431,9 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                     negative_context.scope=scope
                     if await negative_hook('retained',negative_context):
                         return
+                retained_probe=getattr(self,'source_clock_retained_probe',None)
+                if retained_probe is not None:
+                    await retained_probe(scope,reverse)
                 # Genuine changed + reported inputs before actual registry migration.
                 self.producer._attr_native_value=Decimal('12' if not reverse else '14')
                 self.producer.async_write_ha_state()
