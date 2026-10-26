@@ -87,6 +87,7 @@ class NativeIntegrationContinuity:
         self.version, self.event, self.cls = version, event, IntegrationSensor
         self._job_cls, self._callback_kind, self._state_cls = HassJob, HassJobType.Callback, State
         self._live, self._error, self._phase = True, None, 'capture'
+        self._first_failure = None
         self._retained, self._new, self._tool, self._emissions = False, None, None, None
         self._unsubscribes, self._consumed, self._emitted = [], {}, {}
         self._bridge_depth, self._native_old_calls, self._bridge_calls = 0, 0, 0
@@ -187,9 +188,39 @@ class NativeIntegrationContinuity:
     def _poison(self, reason):
         if self._error is None:
             self._error = 'integration_continuity_' + reason
+            # Preserve the FIRST caught failure without retaining exceptions,
+            # frames, Event/State data or changing a native callback's outcome.
+            # sys.exception() also sees the shared emission witness's except.
+            try:
+                error = sys.exception()
+                if error is not None:
+                    frames = []
+                    trace = error.__traceback__
+                    while trace is not None:
+                        code = trace.tb_frame.f_code
+                        frames.append((code.co_filename, code.co_qualname, trace.tb_lineno))
+                        trace = trace.tb_next
+                    # Only our fixed machine reasons, never arbitrary exception
+                    # strings, user configuration, source values or frame locals.
+                    detail = (error.args[0] if type(error) is ValueError
+                              and len(error.args) == 1 and type(error.args[0]) is str
+                              and error.args[0].startswith(('integration_continuity_',
+                                                          'integration_source_clock_')) else None)
+                    self._first_failure = (self._phase,
+                        type(error).__module__ + '.' + type(error).__qualname__,
+                        detail, tuple(frames))
+            except BaseException:
+                # Diagnostics must never escape into the native emitter.
+                self._first_failure = None
 
     def _check(self, *, owner=False):
-        _need(self._live and self._error is None, 'closed_or_poisoned')
+        if not self._live or self._error is not None:
+            error = ValueError('integration_continuity_closed_or_poisoned')
+            if self._error is not None:
+                error.add_note('first_poison=' + self._error)
+                if self._first_failure is not None:
+                    error.add_note('first_failure=' + repr(self._first_failure))
+            raise error from None
         _need(threading.get_ident() == self.thread and asyncio.get_running_loop() is self.loop
               and self.task is not None and not self.task.done()
               and (not owner or asyncio.current_task() is self.task), 'task_loop')

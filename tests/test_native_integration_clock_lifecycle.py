@@ -112,7 +112,25 @@ class NativeIntegrationClockLifecycleRegressionTests(unittest.IsolatedAsyncioTes
             self.assertFalse(scope._unsubscribes)
             self.assertIsNone(scope._tool)
             self.assertIsNone(scope._emissions)
-        self.assertTrue(all(handle.cancelled() for handle in handles))
+            # close() cancels the CURRENT retained timer, which real elapsed
+            # callbacks may have replaced during the awaited restore.
+            cancel=scope.old._max_sub_interval_exceeded_callback
+            current=getattr(cancel,'__self__',None)
+            self.assertIs(type(current),asyncio.TimerHandle)
+            self.assertIs(current._loop,context.hass.loop)
+            self.assertEqual(cancel,current.cancel)
+            self.assertTrue(current.cancelled(),'current old-object timer leaked')
+        loop=context.hass.loop
+        for handle in handles:
+            self.assertIs(type(handle),asyncio.TimerHandle)
+            self.assertIs(handle._loop,loop)
+            if not handle.cancelled():
+                # An already-fired snapshot handle need not be marked cancelled.
+                # Still reject a pending/due/ready callback, including handles
+                # no longer referenced by the entity's current cancellation field.
+                self.assertLessEqual(handle.when(),loop.time())
+                self.assertNotIn(handle,loop._scheduled,'snapshot timer still scheduled')
+                self.assertNotIn(handle,loop._ready,'snapshot timer still ready')
 
     async def hook(self,stage,context):
         if stage=='inactive':
