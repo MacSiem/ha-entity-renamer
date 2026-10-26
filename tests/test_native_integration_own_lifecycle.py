@@ -299,6 +299,14 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         type(error).__qualname__, reason, tuple(frames)))
                 except BaseException:
                     pass  # Diagnostics must never change the original failure.
+            actual_registry_apply = registry.apply
+            async def diagnosed_registry_apply(step, guard):
+                try:
+                    return await actual_registry_apply(step, guard)
+                except BaseException as error:
+                    remember_failure('registry.apply', error)
+                    raise
+            registry.apply = diagnosed_registry_apply
             actual_registry_compensate = registry.compensate
             actual_registry_inspect = registry.inspect
             async def diagnosed_registry_compensate(step, guard):
