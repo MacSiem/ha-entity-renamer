@@ -121,6 +121,31 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
         self.helper_id = self.current().entity_id
         self.helper_uuid = self.f.entity.async_get(self.helper_id).id
         await self.wait_tick()
+        extra_entry = None
+        if getattr(self,'second_lifecycle_clock',False):
+            extra_entry = ConfigEntry(domain='integration',title='Second actual lifecycle clock',data={},
+                options={**dict(self.entry.options),'name':'Second actual lifecycle clock'},
+                version=ConfigFlowHandler.VERSION,minor_version=ConfigFlowHandler.MINOR_VERSION,
+                source='user',discovery_keys=MappingProxyType({}),subentries_data=[],
+                unique_id='second-actual-lifecycle-clock')
+            await hass.config_entries.async_add(extra_entry)
+            await hass.async_block_till_done()
+            from homeassistant.helpers.entity_platform import async_get_platforms
+            extra_entities=[e for p in async_get_platforms(hass,'integration')
+                            if p.config_entry is extra_entry for e in p.entities.values()]
+            self.assertEqual(len(extra_entities),1)
+            extra_entity,=extra_entities
+            tick=asyncio.get_running_loop().create_future()
+            @callback
+            def extra_ticked(event):
+                if getattr(extra_entity._last_integration_trigger,'name',None)=='TimeElapsed' and not tick.done():
+                    tick.set_result(True)
+            remove_tick=async_track_state_change_event(hass,extra_entity.entity_id,extra_ticked)
+            try:
+                await asyncio.wait_for(tick,10)
+            finally:
+                remove_tick()
+            await hass.async_block_till_done()
         (root/'scripts').mkdir()
         (root/'configuration.yaml').write_text('script: !include_dir_merge_named scripts\n')
         (root/'scripts/probe.yaml').write_text('source_clock_probe:\n  sequence:\n'
@@ -153,6 +178,9 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
         changes=[('registry',registry_change)]
         if helper_change is not None:
             changes.append(('helpers',helper_change))
+        if extra_entry is not None:
+            extra_before=m['helper_native'].read_entry(hass,extra_entry.entry_id)
+            changes.append(('helpers',m['helper_transaction'].prepare_helper(extra_before,mapping)))
         changes.append(('yaml',yaml_change))
         digests,steps={},[]
         for i,(adapter,change) in enumerate(changes):
@@ -179,7 +207,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
             return await m['native_input_observation'].async_observe_native_inputs(
                 hass,receipt,guard=self.guard,input_state=input_state)
         lease=await m['native_helper_activation_lease'].NativeHelperActivationLease.acquire(
-            hass,hass.config_entries,(self.entry,),guard=self.guard)
+            hass,hass.config_entries,((self.entry,extra_entry) if extra_entry is not None else (self.entry,)),guard=self.guard)
         self.scope=None
         life=None
         source_auth=None
@@ -248,6 +276,8 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
         scopes_live=[]
         creation_checks=[]
         burst_checks=[]
+        lifecycle_hook=getattr(self,'lifecycle_clock_hook',None)
+        lifecycle_context=None
         negative_hook=getattr(self,'source_clock_negative_hook',None)
         negative_context=None
         if negative_hook is not None:
@@ -292,9 +322,19 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                             hass,receipt,guard=self.guard)
                         self.assertEqual(value,original)
                         return True
+                    clock_scopes={self.entry.entry_id:scope}
+                    if extra_entry is not None:
+                        extra_scope=await m['native_integration_source_clock'].async_begin_source_clock(
+                            hass,extra_entry,lease,chain,guard=self.guard,
+                            observe=observe,load_record=journal.load,reverse=reverse)
+                        scopes_live.append(extra_scope)
+                        clock_scopes[extra_entry.entry_id]=extra_scope
                     async def inactive_clock(key):
-                        self.assertEqual(key,self.entry.entry_id)
-                        self.assertIs(m['native_integration_clock_lifecycle'].retained(life,key),scope)
+                        self.assertIn(key,clock_scopes)
+                        if lifecycle_hook is not None:
+                            lifecycle_context.entry_key=key
+                            await lifecycle_hook('inactive',lifecycle_context)
+                        self.assertIs(m['native_integration_clock_lifecycle'].retained(life,key),clock_scopes[key])
                         return True
                     async def accepted_clock(auth):
                         actual_record=await journal.load(chain.operation_id)
@@ -310,6 +350,8 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                         scope.source_binding.require_accepted(scope,seam=True)
                         self.assertIs(scope._new,self.current())
                         scope._timer(scope._new)
+                        if lifecycle_hook is not None:
+                            await lifecycle_hook('runtime',lifecycle_context)
                         return True
                     setup_effect=m['native_helper_setup_effects'].NativeHelperSetupEffects(
                         hass,chain,observe,journal.load,guard=self.guard)
@@ -319,8 +361,15 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                         verify_inactive=inactive_clock,verify_runtime=runtime_clock,
                         verify_accepted_native_chain=accepted_clock,setup_effect=setup_effect,
                         activation_lease=lease,source_authorization=source_auth if reverse else None,
-                        runtime_baselines=(),integration_clocks={self.entry.entry_id:scope})
+                        runtime_baselines=(),integration_clocks=clock_scopes)
                     lives.append(life)
+                    if lifecycle_hook is not None:
+                        from types import SimpleNamespace
+                        lifecycle_context=SimpleNamespace(m=m,hass=hass,root=root,store=store,
+                            chain=chain,lease=lease,observe=observe,load_record=journal.load,
+                            life=life,scope=scope,scopes=clock_scopes,entry=self.entry)
+                        if await lifecycle_hook('before_quiesce',lifecycle_context):
+                            return
                     await life.quiesce()
                     self.assertTrue(life.inspect()['inactive_receipts_complete'])
                     if initial_power=='0' and not reverse:
@@ -433,6 +482,10 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                         if await negative_hook('before_setup',negative_context):
                             return
                     if shared_lifecycle:
+                        if lifecycle_hook is not None:
+                            lifecycle_context.authorization=auth
+                            if await lifecycle_hook('before_restore',lifecycle_context):
+                                return
                         await life.restore(auth)
                         restored=scope._new
                         self.assertTrue(life.inspect()['activation_receipts_complete'])
@@ -450,6 +503,11 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                                 m['transaction'].PhaseContext(fresh_record,0),tuple(
                                 m['native_registry_receipts'].RegistryRawObservation(f.key,f.raw,f.identity)
                                 for f in fresh_observed.files)),fresh_record.status)
+                        # The same validated receipt chain advances H0 -> H1;
+                        # no fresh native capture may replace its ORIGINAL graph.
+                        self.assertNotEqual(source_auth.head,auth.head)
+                        self.assertEqual(scope.source_binding.accepted_input.head,source_auth.head)
+                        self.assertTrue(chain.verify_setup_authorization(auth))
                     else:
                         restored=await m['native_integration_source_clock'].async_setup_source_clock(
                             scope,auth,observe=observe,load_record=journal.load)

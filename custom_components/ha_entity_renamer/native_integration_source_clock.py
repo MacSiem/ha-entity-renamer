@@ -429,13 +429,40 @@ class IntegrationSourceClockBinding:
                               'head':authorization.head,'status':authorization.status}
         self.require_accepted(scope)
 
+    def bind_helper_setup(self, scope, lifecycle, intent):
+        from .native_helper_setup_receipts import HelperSetupIntent
+        from .native_integration_clock_lifecycle import live
+        _need(scope is self.scope and live(lifecycle,self.entry_id) is scope
+              and type(intent) is HelperSetupIntent and self.chain.active is intent
+              and intent.lifecycle is lifecycle and intent.entry_id == self.entry_id
+              and getattr(self,'_helper_setup_intent',None) is None,
+              'one_typed_helper_setup_intent')
+        self._helper_setup_intent = intent
+
     def require_accepted(self, scope, *, seam=False):
         from .native_helper_lifecycle import RestoreAuthorization
         _need(self.authorization is not None and not self.flights and scope._pending_move is None
               and scope.source == self.to_name and not scope._emitted, 'accepted_transport_complete')
         self.check(scope)
-        _need(self.chain.verify_setup_authorization(RestoreAuthorization(**self.authorization)),
-              'accepted_chain_lost')
+        intent = getattr(self,'_helper_setup_intent',None)
+        if self.chain.active is not None:
+            from .native_helper_setup_receipts import HelperSetupIntent, authorization_matches
+            _need(type(intent) is HelperSetupIntent and self.chain.active is intent
+                  and intent.entry_id == self.entry_id
+                  and intent.lifecycle._integration_clocks.get(self.entry_id) is scope,
+                  'owned_helper_setup_pending')
+            _,head,_,completed,pending = self.chain._reconstruct()
+            _need(pending == intent.reference and authorization_matches(self.chain,
+                RestoreAuthorization(**self.authorization),completed=completed,head=head,
+                history=self.chain._setup_history), 'accepted_pending_setup_chain')
+        else:
+            _need(self.chain.verify_setup_authorization(RestoreAuthorization(**self.authorization)),
+                  'accepted_chain_lost')
+            # A lawful helper setup receipt advances H0 to H1. Only the SAME
+            # validated chain and authorization may advance this evidence; this
+            # is reconstruction of accepted deltas, never a fresh native capture.
+            # Pending setup keeps H0 and its existing typed live hook above.
+            self.accepted_input = self.chain.reconstruct_inputs()
         docs = self.chain.accepted_documents()
         if seam:
             # No await between this ORIGINAL/accepted full-source fence and the

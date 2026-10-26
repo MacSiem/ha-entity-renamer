@@ -132,7 +132,14 @@ class NativeIntegrationContinuity:
             ('call_at', event, 'async_call_at'),
             ('call_later', event, 'async_call_later'),
             ('run_timer', event, '_run_async_call_action'),
+            ('keyed_dispatch', event, '_async_dispatch_entity_id_event'),
+            ('keyed_filter', event, '_async_state_filter'),
+            ('keyed_track', event, '_async_track_event'),
+            ('keyed_remove', event, '_remove_listener'),
+            ('bus_remove', EventBus, '_async_remove_listener'),
         )
+        if version == '2025.6.0':
+            names += (('keyed_dispatch_soon', event, '_async_dispatch_entity_id_event_soon'),)
         self.refs = tuple((owner, name) for _, owner, name in names)
         self.methods, values = prove_methods(self.root, self.pins, self.refs)
         self.codes = dict(zip((name for name, _, _ in names), values, strict=True))
@@ -197,6 +204,9 @@ class NativeIntegrationContinuity:
         else:
             self.source_binding.check(self)
         unchanged(self.refs, self.methods, tuple(self.codes.values()))
+        self._require_dispatchers()
+        if self._new is not None and self._new_timer_bound:
+            self._require_job_order(self._new, bridges=False)
         if self._tool is not None:
             monitor = sys.monitoring
             _need(monitor.get_tool(self._tool) == _NAME and monitor.get_events(self._tool) == 0,
@@ -206,6 +216,42 @@ class NativeIntegrationContinuity:
                       for code in self._watched), 'monitor_mask_lost')
         if self._emissions is not None:
             self._emissions.check()
+
+    def _require_dispatchers(self):
+        """Read-only actual shared bus membership, routing and native filters.
+
+        Keyed jobs alone survive tracker.listener(). Never invoke an Event,
+        dispatcher or filter to manufacture a positive observation.
+        """
+        from collections import defaultdict
+        from functools import partial
+        from .yaml_runtime_observer import _registered_bus_remove
+        for kind, key, event_type, tracker in (
+                ('changed', self.event._TRACK_STATE_CHANGE_DATA, 'state_changed',
+                 self.event._KEYED_TRACK_STATE_CHANGE),
+                ('reported', self.event._TRACK_STATE_REPORT_DATA, 'state_reported',
+                 self.event._KEYED_TRACK_STATE_REPORT)):
+            data = self.hass.data.get(key)
+            expected_dispatch = (self.event._async_dispatch_entity_id_event_soon
+                if kind == 'changed' and self.version == '2025.6.0'
+                else self.event._async_dispatch_entity_id_event)
+            _need(type(tracker) is self.event._KeyedEventTracker
+                  and tracker.key == key and tracker.event_type == event_type
+                  and tracker.dispatcher_callable is expected_dispatch
+                  and tracker.filter_callable is self.event._async_state_filter
+                  and type(data) is self.event._KeyedEventData
+                  and type(data.callbacks) is defaultdict
+                  and data.callbacks.default_factory is list, 'native_tracker_routing')
+            (job, event_filter), _ = _registered_bus_remove(
+                self.hass, data.listener, event_type)
+            _need(type(job) is self._job_cls and job.job_type is self._callback_kind,
+                  'native_bus_dispatch_job')
+            for actual, expected in ((job.target, expected_dispatch),
+                                     (event_filter, self.event._async_state_filter)):
+                _need(type(actual) is partial and actual.func is expected
+                      and not actual.keywords and len(actual.args) == 2
+                      and actual.args[0] is self.hass
+                      and actual.args[1] is data.callbacks, 'native_bus_dispatch_routing')
 
     def _timer(self, entity):
         cancel = entity._max_sub_interval_exceeded_callback

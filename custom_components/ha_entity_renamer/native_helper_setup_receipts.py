@@ -292,7 +292,7 @@ def fold_receipt(chain, states, intent, receipt):
         from .native_integration_setup_audit import (decode_setup_audit as decode_integration,
                                                   validate_setup_audit as validate_integration)
         audit = decode_integration(receipt['audit'])
-        final = validate_integration(baseline, source, audit, core=chain.version, entry_id=entry_id)
+        final = validate_integration(baseline, source, audit, core=chain.version, entry_id=entry_id, chain=chain)
     else:
         audit = decode_setup_audit(receipt['audit'])
         final = validate_setup_audit(baseline, snapshot, source, audit,

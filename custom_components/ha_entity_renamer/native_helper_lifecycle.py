@@ -62,7 +62,7 @@ def stored_lifecycle_plan(store, root_id):
         binding = root['binding']
         operation = binding['operation_id']
         if (row['digest'] != _digest(root) or root['kind'] != 'helper_lifecycle_root'
-                or type(root['schema']) is not int or root['schema'] not in (1, 2)):
+                or type(root['schema']) is not int or root['schema'] not in (1, 2, 3)):
             _fail('root_binding_mismatch')
         raw_plan = binding['plan']
         record = {'operation_id': operation, 'plan': raw_plan, 'status': 'prepared',
@@ -177,7 +177,7 @@ class NativeHelperLifecycle:
                  *, guard, verify_original_native_inputs, settle,
                  verify_inactive, verify_runtime, verify_accepted_native_chain,
                  source_authorization=None, runtime_baselines=None, setup_effect=None,
-                 activation_lease=None):
+                 activation_lease=None, integration_clocks=None):
         if (type(store) is not RegistryReceiptStore or type(plan) is not Plan
                 or type(operation_id) is not str or not operation_id):
             _fail('binding_invalid')
@@ -287,6 +287,16 @@ class NativeHelperLifecycle:
                     or activation_lease.entry_ids != self.ids):
                 _fail('native_activation_lease_binding')
         self.activation_lease = activation_lease
+        if integration_clocks is not None and type(integration_clocks) is not dict:
+            _fail('typed_integration_clocks_required')
+        self._integration_clocks = dict(integration_clocks or {})
+        for key,scope in self._integration_clocks.items():
+            from .native_integration_clock_lifecycle import describe
+            describe(scope)
+            if (key not in self.ids or key in self.own_registry_changes
+                    or self.helper_snapshots[key][0]['domain'] != 'integration'
+                    or scope.entry.entry_id != key or scope.lease is not activation_lease):
+                _fail('integration_clock_scope_binding')
         self.store, self.manager = store, manager
         self.operation_id, self.plan, self.receipt = operation_id, plan, receipt
         self.guard = guard
@@ -346,12 +356,36 @@ class NativeHelperLifecycle:
     def check_source_gaps(self):
         for gap in self._source_gaps.values():
             gap.check()
+        for key,scope in self._integration_clocks.items():
+            from .native_integration_clock_lifecycle import live
+            if live(self,key) is not scope:
+                _fail('integration_clock_lost')
+            if scope.source_binding.authorization is not None:
+                scope.source_binding.require_accepted(scope,seam=True)
+            else:
+                clock_chain = scope.source_binding.chain
+                clock_chain.reconstruct_inputs().assert_current(self.receipt)
+                from .native_input_baseline import _Managers, _KEYS, _json
+                expected = clock_chain.accepted_documents()
+                if _Managers(scope.hass,self.receipt).initial != tuple(
+                        _json(expected[name]['data']) for name in _KEYS):
+                    _fail('integration_clock_manager_changed')
 
     def close_source_gaps(self):
         """Caller may also close on abort before restore, without replay."""
-        for gap in tuple(self._source_gaps.values()):
-            gap.close()
+        first_error = None
+        # A native unsubscribe can already be absent. Each owned clock must
+        # still release its retained timer and monitoring tools on abort/cancel.
+        for resource in (*tuple(self._source_gaps.values()),
+                         *tuple(self._integration_clocks.values())):
+            try:
+                resource.close()
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
         self._source_gaps.clear()
+        if first_error is not None:
+            raise first_error
 
     def runtime_baselines(self):
         """Immutable historical observations; readback never grants write access."""
@@ -460,10 +494,15 @@ class NativeHelperLifecycle:
         values = obj._runtime_baselines or ()
         encoded = obj._bind_runtime_baselines(original, values)
         obj._runtime_baselines = tuple(sorted(values, key=lambda value: value.entry_id))
-        obj.root = {'kind': 'helper_lifecycle_root', 'schema': 2 if encoded else 1,
+        obj.root = {'kind': 'helper_lifecycle_root', 'schema': (3 if obj._integration_clocks else 2 if encoded else 1),
                     'binding': obj.binding, 'original': original}
         if encoded:
             obj.root['runtime_baselines'] = encoded
+        if obj._integration_clocks:
+            from .native_integration_clock_lifecycle import describe, validate_roots
+            obj.root['integration_clocks'] = {key:describe(scope)
+                for key,scope in sorted(obj._integration_clocks.items())}
+            validate_roots(obj)
         if obj.source_authorization is not None and encoded:
             # Reverse uses the first durable forward observation. A newly captured
             # counter cannot replace A0/S0 even with the same configuration Plan.
@@ -486,9 +525,11 @@ class NativeHelperLifecycle:
         obj.root = obj._read(obj.root_id)
         if (type(obj.root) is not dict
                 or set(obj.root) != ({'kind', 'schema', 'binding', 'original'} |
-                    ({'runtime_baselines'} if obj.root.get('schema') == 2 else set()))
+                    ({'runtime_baselines'} if obj.root.get('schema') == 2 or
+                        obj.root.get('schema') == 3 and 'runtime_baselines' in obj.root else set()) |
+                    ({'integration_clocks'} if obj.root.get('schema') == 3 else set()))
                 or obj.root['kind'] != 'helper_lifecycle_root'
-                or type(obj.root['schema']) is not int or obj.root['schema'] not in (1, 2)
+                or type(obj.root['schema']) is not int or obj.root['schema'] not in (1, 2, 3)
                 or obj.root['binding'] != obj.binding
                 or type(obj.root['original']) is not list
                 or [row.get('entry_id') for row in obj.root['original']] != list(obj.ids)):
@@ -507,7 +548,7 @@ class NativeHelperLifecycle:
                 _fail('preparation_activation_conflict')
         from .utility_meter_observers import decode_runtime_baseline
         raw = obj.root.get('runtime_baselines', [])
-        if type(raw) is not list or (obj.root['schema'] == 2 and not raw):
+        if type(raw) is not list or ('runtime_baselines' in obj.root and not raw):
             _fail('runtime_baseline_layout')
         values = tuple(decode_runtime_baseline(row) for row in raw)
         if obj._bind_runtime_baselines(obj.root['original'], values) != raw:
@@ -515,6 +556,12 @@ class NativeHelperLifecycle:
         if obj._runtime_baselines is not None and obj._runtime_baselines != values:
             _fail('runtime_baseline_conflict')
         obj._runtime_baselines = values
+        if obj.root['schema'] == 3:
+            from .native_integration_clock_lifecycle import validate_roots
+            if not validate_roots(obj):
+                _fail('integration_clock_root_required')
+        elif obj._integration_clocks:
+            _fail('integration_clock_root_required')
         obj.inspect()  # Validate graph, including dangling intents.
         return obj
 
@@ -572,6 +619,9 @@ class NativeHelperLifecycle:
     def _inactive(self, original):
         self._assert_activation(original, 'not_loaded')
         _require_inactive(self.manager.async_get_entry(original['entry_id']), self.activation_lease)
+        if original['entry_id'] in self.root.get('integration_clocks', {}):
+            from .native_integration_clock_lifecycle import retained
+            retained(self,original['entry_id'])
 
     def inspect(self):
         """Read-only durable status. Receipt ACK loss is inspectable, never replayed."""
@@ -615,7 +665,8 @@ class NativeHelperLifecycle:
                     'api_called': original['state'] == 'loaded',
                     'state': 'not_loaded' if stage == 'unload' else original['state']}
                 if stage == 'setup' and original['state'] == 'loaded' and (original['domain'] == 'utility_meter'
-                        or original['domain'] == 'integration' and key in self.own_registry_changes):
+                        or original['domain'] == 'integration' and (key in self.own_registry_changes
+                            or key in self.root.get('integration_clocks', {}))):
                     effect = receipt.get('native_effect')
                     if (type(effect) is not list or len(effect) != 2
                             or type(effect[0]) is not str or not re.fullmatch(r'rr-[0-9a-f]{64}', effect[0])
@@ -625,6 +676,10 @@ class NativeHelperLifecycle:
                 if stage == 'unload' and original['state'] == 'loaded' and key in self.own_registry_changes:
                     self._validate_unload_data(key, receipt.get('native_unload'))
                     expected_receipt['native_unload'] = receipt['native_unload']
+                if stage == 'unload' and key in self.root.get('integration_clocks', {}):
+                    from .native_integration_clock_lifecycle import validate_unload
+                    validate_unload(self,key,receipt.get('native_clock'))
+                    expected_receipt['native_clock'] = receipt['native_clock']
                 if receipt != expected_receipt:
                     _fail('receipt_binding_mismatch')
                 previous = _digest(receipt)
@@ -715,13 +770,15 @@ class NativeHelperLifecycle:
             await self._verify(self.verify_inactive, key)
             self._inactive(original)
         audited_setup = stage == 'setup' and active and (original['domain'] == 'utility_meter'
-            or original['domain'] == 'integration' and key in self.own_registry_changes)
+            or original['domain'] == 'integration' and (key in self.own_registry_changes
+                            or key in self.root.get('integration_clocks', {})))
         if audited_setup and not callable(self.setup_effect):
             _fail('installed_setup_effect_required')
         audited_unload = stage == 'unload' and active and key in self.own_registry_changes
         if audited_unload and self.activation_lease is None:
             _fail('native_activation_lease_required')
         unload_witness = None
+        clock_unload = None
         effect_reference = None
         previous = self.inspect()['head']
         intent = {'kind': 'helper_lifecycle_intent', 'root': self.root_id,
@@ -747,6 +804,11 @@ class NativeHelperLifecycle:
                         or type(effect_reference[1]) is not str
                         or not re.fullmatch(r'[0-9a-f]{64}', effect_reference[1])):
                     _fail('native_setup_effect_required')
+            elif stage == 'unload' and key in self.root.get('integration_clocks', {}):
+                from .native_integration_clock_lifecycle import live
+                scope = live(self,key)
+                clock_unload = {'intent':list(scope.intent),
+                                'actual':asdict(await scope.unload())}
             elif audited_unload:
                 from .native_utility_unload_audit import NativeUtilityUnloadAudit, _row
                 from homeassistant.helpers import entity_registry as er
@@ -801,6 +863,10 @@ class NativeHelperLifecycle:
                    'intent': _digest(intent), 'stage': stage, 'entry_id': key,
                    'api_called': active,
                    'state': 'not_loaded' if stage == 'unload' else original['state']}
+        if clock_unload is not None:
+            from .native_integration_clock_lifecycle import validate_unload
+            validate_unload(self,key,clock_unload)
+            receipt['native_clock'] = clock_unload
         if effect_reference is not None:
             receipt['native_effect'] = list(effect_reference)
         if unload_witness is not None:

@@ -86,6 +86,14 @@ class NativeHelperSetupEffects:
         direction = ('forward' if authorization.status == 'applied' else 'rollback') if own_change else None
         source_rows = [row for row in self.chain.accepted_documents()['core.entity_registry']
                        ['data']['entities'] if row.get('config_entry_id') == entry_id]
+        clock = lifecycle._integration_clocks.get(entry_id)
+        if clock is not None:
+            from .native_integration_clock_lifecycle import retained
+            _need(retained(lifecycle,entry_id) is clock)
+            await clock.source_binding.accept_setup(clock,authorization,self.observe,self.load_record)
+            self._scope(lifecycle)
+            before = await self._read(lifecycle)
+            self.chain.expected(context,before)
         intent = await self.chain.begin_helper_setup(context, before,
             lifecycle=lifecycle, entry_id=entry_id)
         self._scope(lifecycle)
@@ -99,7 +107,11 @@ class NativeHelperSetupEffects:
               and type(self.hass.data.get(dr.DATA_REGISTRY)) is dr.DeviceRegistry)
         io = NativeRegistryIO(self.hass)
         gap = lifecycle._source_gaps.get(entry_id)
-        if integration:
+        if clock is not None:
+            from .native_integration_clock_lifecycle import NativeIntegrationClockSetupAudit
+            collector = NativeIntegrationClockSetupAudit(self.hass,lifecycle,self.chain,
+                entry_id,source_rows,guard=lambda:self._scope(lifecycle),setup_intent=intent)
+        elif integration:
             from .native_integration_setup_audit import NativeIntegrationSetupAudit
             collector = NativeIntegrationSetupAudit(self.hass, lifecycle, self.chain, entry_id,
                 source_rows, guard=lambda: self._scope(lifecycle))
@@ -109,7 +121,10 @@ class NativeHelperSetupEffects:
                 direction=direction)
         with collector:
             manager = lifecycle.activation_lease or self.hass.config_entries
-            _need(await manager.async_setup(entry_id) is True)
+            if clock is not None:
+                await clock.setup()
+            else:
+                _need(await manager.async_setup(entry_id) is True)
             self._scope(lifecycle)
             _need(await lifecycle.settle() is not False)
             self._scope(lifecycle)

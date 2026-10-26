@@ -28,6 +28,9 @@ def _need(value, reason):
 
 def activation_baseline(chain, lifecycle, entry_id):
     """Derive data transfer exclusively from copied ORIGINAL+accepted receipts."""
+    if entry_id in lifecycle.root.get('integration_clocks', {}):
+        from .native_integration_clock_lifecycle import baseline
+        return baseline(chain,lifecycle,entry_id)
     from .native_restore_state_escrow_receipts import _parse_root, inspect_escrow
     change = lifecycle.own_registry_changes.get(entry_id)
     _need(change is not None and change.before['platform'] == 'integration', 'own_id_required')
@@ -75,12 +78,15 @@ def encode_setup_audit(data):
 
 
 def decode_setup_audit(raw):
-    _need(type(raw) is dict and raw.get('kind') == 'integration_own_setup', 'audit_kind')
+    _need(type(raw) is dict and raw.get('kind') in ('integration_own_setup','integration_source_clock_setup'), 'audit_kind')
     return IntegrationSetupAuditData(codec._canonical(raw))
 
 
-def validate_setup_audit(baseline, source_rows, data, *, core, entry_id):
+def validate_setup_audit(baseline, source_rows, data, *, core, entry_id, chain=None):
     doc = encode_setup_audit(data)
+    if baseline.get('kind') == 'integration_source_clock_restore_v1':
+        from .native_integration_clock_lifecycle import validate_audit
+        return validate_audit(baseline,source_rows,doc,chain=chain,core=core,entry_id=entry_id)
     keys = {'kind', 'schema', 'core', 'entry_id', 'baseline', 'source_rows', 'result_rows',
             'parser_input', 'full_state_text', 'last_valid_state_text', 'source_pins', 'call'}
     _need(set(doc) == keys and type(doc['schema']) is int and doc['schema'] == 1
