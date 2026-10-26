@@ -162,3 +162,103 @@ class PowercalcGlobalListenerOwnershipNativeTests(unittest.IsolatedAsyncioTestCa
             self.runtime.assert_powercalc_runtime_current(self.f.hass,self.first,guard=self.guard)
         finally:
             path.unlink()  # Cleanup only after negative readback assertions.
+
+    async def test_actual_source_name_takeover_cannot_reactivate_original_callbacks(self):
+        # A second REAL producer exists before SAME ORIGINAL preparation. It is
+        # not introduced as an unbound late input, nor assigned another UID.
+        foreign=existing.profiles.ProfileLight('Foreign physical dynamic',dynamic=True)
+        await self.sources[1].platform.async_add_entities([foreign])
+        await self.f.hass.async_block_till_done()
+        await self._flush_documents()
+        await self.ready()
+        from custom_components.powercalc import register_services
+        from homeassistant.helpers.reload import async_integration_yaml_config
+        before=self.actual_pairs()
+        registry=self.f.entity
+        original_id=self.gui_source
+        moved_id=original_id+'_foreign_moved'
+        foreign_id=foreign.entity_id
+        original_row=registry.async_get(original_id)
+        foreign_row=registry.async_get(foreign_id)
+        self.assertIsNotNone(original_row)
+        self.assertIsNotNone(foreign_row)
+        self.assertNotEqual(original_row.id,foreign_row.id)
+        self.assertNotEqual(original_row.unique_id,foreign_row.unique_id)
+        self.assertIsNone(registry.async_get(moved_id))
+        metadata=[dict(self.entry.data),dict(self.entry.options),self.entry.unique_id]
+        roots=[code for code in existing.subject._code_objects(register_services.__code__)
+               if code.co_qualname=='register_services.<locals>._reload_config']
+        self.assertEqual(len(roots),1)
+        caller=asyncio.current_task()
+        monitor=sys.monitoring
+        free=[key for key in range(6) if monitor.get_tool(key) is None]
+        self.assertTrue(free)
+        tool=free[0]
+        fired=[]
+        observer_errors=[]
+        def started(code,offset):
+            frame=sys._getframe(1)
+            root=frame.f_back
+            call=None if root is None else root.f_locals.get('_')
+            if (fired or root is None or root.f_code is not roots[0]
+                    or getattr(call,'hass',None) is not self.f.hass):
+                return
+            fired.append(True)
+            try:
+                # Enter the real YAML-loader coroutine from native reload. All
+                # root PY_START observers have completed; old pairs are detached
+                # and no new GUI setup has registered its callbacks yet.
+                self.assertFalse(set(before)&set(self.actual_pairs()))
+                registry.async_update_entity(original_id,new_entity_id=moved_id)
+                registry.async_update_entity(foreign_id,new_entity_id=original_id)
+                self.assertEqual(registry.async_get(original_id).id,foreign_row.id)
+                self.assertEqual(registry.async_get(moved_id).id,original_row.id)
+            except BaseException as error:
+                observer_errors.append(type(error).__module__+'.'+type(error).__qualname__)
+            finally:
+                caller.cancel()  # Actual caller cancellation; native descendants drain.
+        monitor.use_tool_id(tool,'test.powercalc.source_takeover')
+        monitor.register_callback(tool,monitor.events.PY_START,started)
+        loader_code=async_integration_yaml_config.__code__
+        monitor.set_local_events(tool,loader_code,monitor.events.PY_START)
+        caught=None
+        try:
+            try:
+                await self.reload_owned()
+            except BaseException as error:
+                caught=error
+        finally:
+            monitor.set_local_events(tool,loader_code,0)
+            monitor.register_callback(tool,monitor.events.PY_START,None)
+            monitor.free_tool_id(tool)
+            if fired:
+                caller.uncancel()
+        try:
+            self.assertEqual(fired,[True])
+            self.assertEqual(observer_errors,[])
+            self.assertEqual([dict(self.entry.data),dict(self.entry.options),self.entry.unique_id],metadata)
+            self.assertEqual(self.entry.state.value,'loaded')
+            self.assertEqual(registry.async_get(original_id).id,foreign_row.id)
+            self.assertEqual(registry.async_get(original_id).unique_id,foreign_row.unique_id)
+            self.assertEqual(registry.async_get(moved_id).id,original_row.id)
+            self.assertIs(foreign.registry_entry,registry.async_get(original_id))
+            self.assertEqual(foreign.entity_id,original_id)
+            self.assertEqual(self.sources[1].entity_id,moved_id)
+            after=self.actual_pairs()
+            self.assertFalse(set(before)&set(after),
+                'original callbacks were reactivated against a foreign physical source')
+            self.assertEqual(after,{})  # Own new pairs removed; no stale original restored.
+            self.assertIs(type(caught),ValueError)
+            self.assertEqual(str(caught),
+                'powercalc_reload_global_rollback_source_identity_changed_original_not_reactivated')
+            # No returned witness/accepted receipt. Do NOT require the stale
+            # whole Powercalc runtime to equal current after a real reload.
+        finally:
+            # Restore only native entity names AFTER all negative assertions.
+            # Neither source UID nor numeric/clock/cache fields are assigned.
+            current=registry.async_get(original_id)
+            if current is not None and current.id==foreign_row.id:
+                registry.async_update_entity(original_id,new_entity_id=foreign_id)
+            if registry.async_get(moved_id) is not None:
+                registry.async_update_entity(moved_id,new_entity_id=original_id)
+            await self.f.hass.async_block_till_done()

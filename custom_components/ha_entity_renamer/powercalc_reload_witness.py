@@ -74,6 +74,7 @@ class _Reload:
         self.root_task=None
         self.live=False
         self.inflight={}
+        self.listener_owner=None
 
     def check(self):
         _guard(self.guard)
@@ -214,6 +215,10 @@ class _Reload:
             code=frame.f_code
             entity=frame.f_locals.get('self')
             tag=self.tags.get(code)
+            if tag in ('global_add','global_remove','global_effect'):
+                _need(self.listener_owner is not None,'global_owner_missing')
+                self.listener_owner.observe(tag,frame,phase,result)
+                return
             if tag=='root':
                 call=frame.f_locals.get('_')
                 if getattr(call,'hass',None) is not self.hass:
@@ -367,7 +372,8 @@ class _Reload:
             raise first
 
 
-async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,original,*,guard):
+async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,original,*,guard,
+                                                  _manage_global_rename=False):
     """Own ONE real service call under unchanged ORIGINAL. Caller owns admin/IO lease.
 
     PERFORMS a real vendor reload, which may reset numeric state. This function
@@ -379,6 +385,7 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
     from homeassistant.helpers.entity import Entity
     from homeassistant.helpers.entity_platform import EntityPlatform
     from .yaml_validation import _settled_executor
+    _need(type(_manage_global_rename) is bool,'global_policy_shape')
     _need(__version__=='2026.10.2' and type(hass) is HomeAssistant,'supported_pair')
     scope=_Reload(hass,receipt,evidence,original,guard)
     scope.vendor=PowercalcVendor(hass,with_profiles=True)
@@ -411,6 +418,9 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
                    (Entity,'add_to_platform_finish'),
                    (scope.vendor.integration.IntegrationSensor,'_cancel_max_sub_interval_exceeded_callback'),
                    (EventBus,'async_listen'),(EventBus,'_async_listen_filterable_job'))
+    if _manage_global_rename:
+        from .powercalc_global_listener_ownership import _refs
+        scope.ha_refs+=_refs()
     def prove():
         scope.vendor.sources()
         vm,vc=prove_methods(scope.vendor.root,_pins(),scope.vendor_refs)
@@ -436,6 +446,9 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
     scope.rename_sources={(row['entry_id'],row['source_entity_id']) for row in rename_before.values()}
     _need(bool(rename_before) and len(scope.rename_sources)==len(rename_before),
           'initial_single_global_rename_listener_per_source')
+    if _manage_global_rename:
+        scope.tags.update({scope.ha_codes[5]:'global_add',scope.ha_codes[6]:'global_remove',
+                           scope.rename_target:'global_effect'})
     scope.codes=tuple(scope.tags)
     scope.context=Context()
     scope.call_class=ServiceCall
@@ -446,11 +459,16 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
     second=await async_bind_powercalc_sources(hass,receipt,evidence,original,guard=guard)
     _need(second==bound and not pending(hass),'preflight_changed')
     _need(scope.rename_listeners()[0]==rename_before,'preflight_global_listener_changed')
+    if _manage_global_rename:
+        from .powercalc_global_listener_ownership import _GlobalRenameOwner
+        scope.listener_owner=_GlobalRenameOwner(scope,rename_before,second)
     token=scope.causal.set(scope.marker)
     task=None
     try:
         scope.install()
         scope.check()
+        if scope.listener_owner is not None:
+            scope.listener_owner.detach()
         async def reload_and_finish():
             try:
                 await hass.services.async_call('powercalc','reload',{},
@@ -526,13 +544,24 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
         blockers=('capture_only_no_full_reload_ownership',)
         if retained:
             blockers+=('vendor_global_rename_listeners_retained',)
-        return PowercalcReloadWitness(evidence.sha256,original.structural_token,_json(before),
+        lifecycle=PowercalcReloadWitness(evidence.sha256,original.structural_token,_json(before),
             _json({'removed':scope.departures,'before_cancel':scope.cancelled,
                    'last_active':scope.last_active}),_json(after),
             _json(scope.calls),tuple((key,id(scope.old[key]),id(current[key])) for key in sorted(current)),
             after_capture.structural_token,_json(rename_before),_json(rename_after),blockers)
+        if scope.listener_owner is not None:
+            from .powercalc_global_listener_ownership import PowercalcOwnedReloadWitness
+            native_receipt=scope.listener_owner.finish(rename_after)
+            return PowercalcOwnedReloadWitness(lifecycle,native_receipt)
+        return lifecycle
     except BaseException as error:
         scope.annotate(error)
+        if scope.listener_owner is not None:
+            try:
+                scope.listener_owner.abort()
+            except BaseException as cleanup_error:
+                error.add_note('powercalc_reload_global_rollback_refused')
+                raise cleanup_error from error
         raise
     finally:
         scope.causal.reset(token)
