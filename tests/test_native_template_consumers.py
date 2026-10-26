@@ -20,7 +20,12 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
     _before_start = fixture.NativeHelperQuiescenceTests._before_start
     _flush_documents = fixture.NativeHelperQuiescenceTests._flush_documents
 
-    async def prepare(self, kind, *, foreign_runtime=False, sibling=False):
+    async def prepare(self, kind, *, foreign_runtime=False, sibling=False, variant='sensor'):
+        self.assertIn(variant, ('sensor', 'binary_sensor'))
+        self.template_variant = variant
+        if variant == 'binary_sensor':
+            self.assertEqual(kind, 'yaml')
+            self.assertFalse(foreign_runtime or sibling)
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.config_entries import ConfigEntry
@@ -38,7 +43,10 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
         self.source_id = self.producer.entity_id
         state = "{{ states('" + self.source_id + "') | int(0) * 2 }}"
         if kind == 'yaml':
-            text = '- unique_id: scope\n  sensor:\n  - unique_id: value\n    name: Runtime consumer\n    state: "' + state + '"\n'
+            if variant == 'binary_sensor':
+                state = "{{ is_state('" + self.source_id + "', '5') }}"
+            text = ('- unique_id: scope\n  ' + variant + ':\n  - unique_id: value\n'
+                    '    name: Runtime consumer\n    state: "' + state + '"\n')
             if sibling:
                 text += '  binary_sensor:\n  - unique_id: flag\n    name: Runtime flag\n    state: "{{ states(\'' + self.source_id + '\') | int(0) > 0 }}"\n'
             (root / 'template.yaml').write_text(text)
@@ -92,8 +100,9 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
         self.producer._attr_native_value = value
         self.producer.async_write_ha_state()
         await self.f.hass.async_block_till_done()
-        self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state,
-                         str(value * multiplier))
+        expected = (('on' if value == 5 else 'off') if self.template_variant == 'binary_sensor'
+                    else str(value * multiplier))
+        self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, expected)
 
     async def check_two_events(self):
         for value in (5, 7):

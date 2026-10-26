@@ -30,11 +30,14 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
     def module(self, name):
         return importlib.import_module(fixture.fixtures.PACKAGE + '.' + name)
 
-    async def transaction(self, *, fault=None):
+    async def transaction(self, *, fault=None, variant='sensor'):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_platform import async_get_platforms
         unknown_errors = []
-        await self.prepare('yaml')
+        await self.prepare('yaml', variant=variant)
+        binary_prerequisites = None
+        if variant == 'binary_sensor':
+            binary_prerequisites = await self.assert_binary_native_prerequisites()
         # Reuse the native source-clock fixture's retained descriptor method.
         # VirtioFS can recycle a closed replacement inode between two reads.
         mutator = self.module('yaml_transaction')
@@ -50,7 +53,9 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.object(mutator, 'apply_file_patch', retain_actual_replacement))
         hass, receipt = self.f.hass, self.receipt
         self.assertEqual(receipt.changed_domains, ('template',))
-        self.assertTrue(receipt.ready_for_apply, receipt.unsupported_domains)
+        self.assertTrue(receipt.ready_for_apply,
+                        (receipt.unsupported_domains, binary_prerequisites)
+                        if binary_prerequisites is not None else receipt.unsupported_domains)
         self.assertIsNotNone(self.evidence.template_candidate_sources)
         original = await self.module('native_input_baseline').async_capture_native_input_baseline(
             hass, receipt, guard=lambda: None)
@@ -328,7 +333,7 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chain.baseline.receipt_json, self.evidence.receipt_json)
         self.consumer = next(entity for platform in async_get_platforms(hass, 'template')
             for entity in platform.entities.values() if entity.unique_id == self.consumer_key)
-        for value in (5, 7):
+        for value in ((5, 7, 5) if variant == 'binary_sensor' else (5, 7)):
             await self.emit(value)
         observed = await accepted_observer.async_observe_accepted_template_consumers(
             hass, chain, self.evidence, guard=lambda: None)
@@ -361,7 +366,7 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chain.original_receipt, receipt)
         self.consumer = next(entity for platform in async_get_platforms(hass, 'template')
             for entity in platform.entities.values() if entity.unique_id == self.consumer_key)
-        for value in (5, 7):
+        for value in ((5, 7, 5) if variant == 'binary_sensor' else (5, 7)):
             await self.emit(value)
         final = await accepted_observer.async_observe_accepted_template_consumers(
             hass, chain, self.evidence, guard=lambda: None)
@@ -372,6 +377,91 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.yaml_position, 'original')
         self.assertEqual([proof.direction for proof in proofs], ['forward', 'rollback'])
         return chain, change, fresh_observer
+
+    async def assert_binary_native_prerequisites(self):
+        """Genuine native events/source identity BEFORE asking product readiness."""
+        import hashlib
+        from pathlib import Path
+        from types import CodeType, MethodType
+        from homeassistant.const import __version__
+        from homeassistant.components.template import binary_sensor, template_entity
+        pinned = {
+            '2025.6.0': ('BinarySensorTemplate',
+                'bbe0f0b272f8173a5a09386752778ec758ae79f2ecf0e66ecc9d2e0fa31c15a7', '_state'),
+            '2026.10.2': ('StateBinarySensorEntity',
+                'b3e86b88a258760edbdcad2a79e929ee77346888d8d7ff793f1bb97003e3c857', '_attr_is_on'),
+        }
+        self.assertIn(__version__, pinned)
+        class_name, source_sha, attribute = pinned[__version__]
+        self.assertEqual(hashlib.sha256(Path(binary_sensor.__file__).read_bytes()).hexdigest(), source_sha)
+        self.assertIs(type(self.consumer), getattr(binary_sensor, class_name))
+        self.assertTrue(self.consumer.entity_id.startswith('binary_sensor.'))
+        self.assertEqual(self.consumer.unique_id, 'scope-value')
+        for name in ('_delay_cancel', '_delay_on', '_delay_off'):
+            self.assertIsNone(getattr(self.consumer, name))
+        state_template = self.consumer._template
+        self.assertEqual(state_template.template,
+                         "{{ is_state('" + self.source_id + "', '5') }}")
+        self.assertEqual(set(self.consumer._template_attrs), {state_template})
+        slots = self.consumer._template_attrs[state_template]
+        self.assertEqual(len(slots), 1)
+        slot = slots[0]
+        self.assertIs(type(slot), template_entity._TemplateAttribute)
+        self.assertIs(slot._entity, self.consumer)
+        self.assertEqual(slot._attribute, attribute)
+        self.assertIs(slot.template, state_template)
+        self.assertIsNone(slot.validator)
+        self.assertFalse(slot.none_on_template_error)
+        if __version__ == '2025.6.0':
+            self.assertIs(type(slot.on_update), MethodType)
+            self.assertIs(slot.on_update.__self__, self.consumer)
+            self.assertIs(slot.on_update.__func__, binary_sensor.BinarySensorTemplate._update_state)
+            self.assertIsNone(self.consumer._delay_on_raw)
+            self.assertIsNone(self.consumer._delay_off_raw)
+        else:
+            self.assertEqual(set(self.consumer._templates), {'state'})
+            callback = slot.on_update
+            self.assertIn(callback.__code__, [code for code in
+                template_entity.TemplateEntity.setup_state_template.__code__.co_consts
+                if type(code) is CodeType])
+            cells = dict(zip(callback.__code__.co_freevars,
+                             (cell.cell_contents for cell in callback.__closure__ or ())))
+            self.assertEqual(set(cells), {'self', 'attribute', 'on_update', 'validator'})
+            self.assertIs(cells['self'], self.consumer)
+            self.assertEqual(cells['attribute'], '_attr_is_on')
+            self.assertIsNone(cells['validator'])
+            self.assertIs(type(cells['on_update']), MethodType)
+            self.assertIs(cells['on_update'].__self__, self.consumer)
+            self.assertIs(cells['on_update'].__func__, binary_sensor.StateBinarySensorEntity._update_state)
+        sources = self.evidence.template_sources
+        self.assertIsNotNone(sources)
+        self.assertTrue(sources.source_matched)
+        self.assertFalse(sources.ledger.findings)
+        expected_keys = [('template.binary_sensor', 'scope-value'), ('template.state', 'id:scope')]
+        self.assertEqual(sorted((row.domain, row.native_key) for row in sources.ledger.definitions), expected_keys)
+        self.assertEqual(sorted(row[:2] for row in sources.rows), expected_keys)
+        candidate = self.evidence.template_candidate_sources
+        self.assertIsNotNone(candidate)
+        candidate.assert_original(self.receipt, sources)
+        self.assertTrue(candidate.sources.source_matched)
+        row_image = self.module('native_utility_unload_audit')._row
+        source_uuid = self.f.entity.async_get(self.source_id).id
+        consumer_before = row_image(self.f.entity.async_get(self.consumer.entity_id))
+        events = []
+        for value in (5, 7, 5):
+            await self.emit(value)  # Only producer native_value is set; HA updates binary.
+            self.assertEqual(self.f.entity.async_get(self.source_id).id, source_uuid)
+            self.assertEqual(self.f.entity.async_get(self.consumer.entity_id).id, self.consumer_uuid)
+            self.assertEqual(row_image(self.f.entity.async_get(self.consumer.entity_id)), consumer_before)
+            events.append((value, self.f.hass.states.get(self.consumer.entity_id).state))
+        self.assertEqual(events, [(5, 'on'), (7, 'off'), (5, 'on')])
+        return {'binary_native_prerequisites': 'PASS', 'producer_events': events,
+                'core': __version__, 'class': class_name,
+                'source_ledger': 'template.binary_sensor/scope-value',
+                'source_and_consumer_uuid': 'preserved'}
+
+    async def test_actual_binary_state_product_forward_and_fresh_reverse_preserve_source_and_uuid(self):
+        await self.transaction(variant='binary_sensor')
 
     async def test_actual_product_forward_and_fresh_reverse_preserve_source_and_uuid(self):
         await self.transaction()
