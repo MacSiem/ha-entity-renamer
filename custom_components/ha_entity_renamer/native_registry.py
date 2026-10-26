@@ -332,11 +332,10 @@ class NativeRegistryBridge:
             metadata = True
             if change.mapping:
                 baseline = json.loads(change.recorder_before_json)
-                if position == "before":
-                    metadata = recorder == baseline
-                else:
-                    from .recorder_guard import verify
-                    metadata = verify(change.mapping, baseline, recorder)
+                from .recorder_guard import verify, verify_rollback
+                metadata = (verify_rollback(change.mapping, baseline, recorder)
+                            if position == "before" else
+                            verify(change.mapping, baseline, recorder))
             runtime_after = self.runtime_probe(change, target)
             runtime = (runtime and runtime_after) if runtime is not None else None
             if self.io.pending(change.kind):

@@ -51,6 +51,39 @@ class RecorderGuardTests(unittest.TestCase):
         self.assertTrue(guard.verify(self.mapping, before, copy.deepcopy(before)))
         self.assertEqual(guard.prepare(self.mapping, before), before)
 
+    def test_reverse_accepts_recorder_series_born_after_original_prepare(self):
+        original = self.baseline()
+        original['statistics'] = {}
+        saved = copy.deepcopy(original)
+        # The actual native cycle supplies the metadata; this unit test covers
+        # comparison semantics only, not provenance or a statistics-cycle PASS.
+        self.assertTrue(guard.verify(self.mapping, original, self.migrated()))
+        self.assertTrue(guard.verify_rollback(self.mapping, original, self.baseline()))
+        self.assertEqual(original, saved)
+        foreign = self.baseline()
+        foreign['statistics']['sensor.old']['source'] = 'external'
+        self.assertFalse(guard.verify_rollback(self.mapping, original, foreign))
+
+    def test_reverse_retains_original_metadata_and_rejects_alias_or_foreign_baseline(self):
+        self.assertTrue(guard.verify_rollback(self.mapping, self.baseline(), self.baseline()))
+        for kind, field, value in [('states', 'metadata_id', 99),
+                                   ('statistics', 'id', 8),
+                                   ('statistics', 'unit_of_measurement', 'Wh'),
+                                   ('statistics', 'has_sum', False)]:
+            with self.subTest(kind=kind, field=field):
+                changed = self.baseline()
+                changed[kind]['sensor.old'][field] = value
+                self.assertFalse(guard.verify_rollback(self.mapping, self.baseline(), changed))
+        for kind in ('states', 'statistics'):
+            with self.subTest(kind=kind):
+                missing = self.baseline()
+                missing[kind].clear()
+                self.assertFalse(guard.verify_rollback(self.mapping, self.baseline(), missing))
+                duplicate = self.baseline()
+                duplicate[kind]['sensor.new'] = {'id': 999}
+                self.assertFalse(guard.verify_rollback(self.mapping, self.baseline(), duplicate))
+                self.assertFalse(guard.verify_rollback(self.mapping, duplicate, self.baseline()))
+
     def test_snapshot_detached_from_mutable_caller(self):
         data = self.baseline(); saved = guard.prepare(self.mapping, data)
         data['states']['sensor.old']['metadata_id'] = 99

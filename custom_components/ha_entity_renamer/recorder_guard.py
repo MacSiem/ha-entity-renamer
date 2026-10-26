@@ -49,6 +49,27 @@ def verify(mapping: dict[str, str], before: dict, after: dict) -> bool:
     return True
 
 
+def verify_rollback(mapping: dict[str, str], before: dict, after: dict) -> bool:
+    """Reverse the SAME ORIGINAL metadata expectations, without a new baseline.
+
+    Forward verification already permits a new Recorder-owned series when none
+    existed at preparation. Its natural creation must remain legal on reverse.
+    Known original primary keys/properties and absence of the other alias still
+    use exactly the existing verification rules in the opposite direction.
+    """
+    if len(set(mapping.values())) != len(mapping):
+        return False
+    try:
+        original = prepare(mapping, before)
+    except RecorderConflict:
+        return False
+    migrated_original = {
+        kind: {mapping.get(entity_id, entity_id): row for entity_id, row in rows.items()}
+        for kind, rows in original.items()
+    }
+    return verify({new: old for old, new in mapping.items()}, migrated_original, after)
+
+
 def _read_session(session, ids):
     from sqlalchemy import select
     from homeassistant.components.recorder.db_schema import StatesMeta, StatisticsMeta
