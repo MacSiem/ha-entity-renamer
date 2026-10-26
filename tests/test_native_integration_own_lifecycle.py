@@ -307,6 +307,16 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         type(error).__qualname__, reason, tuple(frames)))
                 except BaseException:
                     pass  # Diagnostics must never change the original failure.
+            actual_bridge_inspect = self.native_bridge.inspect
+            async def diagnosed_bridge_inspect(change):
+                result = await actual_bridge_inspect(change)
+                # Detached native evidence fields only. Observe the real return;
+                # do not replace its result, callbacks, errors or native state.
+                adapter_diagnostics.append(('bridge.inspect.return', result.position,
+                    result.registry, result.runtime, result.durable, result.metadata,
+                    result.history, result.reason))
+                return result
+            self.native_bridge.inspect = diagnosed_bridge_inspect
             actual_registry_apply = registry.apply
             async def diagnosed_registry_apply(step, guard):
                 try:
