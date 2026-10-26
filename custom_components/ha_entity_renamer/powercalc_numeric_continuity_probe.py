@@ -45,11 +45,20 @@ def _value(value, depth=0):
     if type(value) in (tuple, list, set, frozenset):
         values = [_value(v, depth + 1) for v in value]
         return sorted(values, key=_json) if type(value) in (set, frozenset) else values
-    _need(type(value) is dict and all(type(k) is str for k in value),
-          'value_type_' + type(value).__module__ + '.' + type(value).__qualname__
-          + ('_keys_' + ','.join(sorted({type(k).__module__ + '.' + type(k).__qualname__
-                                        for k in value})) if type(value) is dict else ''))
-    return {k: _value(v, depth + 1) for k, v in value.items()}
+    _need(type(value) is dict, 'value_type_' + type(value).__module__ + '.' + type(value).__qualname__)
+    # Native State attributes use HA StrEnum constants alongside plain strings.
+    # Encode their actual string values, refusing all other keys and collisions.
+    pairs = []
+    for key, item in value.items():
+        if type(key) is str:
+            name = key
+        else:
+            _need(isinstance(key, str) and isinstance(key, Enum)
+                  and type(key.value) is str, 'attribute_key_type')
+            name = key.value
+        pairs.append((name, _value(item, depth + 1)))
+    _need(len({name for name, item in pairs}) == len(pairs), 'attribute_key_collision')
+    return dict(pairs)
 
 
 @dataclass(frozen=True)
