@@ -6,9 +6,11 @@ receipts. Only the producer receives ordinary events; no helper output seeds.
 """
 import asyncio
 import importlib
+import os
 import sys
 import traceback
 import unittest
+from unittest.mock import patch
 
 import test_native_template_consumers as consumers
 import test_receipted_helper_native as lifecycle_fixture
@@ -33,6 +35,19 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.helpers.entity_platform import async_get_platforms
         unknown_errors = []
         await self.prepare('yaml')
+        # Reuse the native source-clock fixture's retained descriptor method.
+        # VirtioFS can recycle a closed replacement inode between two reads.
+        mutator = self.module('yaml_transaction')
+        actual_write = mutator.apply_file_patch
+        def retain_actual_replacement(*args, **kwargs):
+            result = actual_write(*args, **kwargs)
+            fd = os.open(self.f.root / result['path'], os.O_RDONLY | os.O_NOFOLLOW)
+            self.addCleanup(os.close, fd)
+            info = os.fstat(fd)
+            self.assertEqual((info.st_dev, info.st_ino, info.st_mode),
+                             tuple(result['after_identity']))
+            return result
+        self.enterContext(patch.object(mutator, 'apply_file_patch', retain_actual_replacement))
         hass, receipt = self.f.hass, self.receipt
         self.assertEqual(receipt.changed_domains, ('template',))
         self.assertTrue(receipt.ready_for_apply, receipt.unsupported_domains)
@@ -311,7 +326,7 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(await fresh_observer.position_at_inputs(change, chain.reconstruct_inputs()),
                       tx.Position.AFTER)
         rolled = await reverse.rollback(operation)
-        self.assertEqual(rolled.status, 'rolled_back', rolled.reason)
+        self.assertEqual(rolled.status, 'rolled_back', (rolled.reason, unknown_errors))
         self.assertEqual(rolled.phases, ('undone', 'undone'))
         self.assertEqual(self.producer.entity_id, self.source_id)
         self.assertEqual(self.f.entity.async_get(self.source_id).id, source_uuid)
