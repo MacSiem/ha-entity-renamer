@@ -20,12 +20,20 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
     _before_start = fixture.NativeHelperQuiescenceTests._before_start
     _flush_documents = fixture.NativeHelperQuiescenceTests._flush_documents
 
-    async def prepare(self, kind, *, foreign_runtime=False, sibling=False, variant='sensor'):
-        self.assertIn(variant, ('sensor', 'binary_sensor'))
+    async def prepare(self, kind, *, foreign_runtime=False, sibling=False, variant='sensor',
+                      binary_extra=None, binary_device_class=None):
+        self.assertIn(variant, ('sensor', 'binary_sensor', 'mixed'))
         self.template_variant = variant
-        if variant == 'binary_sensor':
+        self.consumer_domain = 'binary_sensor' if variant == 'binary_sensor' else 'sensor'
+        self.binary_match = 7 if foreign_runtime and variant == 'binary_sensor' else 5
+        self.assertIn(binary_extra, (None, 'delay_on'))
+        if binary_extra is not None or binary_device_class is not None:
+            self.assertEqual(variant, 'binary_sensor')
+        if variant in ('binary_sensor', 'mixed'):
             self.assertEqual(kind, 'yaml')
-            self.assertFalse(foreign_runtime or sibling)
+            self.assertFalse(sibling)
+        else:
+            self.assertIsNone(binary_extra)
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.config_entries import ConfigEntry
@@ -45,15 +53,26 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
         if kind == 'yaml':
             if variant == 'binary_sensor':
                 state = "{{ is_state('" + self.source_id + "', '5') }}"
-            text = ('- unique_id: scope\n  ' + variant + ':\n  - unique_id: value\n'
+            text = ('- unique_id: scope\n  ' + self.consumer_domain + ':\n  - unique_id: value\n'
                     '    name: Runtime consumer\n    state: "' + state + '"\n')
+            if binary_extra:
+                text += '    delay_on: "00:00:01"\n'
+            if binary_device_class is not None:
+                self.assertEqual(binary_device_class, 'power')
+                text += '    device_class: power\n'
+            if variant == 'mixed':
+                # Same native key in different domains must never collapse.
+                text += ('  binary_sensor:\n  - unique_id: value\n    name: Runtime binary\n'
+                         '    state: "{{ is_state(\'' + self.source_id + '\', \'5\') }}"\n')
             if sibling:
                 text += '  binary_sensor:\n  - unique_id: flag\n    name: Runtime flag\n    state: "{{ states(\'' + self.source_id + '\') | int(0) > 0 }}"\n'
             (root / 'template.yaml').write_text(text)
             (root / 'configuration.yaml').write_text('template: !include template.yaml\n')
             cfg = await async_hass_config_yaml(hass)
             if foreign_runtime:
-                cfg['template'][0]['sensor'][0]['state'] = state.replace('* 2', '* 3')
+                cfg['template'][0][self.consumer_domain][0]['state'] = (
+                    state.replace("'5'", "'7'") if variant == 'binary_sensor'
+                    else state.replace('* 2', '* 3'))
             self.assertTrue(await async_setup_component(hass, 'template', cfg))
             self.consumer_key, self.entry_id = 'scope-value', None
         else:
@@ -71,9 +90,11 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
             self.entry_id = self.consumer_key = entry.entry_id
         await hass.async_block_till_done()
         from homeassistant.helpers.entity_platform import async_get_platforms
-        self.consumer = next(e for p in async_get_platforms(hass, 'template')
+        self.consumer = next(e for p in async_get_platforms(hass, 'template') if p.domain == self.consumer_domain
             for e in p.entities.values() if e.unique_id == self.consumer_key)
         self.consumer_uuid = self.f.entity.async_get(self.consumer.entity_id).id
+        self.consumer_identities = {(p.domain, e.unique_id): (e.entity_id, self.f.entity.async_get(e.entity_id).id)
+            for p in async_get_platforms(hass, 'template') for e in p.entities.values()}
         await self._flush_documents(initialize=True)
         planner = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_plan')
         validation = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_validation')
@@ -100,9 +121,75 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
         self.producer._attr_native_value = value
         self.producer.async_write_ha_state()
         await self.f.hass.async_block_till_done()
-        expected = (('on' if value == 5 else 'off') if self.template_variant == 'binary_sensor'
+        expected = (('on' if value == self.binary_match else 'off') if self.template_variant == 'binary_sensor'
                     else str(value * multiplier))
         self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, expected)
+        if self.template_variant == 'mixed':
+            from homeassistant.helpers.entity_platform import async_get_platforms
+            binary = next(e for p in async_get_platforms(self.f.hass, 'template') if p.domain == 'binary_sensor'
+                          for e in p.entities.values() if e.unique_id == self.consumer_key)
+            self.assertEqual(self.f.hass.states.get(binary.entity_id).state, 'on' if value == 5 else 'off')
+            self.assertEqual((binary.entity_id, self.f.entity.async_get(binary.entity_id).id),
+                             self.consumer_identities['binary_sensor', self.consumer_key])
+
+    async def test_binary_same_native_key_with_foreign_body_does_not_match_original(self):
+        await self.prepare('yaml', variant='binary_sensor', foreign_runtime=True)
+        for value in (5, 7, 5):
+            await self.emit(value)
+        row = self.consumer_row(await self.observe())
+        self.assertTrue(row.consumer_verified, row.reason)
+        self.assertFalse(row.source_verified)
+        self.assertEqual(row.reason, 'source_semantics_mismatch')
+
+    async def test_binary_static_device_class_keeps_source_and_native_boolean_proof(self):
+        await self.prepare('yaml', variant='binary_sensor', binary_device_class='power')
+        self.assertTrue(self.receipt.ready_for_apply, self.receipt.unsupported_domains)
+        for value in (5, 7, 5):
+            await self.emit(value)
+        row = self.consumer_row(await self.observe())
+        self.assertTrue(row.consumer_verified, row.reason)
+        self.assertTrue(row.source_verified, row.reason)
+        self.assertEqual(row.registry_id, self.consumer_uuid)
+        self.assertEqual(row.dependencies, (self.source_id,))
+        self.assertEqual(self.consumer._attr_device_class, 'power')
+
+    async def test_binary_delay_is_inventoried_but_refuses_activation_and_consumer_proof(self):
+        await self.prepare('yaml', variant='binary_sensor', binary_extra='delay_on')
+        self.assertFalse(self.receipt.ready_for_apply)
+        self.assertIn('template', self.receipt.unsupported_domains)
+        self.assertTrue(self.evidence.template_sources.source_matched)
+        self.assertEqual({(row.domain, row.native_key) for row in self.evidence.template_sources.ledger.definitions},
+                         {('template.state', 'id:scope'), ('template.binary_sensor', 'scope-value')})
+        observed = await self.observe()
+        row = self.consumer_row(observed)
+        self.assertFalse(row.consumer_verified)
+        self.assertFalse(row.source_verified)
+        self.assertTrue(any(row.kind == 'source' and row.platform == 'template.binary_sensor' for row in observed.rows))
+        self.assertFalse(observed.family_complete)
+
+    async def test_binary_foreign_boolean_conversion_refuses_without_executing_it(self):
+        from homeassistant.components.template import binary_sensor
+        await self.prepare('yaml', variant='binary_sensor')
+        invoked = []
+        def foreign_conversion(value):
+            invoked.append(value)
+            raise AssertionError('foreign conversion must not execute')
+        with patch.object(binary_sensor.template, 'result_as_boolean', foreign_conversion):
+            with self.assertRaises(ValueError):
+                await self.observe()
+        self.assertEqual(invoked, [])
+
+    async def test_binary_dynamic_reference_and_expression_wrappers_remain_unqualified(self):
+        worker = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_validation_worker')
+        self.assertEqual(worker._qualified_binary_expression("{{ is_state('sensor.original', '5') }}"),
+                         ('sensor.original',))
+        for text in ("{{ is_state(source, '5') }}", "{{ is_state('sensor.original', wanted) }}",
+                     "{{ states('sensor.original') | int(0) > 0 }}",
+                     "{{ is_state('sensor.original', '5') or true }}",
+                     "prefix {{ is_state('sensor.original', '5') }}",
+                     "{{ is_state('sensor.original', '5', extra=true) }}"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                worker._qualified_binary_expression(text)
 
     async def check_two_events(self):
         for value in (5, 7):
@@ -258,3 +345,23 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(render.filter, original_filter)
         self.assertIs(render.filter_lifecycle, original_lifecycle)
         await self.emit(7)  # genuine callback resumes and reads 14 after restore
+
+    async def test_binary_late_native_boolean_import_alias_refuses_without_execution(self):
+        import sys
+        from types import SimpleNamespace
+        await self.prepare('yaml', variant='binary_sensor')
+        observer = importlib.import_module(fixture.fixtures.PACKAGE + '.native_template_consumers')
+        # Establish real byte/method proof, then drift the actual alias which
+        # the pinned converter would resolve. Do not invoke the converter.
+        native = observer._Native(self.f.hass)
+        invoked = []
+        def foreign_conversion(value):
+            invoked.append(value)
+            raise AssertionError('foreign boolean alias must not execute')
+        fake = SimpleNamespace(boolean=foreign_conversion)
+        target, attribute = ((sys.modules['homeassistant.helpers'], 'config_validation')
+                             if native.version == '2025.6.0' else (native.boolean_module, 'cv'))
+        with patch.object(target, attribute, fake):
+            with self.assertRaisesRegex(ValueError, 'native_binary_boolean_binding_changed'):
+                observer._live_binary(native, self.consumer)
+        self.assertEqual(invoked, [])

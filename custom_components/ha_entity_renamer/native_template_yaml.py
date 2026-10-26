@@ -1,4 +1,4 @@
-"""Scoped modern YAML state-sensor activation readback; no native effects.
+"""Scoped modern YAML numeric/binary activation readback; no native effects.
 
 ORIGINAL/candidate seals and accepted/live YAML hook sources remain distinct.
 Only ReceiptedYAMLTransactionAdapter supplies its actual partial-call state.
@@ -31,7 +31,7 @@ from .template_source_evidence import CandidateTemplateSources
 from .transaction import Position
 from .yaml_source_binding import OriginalSourceEvidence
 from .yaml_validation import _settled_executor
-from .yaml_validation_worker import _fingerprint
+from .yaml_validation_worker import _fingerprint, template_state_runtime_projection
 
 _SERVICE_PINS = {
     '2025.6.0': '6cdda27dd9e3cc25605e94365789062ffdddfe538f815bf7bf1f973bc1b8b157',
@@ -360,11 +360,13 @@ class NativeTemplateYAMLRuntimeReadback:
         candidate.assert_original(self.receipt, original)
         _need(original.source_matched and candidate.sources.source_matched
               and not original.ledger.findings
-              and all(row.domain in ('template.state', 'template.sensor')
+              and all(row.domain in ('template.state', 'template.sensor', 'template.binary_sensor')
                       for row in original.ledger.definitions),
               'template_scoped_source_inventory_required')
-        self.keys = tuple(row[1] for row in original.rows if row[0] == 'template.sensor')
-        _need(bool(self.keys), 'template_scoped_nonempty_sources_required')
+        self.keys = tuple((domain.removeprefix('template.'), key) for domain, key, _ in original.rows
+                          if domain in ('template.sensor', 'template.binary_sensor'))
+        _need(bool(self.keys) and len(self.keys) == len(set(self.keys)),
+              'template_scoped_nonempty_sources_required')
         documents = {row.key: json.loads(row.raw) for row in chain.baseline.files}
         _need(not any(row['domain'] == 'template'
                       for row in documents['core.config_entries']['data']['entries']),
@@ -372,11 +374,12 @@ class NativeTemplateYAMLRuntimeReadback:
         registry = [row for row in documents['core.entity_registry']['data']['entities']
                     if row['platform'] == 'template']
         _need(len(registry) == len(self.keys)
-              and {row['unique_id'] for row in registry} == set(self.keys)
+              and {(row['entity_id'].split('.')[0], row['unique_id']) for row in registry} == set(self.keys)
               and all(row['config_entry_id'] is None and row['disabled_by'] is None
-                      and row['entity_id'].split('.')[0] == 'sensor' for row in registry),
+                      and row['entity_id'].split('.')[0] in ('sensor', 'binary_sensor') for row in registry),
               'template_scoped_registry_inventory_required')
-        self.identities = {row['unique_id']: (row['entity_id'], row['id']) for row in registry}
+        self.identities = {(row['entity_id'].split('.')[0], row['unique_id']):
+                           (row['entity_id'], row['id']) for row in registry}
         native = self.native = _Native(hass)
         _need(native.version == self.receipt.version, 'native_version_changed')
         from homeassistant.components import template
@@ -445,14 +448,14 @@ class NativeTemplateYAMLRuntimeReadback:
                   'template_scoped_runtime_inventory_unverified')
             entities = [row for row in rows if row.kind == 'entity']
             _need(len(entities) == len(self.keys)
-                  and {row.key for row in entities} == set(self.keys)
-                  and all(row.platform == 'sensor' and row.entry_id is None
+                  and {(row.platform, row.key) for row in entities} == set(self.keys)
+                  and all(row.platform in ('sensor', 'binary_sensor') and row.entry_id is None
                           and row.consumer_verified
-                          and (row.entity_id, row.registry_id) == self.identities[row.key]
+                          and (row.entity_id, row.registry_id) == self.identities[row.platform, row.key]
                           for row in entities), 'template_scoped_runtime_consumer_unverified')
         entities = [row for row in before if row.kind == 'entity']
-        actual = _fingerprint(['template_state_sensors_v1',
-            sorted([row.key, row.semantic_sha256] for row in entities)])
+        actual = _fingerprint(template_state_runtime_projection([
+            ['template.' + row.platform, row.key, row.semantic_sha256] for row in entities]))
         _, old, new = self.receipt.runtime_expected[0]
         position = (Position.BEFORE if actual == old else
                     Position.AFTER if actual == new else Position.UNKNOWN)

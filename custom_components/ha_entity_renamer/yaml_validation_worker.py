@@ -245,11 +245,60 @@ def simple_template_sensor_semantics(cfg):
         cfg.get('unit_of_measurement'), cfg.get('device_class'), cfg.get('state_class')]
 
 
+def simple_template_binary_semantics(cfg):
+    """Named boolean state only, with no availability/delays or extra effects."""
+    from homeassistant.helpers.template import Template
+    allowed = {'state', 'name', 'unique_id', 'device_class', 'availability',
+        'attributes', 'icon', 'picture', 'variables', 'device_id',
+        'default_entity_id', 'object_id', 'raw_configs', 'raw_blueprint_inputs',
+        'delay_on', 'delay_off', 'auto_off', 'unit_of_measurement'}
+    if (set(cfg) - allowed or any(cfg.get(key) is not None for key in
+            ('availability', 'delay_on', 'delay_off', 'auto_off', 'device_id',
+             'unit_of_measurement', 'raw_blueprint_inputs'))
+            or any(cfg.get(key) for key in ('attributes', 'icon', 'picture', 'variables'))):
+        raise ValueError('binary_semantics_subset_unverified')
+    state, name, device_class = cfg.get('state'), cfg.get('name'), cfg.get('device_class')
+    if (type(state) is not Template or type(name) is not Template or not name.is_static
+            or (device_class is not None and not isinstance(device_class, str))):
+        raise ValueError('binary_semantics_subset_unverified')
+    _qualified_binary_expression(state.template)
+    return ['state_binary_v1', state.template, name.template, device_class]
+
+
+def _qualified_binary_expression(text):
+    """Exactly one literal is_state(entity, state) call, without evaluation."""
+    from jinja2 import Environment, nodes
+    tree = Environment().parse(text)
+    if (len(tree.body) != 1 or not isinstance(tree.body[0], nodes.Output)
+            or len(tree.body[0].nodes) != 1):
+        raise ValueError('binary_expression_subset_unverified')
+    call = tree.body[0].nodes[0]
+    if (not isinstance(call, nodes.Call) or not isinstance(call.node, nodes.Name)
+            or call.node.name != 'is_state' or len(call.args) != 2
+            or any(not isinstance(arg, nodes.Const) or type(arg.value) is not str
+                   for arg in call.args)
+            or not re.fullmatch(r'[a-z_][a-z0-9_]*\.[a-z0-9_]+', call.args[0].value)
+            or call.kwargs or call.dyn_args is not None or call.dyn_kwargs is not None):
+        raise ValueError('binary_expression_subset_unverified')
+    return (call.args[0].value,)
+
+
+def template_state_runtime_projection(rows):
+    """Preserve sensor-only v1 bytes; qualify every new/mixed key by domain."""
+    if (not rows or any(row[0] not in ('template.sensor', 'template.binary_sensor')
+                        for row in rows)
+            or len({(row[0], row[1]) for row in rows}) != len(rows)):
+        raise ValueError('template_activation_inventory_unverified')
+    if all(row[0] == 'template.sensor' for row in rows):
+        return ['template_state_sensors_v1', sorted([key, digest] for _, key, digest in rows)]
+    return ['template_state_entities_v2', sorted(rows)]
+
+
 def _template_source_projection(checked):
     """Native validated ORIGINAL blocks + every platform entity, no rendering.
 
-    Distinct from _expected_runtime: Template apply remains unsupported. The
-    state_sensor_v1 row can be checked by the separate read-only consumer proof;
+    Distinct from _expected_runtime: a source row alone grants no activation.
+    Numeric state and literal binary rows can be compared with native consumers;
     all other native conversion/defaults/variables remain full source rows.
     """
     from homeassistant.components.template.const import PLATFORMS
@@ -285,6 +334,12 @@ def _template_source_projection(checked):
                     payload = [block_key, simple_template_sensor_semantics(entity)]
                 except ValueError:
                     pass  # unsupported remains full source inventory, not empty
+            elif (mode == 'state' and domain == 'template.binary_sensor' and not any(
+                    cfg.get(key) for key in ('variables', 'actions', 'conditions'))):
+                try:
+                    payload = [block_key, simple_template_binary_semantics(entity)]
+                except ValueError:
+                    pass  # every unsupported binary config remains inventoried
             rows.append([domain, key, payload])
     keys = [(row[0], row[1]) for row in rows]
     if len(set(keys)) != len(keys):
@@ -329,7 +384,7 @@ def _qualified_state_expression(text):
 
 
 def qualified_template_state_projection(checked):
-    """Whole modern YAML family restricted to named state-only sensors.
+    """Whole modern YAML inventory restricted to the two explicit state subsets.
 
     Other platforms/coordinators/config shapes never qualify an activation.
     Source inventories remain available through the independent full projection.
@@ -337,22 +392,24 @@ def qualified_template_state_projection(checked):
     rows = []
     for block in checked.get('template', ()):
         if (block.raw_config is None or block.raw_blueprint_inputs is not None
-                or set(block) - {'unique_id', 'sensor', 'variables', 'actions', 'conditions'}
+                or set(block) - {'unique_id', 'sensor', 'binary_sensor', 'variables', 'actions', 'conditions'}
                 or any(block.get(k) for k in ('variables', 'actions', 'conditions'))
-                or not block.get('sensor')):
+                or not (block.get('sensor') or block.get('binary_sensor'))):
             raise ValueError('template_activation_subset_unverified')
-        for entity in block['sensor']:
-            key = entity.get('unique_id')
-            if type(key) is not str or not key:
-                raise ValueError('template_activation_identity_unverified')
-            if block.get('unique_id'):
-                key = block['unique_id'] + '-' + key
-            semantic = simple_template_sensor_semantics(entity)
-            _qualified_state_expression(semantic[1])
-            rows.append([key, _fingerprint(semantic)])
-    if not rows or len({row[0] for row in rows}) != len(rows):
-        raise ValueError('template_activation_inventory_unverified')
-    return ['template_state_sensors_v1', sorted(rows)]
+        for platform in ('sensor', 'binary_sensor'):
+            for entity in block.get(platform, ()):
+                key = entity.get('unique_id')
+                if type(key) is not str or not key:
+                    raise ValueError('template_activation_identity_unverified')
+                if block.get('unique_id'):
+                    key = block['unique_id'] + '-' + key
+                if platform == 'sensor':
+                    semantic = simple_template_sensor_semantics(entity)
+                    _qualified_state_expression(semantic[1])
+                else:
+                    semantic = simple_template_binary_semantics(entity)
+                rows.append(['template.' + platform, key, _fingerprint(semantic)])
+    return template_state_runtime_projection(rows)
 
 
 async def _expected_template_sources(hass, config):

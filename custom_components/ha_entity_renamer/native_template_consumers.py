@@ -1,4 +1,4 @@
-"""Actual native Template state-sensor consumers, read-only and task-local.
+"""Actual native Template numeric state and literal binary consumers, read-only.
 
 No setup/render/refresh/reload/callback execution, native field/cache writes or
 new authority. Runtime and original source semantics are separate row facts.
@@ -15,9 +15,10 @@ from importlib import import_module
 import inspect
 import json
 from pathlib import Path
-from types import CodeType, FunctionType
+from types import CodeType, FunctionType, ModuleType
 
-from .yaml_validation_worker import _fingerprint, simple_template_sensor_semantics
+from .yaml_validation_worker import (_fingerprint, simple_template_sensor_semantics,
+    simple_template_binary_semantics, _qualified_binary_expression)
 from .yaml_runtime_observer import _pending_native_work, _registered_bus_remove
 from .native_unload_code_proof import prove_methods, unchanged
 
@@ -45,6 +46,17 @@ _PINS = {'2025.6.0': {'components/template/__init__.py': 'ecbdfe7f1f184c80aa6957
                'helpers/entity_platform.py': '776e21f2ef16715b17e34fe27da33a3d30042b27988d75aaf5461ddcf736b09e',
                'helpers/event.py': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
                'helpers/trigger_template_entity.py': 'f6411c6e1a65683e5427667358f7f5033cbad34ec5d32e6f84746a60e52c1b14'}}
+
+
+_BINARY_PINS = {
+    '2025.6.0': {
+        'components/template/binary_sensor.py': 'bbe0f0b272f8173a5a09386752778ec758ae79f2ecf0e66ecc9d2e0fa31c15a7',
+        'helpers/config_validation.py': '74ae0ebe29be4d28bc9ab31c5352599e2eccdc31bd534cb40d1b07f3765ce8ea'},
+    '2026.10.2': {
+        'components/template/binary_sensor.py': 'b3e86b88a258760edbdcad2a79e929ee77346888d8d7ff793f1bb97003e3c857',
+        'helpers/template/helpers.py': '2f4796b9d35516ab9c39498365d4fcf843ebd3334ac9c1b07000d7811d706c67',
+        'helpers/config_validation.py': '78776d1584e83ec05c97dc138cbaf343233f0293597dda4eb1872106ecb97d0c'},
+}
 
 
 class TemplateConsumerError(ValueError):
@@ -104,12 +116,16 @@ class _Native:
         from homeassistant.const import __version__
         from homeassistant.core import HomeAssistant
         from homeassistant.helpers import event, entity_platform as ep
-        from homeassistant.components.template import template_entity as te, sensor
+        from homeassistant.components.template import template_entity as te, sensor, binary_sensor
+        from homeassistant.helpers import template as ht, config_validation as cv
         from .native_utility_setup_audit import _SOURCES
         _need(type(hass) is HomeAssistant and __version__ in _PINS, 'native_runtime_unverified')
         self.hass, self.version = hass, __version__
         self.root = Path(import_module('homeassistant').__file__).resolve().parent
-        self.pins = {**_SOURCES[__version__], **_PINS[__version__]}
+        self.pins = {**_SOURCES[__version__], **_PINS[__version__], **_BINARY_PINS[__version__]}
+        self.binary_module, self.template_module, self.cv = binary_sensor, ht, cv
+        self.boolean_module = import_module('homeassistant.helpers.template' if __version__ == '2025.6.0'
+                                            else 'homeassistant.helpers.template.helpers')
         from homeassistant.helpers.template import RenderInfo
         self.render_module = import_module(RenderInfo.__module__)
         self.pins.update({'helpers/template.py':
@@ -118,6 +134,8 @@ class _Native:
             '259fba6cd34246e9a022dd67e9b9a5f5a041a307637b9cc15c74b7afd5249ca9'})
         self.sensor = (sensor.SensorTemplate if __version__ == '2025.6.0'
                        else sensor.StateSensorEntity)
+        self.binary = (binary_sensor.BinarySensorTemplate if __version__ == '2025.6.0'
+                       else binary_sensor.StateBinarySensorEntity)
         self.refs = [(self.sensor, '__init__'), (te.TemplateEntity, '__init__'),
             (te.TemplateEntity, '_async_template_startup'),
             (te.TemplateEntity, '_handle_results'),
@@ -139,6 +157,19 @@ class _Native:
         else:
             self.refs += [(te.TemplateEntity, 'setup_state_template'),
                           (sensor.AbstractTemplateSensor, '_validate_state')]
+        self.refs += [(self.binary, '__init__'), (self.binary, '_update_state'),
+                      (te.TemplateEntity, '_update_state'),
+                      (te.TemplateEntity, '_async_setup_templates'),
+                      (ht, 'result_as_boolean'), (self.boolean_module, 'forgiving_boolean'),
+                      (cv, 'boolean')]
+        if __version__ == '2025.6.0':
+            self.refs += [(self.binary, '_async_setup_templates')]
+        else:
+            from homeassistant.components.template.entity import AbstractTemplateEntity
+            self.refs += [(binary_sensor.AbstractTemplateBinarySensor, '__init__'),
+                          (AbstractTemplateEntity, '__init__'),
+                          (AbstractTemplateEntity, 'add_template'),
+                          (te.TemplateEntity, 'setup_template')]
         self.refs += [(RenderInfo, '_filter_entities'), (RenderInfo, '_freeze'),
                       (self.render_module, '_false')]
         self.methods, self.codes = prove_methods(self.root, self.pins, self.refs)
@@ -210,6 +241,95 @@ def _live_sensor(native, entity):
               and _bound(cells['validator'], entity, type(entity)._validate_state),
               'native_update_owner_changed')
     return semantic, state_template, slot
+
+
+def _live_binary(native, entity):
+    """Actual boolean source/body/slot proof; no renderer or state is executed."""
+    from homeassistant.components.template import template_entity as te
+    from homeassistant.helpers.template import Template
+    _need(type(entity) is native.binary and entity._preview_callback is None
+          and not entity._action_scripts and type(entity._run_variables) is dict
+          and not entity._run_variables and entity._blueprint_inputs is None,
+          'native_state_binary_required')
+    _need(entity._availability_template is None and entity._attr_device_info is None
+          and all(getattr(entity, name) is None for name in
+                  ('_delay_on', '_delay_off', '_delay_cancel')),
+          'binary_semantics_subset_unverified')
+    if native.version == '2025.6.0':
+        cfg = {'state': entity._template, 'name': entity._friendly_name_template,
+            'device_class': entity._attr_device_class,
+            'availability': entity._availability_template,
+            'attributes': entity._attribute_templates, 'icon': entity._icon_template,
+            'picture': entity._entity_picture_template,
+            'delay_on': entity._delay_on_raw, 'delay_off': entity._delay_off_raw}
+        attribute = '_state'
+    else:
+        cfg, attribute = entity._config, '_attr_is_on'
+        _need(set(entity._templates) == {'state'} and not entity._attribute_templates
+              and entity._attributes_template is None,
+              'binary_semantics_subset_unverified')
+        value = entity._templates['state']
+        _need(value.attribute == attribute and value.template is cfg['state']
+              and value.validator is None and value.none_on_template_error is False,
+              'native_binary_slot_changed')
+    semantic = simple_template_binary_semantics(cfg)
+    template = entity._template
+    _need(type(template) is Template and template is cfg['state'] and template.hass is native.hass
+          and entity._attr_name == semantic[2] and entity._attr_device_class == semantic[3]
+          and type(entity._attr_is_on) is bool,
+          'native_binary_semantics_changed')
+    state = native.hass.states.get(entity.entity_id)
+    _need(state is not None and state.state == ('on' if entity._attr_is_on else 'off'),
+          'native_binary_state_changed')
+    attrs = entity._template_attrs
+    _need(type(attrs) is dict and set(attrs) == {template}
+          and type(attrs[template]) is list and len(attrs[template]) == 1,
+          'native_binary_slots_changed')
+    slot = attrs[template][0]
+    _need(type(slot) is te._TemplateAttribute and slot._entity is entity
+          and slot._attribute == attribute and slot.template is template
+          and slot.validator is None and slot.none_on_template_error is False,
+          'native_binary_slot_changed')
+    callback = slot.on_update
+    if native.version == '2025.6.0':
+        _need(_bound(callback, entity, native.binary._update_state), 'native_binary_update_changed')
+    else:
+        _need(type(callback) is FunctionType and any(callback.__code__ is code
+              for code in _codes(te.TemplateEntity.setup_state_template.__code__))
+              and callback.__qualname__ == 'TemplateEntity.setup_state_template.<locals>._update_state'
+              and callback.__globals__ is vars(te)
+              and callback.__defaults__ is None and callback.__kwdefaults__ is None
+              and entity._templates['state'].on_update is callback,
+              'native_binary_update_changed')
+        cells = dict(zip(callback.__code__.co_freevars,
+                         (cell.cell_contents for cell in callback.__closure__ or ())))
+        _need(set(cells) == {'self', 'attribute', 'on_update', 'validator'}
+              and cells['self'] is entity and cells['attribute'] == '_attr_is_on'
+              and cells['validator'] is None
+              and _bound(cells['on_update'], entity, native.binary._update_state),
+              'native_binary_update_changed')
+    # Source-pinned code plus the actual conversion aliases it dispatches to.
+    ht, boolean = native.template_module, native.boolean_module
+    _need(native.binary_module.template is ht
+          and native.binary._update_state.__globals__ is vars(native.binary_module)
+          and ht.result_as_boolean is boolean.result_as_boolean
+          and boolean.result_as_boolean.__globals__ is vars(boolean)
+          and boolean.result_as_boolean.__globals__['forgiving_boolean'] is boolean.forgiving_boolean
+          and boolean.forgiving_boolean.__globals__ is vars(boolean)
+          and native.cv.boolean.__globals__ is vars(native.cv),
+          'native_binary_boolean_binding_changed')
+    if native.version == '2026.10.2':
+        _need(vars(boolean).get('cv') is native.cv,
+              'native_binary_boolean_binding_changed')
+    else:
+        # Minimum's forgiving_boolean imports cv locally on each conversion.
+        # Its proven function globals do not pin that package/import alias.
+        helpers = sys.modules.get('homeassistant.helpers')
+        _need(type(helpers) is ModuleType
+              and vars(helpers).get('config_validation') is native.cv
+              and sys.modules.get('homeassistant.helpers.config_validation') is native.cv,
+              'native_binary_boolean_binding_changed')
+    return semantic, template, slot
 
 
 def _registration(native, entity, template):
@@ -302,10 +422,11 @@ def _under(origin, parent):
         and origin.includes[prefix].route[:len(parent.route)] == parent.route)
 
 
-def _source_semantics(native, entity, registry_row, semantic, evidence, documents):
+def _source_semantics(native, entity, registry_row, semantic, evidence, documents, *, platform='sensor'):
     """Compare against actual ORIGINAL full-three entry or sealed YAML hash."""
     from homeassistant.components.template import sensor
     if registry_row['config_entry_id'] is not None:
+        _need(platform == 'sensor', 'binary_config_entry_unverified')
         entry_id = registry_row['config_entry_id']
         source = next((row for row in documents['core.config_entries']['entries']
                        if row['entry_id'] == entry_id), None)
@@ -326,16 +447,17 @@ def _source_semantics(native, entity, registry_row, semantic, evidence, document
     source = evidence.template_sources
     _need(source is not None and source.source_matched and source.rows is not None,
           'yaml_source_inventory_unverified')
+    domain = 'template.' + platform
     definitions = [row for row in source.ledger.definitions
-                   if row.domain == 'template.sensor' and row.native_key == entity.unique_id]
+                   if row.domain == domain and row.native_key == entity.unique_id]
     _need(len(definitions) == 1, 'yaml_source_identity_unverified')
     blocks = [row for row in source.ledger.definitions if row.domain == 'template.state'
               and _under(definitions[0].origin, row.origin)]
     _need(len(blocks) == 1 and blocks[0].native_key is not None,
           'yaml_source_block_unverified')
     expected = next((row[2] for row in source.rows
-                     if row[:2] == ('template.sensor', entity.unique_id)), None)
-    actual = _fingerprint(['template.sensor', entity.unique_id,
+                     if row[:2] == (domain, entity.unique_id)), None)
+    actual = _fingerprint([domain, entity.unique_id,
                           [blocks[0].native_key, semantic]])
     return expected == actual
 
@@ -376,7 +498,8 @@ def _sample(native, evidence, observed):
             consumer, source_verified, semantic, dependencies = False, False, None, ()
             reason = 'runtime_variant_unverified'
             token = ('entity', id(entity), id(row))
-            if platform.domain == 'sensor' and type(entity) is native.sensor:
+            if ((platform.domain == 'sensor' and type(entity) is native.sensor)
+                    or (platform.domain == 'binary_sensor' and type(entity) is native.binary)):
                 try:
                     _need(stored is not None and type(row) is er.RegistryEntry
                           and _row(row) == stored and row.platform == 'template'
@@ -389,8 +512,13 @@ def _sample(native, evidence, observed):
                               and entry.state.value == 'loaded' and entry.disabled_by is None
                               and hass.config_entries.async_get_entry(entry_id) is entry,
                               'native_entry_identity_unverified')
-                    semantic, template, slot = _live_sensor(native, entity)
+                    semantic, template, slot = (_live_sensor(native, entity) if platform.domain == 'sensor'
+                                                else _live_binary(native, entity))
                     dependencies, token = _registration(native, entity, template)
+                    if platform.domain == 'binary_sensor':
+                        _need(entry is None, 'binary_config_entry_unverified')
+                        _need(dependencies == _qualified_binary_expression(template.template),
+                              'native_binary_dependencies_changed')
                     token += (id(slot), id(slot.on_update), id(entity._template_attrs),
                               id(entity._template_attrs[template]))
                     from .reference_planner import (plan_references, Context, Consumer, Scope, Syntax)
@@ -400,7 +528,7 @@ def _sample(native, evidence, observed):
                     _need(not static.markers, 'template_dependency_scope_unverified')
                     consumer = True
                     source_verified = _source_semantics(native, entity, stored,
-                                                        semantic, evidence, documents)
+                        semantic, evidence, documents, platform=platform.domain)
                     reason = 'verified' if source_verified else 'source_semantics_mismatch'
                 except TemplateConsumerError as error:
                     reason = str(error)

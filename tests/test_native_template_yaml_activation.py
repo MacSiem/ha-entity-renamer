@@ -65,7 +65,8 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         inputs = await preparations.create_native_inputs('template-yaml-inputs', original)
         recorder = self.module('recorder_guard').NativeRecorderGuard(hass)
         history = self.module('history_guard').NativeHistoryGuard(recorder)
-        helper_history = await history.capture({self.consumer.entity_id: self.consumer.entity_id})
+        helper_history = await history.capture({entity_id: entity_id
+            for entity_id, _ in self.consumer_identities.values()})
         nr = self.module('native_registry')
         source_uuid = self.f.entity.async_get(self.source_id).id
         io = nr.NativeRegistryIO(hass)
@@ -81,7 +82,8 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
             steps.append(tx.Step(ref, scope, item.identity, item.before_revision,
                                  item.after_revision, ref))
         plan = tx.Plan('template-yaml-apply', scopes, scopes, tuple(steps),
-                       'exact-modern-yaml-state-sensors', scopes, inputs)
+                       ('exact-modern-yaml-state-sensors' if variant == 'sensor'
+                        else 'exact-modern-yaml-state-entities-v2'), scopes, inputs)
         journal = self.module('journal').native_journal(hass)
         await journal.initialize()
         rr = self.module('native_registry_receipts')
@@ -109,6 +111,7 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         fault_observations = []
         def current_consumer():
             return next(entity for platform in async_get_platforms(hass, 'template')
+                        if platform.domain == self.consumer_domain
                         for entity in platform.entities.values() if entity.unique_id == self.consumer_key)
         def detach_actual_consumer():
             current_consumer()._template_result_info._track_state_changes.async_remove()
@@ -133,9 +136,11 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
                 if actual.yaml_position != ('original' if rollback else 'proposed'):
                     return False
                 entities = [row for row in actual.rows if row.kind == 'entity']
-                return (len(entities) == 1 and entities[0].consumer_verified
-                        and entities[0].source_verified
-                        and entities[0].registry_id == self.consumer_uuid
+                return (len(entities) == len(self.consumer_identities)
+                        and {(row.platform, row.key) for row in entities} == set(self.consumer_identities)
+                        and all(row.consumer_verified and row.source_verified
+                                and (row.entity_id, row.registry_id) == self.consumer_identities[row.platform, row.key]
+                                for row in entities)
                         and actual.evidence_sha256 == self.evidence.sha256)
             async def full(rollback):
                 if not await common(rollback):
@@ -332,16 +337,25 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chain.baseline, original)
         self.assertEqual(chain.baseline.receipt_json, self.evidence.receipt_json)
         self.consumer = next(entity for platform in async_get_platforms(hass, 'template')
+            if platform.domain == self.consumer_domain
             for entity in platform.entities.values() if entity.unique_id == self.consumer_key)
-        for value in ((5, 7, 5) if variant == 'binary_sensor' else (5, 7)):
+        for value in ((5, 7, 5) if variant in ('binary_sensor', 'mixed') else (5, 7)):
             await self.emit(value)
         observed = await accepted_observer.async_observe_accepted_template_consumers(
             hass, chain, self.evidence, guard=lambda: None)
-        entity = next(row for row in observed.rows if row.kind == 'entity')
+        entity = next(row for row in observed.rows if row.kind == 'entity' and row.platform == self.consumer_domain)
         self.assertEqual(entity.dependencies, ('sensor.accepted_next',))
         self.assertEqual(entity.registry_id, self.consumer_uuid)
         self.assertTrue(entity.source_verified)
         self.assertFalse(observed.family_complete)
+        if variant == 'mixed':
+            entities = [row for row in observed.rows if row.kind == 'entity']
+            self.assertEqual({(row.platform, row.key) for row in entities},
+                             {('sensor', 'scope-value'), ('binary_sensor', 'scope-value')})
+            for row in entities:
+                self.assertEqual(row.dependencies, ('sensor.accepted_next',))
+                self.assertTrue(row.source_verified, row.reason)
+                self.assertEqual((row.entity_id, row.registry_id), self.consumer_identities[row.platform, row.key])
         # Reload the durable journal and independently reopen the full chain for
         # read-only accepted-head proof before composing a fresh reverse writer.
         fresh_journal = self.module('journal').native_journal(hass)
@@ -365,15 +379,23 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chain.baseline.digest, original_head)
         self.assertEqual(chain.original_receipt, receipt)
         self.consumer = next(entity for platform in async_get_platforms(hass, 'template')
+            if platform.domain == self.consumer_domain
             for entity in platform.entities.values() if entity.unique_id == self.consumer_key)
-        for value in ((5, 7, 5) if variant == 'binary_sensor' else (5, 7)):
+        for value in ((5, 7, 5) if variant in ('binary_sensor', 'mixed') else (5, 7)):
             await self.emit(value)
         final = await accepted_observer.async_observe_accepted_template_consumers(
             hass, chain, self.evidence, guard=lambda: None)
-        entity = next(row for row in final.rows if row.kind == 'entity')
+        entity = next(row for row in final.rows if row.kind == 'entity' and row.platform == self.consumer_domain)
         self.assertEqual(entity.dependencies, (self.source_id,))
         self.assertEqual(entity.registry_id, self.consumer_uuid)
         self.assertTrue(entity.source_verified)
+        if variant == 'mixed':
+            entities = [row for row in final.rows if row.kind == 'entity']
+            self.assertEqual(len(entities), 2)
+            for row in entities:
+                self.assertEqual(row.dependencies, (self.source_id,))
+                self.assertTrue(row.source_verified, row.reason)
+                self.assertEqual((row.entity_id, row.registry_id), self.consumer_identities[row.platform, row.key])
         self.assertEqual(final.yaml_position, 'original')
         self.assertEqual([proof.direction for proof in proofs], ['forward', 'rollback'])
         return chain, change, fresh_observer
@@ -462,6 +484,29 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_actual_binary_state_product_forward_and_fresh_reverse_preserve_source_and_uuid(self):
         await self.transaction(variant='binary_sensor')
+
+    async def test_actual_mixed_sensor_binary_same_unique_key_forward_and_fresh_reverse(self):
+        await self.transaction(variant='mixed')
+
+    async def test_binary_actual_detach_after_true_getter_refuses_final_verify(self):
+        await self.transaction(variant='binary_sensor', fault='adapter_detach')
+
+    async def test_binary_actual_detach_after_terminal_save_refuses_confirmation(self):
+        await self.transaction(variant='binary_sensor', fault='terminal_detach')
+
+    async def test_sensor_only_v1_runtime_digest_and_source_rows_are_unchanged(self):
+        await self.prepare('yaml')
+        worker = self.module('yaml_validation_worker')
+        original = ['state_sensor_v1', "{{ states('" + self.source_id + "') | int(0) * 2 }}",
+                    'Runtime consumer', None, None, None]
+        proposed = ['state_sensor_v1', "{{ states('sensor.accepted_next') | int(0) * 2 }}",
+                    'Runtime consumer', None, None, None]
+        self.assertEqual(self.receipt.runtime_expected, (('template',
+            worker._fingerprint(['template_state_sensors_v1', [['scope-value', worker._fingerprint(original)]]]),
+            worker._fingerprint(['template_state_sensors_v1', [['scope-value', worker._fingerprint(proposed)]]])),))
+        self.assertEqual(next(row[2] for row in self.evidence.template_sources.rows
+                              if row[:2] == ('template.sensor', 'scope-value')),
+                         worker._fingerprint(['template.sensor', 'scope-value', ['id:scope', original]]))
 
     async def test_actual_product_forward_and_fresh_reverse_preserve_source_and_uuid(self):
         await self.transaction()
