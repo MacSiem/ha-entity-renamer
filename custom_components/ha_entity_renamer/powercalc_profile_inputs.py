@@ -326,8 +326,9 @@ async def compile_closed_graph(hass, checked, root):
          and pc.get('energy_sensor_unit_prefix') == 'k', 'offline_energy_globals_required')
     bundle = read_bundle(root)
     # Real native registries load the staged ORIGINAL. No fake SourceEntity/cache.
-    await er.async_load(hass)
     await dr.async_load(hass)
+    # EntityRegistry._async_load reads the already-loaded DeviceRegistry.
+    await er.async_load(hass)
     library = ProfileLibrary(hass, ProfileLibrary.create_loader(hass, skip_remote_loader=True))
     await library.initialize()
     from custom_components.powercalc.common import create_source_entity
