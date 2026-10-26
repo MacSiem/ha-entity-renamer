@@ -51,10 +51,16 @@ class PowercalcNumericContinuityNativeTests(unittest.IsolatedAsyncioTestCase):
             # awaiting this same real completion still raises the original error.
             completion.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         started = False
+        removed_power_id = self.static_power.entity_id
         async def real_producer_after_power_removal(event):
             nonlocal started
-            if (not gap_event or started or event.data.get('entity_id') != self.static_power.entity_id
-                    or event.data.get('new_state') is not None):
+            state = event.data.get('new_state')
+            # Native Entity.async_remove keeps a registered entity as an
+            # unavailable restored State; it does not necessarily remove it.
+            departed = (state is None or (state.state == 'unavailable'
+                                          and state.attributes.get('restored') is True))
+            if (not gap_event or started or event.data.get('entity_id') != removed_power_id
+                    or not departed):
                 return
             started = True
             try:
