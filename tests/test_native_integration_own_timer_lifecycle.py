@@ -19,6 +19,7 @@ PACKAGE = quiet.PACKAGE
 @unittest.skipUnless(quiet.fixture.HAS_HA, 'requires actual pinned HA')
 class NativeIntegrationOwnTimerLifecycleTests(quiet.NativeIntegrationOwnLifecycleTests):
     method = 'left'
+    saved_uuid = False
 
     async def prepare(self, *, zero=False):
         await super().prepare(zero=zero)
@@ -26,6 +27,8 @@ class NativeIntegrationOwnTimerLifecycleTests(quiet.NativeIntegrationOwnLifecycl
         # Ordinary native configuration+reload, before capturing ORIGINAL.
         self.assertTrue(await hass.config_entries.async_unload(self.entry.entry_id))
         options = dict(self.entry.options, method=self.method, max_sub_interval={'seconds': 1})
+        if self.saved_uuid:
+            options['source'] = self.f.entity.async_get(self.producer.entity_id).id
         hass.config_entries.async_update_entry(self.entry, options=options)
         self.assertTrue(await hass.config_entries.async_setup(self.entry.entry_id))
         await hass.async_block_till_done()
@@ -457,3 +460,7 @@ class NativeIntegrationOwnRightTimerLifecycleTests(NativeIntegrationOwnTimerLife
 
 class NativeIntegrationOwnTrapezoidalTimerLifecycleTests(NativeIntegrationOwnTimerLifecycleTests):
     method = 'trapezoidal'
+
+
+class NativeIntegrationOwnSavedUUIDTimerLifecycleTests(NativeIntegrationOwnTimerLifecycleTests):
+    saved_uuid = True
