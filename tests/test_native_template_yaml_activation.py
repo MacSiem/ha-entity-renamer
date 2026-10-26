@@ -4,7 +4,9 @@ Owner executes on both pinned Cores through FIFO. Real Coordinator, immutable
 preparations, native registry effects, file calls, check_config, reload and chain
 receipts. Only the producer receives ordinary events; no helper output seeds.
 """
+import asyncio
 import importlib
+import sys
 import unittest
 
 import test_native_template_consumers as consumers
@@ -25,7 +27,7 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
     def module(self, name):
         return importlib.import_module(fixture.fixtures.PACKAGE + '.' + name)
 
-    async def transaction(self):
+    async def transaction(self, *, fault=None):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_platform import async_get_platforms
         await self.prepare('yaml')
@@ -82,6 +84,13 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         locks = self.module('yaml_editor_locks').NativeYAMLEditorLocks(hass)
         self.assertGreaterEqual(len(locks.enumerate()), 3)
         proofs = []
+        fault_observations = []
+        def current_consumer():
+            return next(entity for platform in async_get_platforms(hass, 'template')
+                        for entity in platform.entities.values() if entity.unique_id == self.consumer_key)
+        def detach_actual_consumer():
+            current_consumer()._template_result_info._track_state_changes.async_remove()
+            fault_observations.append('actual_detach')
         accepted_observer = self.module('native_template_accepted_consumers')
         def compose(log):
             # Fresh runtime observer/adapters for reverse, bound to SAME original
@@ -125,11 +134,112 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
                 hass, resolver, locks, observer, chain, observe, log.load, lambda: None,
                 context=Context(), full_verify=lambda _: full(False),
                 full_verify_rollback=lambda _: full(True))
-            return tx.Coordinator({'registry': registry, 'yaml': yaml}, log,
-                                  lambda: None, required_scopes=scopes), observer
+            if fault == 'adapter_detach':
+                real_position, real_read = yaml._runtime_position, yaml._read
+                final_getter = []
+                async def remember_true_getter(change, state):
+                    value = await real_position(change, state)
+                    record = await log.load(operation)
+                    if (record is not None and record.phases == ('verified', 'verified')):
+                        self.assertIs(value, tx.Position.AFTER)
+                        final_getter.append(value)
+                    return value
+                async def detach_after_actual_adapter_read(*args):
+                    value = await real_read(*args)
+                    # This is AFTER the actual adapter read/checkpoint, after
+                    # its genuine final getter. No positive result is changed.
+                    if final_getter and not fault_observations:
+                        detach_actual_consumer()
+                    return value
+                yaml._runtime_position = remember_true_getter
+                yaml._read = detach_after_actual_adapter_read
+            if fault == 'terminal_detach':
+                real_save = log.save
+                async def detach_after_actual_save(record):
+                    value = await real_save(record)
+                    if record.status == 'applied' and not fault_observations:
+                        detach_actual_consumer()
+                    return value
+                log.save = detach_after_actual_save
+            return self.module('native_template_yaml').compose_template_yaml_coordinator(
+                {'registry': registry, 'yaml': yaml}, log, lambda: None,
+                required_scopes=scopes), observer
         coordinator, observer = compose(journal)
         self.assertIs(await observer.position_at_inputs(change, chain.reconstruct_inputs()),
                       tx.Position.BEFORE)
+        if fault == 'cancel_reload':
+            native = importlib.import_module('homeassistant.components.template')
+            monitor = sys.monitoring
+            key = next((key for key in range(6) if monitor.get_tool(key) is None), None)
+            self.assertIsNotNone(key)
+            captured = {'tasks': (), 'locks_held': False}
+            running = None
+            def native_returned(code, offset, result):
+                frame = sys._getframe(1)
+                if (captured['tasks'] or running is None
+                        or frame.f_locals.get('hass') is not hass):
+                    return
+                actual_tasks = self.module('native_template_yaml')._pending_template_tasks(hass)
+                if actual_tasks:
+                    captured['tasks'] = tuple(actual_tasks)
+                    captured['locks_held'] = all(row[3].locked() for row in locks.enumerate())
+                    running.cancel()
+            monitor.use_tool_id(key, 'renamer_template_cancel_regression')
+            monitor.register_callback(key, monitor.events.PY_RETURN, native_returned)
+            monitor.set_local_events(key, native._process_config.__code__, monitor.events.PY_RETURN)
+            try:
+                running = asyncio.create_task(coordinator.apply(plan, plan.fingerprint, operation))
+                with self.assertRaises(asyncio.CancelledError):
+                    await running
+                self.assertTrue(captured['tasks'], 'must observe REAL native reload descendants')
+                self.assertTrue(captured['locks_held'])
+                # Assert BEFORE emergency cleanup: no orphaned own descendant
+                # can outlive lock release/cancellation propagation.
+                self.assertTrue(all(task.done() for task in captured['tasks']))
+                self.assertFalse(self.module('native_template_yaml')._pending_template_tasks(hass))
+                self.assertTrue(all(not row[3].locked() for row in locks.enumerate()))
+                self.assertNotEqual((await journal.load(operation)).status, 'applied')
+                with self.assertRaises(ValueError):
+                    chain.reconstruct_inputs()  # actual pending effect is UNKNOWN
+            finally:
+                monitor.set_local_events(key, native._process_config.__code__, 0)
+                monitor.register_callback(key, monitor.events.PY_RETURN, None)
+                monitor.free_tool_id(key)
+                if running is not None and not running.done():
+                    await asyncio.gather(running, return_exceptions=True)
+                if captured['tasks']:
+                    await asyncio.gather(*captured['tasks'], return_exceptions=True)
+            return
+        if fault == 'schema':
+            registered = hass.services._services['template']['reload']
+            original_schema = registered.schema
+            invoked = []
+            def foreign_schema(data):
+                invoked.append(True)
+                raise AssertionError('foreign schema must not execute')
+            registered.schema = foreign_schema
+            try:
+                with self.assertRaises(ValueError):
+                    observer.assert_reload_current()
+                try:
+                    result = await coordinator.apply(plan, plan.fingerprint, operation)
+                except (tx.Refused, ValueError):
+                    result = None
+                self.assertTrue(result is None or result.status != 'applied')
+                self.assertEqual(invoked, [])
+                self.assertEqual((self.f.root / change.files[0].path).read_bytes(), change.files[0].before)
+            finally:
+                registered.schema = original_schema
+            return
+        if fault in ('adapter_detach', 'terminal_detach'):
+            try:
+                result = await coordinator.apply(plan, plan.fingerprint, operation)
+            except (tx.Refused, ValueError):
+                result = None
+            self.assertEqual(fault_observations, ['actual_detach'])
+            self.assertTrue(result is None or result.status != 'applied',
+                            'stale genuine runtime proof must not confirm applied')
+            return
         result = await coordinator.apply(plan, plan.fingerprint, operation)
         self.assertEqual(result.status, 'applied', result.reason)
         self.assertEqual(result.phases, ('verified', 'verified'))
@@ -215,3 +325,15 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(evidence.template_sources.source_matched)
         self.assertTrue(any(row.domain == 'template.sensor'
                             for row in evidence.template_sources.ledger.definitions))
+
+    async def test_actual_detach_after_true_getter_and_read_refuses_final_verify(self):
+        await self.transaction(fault='adapter_detach')
+
+    async def test_actual_detach_after_terminal_journal_write_refuses_confirmation(self):
+        await self.transaction(fault='terminal_detach')
+
+    async def test_actual_pending_reload_descendants_settle_before_cancel_unlock(self):
+        await self.transaction(fault='cancel_reload')
+
+    async def test_actual_service_schema_drift_refuses_before_foreign_callable(self):
+        await self.transaction(fault='schema')
