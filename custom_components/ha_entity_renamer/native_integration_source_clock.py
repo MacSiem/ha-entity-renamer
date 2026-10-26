@@ -389,7 +389,9 @@ class IntegrationSourceClockBinding:
                           else engine._last_integration_time)
                 elapsed = Decimal((interval.new_time-origin).total_seconds())
                 states = engine._method.validate_states(interval.left,interval.right)
-                _need(states is not None and elapsed >= 0, 'actual_numeric_interval')
+                # Both pinned native engines accept signed elapsed after a
+                # real timer overtakes a queued, frozen source timestamp.
+                _need(states is not None, 'actual_numeric_interval')
                 engine._cancel_max_sub_interval_exceeded_callback()
                 area = engine._method.calculate_area_with_two_states(elapsed,*states)
                 engine._update_integral(area)
