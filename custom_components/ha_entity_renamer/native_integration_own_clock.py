@@ -91,6 +91,7 @@ class IntegrationOwnClockBinding(IntegrationSourceClockBinding):
         self._creation_emitted = False
         self.transport_calls = self.frozen_calls = 0
         self.last_consumption = None
+        self._pre_effect_inputs = None
 
     def physical_uuid(self):
         return self.source_uuid
@@ -123,21 +124,39 @@ class IntegrationOwnClockBinding(IntegrationSourceClockBinding):
             # A clock may keep computing during our single lawful native own-ID
             # effect. This permits only its prepared row under the SAME live
             # persisted intent; it does not confer accepted physical authority.
-            intent = self.chain.active
-            _need(type(intent) is RegistryIntent, 'own_pending_intent_required')
-            row = self.chain.store.read(intent.reference[0])
-            _need(row is not None and row['digest'] == intent.reference[1]
-                  and canonical(row['payload'])[1] == intent.reference[1]
-                  and row['payload']['kind'] == 'registry_intent'
-                  and row['payload']['chain'] == self.chain.root_id
-                  and row['payload']['binding']['index'] == self.index
-                  and row['payload']['binding']['identity'] == self.change.identity
-                  and row['payload']['binding']['direction'] == self.direction
-                  and self.chain._reconstruct()[-1] == intent.reference, 'own_pending_binding')
+            self._require_own_pending_intent()
         if hasattr(self,'refs'):
             unchanged(self.refs,self.methods,self.codes)
         if self.authorization is not None:
             _need(rows[0].entity_id == self.helper_to and accepted == [actual], 'accepted_own_row_lost')
+
+    def _require_own_pending_intent(self):
+        intent = self.chain.active
+        _need(type(intent) is RegistryIntent, 'own_pending_intent_required')
+        row = self.chain.store.read(intent.reference[0])
+        _need(row is not None and row['digest'] == intent.reference[1]
+              and canonical(row['payload'])[1] == intent.reference[1]
+              and row['payload']['kind'] == 'registry_intent'
+              and row['payload']['chain'] == self.chain.root_id
+              and row['payload']['binding']['index'] == self.index
+              and row['payload']['binding']['identity'] == self.change.identity
+              and row['payload']['binding']['direction'] == self.direction
+              and self.chain._reconstruct()[-1] == intent.reference, 'own_pending_binding')
+
+    def source_fence_inputs(self, scope):
+        """Fence the accepted preimage during our exact live pre-effect hook.
+
+        The cached state remains bound to its accepted head. Its existing live
+        evidence check permits this writer's registry intent, never its result.
+        Physical source bytes and managers must still equal the full preimage.
+        """
+        self.check(scope)
+        if self.chain.active is None:
+            self._pre_effect_inputs = self.chain.reconstruct_inputs()
+        else:
+            self._require_own_pending_intent()
+            _need(self._pre_effect_inputs is not None, 'own_pre_effect_inputs_required')
+        return self._pre_effect_inputs
 
     def emission(self, scope, frame):
         data = frame.f_locals.get('event_data')

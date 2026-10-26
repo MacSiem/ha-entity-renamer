@@ -366,9 +366,14 @@ class NativeHelperLifecycle:
                 scope.source_binding.require_accepted(scope,seam=True)
             else:
                 clock_chain = scope.source_binding.chain
-                clock_chain.reconstruct_inputs().assert_current(self.receipt)
+                from .native_integration_own_clock import IntegrationOwnClockBinding
+                binding = scope.source_binding
+                inputs = (binding.source_fence_inputs(scope)
+                    if type(binding) is IntegrationOwnClockBinding
+                    else clock_chain.reconstruct_inputs())
+                inputs.assert_current(self.receipt)
                 from .native_input_baseline import _Managers, _KEYS, _json
-                expected = clock_chain.accepted_documents()
+                expected = inputs.documents()
                 if _Managers(scope.hass,self.receipt).initial != tuple(
                         _json(expected[name]['data']) for name in _KEYS):
                     _fail('integration_clock_manager_changed')
