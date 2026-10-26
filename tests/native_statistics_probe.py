@@ -13,7 +13,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
-parser.add_argument('--container', choices=('ha-renamer-qa222',), default='ha-renamer-qa222')
+parser.add_argument('--container', choices=('ha-renamer-qa222', 'ha-renamer-min222'), default='ha-renamer-qa222')
 parser.add_argument('--run-name', required=True)
 parser.add_argument('--late-statistics-birth', action='store_true')
 args = parser.parse_args()
