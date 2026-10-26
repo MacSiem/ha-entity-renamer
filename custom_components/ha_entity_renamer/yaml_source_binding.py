@@ -16,6 +16,7 @@ from .yaml_validation import assert_proposal_matches
 
 if TYPE_CHECKING:
     from .powercalc_source_binding import OriginalPowercalcSources
+    from .powercalc_candidate_sources import CandidatePowercalcSources
 
 _DOMAINS = ('automation', 'script')
 _SHA = re.compile(r'[0-9a-f]{64}\Z')
@@ -45,6 +46,7 @@ class OriginalSourceEvidence:
     template_sources: OriginalTemplateSources | None = None
     template_candidate_sources: CandidateTemplateSources | None = None
     powercalc_sources: OriginalPowercalcSources | None = None
+    powercalc_candidate_sources: CandidatePowercalcSources | None = None
 
     @property
     def migration_ready(self):
@@ -63,6 +65,8 @@ class OriginalSourceEvidence:
             payload['template_candidate_sources'] = self.template_candidate_sources.sha256
         if self.powercalc_sources is not None:
             payload['powercalc_sources'] = self.powercalc_sources.sha256
+        if self.powercalc_candidate_sources is not None:
+            payload['powercalc_candidate_sources'] = self.powercalc_candidate_sources.sha256
         return hashlib.sha256(json.dumps(payload, sort_keys=True,
             separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 

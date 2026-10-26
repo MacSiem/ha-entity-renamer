@@ -336,6 +336,71 @@ class NativePowercalcAcceptedCandidateTests(unittest.IsolatedAsyncioTestCase):
         # expected product refusal. The completed future never blocks the loop.
         completion.result()
 
+    async def test_late_ha_public_source_edit_at_final_accepted_job_refuses(self):
+        import hashlib
+        import os
+        import threading
+        import homeassistant
+        from homeassistant.helpers import event
+        await self.chain_root()
+        # This fixture may mutate ONLY the real HA package imported from the
+        # runner's owned suite copy. A shared installation is never writable.
+        owned_value = os.environ.get('RENAMER_OWNED_HA_SOURCE_ROOT')
+        suite_value = os.environ.get('RENAMER_TEST_SCRATCH')
+        self.assertIsNotNone(owned_value, 'F1 requires native_unit_probe --owned-ha-sources')
+        self.assertIsNotNone(suite_value, 'F1 requires the owned runner suite directory')
+        suite = Path(suite_value).resolve(strict=True)
+        owned = Path(owned_value).resolve(strict=True)
+        self.assertEqual(suite.parent, Path('/config'))
+        self.assertTrue(suite.name.startswith('renamer-unit-'))
+        self.assertEqual(owned, suite / '_owned_ha_sources' / 'homeassistant')
+        self.assertTrue(self.f.root.resolve().is_relative_to(suite))
+        self.assertEqual(Path(homeassistant.__file__).resolve().parent, owned)
+        path = owned / 'helpers/event.py'
+        self.assertEqual(path.resolve(strict=True), path)
+        self.assertEqual(Path(event.__file__).resolve(), path)
+        self.assertEqual(event._remove_listener.__code__.co_filename, str(path))
+        raw = path.read_bytes()
+        before_sha = hashlib.sha256(raw).hexdigest()
+        self.assertEqual(before_sha, 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269')
+        actual_fence = self.observer._accepted_sources
+        cls = self.module('powercalc_source_binding').PowercalcVendor
+        actual_sources = cls.sources
+        calls, source_calls, edit_threads = [], [], []
+        loop_thread = threading.get_ident()
+
+        def real_sources(vendor):
+            source_calls.append(True)
+            return actual_sources(vendor)
+
+        def late_edit_then_real_fence(chain, state, receipt, *args, **kwargs):
+            calls.append(True)
+            if len(calls) == 2:
+                self.assertNotEqual(threading.get_ident(), loop_thread)
+                edit_threads.append(threading.get_ident())
+                path.write_bytes(raw + b'\n# F1 owned native public-source drift\n')
+            return actual_fence(chain, state, receipt, *args, **kwargs)
+
+        try:
+            with patch.object(self.observer, '_accepted_sources', late_edit_then_real_fence), \
+                    patch.object(cls, 'sources', real_sources):
+                with self.assertRaisesRegex(ValueError, 'native_unload_source_pin'):
+                    await self.observe()
+        finally:
+            path.write_bytes(raw)
+            restored = path.read_bytes()
+            after_sha = hashlib.sha256(restored).hexdigest()
+            self.assertEqual(restored, raw)
+            self.assertEqual(after_sha, before_sha)
+            print(json.dumps({'fixture': 'F1_owned_ha_public_source',
+                              'path': str(path), 'before_sha256': before_sha,
+                              'after_sha256': after_sha, 'restored_exact': restored == raw}))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(source_calls), 2)
+        self.assertEqual(len(edit_threads), 1)
+        self.assertIs(self.observer._accepted_sources, actual_fence)
+        self.assertIs(cls.sources, actual_sources)
+
     async def test_missing_durable_preparations_cannot_reopen_same_chain(self):
         await self.chain_root()
         path = Path(self.f.hass.config.path('.storage', 'ha_entity_renamer.prepared'))

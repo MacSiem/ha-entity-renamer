@@ -311,7 +311,7 @@ def read_bundle(root):
         os.close(fd)
 
 
-async def compile_closed_graph(hass, checked, root):
+async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
     """Called ONLY by the isolated ORIGINAL worker, never by live observers."""
     from custom_components.powercalc.power_profile.library import ProfileLibrary, ModelInfo
     from homeassistant.helpers import entity_registry as er, device_registry as dr
@@ -358,7 +358,7 @@ async def compile_closed_graph(hass, checked, root):
                            'unique_id': cfg.get('unique_id') or entry['unique_id'] or entry['entry_id']})
         else:
             originals.append((origin, cfg, cfg.get('unique_id') or entry['unique_id']))
-    profiles = []
+    profiles, bindings = [], []
     for origin, cfg, configured_unique_id in originals:
         semantic = source_config(cfg)
         source = create_source_entity(semantic['entity_id'], hass)
@@ -372,6 +372,21 @@ async def compile_closed_graph(hass, checked, root):
                     model=profile.model, config_sha256=digest(cfg),
                     unique_id=configured_unique_id or source.unique_id)
         profiles.append(data)
+        if with_bindings:
+            # Actual native rows loaded from this isolated staged image. Never
+            # resolve a live source or borrow a registry row from the other image.
+            source_row = source.entity_entry
+            need(source_row is not None, 'source_registry_required')
+            dependencies = [('source', semantic['entity_id'], source_row)]
+            selector = profile._base_json_data.get('sub_profile_select')
+            if selector is not None:
+                sid = selector['matchers'][0]['entity_id'].replace(
+                    '{{source_object_id}}', source.object_id)
+                selected_row = er.async_get(hass).async_get(sid)
+                need(selected_row is not None, 'source_registry_required')
+                dependencies.append(('selector', sid, selected_row))
+            bindings.append([origin, [[role, eid, row.id, row.unique_id, row.platform]
+                for role, eid, row in dependencies]])
     need(bool(profiles) and len({r['origin'] for r in profiles}) == len(profiles), 'profile_membership')
     energy_path = Path(root) / '.storage/energy'
     settings = None if not energy_path.exists() else json.loads(energy_path.read_bytes())['data']
@@ -386,8 +401,11 @@ async def compile_closed_graph(hass, checked, root):
             for child in value:
                 references(child)
     references(settings)
-    return {'schema': 1, 'profiles': sorted(profiles, key=lambda r: r['origin']),
+    result = {'schema': 1, 'profiles': sorted(profiles, key=lambda r: r['origin']),
             'groups': sorted(groups, key=lambda r: r['origin']),
             'files': sorted([path, hashlib.sha256(raw).hexdigest()] for path, raw in bundle.items()),
             'energy_settings_sha256': None if settings is None else digest(settings),
             'energy_refs': sorted(set(refs))}
+    if with_bindings:
+        result['bindings'] = sorted(bindings)
+    return result

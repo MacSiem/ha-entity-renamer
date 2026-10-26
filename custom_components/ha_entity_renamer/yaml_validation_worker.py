@@ -504,7 +504,7 @@ def powercalc_fixed_semantics(cfg):
     return {'source': cfg['entity_id'], 'power': str(value)}
 
 
-async def _expected_powercalc_sources(root, *, profiles=False):
+async def _expected_powercalc_sources(root, *, profiles=False, bindings=False):
     """Projection in the SAME isolated ORIGINAL checker; no vendor setup."""
     from homeassistant import loader
     from homeassistant.core import HomeAssistant
@@ -533,13 +533,15 @@ async def _expected_powercalc_sources(root, *, profiles=False):
             module = importlib.util.module_from_spec(spec)
             sys.modules[spec.name] = module
             spec.loader.exec_module(module)
-            result['closed_graph'] = await module.compile_closed_graph(hass, checked, root)
+            result['closed_graph'] = await module.compile_closed_graph(
+                hass, checked, root, with_bindings=bindings)
         return result
     finally:
         await hass.async_stop(force=True)
 
 
-async def check(before_root, proposed_root, *, with_sources=False, powercalc_profiles=False):
+async def check(before_root, proposed_root, *, with_sources=False, powercalc_profiles=False,
+                powercalc_candidate=False):
     from homeassistant.const import __version__
     from homeassistant.scripts.check_config import async_check_config
     if __version__ not in ('2025.6.0', '2026.10.2'):
@@ -572,7 +574,22 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
                                    for domain in changed]}
     if with_sources:
         if os.path.isfile(os.path.join(before_root, 'custom_components/powercalc/manifest.json')):
-            result['powercalc_sources'] = await _expected_powercalc_sources(before_root, profiles=powercalc_profiles)
+            result['powercalc_sources'] = await _expected_powercalc_sources(
+                before_root, profiles=powercalc_profiles, bindings=powercalc_candidate)
+            if powercalc_candidate:
+                if not powercalc_profiles:
+                    raise ValueError('powercalc_profile_original_sources_required')
+                result['powercalc_candidate_sources'] = await _expected_powercalc_sources(
+                    proposed_root, profiles=True, bindings=True)
+                # Hash exact full planned documents AFTER both isolated reads.
+                # No live manager dump or second validation root is consulted.
+                import hashlib
+                from pathlib import Path
+                keys = ('core.entity_registry', 'core.device_registry', 'core.config_entries')
+                result['powercalc_candidate_documents'] = [[key,
+                    hashlib.sha256((Path(before_root) / '.storage' / key).read_bytes()).hexdigest(),
+                    hashlib.sha256((Path(proposed_root) / '.storage' / key).read_bytes()).hexdigest()]
+                    for key in keys]
         result['template_sources'] = template_sources
         result['template_candidate_sources'] = candidate_templates
         result['source_runtime'] = {'version': __version__, 'domains': [
@@ -588,7 +605,8 @@ def main():
         with open(os.devnull, 'w') as sink, redirect_stdout(sink), redirect_stderr(sink):
             result = asyncio.run(check(sys.argv[1], sys.argv[2],
                                        with_sources='--source-evidence' in sys.argv[3:],
-                                       powercalc_profiles='--powercalc-profile-inputs' in sys.argv[3:]),
+                                       powercalc_profiles='--powercalc-profile-inputs' in sys.argv[3:],
+                                       powercalc_candidate='--powercalc-candidate-inputs' in sys.argv[3:]),
                                  loop_factory=getattr(runner, 'create_event_loop', None))
     except BaseException as error:
         result = {'status': 'checker_failed', 'diagnostic': _checker_diagnostic(error)}

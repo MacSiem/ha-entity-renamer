@@ -298,13 +298,19 @@ async def _settled_executor(hass, function, *args):
     return result
 
 
-async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, with_sources=False, powercalc_bundle=None):
+async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, with_sources=False,
+                                   powercalc_bundle=None, powercalc_candidate_documents=None):
     """Return only after native validation of the entire proposed graph succeeds.
 
     scratch_parent must be private local storage OUTSIDE config_root. It contains
     temporary secret material with mode 0700 and is erased on every normal exit.
     A failure never invokes file_mutations or a live reload service.
     """
+    if powercalc_candidate_documents is not None:
+        from .powercalc_candidate_sources import PlannedPowercalcDocuments
+        if (not with_sources or powercalc_bundle is None or plan.powercalc_inputs is None
+                or type(powercalc_candidate_documents) is not PlannedPowercalcDocuments):
+            raise YAMLValidationError('powercalc_candidate_profile_scope_required')
     root = Path(hass.config.config_dir).resolve()
     scratch = Path(scratch_parent).resolve()
     if scratch == root or root in scratch.parents:
@@ -320,11 +326,16 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
             if powercalc_bundle is not None:
                 from .powercalc_source_binding import stage_powercalc_bundle
                 await _settled_executor(hass, stage_powercalc_bundle, powercalc_bundle, before, after)
+            if powercalc_candidate_documents is not None:
+                from .powercalc_candidate_sources import stage_candidate_documents
+                await _settled_executor(hass, stage_candidate_documents,
+                    powercalc_candidate_documents, before, after)
             worker = str(Path(__file__).with_name('yaml_validation_worker.py'))
             process = await asyncio.create_subprocess_exec(
                 sys.executable, '-I', worker, str(before), str(after),
                 *(('--source-evidence',) if with_sources else ()),
                 *(('--powercalc-profile-inputs',) if plan.powercalc_inputs is not None else ()),
+                *(('--powercalc-candidate-inputs',) if powercalc_candidate_documents is not None else ()),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                 start_new_session=True)
             try:
@@ -363,8 +374,14 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 if powercalc_bundle is not None:
                     from dataclasses import replace
                     from .powercalc_source_binding import seal_powercalc_sources
-                    evidence = replace(evidence, powercalc_sources=seal_powercalc_sources(
-                        receipt, plan, staged[4], result['powercalc_sources']))
+                    original = seal_powercalc_sources(receipt, plan, staged[4], result['powercalc_sources'])
+                    evidence = replace(evidence, powercalc_sources=original)
+                    if powercalc_candidate_documents is not None:
+                        from .powercalc_candidate_sources import seal_powercalc_candidate
+                        candidate = seal_powercalc_candidate(receipt, plan, original,
+                            powercalc_candidate_documents, result['powercalc_candidate_sources'],
+                            result['powercalc_candidate_documents'])
+                        evidence = replace(evidence, powercalc_candidate_sources=candidate)
                 return receipt, evidence
             return receipt
     except (OSError, TimeoutError):
@@ -425,7 +442,8 @@ async def async_activate_yaml(hass, receipt, *, context, guard):
     return {'status': 'reloads_completed_readback_required', 'services': tuple(completed)}
 
 
-async def async_validate_proposed_with_powercalc_sources(hass, plan, scratch_parent, *, timeout=120):
+async def async_validate_proposed_with_powercalc_sources(hass, plan, scratch_parent, *, timeout=120,
+                                                         candidate_documents=None):
     """Exact ORIGINAL checker plus the supported official vendor source bundle.
 
     Read-only prerequisite. Unsupported Powercalc apply stays unsupported.
@@ -435,7 +453,8 @@ async def async_validate_proposed_with_powercalc_sources(hass, plan, scratch_par
     bundle = await _settled_executor(hass, vendor.sources)
     vendor.bindings()
     result = await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
-                                          with_sources=True, powercalc_bundle=bundle)
+                                          with_sources=True, powercalc_bundle=bundle,
+                                          powercalc_candidate_documents=candidate_documents)
     def final_sources():
         vendor.sources()
         # SAME ORIGINAL receipt closes the final vendor-code executor await.
