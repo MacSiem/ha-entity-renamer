@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import redirect_stdout, redirect_stderr
 import json
+import re
 import logging
 import os
 import sys
@@ -171,6 +172,69 @@ def _template_source_projection(checked):
     return sorted(rows, key=lambda row: (row[0], row[1]))
 
 
+def _qualified_state_expression(text):
+    """Pure Jinja AST qualifier for the first numeric producer expression slice.
+
+    No time/dynamic/domain/variable lookup, render or alternate template parser.
+    Broader state templates retain source inventory but not activation support.
+    """
+    from jinja2 import Environment, nodes
+    tree = Environment().parse(text)
+    if (len(tree.body) != 1 or not isinstance(tree.body[0], nodes.Output)
+            or len(tree.body[0].nodes) != 1):
+        raise ValueError('template_expression_subset_unverified')
+    allowed = (nodes.Output, nodes.Const, nodes.Name, nodes.Call, nodes.Filter,
+               nodes.Add, nodes.Sub, nodes.Mul, nodes.Div, nodes.FloorDiv,
+               nodes.Mod, nodes.Pow, nodes.Neg, nodes.Pos)
+    calls = 0
+    for node in tree.find_all(nodes.Node):
+        if not isinstance(node, allowed):
+            raise ValueError('template_expression_subset_unverified')
+        if isinstance(node, nodes.Name) and node.name != 'states':
+            raise ValueError('template_expression_subset_unverified')
+        if isinstance(node, nodes.Call):
+            if (not isinstance(node.node, nodes.Name) or node.node.name != 'states'
+                    or len(node.args) != 1 or not isinstance(node.args[0], nodes.Const)
+                    or type(node.args[0].value) is not str
+                    or not re.fullmatch(r'[a-z_][a-z0-9_]*\.[a-z0-9_]+', node.args[0].value)
+                    or node.kwargs or node.dyn_args is not None or node.dyn_kwargs is not None):
+                raise ValueError('template_expression_subset_unverified')
+            calls += 1
+        if isinstance(node, nodes.Filter) and (node.name not in ('int', 'float', 'round')
+                or node.kwargs or node.dyn_args is not None or node.dyn_kwargs is not None
+                or any(not isinstance(arg, nodes.Const) for arg in node.args)):
+            raise ValueError('template_expression_subset_unverified')
+    if not calls:
+        raise ValueError('template_expression_subset_unverified')
+
+
+def qualified_template_state_projection(checked):
+    """Whole modern YAML family restricted to named state-only sensors.
+
+    Other platforms/coordinators/config shapes never qualify an activation.
+    Source inventories remain available through the independent full projection.
+    """
+    rows = []
+    for block in checked.get('template', ()):
+        if (block.raw_config is None or block.raw_blueprint_inputs is not None
+                or set(block) - {'unique_id', 'sensor', 'variables', 'actions', 'conditions'}
+                or any(block.get(k) for k in ('variables', 'actions', 'conditions'))
+                or not block.get('sensor')):
+            raise ValueError('template_activation_subset_unverified')
+        for entity in block['sensor']:
+            key = entity.get('unique_id')
+            if type(key) is not str or not key:
+                raise ValueError('template_activation_identity_unverified')
+            if block.get('unique_id'):
+                key = block['unique_id'] + '-' + key
+            semantic = simple_template_sensor_semantics(entity)
+            _qualified_state_expression(semantic[1])
+            rows.append([key, _fingerprint(semantic)])
+    if not rows or len({row[0] for row in rows}) != len(rows):
+        raise ValueError('template_activation_inventory_unverified')
+    return ['template_state_sensors_v1', sorted(rows)]
+
+
 async def _expected_template_sources(hass, config):
     """Same ORIGINAL checker instance/config; no factory, setup or rendering."""
     from homeassistant.const import __version__
@@ -246,7 +310,9 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
                     if checked is None:
                         raise ValueError('native_projection_rejected')
                     projection = []
-                    if domain == 'script':
+                    if domain == 'template':
+                        projection = qualified_template_state_projection(checked)
+                    elif domain == 'script':
                         for key, cfg in checked[domain].items():
                             if cfg.raw_config is None or cfg.raw_blueprint_inputs is not None:
                                 raise ValueError('blueprint_or_invalid_script')
@@ -275,6 +341,9 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
                                                    scene['entities']])
                     else:
                         raise ValueError('unsupported_domain')
+                    if domain == 'template':
+                        result[domain] = _fingerprint(projection)
+                        continue
                     if len({row[0] for row in projection}) != len(projection):
                         raise ValueError('duplicate_runtime_id')
                     projection.sort(key=lambda row: row[0])
@@ -361,6 +430,11 @@ async def check(before_root, proposed_root, *, with_sources=False):
     candidate_templates = {} if with_sources else None
     new_runtime = await _expected_runtime(proposed_root, changed,
         template_sources=candidate_templates)
+    if (with_sources and changed == ['template']
+            and old_runtime.get('template') is not None
+            and new_runtime.get('template') is not None
+            and old_runtime['template'] != new_runtime['template']):
+        unsupported = [domain for domain in unsupported if domain != 'template']
     result = {'status': 'valid', 'version': __version__, 'changed_domains': changed,
               'unsupported_domains': unsupported,
               'runtime_expected': [(domain, old_runtime.get(domain), new_runtime.get(domain))

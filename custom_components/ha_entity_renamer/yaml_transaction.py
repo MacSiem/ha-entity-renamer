@@ -24,7 +24,7 @@ from .yaml_validation import (ValidationReceipt, _settled_executor,
     async_activate_yaml, async_validate_proposed)
 
 _DIGEST = re.compile(r'[0-9a-f]{64}\Z')
-_SUPPORTED = frozenset(('automation', 'script', 'scene', 'homeassistant'))
+_SUPPORTED = frozenset(('automation', 'script', 'scene', 'homeassistant', 'template'))
 
 
 def _hash(raw):
@@ -196,6 +196,11 @@ def decode_yaml(data):
                                  None if after is None else _sha(after)))
     if len({row[0] for row in runtime_expected}) != len(runtime_expected):
         raise ValueError('invalid_prepared_yaml_runtime')
+    if 'template' in domains and (domains != ('template',)
+            or len(runtime_expected) != 1 or runtime_expected[0][0] != 'template'
+            or None in runtime_expected[0][1:]
+            or runtime_expected[0][1] == runtime_expected[0][2]):
+        raise ValueError('template_prepared_runtime_subset_required')
     receipt = ValidationReceipt(root, tuple(sources), tuple(directories), tuple(proposed),
                                 domains, (), _text(raw['version']), tuple(runtime_expected))
     return PreparedYAML(receipt, tuple(files))
@@ -347,6 +352,11 @@ class YAMLTransactionAdapter:
                 or change.receipt.version != self.runtime_version):
             raise Refused('yaml_preparation_mismatch')
         assert_activation_available(self.hass, change.receipt)
+        if 'template' in change.receipt.changed_domains:
+            from .native_template_yaml import NativeTemplateYAMLRuntimeReadback
+            if type(self.observer) is not NativeTemplateYAMLRuntimeReadback:
+                raise Refused('template_scoped_runtime_observer_required')
+            self.observer.assert_change(change)
         return change
 
     async def inspect(self, step):
@@ -432,14 +442,27 @@ class YAMLTransactionAdapter:
         if _trusted_hooks is None:
             await _settled(async_activate_yaml(self.hass, change.receipt, context=self.context, guard=guard))
         else:
-            await _settled(_trusted_hooks.activate())
+            async def activate_and_settle():
+                try:
+                    await _trusted_hooks.activate()
+                finally:
+                    # Service ACK may precede actual platform additions. Keep
+                    # OWN started reload descendants inside these editor locks,
+                    # including cancellation/error while activate was awaiting.
+                    await _trusted_hooks.settle_reload()
+            await _settled(activate_and_settle())
         await checkpoint()
-        position = await self.observer.position(change)
+        position = (await _settled(_trusted_hooks.runtime_position()) if _trusted_hooks is not None
+                    else await self.observer.position(change))
+        runtime_check = (self.observer.runtime_check(position)
+                         if 'template' in change.receipt.changed_domains else None)
         await checkpoint()
         if position != (Position.BEFORE if reverse else Position.AFTER):
             raise Refused('yaml_native_runtime_unconfirmed')
         await _settled_executor(self.hass, sources)
         await checkpoint()
+        if runtime_check is not None:
+            runtime_check.check()
         return results
 
     async def apply(self, step, guard):

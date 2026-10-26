@@ -22,6 +22,7 @@ class _YAMLHooks:
         self.adapter, self.change, self.context = adapter, change, context
         self.intent, self.guard = intent, guard
         self.calls = []
+        self.reload_started = False
 
     def state(self):
         return self.adapter.chain.live_yaml_inputs(self.intent, self.context, self.calls)
@@ -44,6 +45,13 @@ class _YAMLHooks:
         self.calls.append(result)
         self.assert_sources()
 
+    async def runtime_position(self):
+        return await self.adapter._runtime_position(self.change, self.state())
+
+    async def settle_reload(self):
+        if self.reload_started and 'template' in self.change.receipt.changed_domains:
+            await self.adapter.observer.settle_reload()
+
     async def activate(self):
         hooks = self
         services = self.adapter.hass.services
@@ -53,7 +61,12 @@ class _YAMLHooks:
 
             async def async_call(self, *args, **kwargs):
                 await hooks.checkpoint()
+                if 'template' in hooks.change.receipt.changed_domains:
+                    hooks.adapter.observer.assert_reload_current()
+                hooks.reload_started = True
                 result = await services.async_call(*args, **kwargs)
+                if 'template' in hooks.change.receipt.changed_domains:
+                    hooks.adapter.observer.assert_reload_current()
                 await hooks.checkpoint()
                 return result
         # Reuse native activation with the ORIGINAL receipt; wrap only the IO
@@ -76,6 +89,7 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
         self.phase_loader, self.guard = phase_loader, guard
         self.full_verify, self.full_verify_rollback = full_verify, full_verify_rollback
         self.phase_context = None
+        self._template_completion = None
 
     def _change(self, step):
         change = super()._change(step)
@@ -84,7 +98,24 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
                 or {row[0] for row in change.receipt.runtime_expected}
                    != set(change.receipt.changed_domains)):
             raise Refused('YAML original preparation/runtime coverage mismatch')
+        if 'template' in change.receipt.changed_domains:
+            from .native_template_yaml import _TemplateCompletionGuard
+            if type(self._template_completion) is not _TemplateCompletionGuard:
+                raise Refused('template_scoped_completion_guard_required')
         return change
+
+    def _runtime_check(self, change, position):
+        if 'template' in change.receipt.changed_domains:
+            return self.observer.runtime_check(position)
+        return None
+
+    async def _runtime_position(self, change, state):
+        if 'template' in change.receipt.changed_domains:
+            from .native_template_yaml import NativeTemplateYAMLRuntimeReadback
+            if type(self.observer) is not NativeTemplateYAMLRuntimeReadback:
+                raise Refused('template_scoped_runtime_observer_required')
+            return await self.observer.position_at_inputs(change, state)
+        return await self.observer.position(change)
 
     def bind_phase_context(self, context):
         if context is not None and type(context) is not PhaseContext:
@@ -140,7 +171,8 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
                     await self._durable_context(guard, context)
                 self._assert(state, guard)
             await checkpoint()
-            runtime = await self.observer.position(change)
+            runtime = await self._runtime_position(change, state)
+            runtime_check = self._runtime_check(change, runtime)
             await checkpoint()
             observed = await self._read(state, guard, checkpoint)
             if context is None:
@@ -150,6 +182,8 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
                 position = self.chain.position(context, observed)
             await checkpoint()
             expected = {'before': Position.BEFORE, 'after': Position.AFTER}[position]
+            if runtime_check is not None:
+                runtime_check.check()
             return expected if runtime == expected else Position.UNKNOWN
         except asyncio.CancelledError:
             raise
@@ -175,12 +209,15 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
                 await self._durable_context(guard, context)
                 self._assert(state, guard)
             await checkpoint()
-            runtime = await self.observer.position(change)
+            runtime = await self._runtime_position(change, state)
+            runtime_check = self._runtime_check(change, runtime)
             await checkpoint()
             expected = Position.BEFORE if direction == 'forward' else Position.AFTER
             if runtime != expected:
                 raise Refused('yaml_native_source_unconfirmed')
             before = await self._read(state, guard, checkpoint)
+            if runtime_check is not None:
+                runtime_check.check()
             # begin_yaml validates native source and entire original-bound graph.
             intent = await self.chain.begin_yaml(context, before, input_state=state)
             hooks = _YAMLHooks(self, change, context, intent, guard)
@@ -198,8 +235,16 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
             guard()
             accepted = self.chain.reconstruct_inputs()
             self._assert(accepted, guard)
+            runtime_check = None
+            if 'template' in change.receipt.changed_domains:
+                runtime = await self._runtime_position(change, accepted)
+                runtime_check = self._runtime_check(change, runtime)
+                if runtime is not (Position.AFTER if direction == 'forward' else Position.BEFORE):
+                    raise Refused('yaml_native_runtime_unconfirmed')
             await self._durable_context(guard, context)
             self._assert(accepted, guard)
+            if runtime_check is not None:
+                runtime_check.check()
             return results
 
     async def apply(self, step, guard):
@@ -234,10 +279,17 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
             self._assert(state, guard)
             await self._durable_context(guard, context)
             self._assert(state, guard)
-        runtime = await self.observer.position(self._change(context.step))
+        change = self._change(context.step)
+        runtime = await self._runtime_position(change, state)
+        runtime_check = self._runtime_check(change, runtime)
         await checkpoint()
         observed = await self._read(state, guard, checkpoint)
         position = self.chain.position(context, observed)
         await checkpoint()
         expected = Position.BEFORE if rollback else Position.AFTER
-        return runtime == expected and position == expected.value
+        matched = runtime == expected and position == expected.value
+        if runtime_check is not None:
+            runtime_check.check()
+            if matched:
+                self._template_completion.arm(runtime_check)
+        return matched

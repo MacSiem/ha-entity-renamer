@@ -317,6 +317,12 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 raise YAMLValidationError('native_checker_failed') from None
             if process.returncode or result.get('status') != 'valid':
                 raise YAMLValidationError('native_config_rejected')
+            if ('template' in result['changed_domains']
+                    and (not with_sources or staged[3].findings
+                         or any(row.domain not in ('template.state', 'template.sensor')
+                                for row in staged[3].definitions))):
+                result['unsupported_domains'] = sorted(
+                    set(result['unsupported_domains']) | {'template'})
             receipt = ValidationReceipt(str(root), sources, directories,
                 tuple(sorted((patch.path, _digest(patch.proposed_bytes)) for patch in plan.patches)),
                 tuple(result['changed_domains']), tuple(result['unsupported_domains']), result['version'],

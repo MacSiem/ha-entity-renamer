@@ -129,12 +129,13 @@ def _compare(result, original, reverse):
     return _hash(expected)
 
 
-async def _checker(before, after, timeout, checkpoint):
+async def _checker(before, after, timeout, checkpoint, *, with_sources=False):
     """Execute the existing native worker by path, without copying its source."""
     worker = str(Path(__file__).with_name('yaml_validation_worker.py'))
     # Shield spawning too: cancellation must not orphan a checker with secrets.
     spawning = asyncio.create_task(asyncio.create_subprocess_exec(
         sys.executable, '-I', worker, str(before), str(after),
+        *(('--source-evidence',) if with_sources else ()),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         start_new_session=True))
     process = None
@@ -251,7 +252,8 @@ async def async_revalidate_accepted_candidate(hass, chain, phase_loader,
                 lambda: _stage(state, original, change, reverse, before, after))
             await checkpoint()
             await observe()
-            result = await _checker(before, after, timeout, checkpoint)
+            result = await _checker(before, after, timeout, checkpoint,
+                with_sources='template' in original.changed_domains)
             await checkpoint()
             await observe()
             runtime_hash = _compare(result, original, reverse)
