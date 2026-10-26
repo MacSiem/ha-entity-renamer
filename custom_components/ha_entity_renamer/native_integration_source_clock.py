@@ -479,6 +479,42 @@ class IntegrationSourceClockBinding:
               'accepted_actual_source_configuration')
 
 
+    def _require_setup_observation(self, scope):
+        """Post-setup H0 read fence only; no accepted physical evidence.
+
+        Native entity-registry flush may replace bytes/inode before its setup
+        receipt ACK. The whole native documents must still be exactly H0's
+        accepted images: this clock audit permits NO native metadata delta.
+        Pre-transfer and post-ACK callers keep require_accepted(seam=True).
+        """
+        from .native_helper_setup_receipts import HelperSetupIntent
+        from .native_input_baseline import _Managers, _KEYS, _json
+        intent = getattr(self,'_helper_setup_intent',None)
+        _need(scope is self.scope and type(intent) is HelperSetupIntent
+              and self.chain.active is intent and intent.entry_id == self.entry_id
+              and scope._phase == 'loaded' and scope._new is not None
+              and scope._new_timer_bound and scope._old_cancelled.cancelled(),
+              'owned_loaded_setup_observation')
+        self.require_accepted(scope)  # Same typed pending H0 + terminal auth.
+        docs = self.chain.accepted_documents()
+        fence = self.accepted_input._native_observation_fence(self.chain.original_receipt)
+        _need(_json(fence.documents()) == _json(docs),
+              'setup_observation_native_document_delta')
+        expected_sources, observed_sources = self.accepted_input.sources(), fence.sources()
+        _need(set(observed_sources) == set(expected_sources)
+              and all(observed_sources[path] == row for path,row in expected_sources.items()
+                      if path != '.storage/core.entity_registry'),
+              'setup_observation_foreign_physical_delta')
+        managers = _Managers(scope.hass,self.chain.original_receipt)
+        _need(managers.initial == tuple(_json(docs[key]['data']) for key in _KEYS),
+              'setup_observation_manager_image')
+        managers.check()
+        # Recheck sampled native identities AND every original/accepted YAML,
+        # storage sibling and directory membership after all document/model IO.
+        # Never assign this ephemeral fence to accepted_input or journal it.
+        fence.assert_current(self.chain.original_receipt)
+
+
 async def async_begin_source_clock(hass, entry, lease, chain, *, guard, observe, load_record, reverse=False):
     """Existing Coordinator chain authorizes preparation; no boolean-only mode."""
     from .native_integration_continuity import NativeIntegrationContinuity

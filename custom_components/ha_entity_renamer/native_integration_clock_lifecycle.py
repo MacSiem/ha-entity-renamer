@@ -221,7 +221,6 @@ class NativeIntegrationClockSetupAudit:
         _need(self.guard() is not False and live(self.life,self.key) is self.scope,
               'live_setup_scope')
         self.scope._check(owner=True)
-        self.scope.source_binding.require_accepted(self.scope,seam=True)
         _need(self.scope._phase == 'loaded' and self.scope._new is not None
               and self.scope._new_timer_bound and self.scope._old_cancelled.cancelled(),
               'one_native_transfer')
@@ -232,6 +231,13 @@ class NativeIntegrationClockSetupAudit:
             'clock_receipt':list(self.scope.receipt),'source_pins':self.scope.pins}
         validate_audit(self.baseline,self.rows,doc,chain=self.chain,
                        core=self.scope.version,entry_id=self.key)
+        if self.chain.active is self.intent:
+            # Already transferred native clock + validated immutable audit;
+            # pending flush readback is not accepted H0 physical authority.
+            self.scope.source_binding._require_setup_observation(self.scope)
+        else:
+            # After ACK only reconstructed accepted H1 can fence the graph.
+            self.scope.source_binding.require_accepted(self.scope,seam=True)
         return IntegrationSetupAuditData(codec._canonical(doc))
 
     def __exit__(self,*_args):
