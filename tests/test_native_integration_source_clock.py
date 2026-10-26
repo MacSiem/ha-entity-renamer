@@ -78,6 +78,8 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
         await self._run_source_clock()
 
     async def _run_source_clock(self):
+        shared_lifecycle = getattr(self, 'shared_lifecycle', False)
+        initial_power = getattr(self, 'initial_power', '10')
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.components.integration.config_flow import ConfigFlowHandler
         from homeassistant.config_entries import ConfigEntry
@@ -103,7 +105,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
             _attr_unique_id = 'source-clock-producer'
             _attr_should_poll = False
             _attr_native_unit_of_measurement = 'W'
-            _attr_native_value = Decimal(self.initial_power)
+            _attr_native_value = Decimal(initial_power)
         self.producer = Producer()
         component = EntityComponent(logging.getLogger(__name__),'sensor',hass,timedelta(seconds=60))
         await component.async_add_entities([self.producer])
@@ -196,7 +198,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
             m['native_helper_transaction']._require_inactive(self.entry,lease)
             self.assertEqual(self.entry.state.value,'not_loaded')
             self.scope._timer(self.scope.old)  # Explicit owned retained exception.
-            if self.shared_lifecycle:
+            if shared_lifecycle:
                 life.require_quiescent()
         async def validate_snapshot(snapshot):
             self.assertIn(snapshot,(before,helper_change.after if helper_change else before))
@@ -271,7 +273,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                     hass,self.entry,lease,chain,guard=self.guard,observe=observe,load_record=journal.load,reverse=reverse)
                 scopes_live.append(self.scope)
                 scope=self.scope
-                if self.shared_lifecycle:
+                if shared_lifecycle:
                     try:
                         m['native_integration_clock_lifecycle']=importlib.import_module(
                             PACKAGE+'.native_integration_clock_lifecycle')
@@ -321,7 +323,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                     lives.append(life)
                     await life.quiesce()
                     self.assertTrue(life.inspect()['inactive_receipts_complete'])
-                    if self.initial_power=='0' and not reverse:
+                    if initial_power=='0' and not reverse:
                         self.assertEqual(Decimal(scope.initial.full),0)
                         self.assertEqual(Decimal(scope.initial.last_valid),0)
                 else:
@@ -430,7 +432,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                         negative_context.authorization=auth
                         if await negative_hook('before_setup',negative_context):
                             return
-                    if self.shared_lifecycle:
+                    if shared_lifecycle:
                         await life.restore(auth)
                         restored=scope._new
                         self.assertTrue(life.inspect()['activation_receipts_complete'])
@@ -494,7 +496,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(reopened.writable)
                 self.assertEqual(reopened.accepted_documents(),chain.accepted_documents())
                 self.assertTrue(reopened.verify_setup_authorization(auth))
-                if self.shared_lifecycle:
+                if shared_lifecycle:
                     witness=m['native_helper_lifecycle'].validate_lifecycle_receipt_witness(
                         fresh_store,chain.operation_id,plan,receipt,digests,root_id=life.root_id,
                         source_authorization=life.source_authorization)
