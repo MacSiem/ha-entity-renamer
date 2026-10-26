@@ -23,6 +23,53 @@ import test_receipted_helper_native as mixed
 PACKAGE = fixture.PACKAGE
 
 
+def _diagnose_actual_frozen_interval(scope):
+    """Local synthetic-native test log only; never changes product authority."""
+    binding = scope.source_binding
+    original = binding._consume
+    original_code = original.__func__.__code__
+    def consume(actual_scope, event, interval):
+        try:
+            return original(actual_scope, event, interval)
+        except BaseException as error:
+            # Read only the FAILED real call's frame. No revalidation, repeated
+            # native method, State/Event creation, arithmetic or positive proof.
+            try:
+                if (type(error) is ValueError and error.args ==
+                        ('integration_source_clock_actual_numeric_interval',)):
+                    trace = error.__traceback__
+                    while trace is not None:
+                        if trace.tb_frame.f_code is original_code:
+                            values = trace.tb_frame.f_locals
+                            states, elapsed = values['states'], values['elapsed']
+                            before = values['before']
+                            diagnostic = {
+                                'core': actual_scope.version,
+                                'phase': actual_scope._phase,
+                                'kind': interval.kind,
+                                'transport': interval.transport,
+                                'method': type(actual_scope.old._method).__name__,
+                                'states_is_none': states is None,
+                                'elapsed': str(elapsed),
+                                'elapsed_negative': elapsed < 0,
+                                'old_time': interval.old_time.isoformat(),
+                                'new_time': interval.new_time.isoformat(),
+                                'anchor': before[1].isoformat(),
+                                'trigger': before[2],
+                                'origin': values['origin'].isoformat(),
+                                'stable_old': values['stable_old'],
+                                'stable_new': values['stable_new'],
+                            }
+                            logging.getLogger(__name__).error(
+                                'SYNTHETIC_NATIVE_FROZEN_INTERVAL %r', diagnostic)
+                            break
+                        trace = trace.tb_next
+            except BaseException:
+                pass  # Preserve the original refusal even if logging fails.
+            raise
+    binding._consume = consume
+
+
 @unittest.skipUnless(fixture.HAS_HA, 'requires actual pinned HA')
 class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
     method = 'left'
@@ -301,6 +348,7 @@ class NativeIntegrationSourceClockTests(unittest.IsolatedAsyncioTestCase):
                     await self.wait_tick()
                 self.scope=await m['native_integration_source_clock'].async_begin_source_clock(
                     hass,self.entry,lease,chain,guard=self.guard,observe=observe,load_record=journal.load,reverse=reverse)
+                _diagnose_actual_frozen_interval(self.scope)
                 scopes_live.append(self.scope)
                 scope=self.scope
                 if shared_lifecycle:
