@@ -190,15 +190,19 @@ async def async_add_powercalc_source_inputs(hass, plan, *, guard):
 
 def source_config(cfg):
     """One local LUT source subset, with Energy explicit; no hidden overrides."""
+    from annotatedyaml.objects import NodeDictClass, NodeStrClass
+    # Native YAML/schema validation preserves these source-location wrappers.
+    # Accept their exact types, without coercing arbitrary config objects.
+    text_types = (str, NodeStrClass)
     allowed = {'name', 'entity_id', 'unique_id', 'sensor_type', 'manufacturer', 'model',
         'mode', 'create_energy_sensor', '_power_entity', '_energy_entity'}
-    need(type(cfg) is dict and not set(cfg) - allowed
+    need(type(cfg) in (dict, NodeDictClass) and not set(cfg) - allowed
          and cfg.get('sensor_type', 'virtual_power') == 'virtual_power'
          and cfg.get('mode', 'lut') == 'lut' and cfg.get('create_energy_sensor') is True
-         and type(cfg.get('entity_id')) is str and cfg['entity_id'].startswith('light.')
-         and type(cfg.get('manufacturer')) is str and type(cfg.get('model')) is str,
+         and type(cfg.get('entity_id')) in text_types and cfg['entity_id'].startswith('light.')
+         and type(cfg.get('manufacturer')) in text_types and type(cfg.get('model')) in text_types,
          'source_variant_unverified')
-    return {key: cfg[key] for key in ('entity_id', 'manufacturer', 'model')}
+    return {key: str(cfg[key]) for key in ('entity_id', 'manufacturer', 'model')}
 
 
 def profile_json(value):
