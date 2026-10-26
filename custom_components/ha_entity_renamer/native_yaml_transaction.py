@@ -191,9 +191,31 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
             return Position.UNKNOWN
 
     async def _effect(self, step, caller_guard, direction):
-        def guard():
+        import threading
+        from concurrent.futures import Future
+        loop, owner_thread = asyncio.get_running_loop(), threading.get_ident()
+
+        def on_loop():
             self.guard()
             caller_guard()
+
+        def guard():
+            if threading.get_ident() == owner_thread:
+                return on_loop()
+            # The file writer stays in its executor; native clock/HA checks
+            # must run on the owning loop, including the final replace guard.
+            # Only this worker waits. _settled_executor drains it on cancellation.
+            result = Future()
+            def checked():
+                try:
+                    on_loop()
+                except BaseException as error:
+                    result.set_exception(error)
+                else:
+                    result.set_result(None)
+            loop.call_soon_threadsafe(checked)
+            return result.result()
+
         guard()
         change = self._change(step)
         context = await self._durable_context(guard)
