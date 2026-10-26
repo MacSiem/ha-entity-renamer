@@ -1,6 +1,7 @@
 """Causal numeric observation around existing own Powercalc reload.
 
-Performs that real reload through G4. No counter/State/cache/timer transfer,
+Performs that real reload through G4. Optional typed exact-fields prerequisite;
+default captures only. No State/cache/timer transfer,
 lifecycle widening, new baseline, root or journal. Current pinned pair only.
 """
 from __future__ import annotations
@@ -68,6 +69,7 @@ class PowercalcNumericProbeResult:
     chain_head: str
     lifecycle: PowercalcReloadWitness
     trace_json: bytes
+    exact_fields: object | None = None
     continuity_verified: bool = field(default=False, init=False)
     counter_ownership_verified: bool = field(default=False, init=False)
     migration_ready: bool = field(default=False, init=False)
@@ -261,14 +263,18 @@ class _Probe:
             raise first
 
 
-async def async_capture_powercalc_numeric_reload(hass, chain, evidence, original, *, guard):
+async def async_capture_powercalc_numeric_reload(hass, chain, evidence, original, *, guard,
+                                                exact_fields=False):
     """ONE unchanged-ORIGINAL G4 call, actual numeric boundary facts only.
 
+    exact_fields=True selects the typed live-field prerequisite only. The
+    default remains the unmanaged numerical diagnostic, including its RED.
     Caller owns existing operation/admin lease. Accepted source-ID effects are
     not executed here; original and current configuration must still coincide.
     """
     from homeassistant.helpers import entity_platform as ep
     from homeassistant.core import EventBus
+    _need(type(exact_fields) is bool, 'typed_exact_fields_option')
     _need(type(chain) is RegistryReceiptChain and chain.original_receipt.version == '2026.10.2',
           'same_chain_current_pair_required')
     receipt, state = chain.original_receipt, chain.reconstruct_inputs()
@@ -312,8 +318,15 @@ async def async_capture_powercalc_numeric_reload(hass, chain, evidence, original
     probe.tags[timer[0]] = 'timer'
     try:
         probe.install()
-        lifecycle = await async_witness_unchanged_powercalc_reload(
-            hass, receipt, evidence, original, guard=check)
+        exact_receipt = None
+        if exact_fields:
+            from .powercalc_exact_fields import async_reload_with_powercalc_exact_fields
+            owned = await async_reload_with_powercalc_exact_fields(
+                hass, chain, evidence, original, guard=check)
+            lifecycle, exact_receipt = owned.lifecycle, owned.exact_fields
+        else:
+            lifecycle = await async_witness_unchanged_powercalc_reload(
+                hass, receipt, evidence, original, guard=check)
         probe.check()
         # Final vendor/HA source pins and accepted full graph in ONE last job.
         await _settled_executor(hass, proof)
@@ -324,6 +337,6 @@ async def async_capture_powercalc_numeric_reload(hass, chain, evidence, original
         unchanged(hrefs, hm, hc)
         trace = _json(probe.rows)
         return PowercalcNumericProbeResult(evidence.sha256, original.structural_token,
-                                            state.head, lifecycle, trace)
+                                            state.head, lifecycle, trace, exact_receipt)
     finally:
         probe.close()

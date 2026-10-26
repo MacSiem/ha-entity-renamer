@@ -43,7 +43,7 @@ class PowercalcNumericContinuityNativeTests(unittest.IsolatedAsyncioTestCase):
         # Missing product API is an explicit RED after genuine preparation.
         self.numeric = self.module('powercalc_numeric_continuity_probe')
 
-    async def collect(self, *, gap_event=False):
+    async def collect(self, *, gap_event=False, exact_fields=False):
         await self.ready()
         completion = self.f.hass.loop.create_future() if gap_event else None
         if completion is not None:
@@ -74,7 +74,8 @@ class PowercalcNumericContinuityNativeTests(unittest.IsolatedAsyncioTestCase):
         remove = self.f.hass.bus.async_listen('state_changed', real_producer_after_power_removal)
         try:
             result = await self.numeric.async_capture_powercalc_numeric_reload(
-                self.f.hass, self.chain, self.evidence, self.original_runtime, guard=self.guard)
+                self.f.hass, self.chain, self.evidence, self.original_runtime, guard=self.guard,
+                exact_fields=exact_fields)
             if gap_event:
                 async with asyncio.timeout(8):
                     await asyncio.shield(completion)
@@ -156,3 +157,88 @@ class PowercalcNumericContinuityNativeTests(unittest.IsolatedAsyncioTestCase):
                     and r.get('state', {}).get('process_id') == source['new']['process_id']]
         self.assertTrue(retained, 'actual source event had no retained native W calculation in unload gap')
         self.assertTrue(all(Decimal(r['returned_decimal']['decimal']).is_finite() for r in retained))
+
+    async def test_typed_exact_fields_match_live_engine_before_first_BASE_schedule(self):
+        result, rows = await self.collect(exact_fields=True)
+        self.assertIsNotNone(result.exact_fields)
+        receipt = result.exact_fields
+        self.assertTrue(receipt.exact_fields_transfer_verified)
+        for flag in ('continuity_verified', 'counter_ownership_verified',
+                     'reload_ownership_verified', 'migration_ready', 'family_complete'):
+            self.assertFalse(getattr(receipt, flag), flag)
+        self.assertEqual(receipt.evidence_sha256, self.evidence.sha256)
+        self.assertEqual(receipt.original_runtime_token, self.original_runtime.structural_token)
+        self.assertEqual(receipt.chain_head, self.chain.reconstruct_inputs().head)
+        transferred = {row['entity_id']: row for row in json.loads(receipt.transfers_json)}
+        pairs = {name: (old, new) for name, old, new in result.lifecycle.instance_pairs}
+        for entity in (self.static_energy, self.dynamic_energy, self.subtract_energy):
+            name = entity.entity_id
+            old_id, new_id = pairs[name]
+            seams = [row for row in rows if row['tag'] == 'schedule'
+                     and row['phase'] == 'start'
+                     and row['snapshot']['process_id'] == new_id
+                     and 'IntegrationSensor.async_added_to_hass' in row['parents']]
+            self.assertTrue(seams, name)
+            old, new = seams[0]['actual_old_engine'], seams[0]['snapshot']
+            self.assertEqual(old['process_id'], old_id)
+            self.assertEqual(Decimal(new['full']['decimal']), Decimal(old['full']['decimal']))
+            self.assertEqual(new['last_valid'], old['last_valid'])
+            self.assertEqual(new['anchor'], old['anchor'])
+            self.assertEqual(new['trigger'], old['trigger'])
+            local = transferred[name]
+            self.assertEqual(local['old_live'], local['new_after'])
+            self.assertEqual(local['new_after'], local['base_start'])
+            self.assertEqual(local['base_start'], local['base_return'])
+        static = transferred[self.static_energy.entity_id]
+        self.assertNotEqual(Decimal(static['old_live']['full']),
+                            round(Decimal(static['old_live']['full']), 6))
+        # This is a local effect receipt. It cannot close G5 continuity.
+        self.assertFalse(result.continuity_verified)
+
+    async def test_typed_exact_fields_does_not_claim_W_gap_continuity(self):
+        result, rows = await self.collect(gap_event=True, exact_fields=True)
+        self.assertTrue(result.exact_fields.exact_fields_transfer_verified)
+        self.assertFalse(result.continuity_verified)
+        self.assertFalse(result.counter_ownership_verified)
+        self.assertFalse(result.migration_ready)
+        old_id, new_id = next((old, new) for name, old, new in result.lifecycle.instance_pairs
+                              if name == self.static_power.entity_id)
+        source = [row for row in rows if row['tag'] == 'fire' and row['phase'] == 'start'
+                  and row.get('entity_id') == self.yaml_source and row.get('new') is not None
+                  and row['new']['attributes'].get('brightness') == 1]
+        self.assertEqual(len(source), 1)
+        first_new = min(row['seq'] for row in rows if row['tag'] == 'power_source'
+                        and row['phase'] == 'start' and row['snapshot']['process_id'] == new_id)
+        retained = [row for row in rows if row['tag'] == 'power_calculate'
+                    and row['phase'] == 'return' and row['snapshot']['process_id'] == old_id
+                    and source[0]['seq'] < row['seq'] < first_new
+                    and row.get('state', {}).get('process_id') == source[0]['new']['process_id']]
+        self.assertFalse(retained, 'this prerequisite must not introduce retained W calculation')
+
+    async def test_exact_fields_rejects_guard_revocation_after_real_transfer(self):
+        await self.ready()
+        exact = self.module('powercalc_exact_fields')
+        from homeassistant.helpers import entity_platform as ep
+        old = self.static_energy
+        def lease():
+            self.guard()
+            for platform in ep.async_get_platforms(self.f.hass, 'powercalc'):
+                candidate = platform.entities.get(old.entity_id)
+                if candidate is not None and candidate is not old and candidate._state is old._state:
+                    raise ValueError('test_existing_admin_lease_revoked_after_transfer')
+        with self.assertRaises(ValueError) as caught:
+            await exact.async_reload_with_powercalc_exact_fields(
+                self.f.hass, self.chain, self.evidence, self.original_runtime, guard=lease)
+        # The effect is reported; no rollback of native data is asserted.
+        notes = getattr(caught.exception, '__notes__', ())
+        effects = [note for note in notes if note.startswith('powercalc_exact_fields_effects=')]
+        self.assertTrue(effects)
+        self.assertFalse(any(note.startswith('powercalc_exact_fields_effects=0;') for note in effects))
+
+    async def test_exact_fields_rejects_untyped_policy_before_native_effect(self):
+        await self.ready()
+        witness = self.module('powercalc_reload_witness')
+        with self.assertRaisesRegex(ValueError, 'typed_exact_fields_requires_global_owner'):
+            await witness.async_witness_unchanged_powercalc_reload(
+                self.f.hass, self.chain.original_receipt, self.evidence, self.original_runtime,
+                guard=self.guard, _manage_global_rename=True, _exact_fields=object())
