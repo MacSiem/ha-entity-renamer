@@ -54,6 +54,39 @@ class Runtime:
     async def recovery_restore(self, hass, operation_id, fingerprint, *, guard, refresh):
         return await self._recovery(hass, 'restore', operation_id, fingerprint, guard=guard, refresh=refresh)
 
+    async def native_forward(self, hass, mapping, *, guard, refresh):
+        """Private qualified component, not a public migration admission route.
+
+        The same Runtime lock spans fresh authorization, prepare, native effects
+        and drain. The native lease belongs to the owned operation task; request
+        cancellation cannot release this lock while its IO still runs.
+        """
+        from .native_template_forward import NativeTemplateForward
+        from .recovery_controller import _drain_restore as drain_effect
+        def current():
+            guard()
+            if (hass.data.get(DATA_RUNTIME) is not self or not self.loaded or self.unloading):
+                raise ValueError('forward_runtime_unavailable')
+        current()
+        async with self.operation_lock:
+            current()
+            await refresh()
+            current()
+            async def operation():
+                session = await NativeTemplateForward.prepare(hass, mapping,
+                    guard=current, refresh=refresh)
+                try:
+                    return await session.apply()
+                finally:
+                    session.close()
+            record = await drain_effect(operation())
+            current()
+            # No Plan, receipt, prepared refs or source documents cross this
+            # boundary. Global/family readiness is still explicitly false.
+            return {'operation_id': record.operation_id,
+                'fingerprint': record.plan.fingerprint, 'state': record.status,
+                'reason': record.reason, 'migration_ready': False, 'family_complete': False}
+
     async def discover(self, hass, proposal, *, guard, refresh):
         """Server-owned read under the same lease used by migration/recovery.
 
