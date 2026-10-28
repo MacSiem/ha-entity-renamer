@@ -7,6 +7,7 @@ The Runtime owns its lock and cancellation-drained task through close().
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 import uuid
@@ -15,20 +16,44 @@ from .const import DATA_RUNTIME
 from .transaction import Refused, Plan, Step, PhaseContext, Position
 from .native_template_reverse import _authorize
 from .native_template_forward import _UnchangedConsumers
-from .native_input_baseline import _drained, _Managers
+from .native_input_baseline import _drained, _Managers, NativeInputBaseline, NativeInputFile
 from .native_input_observation import async_observe_native_inputs
 from .native_registry_receipts import (RegistryReceiptChain, RegistryReceiptError,
     RegistryRawObservation, native_registry_receipt_store)
 from .native_template_yaml import (NativeTemplateYAMLRuntimeReadback,
     compose_template_yaml_coordinator)
-from .native_template_composition import TemplateComposition
-from .prepared import native_prepared_store, encode_change, decode_change
+from .native_template_composition import TemplateComposition, encode_composition
+from .prepared import native_prepared_store, encode_change, decode_change, canonical
 from .journal import native_journal
 
 
 def _need(value, reason):
     if not value:
         raise Refused('template_yaml_server_' + reason) from None
+
+
+def _baseline_stamp(value):
+    """Full immutable ORIGINAL identity without repeated JSON/base64 decoding.
+
+    Chain construction already authenticated the native codec and receipt. Hash
+    every retained raw/manager byte and exact typed identity on each check; this
+    never observes or substitutes current native managers/files.
+    """
+    _need(type(value) is NativeInputBaseline and type(value.format) is int
+          and type(value.receipt_json) is bytes and type(value.files) is tuple
+          and len(value.files) == 3, 'original_binding_changed')
+    rows = []
+    for item in value.files:
+        _need(type(item) is NativeInputFile and type(item.key) is str
+              and (item.raw is None or type(item.raw) is bytes)
+              and type(item.manager_json) is bytes
+              and (item.identity is None or (type(item.identity) is tuple
+                   and len(item.identity) == 3 and all(type(v) is int for v in item.identity))),
+              'original_binding_changed')
+        rows.append((item.key, item.identity,
+            None if item.raw is None else hashlib.sha256(item.raw).digest(),
+            hashlib.sha256(item.manager_json).digest()))
+    return value.format, hashlib.sha256(value.receipt_json).digest(), tuple(rows)
 
 
 class NativeTemplateYAMLServer:
@@ -62,9 +87,7 @@ class NativeTemplateYAMLServer:
             if obj.bound:
                 _need(runtime.journal is obj.journal and runtime.preparations is obj.preparations,
                       'runtime_cache_replaced')
-                baseline, composition = obj.preparations.resolve_composition(obj.plan.native_inputs)
-                _need(composition == obj.composition and baseline.receipt == obj.receipt,
-                      'composition_changed')
+                obj._preparation_current()
         obj._scope = scope
         scope()
         await refresh()
@@ -194,6 +217,22 @@ class NativeTemplateYAMLServer:
         self._scope()
 
     def _install(self):
+        # The chain has just resolved and strictly decoded this exact immutable
+        # preparation. Keep its existing baseline, not a second decoded cache.
+        reference = self.plan.native_inputs
+        original_stamp = _baseline_stamp(self.chain.baseline)
+        def preparation_current():
+            _need(type(self.plan.native_inputs) is tuple and self.plan.native_inputs == reference,
+                  'original_binding_changed')
+            payload = self.preparations.resolve(*reference[:2])
+            _need(canonical(payload)[1] == reference[1]
+                  and _baseline_stamp(self.chain.baseline) == original_stamp,
+                  'original_binding_changed')
+            _need(self.chain.baseline.receipt == self.receipt
+                  and payload.get('composition') == encode_composition(self.composition, self.chain.baseline),
+                  'composition_changed')
+        self._preparation_current = preparation_current
+        preparation_current()
         self.observation_state = self.chain.reconstruct_inputs()
         self.observer = NativeTemplateYAMLRuntimeReadback(self.hass, self.chain, self.evidence,
                                                         guard=self._scope)
