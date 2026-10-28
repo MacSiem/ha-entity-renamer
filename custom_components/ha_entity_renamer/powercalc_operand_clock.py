@@ -88,6 +88,7 @@ class PowercalcOperandClockReceipt:
     steps_json: bytes
     timer_proofs_json: bytes
     subtract_interval: object | None = None
+    subtract_intervals: tuple = ()
     direct_operand_clock_verified: bool = field(default=True, init=False)
     continuity_verified: bool = field(default=False, init=False)
     counter_ownership_verified: bool = field(default=False, init=False)
@@ -433,6 +434,8 @@ class _OperandClockOwner:
             self.steps.append({'kind': 'unchanged', 'entity_id': name,
                                'result': id(result), 'deadline': c.deadline,
                                'deadline_before': c.deadline, 'deadline_after': c.deadline})
+            if self.subtract is not None:
+                self.subtract.consume(result)
             return
         _need(result.native_write_suppressed, 'actual_removed_update_boundary')
         self._area(name, result.update_returned_at, kind='operand', next_value=result.native_power)
@@ -440,6 +443,8 @@ class _OperandClockOwner:
         step = self.steps[-1]
         self._arm(name, self.scope.loop.time() + c.engine._max_sub_interval.total_seconds())
         step['deadline_after'] = c.deadline
+        if self.subtract is not None:
+            self.subtract.consume(result)
 
     def after_exact_schedule(self, entity):
         if self.subtract is not None:
@@ -709,7 +714,9 @@ class _OperandClockOwner:
         from .powercalc_profile_binding import _energy_listeners
         self.check()
         _need(self.subtract.pending_native is None and self.subtract.depth == 0
-              and (self.subtract.phase != 'native' or self.subtract.interval is not None),
+              and (not self.subtract.dynamic_results or self.subtract.dynamic_source_state is not None)
+              and (self.subtract.phase != 'native' or self.subtract.interval is not None
+                   or self.subtract.dynamic_source_state is not None),
               'subtract_incomplete_native_handoff')
         _need(all(c.phase == 'native' and c.handle is None and c.transport is None
                   and not c.neutralizing and current[name] is c.engine
@@ -725,7 +732,8 @@ class _OperandClockOwner:
                        'steps': self.subtract.steps},
                    'time_policy': 'actual_update_return_utc_v1', 'ha_codes': [id(code) for code in self.hc]}),
             _json(self.steps), _json(self.timer_proofs),
-            subtract_interval=self.subtract.interval)
+            subtract_interval=self.subtract.interval,
+            subtract_intervals=tuple(self.subtract.dynamic_intervals))
 
     def annotate(self, error):
         if self.subtract is not None:

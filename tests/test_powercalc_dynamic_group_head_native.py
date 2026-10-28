@@ -8,11 +8,14 @@ import asyncio
 from datetime import datetime
 from decimal import Decimal
 import json
+from pathlib import Path
 import sys
 import unittest
 
 import test_powercalc_group_head_native as group
 import test_powercalc_operand_timer_native as timers
+
+_SUBTRACT_SHA256 = "f14231d960275963bfbb376745562a9308d8e2a330f2b247070d68b5986618d5"
 
 
 class _DynamicIOFacts(timers._CustomTimerFacts):
@@ -64,11 +67,45 @@ class _DynamicGroupFacts(group._GroupHeadFacts):
         self.tags.update({self.vc[-2]: 'dynamic_calculate', self.vc[-1]: 'dynamic_update'})
         self.calculations, self.updates, self.open_updates = [], [], {}
         self.native_source_boundary = None
+        module = self.case.module('powercalc_subtract_clock')
+        path = Path(module.__file__).resolve()
+        proof = self.case.module('native_unload_code_proof')
+        self.dynamic_refs = ((module._SubtractClockOwner, '_dynamic_area'),)
+        def dynamic_prove():
+            return proof.prove_methods(path.parent, {path.name: _SUBTRACT_SHA256}, self.dynamic_refs)
+        self.dynamic_prove = dynamic_prove
+        self.dynamic_methods, self.dynamic_codes = await self.case.module('yaml_validation')._settled_executor(
+            self.hass, dynamic_prove)
 
     def _capture_observation_baseline(self):
         super()._capture_observation_baseline()
         self.initial_children = {w.entity_id: group._numeric(self.hass.states.get(w.entity_id), 'W')
             for w in (self.case.static_power, self.case.dynamic_power)}
+
+    def _interval(self, frame, entity):
+        for node in self._ancestors(frame):
+            if node.f_code is self.dynamic_codes[0]:
+                self.unchanged(self.dynamic_refs, self.dynamic_methods, self.dynamic_codes)
+                local, module = node.f_locals, self.case.module('powercalc_subtract_clock')
+                owner = local['self']
+                assert type(owner) is module._SubtractClockOwner and owner.c.engine is entity
+                assert owner.c.old is self.old_subtract and owner.depth == 1
+                start, end = local['start'], local['end']
+                result = local['result']
+                if result is not None:
+                    assert result is owner.scope.producer_owner.results[-1]
+                    assert end is result.update_returned_at
+                else:
+                    assert end is local['source_state'].last_updated
+                # Operand values come from actual original children and native
+                # retained results, not the product's computed signed operand.
+                values = dict(self.initial_children)
+                for actual in owner.scope.producer_owner.results:
+                    if actual.update_returned_at <= start and actual.producer.entity_id in values:
+                        values[actual.producer.entity_id] = actual.native_power
+                power = sum(values.values(), Decimal(0)) - values[self.case.dynamic_power.entity_id]
+                return start, end, power, 'actual_retained_signed_operand'
+        return super()._interval(frame, entity)
 
     def observe(self, frame, phase, returned=None):
         tag, entity = self.tags[frame.f_code], frame.f_locals.get('self')
@@ -140,7 +177,63 @@ class _DynamicGroupFacts(group._GroupHeadFacts):
         case.assertNotEqual(self.signed(self.retired), self.signed(outcome.update_returned_at),
                             'qualification: changed child did not change signed reload power')
         self.typed_interval = result.operand_clock.subtract_interval
-        if self.typed_interval is not None:
+        actual_intervals = result.operand_clock.subtract_intervals
+        if actual_intervals:
+            case.assertIsNone(self.typed_interval)
+            case.assertEqual(clock.phase, 'native')
+            case.assertIs(clock.dynamic_source_state, source)
+            module = case.module('powercalc_subtract_clock')
+            prefix_rows, pairs = [], []
+            prior_end = self.retired
+            for fact in actual_intervals:
+                case.assertIs(type(fact), module.PowercalcSubtractOperandInterval)
+                case.assertIs(fact.owner, clock)
+                case.assertTrue(any(fact is issued for issued in clock.dynamic_intervals))
+                case.assertIs(fact.start, prior_end)
+                case.assertLessEqual(fact.end, self.boundary)
+                case.assertIs(fact.native_update, self.integration._update_integral)
+                case.assertIs(fact.native_one_state, self.vendor.integration._IntegrationMethod.calculate_area_with_one_state)
+                case.assertTrue(all(any(r is actual for actual in result.retained_producers.calculations)
+                                    for r in fact.operand_results))
+                case.assertIs(dict(fact.physical_inputs)[case.stimulus_state.entity_id], case.stimulus_state)
+                if fact.result is not None:
+                    case.assertIs(fact.result, outcome)
+                    case.assertIs(fact.end, outcome.update_returned_at)
+                    case.assertIs(fact.engine, self.old_subtract)
+                else:
+                    case.assertIs(fact.source_state, source)
+                    case.assertIs(fact.end, source.last_updated)
+                    case.assertIs(fact.engine, engine)
+                power = self.signed(fact.start)
+                key = (fact.start, fact.end, power)
+                observed = [r for r in self.subtract_heads
+                    if datetime.fromisoformat(r['start']) == fact.start
+                    and datetime.fromisoformat(r['end']) == fact.end
+                    and Decimal(r['actual_child_w']) == power]
+                case.assertLessEqual(len(observed), 1, 'actual interval was observed more than once')
+                prefix_rows.append(observed[0] if observed else {
+                    'kind': 'actual_retained_signed_operand', 'entity': id(fact.engine),
+                    'start': fact.start.isoformat(), 'end': fact.end.isoformat(),
+                    'actual_child_w': str(power), 'duplicate_interval': False,
+                    'provenance': 'completed_native_operand_interval'})
+                self.seen_intervals.add(key)
+                pairs.append((fact.start, fact.end))
+                prior_end = fact.end
+            case.assertIs(prior_end, self.boundary)
+            case.assertIs(clock.c.anchor, self.retired, 'retirement anchor was rebased')
+            case.assertIs(clock.cursor, self.boundary)
+            remaining = [r for r in self.subtract_heads
+                         if (datetime.fromisoformat(r['start']), datetime.fromisoformat(r['end'])) not in pairs]
+            case.assertTrue(all(datetime.fromisoformat(r['start']) >= self.boundary for r in remaining),
+                            'qualification: partial native/owned overlap requires separate proof')
+            self.subtract_heads = prefix_rows + remaining
+            def coverage(covered):
+                return (*pairs, *(pair for pair in covered if pair not in pairs))
+            self.intervals = list(coverage(self.intervals))
+            point, head, ref, covered = self.first_new
+            self.first_new = point, head, ref, coverage(covered)
+            self.checkpoints = [(p, h, r, coverage(c)) for p, h, r, c in self.checkpoints]
+        elif self.typed_interval is not None:
             # Read-only completed interval provenance; no full_after/area/HEAD.
             module = case.module('powercalc_subtract_clock')
             fact = self.typed_interval
@@ -331,6 +424,8 @@ class NativePowercalcDynamicGroupHeadTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await executor(self.f.hass, facts.prove), (facts.vm, facts.vc, facts.hm, facts.hc))
             self.assertEqual(await executor(self.f.hass, io.io_prove), (io.io_methods, io.io_codes))
             self.assertEqual(await executor(self.f.hass, io.runtime_prove), (io.runtime_methods, io.runtime_codes))
+            self.assertEqual(await executor(self.f.hass, facts.dynamic_prove),
+                             (facts.dynamic_methods, facts.dynamic_codes))
             self.assertEqual(self.chain.reconstruct_inputs().head, self.original_head)
             self.assertEqual(self.chain.baseline.receipt_json, original_receipt)
             self.assertEqual(result.original_runtime_token, self.original_runtime.structural_token)
