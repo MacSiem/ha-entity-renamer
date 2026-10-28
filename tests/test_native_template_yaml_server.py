@@ -28,7 +28,8 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         return importlib.import_module(activation.fixture.fixtures.PACKAGE + '.' + name)
 
     async def data(self, *, multiple=False, variant='mixed', binary_extra=None,
-                   uidless=False, duplicate_uidless=False, uidless_alias=False):
+                   uidless=False, duplicate_uidless=False, uidless_alias=False,
+                   source_consumers=False):
         from homeassistant.const import __version__
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -41,6 +42,21 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(self, 'evidence'))
         hass, root = self.f.hass, self.f.root
         self.assertEqual(hass.config_entries.async_entries('template'), [])
+        if source_consumers:
+            from homeassistant.config import async_hass_config_yaml
+            from homeassistant.setup import async_setup_component
+            with (root / 'configuration.yaml').open('a') as handle:
+                handle.write('\nautomation:\n- id: corpus_unrelated\n'
+                    '  alias: Corpus unrelated\n  initial_state: false\n'
+                    '  triggers:\n  - trigger: event\n    event_type: corpus_unrelated\n'
+                    '  actions:\n  - variables: {retained: unrelated}\n'
+                    'script:\n  corpus_unrelated:\n    sequence:\n'
+                    '    - variables: {retained: unrelated}\n')
+            config = await async_hass_config_yaml(hass)
+            for domain in ('automation', 'script'):
+                self.assertTrue(await async_setup_component(hass, domain, config))
+            await hass.async_block_till_done()
+            await self._flush_documents()
         mapping = {self.source_id: 'sensor.accepted_next'}
         self.other = None
         if multiple:
@@ -87,9 +103,11 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({(p.domain, e.unique_id): (e.entity_id, None if (r := self.f.entity.async_get(e.entity_id)) is None else r.id)
             for p in async_get_platforms(self.f.hass, 'template') for e in p.entities.values()}, self.identities)
 
-    async def flow(self, *, multiple=False, variant='mixed', uidless=False):
+    async def flow(self, *, multiple=False, variant='mixed', uidless=False,
+                   source_consumers=False):
         runtime, mapping, uuids, original = await self.data(
-            multiple=multiple, variant=variant, uidless=uidless)
+            multiple=multiple, variant=variant, uidless=uidless,
+            **({'source_consumers': True} if source_consumers else {}))
         hass = self.f.hass
         for value in (5, 7):
             await self.stimulus(value)
@@ -100,7 +118,8 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
             frame = sys._getframe(1)
             if frame.f_code is code and frame.f_locals['self'].hass is hass:
                 session = frame.f_locals['self']
-                captured.append((asyncio.current_task(), session.chain, session.preparations, session.journal))
+                captured.append((asyncio.current_task(), session.chain,
+                                 session.preparations, session.journal, session))
                 self.assertTrue(runtime.operation_lock.locked())
                 self.assertIsNot(asyncio.current_task(), caller)
         tool = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
@@ -156,6 +175,16 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(row[0].done() for row in captured))
             self.assertIsNot(captured[0][2], captured[1][2])
             self.assertIsNot(captured[0][3], captured[1][3])
+            if source_consumers:
+                before_consumers, after_consumers = (row[4].consumers for row in captured)
+                sampler_type = self.module('yaml_source_binding')._RuntimeSourceSampler
+                for consumers in (before_consumers, after_consumers):
+                    self.assertIs(type(consumers.runtime_sampler), sampler_type)
+                    self.assertEqual(len(consumers.runtime_sampler._rows), 2)
+                    self.assertEqual(consumers.runtime_sampler.sample(hass,
+                        consumers.evidence, consumers.observed), consumers.runtime_sample)
+                self.assertIsNot(before_consumers.runtime_sampler, after_consumers.runtime_sampler)
+                self.assertIsNot(before_consumers.observed, after_consumers.observed)
             self.assertFalse(captured[1][1].writable, 'fresh reader must remain readonly')
             self.assertIsNone(captured[1][1].active)
             self.assertEqual(captured[1][1].root, captured[0][1].root)
@@ -177,6 +206,9 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
             if caller is not None and not caller.done():
                 caller.cancel()
                 await asyncio.gather(caller, return_exceptions=True)
+
+    async def test_nonempty_source_corpus_mixed_forward_and_fresh_reverse(self):
+        await self.flow(variant='mixed', source_consumers=True)
 
     async def test_uidless_numeric_server_owned_forward_and_fresh_reverse_history(self):
         await self.flow(variant='sensor', uidless=True)

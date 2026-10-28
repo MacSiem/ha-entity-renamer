@@ -90,3 +90,105 @@ class SourceEvidenceBindingTests(unittest.TestCase):
         evidence = seal_original_sources(receipt, plan, ledger, unknown)
         self.assertIsNone(evidence.domain_projection('automation'))
         self.assertFalse(evidence.migration_ready)
+
+
+class RuntimeSourceSamplerBindingTests(unittest.TestCase):
+    fixture = SourceEvidenceBindingTests.fixture
+    def sampler_fixture(self):
+        import json
+        from custom_components.ha_entity_renamer import yaml_source_binding as binding
+        from custom_components.ha_entity_renamer.native_discovery_inputs import (
+            DiscoveryNativeFile, DiscoveryNativeInputs)
+        receipt, plan, ledger, native = self.fixture()
+        evidence = binding.seal_original_sources(receipt, plan, ledger, native)
+        row = {'id': 'script-registry-id', 'platform': 'script', 'entity_id': 'script.one',
+               'unique_id': 'one', 'opaque': {'nested': [1]}}
+        document = {'entities': [row,
+            {'platform': 'sensor', 'entity_id': 'sensor.unrelated', 'unique_id': 'foreign'},
+            {'platform': 'script', 'entity_id': 'sensor.wrong_domain', 'unique_id': 'wrong'}],
+            'deleted_entities': [{'unrelated': 'large deleted corpus'}]}
+        manager_json = json.dumps(document).encode()
+        file = DiscoveryNativeFile('core.entity_registry', b'raw', (1, 2, 0o100600),
+                                   1, 1, manager_json)
+        observed = DiscoveryNativeInputs('2026.10.2', '/isolated-config', (file,))
+        return binding, evidence, observed, document
+
+    def test_corpus_keeps_only_immutable_detached_canonical_eligible_rows(self):
+        import json
+        binding, evidence, observed, source = self.sampler_fixture()
+        sampler = binding._RuntimeSourceSampler.bind(evidence, observed)
+        self.assertIs(type(sampler._rows), tuple)
+        self.assertEqual(len(sampler._rows), 1)
+        row = source['entities'][0]
+        canonical = json.dumps(row, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+        self.assertEqual(sampler._rows, (canonical,))
+        self.assertIs(type(sampler._rows[0]), bytes)
+        row['opaque']['nested'].append(2)
+        detached = json.loads(sampler._rows[0])
+        detached['opaque']['nested'].append(3)
+        self.assertEqual(sampler._rows, (canonical,))
+        for field, value in (('_rows', (b'{}',)), ('_manager_json', b'{}')):
+            with self.assertRaises(AttributeError):
+                setattr(sampler, field, value)
+
+    def test_exact_evidence_observation_file_tuple_and_bytes_are_pinned(self):
+        from unittest.mock import patch
+        binding, evidence, observed, _ = self.sampler_fixture()
+        sampler = binding._RuntimeSourceSampler.bind(evidence, observed)
+        sentinel = ((), (), ())
+        # This pure case verifies pinning only. Actual native live cases below
+        # use the real backend without any positive verifier substitution.
+        with patch.object(binding, '_runtime_rows_sample', return_value=sentinel) as backend:
+            self.assertIs(sampler.sample(None, evidence, observed), sentinel)
+            for changed_evidence, changed_observed in (
+                    (replace(evidence), observed), (evidence, replace(observed))):
+                with self.assertRaises(binding.SourceBindingError):
+                    sampler.sample(None, changed_evidence, changed_observed)
+            self.assertEqual(backend.call_count, 1)
+            old_files = observed.files
+            object.__setattr__(observed, 'files', tuple(list(old_files)))
+            try:
+                with self.assertRaises(binding.SourceBindingError):
+                    sampler.sample(None, evidence, observed)
+            finally:
+                object.__setattr__(observed, 'files', old_files)
+            native = old_files[0]
+            old_bytes = native.manager_json
+            same_bytes = bytes(bytearray(old_bytes))
+            self.assertEqual(same_bytes, old_bytes)
+            self.assertIsNot(same_bytes, old_bytes)
+            # Deliberate frozen-object corruption injection: even byte-equal
+            # replacement of the pinned manager buffer must refuse before IO.
+            object.__setattr__(native, 'manager_json', same_bytes)
+            try:
+                with self.assertRaises(binding.SourceBindingError):
+                    sampler.sample(None, evidence, observed)
+            finally:
+                object.__setattr__(native, 'manager_json', old_bytes)
+            self.assertEqual(backend.call_count, 1)
+
+    def test_each_sample_gives_the_backend_fresh_nested_rows(self):
+        from unittest.mock import patch
+        import json
+        binding, evidence, observed, _ = self.sampler_fixture()
+        sampler = binding._RuntimeSourceSampler.bind(evidence, observed)
+        seen = []
+        def mutating_reader(hass, current_evidence, rows):
+            row, = tuple(rows)
+            seen.append(deepcopy(row))
+            row['opaque']['nested'].append('reader mutation')
+            return ((), (), ())
+        with patch.object(binding, '_runtime_rows_sample', mutating_reader):
+            sampler.sample(None, evidence, observed)
+            sampler.sample(None, evidence, observed)
+        self.assertEqual(seen, [json.loads(sampler._rows[0])] * 2)
+
+    def test_mutable_manager_buffer_and_sampler_subclass_are_refused(self):
+        binding, evidence, observed, _ = self.sampler_fixture()
+        native = replace(observed.files[0], manager_json=bytearray(observed.files[0].manager_json))
+        with self.assertRaises(binding.SourceBindingError):
+            binding._RuntimeSourceSampler.bind(evidence, replace(observed, files=(native,)))
+        class ForeignSampler(binding._RuntimeSourceSampler):
+            pass
+        with self.assertRaises(binding.SourceBindingError):
+            ForeignSampler.bind(evidence, observed)

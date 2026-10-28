@@ -130,3 +130,62 @@ class NativeYAMLSourceBindingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.verified)
         self.assertTrue(result.blockers)
         self.assertTrue(path.read_text().endswith('# late foreign edit\n'))
+
+
+    async def compiled_sample(self):
+        receipt, evidence = await self.prepare()
+        binding = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_source_binding')
+        discovery = importlib.import_module(fixture.fixtures.PACKAGE + '.native_discovery_inputs')
+        observed = await discovery.async_observe_discovery_inputs(self.f.hass, guard=lambda: None)
+        sampler = binding._RuntimeSourceSampler.bind(evidence, observed)
+        expected = binding._runtime_sample(self.f.hass, evidence, observed)
+        self.assertFalse(expected[1])
+        self.assertEqual(sampler.sample(self.f.hass, evidence, observed), expected)
+        return binding, evidence, observed, sampler, expected
+
+    async def test_compiled_nonempty_native_sample_does_not_reparse_full_manager_image(self):
+        import json
+        from unittest.mock import patch
+        binding, evidence, observed, sampler, expected = await self.compiled_sample()
+        native = next(row for row in observed.files if row.key == 'core.entity_registry')
+        self.assertTrue(sampler._rows, 'actual loaded script must populate the corpus')
+        actual_loads, parsed = json.loads, []
+        def loads(value, *args, **kwargs):
+            self.assertIsNot(value, native.manager_json, 'guard reparsed full manager image')
+            if any(value is row for row in sampler._rows):
+                parsed.append(value)
+            return actual_loads(value, *args, **kwargs)
+        with patch.object(json, 'loads', loads):
+            for _ in range(2):
+                self.assertEqual(sampler.sample(self.f.hass, evidence, observed), expected)
+        self.assertEqual(len(parsed), 2 * len(sampler._rows))
+
+    async def test_compiled_sample_still_observes_actual_live_registry_rename(self):
+        binding, evidence, observed, sampler, _ = await self.compiled_sample()
+        self.f.entity.async_update_entity('script.source_probe',
+                                        new_entity_id='script.foreign_source')
+        for sample in (sampler.sample, binding._runtime_sample):
+            with self.assertRaises(binding.SourceBindingError):
+                sample(self.f.hass, evidence, observed)
+
+    async def test_compiled_sample_still_observes_actual_script_reload_projection_and_token(self):
+        binding, evidence, observed, sampler, before = await self.compiled_sample()
+        path = self.f.root / 'scripts/one.yaml'
+        path.write_text('source_probe:\n  sequence:\n    - variables: {sample: changed}\n')
+        await self.f.hass.services.async_call('script', 'reload', {}, blocking=True)
+        await self.f.hass.async_block_till_done()
+        after = sampler.sample(self.f.hass, evidence, observed)
+        self.assertEqual(after, binding._runtime_sample(self.f.hass, evidence, observed))
+        self.assertIn('runtime_source_projection_mismatch', after[1])
+        self.assertNotEqual(after[2], before[2])
+
+    async def test_compiled_sample_still_observes_actual_entity_component_removal(self):
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        binding, evidence, observed, sampler, before = await self.compiled_sample()
+        component = self.f.hass.data[DATA_INSTANCES]['script']
+        await component.async_remove_entity('script.source_probe')
+        await self.f.hass.async_block_till_done()
+        after = sampler.sample(self.f.hass, evidence, observed)
+        self.assertEqual(after, binding._runtime_sample(self.f.hass, evidence, observed))
+        self.assertIn('runtime_source_registry_identity_unverified', after[1])
+        self.assertNotEqual(after, before)

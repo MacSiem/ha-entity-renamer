@@ -207,3 +207,34 @@ class NativeTemplateForwardConsumerTests(forward.NativeTemplateForwardTests):
                 sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
                 sys.monitoring.free_tool_id(tool)
                 session.close()
+
+
+    async def test_bound_consumer_guard_refuses_equivalent_source_snapshot_replacements(self):
+        from dataclasses import replace
+        module, _, mapping, _, _, _ = await self._fixture()
+        runtime = await self._runtime(module)
+        async def refresh():
+            return None
+        async with runtime.operation_lock:
+            session = await module('native_template_forward').NativeTemplateForward.prepare(
+                self.f.hass, mapping, guard=lambda: None, refresh=refresh)
+            consumers = session._unchanged_consumers
+            try:
+                consumers.check()
+                saved = (consumers.evidence, consumers.observed, consumers.runtime_sampler)
+                for name, replacement in (
+                        ('evidence', replace(consumers.evidence)),
+                        ('observed', replace(consumers.observed)),
+                        ('runtime_sampler', {'rows': consumers.runtime_sampler._rows})):
+                    old = getattr(consumers, name)
+                    setattr(consumers, name, replacement)
+                    try:
+                        with self.assertRaises((ValueError, module('transaction').Refused)):
+                            consumers.check()
+                    finally:
+                        setattr(consumers, name, old)
+                    consumers.check()
+                self.assertEqual((consumers.evidence, consumers.observed,
+                                  consumers.runtime_sampler), saved)
+            finally:
+                session.close()
