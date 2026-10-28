@@ -132,8 +132,13 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
             _attr_should_poll = False
             _attr_native_value = 1
 
-        self.producer = Producer()
-        await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([self.producer])
+        prepare_cold_source = getattr(self, '_prepare_cold_source', None)
+        if prepare_cold_source is None:
+            self.producer = Producer()
+            await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([self.producer])
+        else:
+            # TEST ONLY: source must reconstruct from its native persisted entry.
+            self.producer = await prepare_cold_source(hass)
         self.source_id = self.producer.entity_id
         target = 'sensor.template_entry_activation_next'
         mapping = {self.source_id: target}
