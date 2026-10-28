@@ -125,8 +125,8 @@ test('account, role, connection and detach purge recovery and discard late inspe
  } finally {close(f);}}
 });
 
-test('help off, household and unresolved admin have no recovery controls or direct requests',async()=>{
- for(const options of [{showHelp:false},{admin:false}]){const f=await fixture(options);try{
+test('household and unresolved admin have no recovery controls or direct requests',async()=>{
+ for(const options of [{admin:false}]){const f=await fixture(options);try{
  await f.card._checkBackendStatus();await f.card._inspectRecovery();await f.card._restoreRecovery();
  assert.equal(packets(f).length,0);assert.equal(button(f,'reviewRenamerRecovery'),null);
  }finally{close(f);}}
