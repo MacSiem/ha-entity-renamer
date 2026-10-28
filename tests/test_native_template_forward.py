@@ -5,6 +5,7 @@ No test-built Plan, ORIGINAL, receipt, prepared reference or adapter is passed.
 """
 import importlib
 import json
+import sys
 import unittest
 from types import MappingProxyType
 
@@ -119,7 +120,7 @@ class NativeTemplateForwardTests(unittest.IsolatedAsyncioTestCase):
                 baseline, composition = session.preparations.resolve_composition(session.plan.native_inputs)
                 operation, fingerprint = session.operation_id, session.fingerprint
                 digest, original_json = baseline.digest, baseline.receipt_json
-                record = await session.apply()
+                record = await self._apply_with_durable_unload_observation(session)
                 self.assertEqual(record.status, 'applied')
                 self.assertEqual(record.plan.native_inputs[2], digest)
                 for value in (5, 7):
@@ -140,6 +141,59 @@ class NativeTemplateForwardTests(unittest.IsolatedAsyncioTestCase):
         from native_template_composition_scenario import fresh_reverse_scenario
         await fresh_reverse_scenario(self, module, operation, fingerprint, digest,
                                     original_json, identity, original, mapping, None)
+
+    async def test_forward_is_durable_before_actual_native_unload(self):
+        self.require_durable_before_unload = True
+        await self.test_server_forward_then_fresh_strict_reverse_same_original()
+
+    async def _apply_with_durable_unload_observation(self, session):
+        if not getattr(self, 'require_durable_before_unload', False):
+            return await session.apply()
+        module = importlib.import_module(fixtures.PACKAGE + '.native_helper_activation_lease')
+        from homeassistant.config_entries import ConfigEntryState
+        code = module.NativeHelperActivationLease.async_unload.__code__
+        seen = []
+        tool = None
+        def observe(current_code, offset):
+            frame = sys._getframe()
+            while frame is not None and frame.f_code is not current_code:
+                frame = frame.f_back
+            if frame is None or frame.f_locals.get('self') is not session.lease:
+                return
+            self.assertEqual(frame.f_locals.get('entry_id'), session.entry_id)
+            self.assertIs(session.entry.state, ConfigEntryState.LOADED)
+            self.assertTrue(session.runtime.operation_lock.locked())
+            path = self.f.root / '.storage' / 'ha_entity_renamer.migrations'
+            self.assertTrue(path.is_file(), 'journal must be durable BEFORE actual native unload')
+            # Independent physical read of the actual supported Store envelope.
+            # No fabricated Record, expected receipt or writer seam is supplied.
+            journal = importlib.import_module(fixtures.PACKAGE + '.journal')
+            records = journal.decode(json.loads(path.read_bytes())['data'])
+            record = records.get(session.operation_id)
+            self.assertIsNotNone(record, 'native unload has no durable operation')
+            self.assertEqual(record.plan.fingerprint, session.fingerprint)
+            self.assertEqual(record.plan.native_inputs, session.plan.native_inputs)
+            self.assertEqual((record.status, record.direction, record.phases),
+                             ('prepared', 'forward', ('pending', 'pending')))
+            seen.append(record.operation_id)
+        for ident in range(6):
+            try:
+                sys.monitoring.use_tool_id(ident, 'server forward durable before native unload')
+            except ValueError:
+                continue
+            tool = ident
+            break
+        self.assertIsNotNone(tool)
+        try:
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, observe)
+            sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
+            result = await session.apply()
+            self.assertEqual(seen, [session.operation_id], 'actual native unload was not observed once')
+            return result
+        finally:
+            sys.monitoring.set_local_events(tool, code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
+            sys.monitoring.free_tool_id(tool)
 
     async def test_malformed_mapping_refuses_without_native_effects(self):
         module, entry, mapping, _, original, before = await self._fixture()
