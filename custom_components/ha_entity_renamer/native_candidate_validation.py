@@ -134,7 +134,7 @@ async def _checker(before, after, timeout, checkpoint, *, with_sources=False):
     worker = str(Path(__file__).with_name('yaml_validation_worker.py'))
     # Shield spawning too: cancellation must not orphan a checker with secrets.
     spawning = asyncio.create_task(asyncio.create_subprocess_exec(
-        sys.executable, '-I', worker, str(before), str(after),
+        sys.executable, '-I', '-B', worker, str(before), str(after),
         *(('--source-evidence',) if with_sources else ()),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         start_new_session=True))
