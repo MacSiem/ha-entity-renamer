@@ -898,8 +898,9 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         for key, value in states.items():
             path = '.storage/' + key
             sources[path][:4] = [value['sha256'], *value['identity']]
+        # AcceptedInputState makes the single detached copy of these documents.
         return AcceptedInputState(self.baseline.receipt_json, head, sources,
-            {key: deepcopy(value['document']) for key, value in states.items()},
+            {key: value['document'] for key, value in states.items()},
             evidence_check=lambda: self._check_inputs_head(head))
 
     def _check_inputs_head(self, expected_head):

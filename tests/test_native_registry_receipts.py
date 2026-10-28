@@ -165,6 +165,52 @@ async def reopened(f):
 
 
 class RegistryReceiptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reconstructed_inputs_detach_all_cached_native_documents(self):
+        f = await fixture()
+        chain = f['chain']
+        state = chain.reconstruct_inputs()
+        expected = state.documents()
+        cached, *_ = chain._reconstruct()
+        # Mutate the actual reconstruction source after state construction. A
+        # shallow constructor copy would expose these nested changes to state.
+        cached['core.entity_registry']['document']['data']['entities'][0][
+            'opaque']['keep'].append('changed')
+        cached['core.device_registry']['document']['data']['devices'][0][
+            'name_by_user'] = 'changed'
+        cached['core.config_entries']['document']['data']['entries'][0][
+            'subentries'][0]['data']['keep'] = 99
+        self.assertNotEqual({key: value['document'] for key, value in cached.items()},
+                            expected)
+        self.assertEqual(state.documents(), expected)
+
+    async def test_reconstructed_input_accessors_cannot_mutate_accepted_evidence(self):
+        f = await fixture()
+        state = f['chain'].reconstruct_inputs()
+        peer = f['chain'].reconstruct_inputs()
+        documents, sources = state.documents(), state.sources()
+        documents['core.entity_registry']['data']['entities'][0]['opaque'][
+            'keep'].append('changed')
+        del documents['core.config_entries']
+        sources['.storage/core.entity_registry'][0] = '0' * 64
+        self.assertNotEqual(state.documents(), documents)
+        self.assertNotEqual(state.sources(), sources)
+        self.assertTrue(state.same_evidence(peer))
+
+    async def test_reconstructed_input_equality_rejects_nested_evidence_drift(self):
+        f = await fixture()
+        state = f['chain'].reconstruct_inputs()
+        documents = state.documents()
+        documents['core.entity_registry']['data']['entities'][0]['opaque'][
+            'keep'].append('changed')
+        changed_documents = receipts.AcceptedInputState(state.original_json,
+            state.head, state.sources(), documents)
+        self.assertFalse(state.same_evidence(changed_documents))
+        sources = state.sources()
+        sources['.storage/core.entity_registry'][0] = '0' * 64
+        changed_sources = receipts.AcceptedInputState(state.original_json,
+            state.head, sources, state.documents())
+        self.assertFalse(state.same_evidence(changed_sources))
+
     async def test_multiple_registry_forward_reopen_reverse(self):
         f = await fixture()
         phases, observations = ['pending'] * 3, f['observations']
