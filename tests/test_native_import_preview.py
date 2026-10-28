@@ -19,7 +19,7 @@ class NativeImportPreviewTests(unittest.IsolatedAsyncioTestCase):
     async def request(self, content, *, admin=True, extra=None):
         connection, user, output = await self._connection(admin=admin)
         command = 'ha_entity_renamer/import/preview'
-        self.assertIn(command, connection.handlers)
+        self.assertTrue(command in connection.handlers, "registered import preview command missing")
         connection.async_handle({'id': 1, 'type': command, 'manifest': content, **(extra or {})})
         return await asyncio.wait_for(output, 30)
 

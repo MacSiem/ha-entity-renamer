@@ -33,6 +33,10 @@ class ManifestImportTests(unittest.TestCase):
         self.assertNotIn('references', json.dumps(proposal))
         self.assertEqual(len(module.parse_manifest(proposal).entities), 1)
 
+    def test_approved_full_inventory_size_can_exceed_two_megabytes_before_normalization(self):
+        result = module.decode_import(' ' * 2_100_000 + json.dumps(self.source()))
+        self.assertEqual(len(result['entities']), 1)
+
     def test_explicit_selection_keeps_linked_statistics_and_does_not_infer_device_changes(self):
         proposal = self.decode(entity_ids=['sensor.old'], device_ids=[])
         self.assertEqual(proposal['devices'], [])
@@ -50,7 +54,7 @@ class ManifestImportTests(unittest.TestCase):
 
     def test_duplicate_json_keys_constants_oversize_and_wrong_types_refuse(self):
         for raw in ('{"entities":[],"entities":[]}', '{"checks":{"ha_writes":NaN}}',
-                    '[]', ' ' * 2_000_001):
+                    '[]', ' ' * 4_000_001):
             with self.assertRaises(ValueError): module.decode_import(raw)
         for family, field, value in (('entities', 'entity_id', None),
                                      ('entities', 'references', {}),
