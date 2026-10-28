@@ -152,6 +152,7 @@ class _OperandClockOwner:
         # Issuance ledger is independent of mutable per-entity runtime fields.
         # Every value is a fixed identity tuple from our own native _arm call.
         self._issued_timers = {}
+        self.subtract = None
 
     def bind_codes(self):
         scope = self.scope
@@ -180,11 +181,15 @@ class _OperandClockOwner:
             c.old.platform.config_entry, c.old._sensor_source_id, c.old._source_entity,
             c.old._max_sub_interval, c.old._unit_prefix, c.old._unit_time)
             for name, c in self.states.items()}
+        from .powercalc_subtract_clock import _SubtractClockOwner
+        self.subtract = _SubtractClockOwner(self, bound)
         self.check()
 
     def check(self):
         _need(self.error is None and self.scope.error is None, 'poisoned')
         self.scope.producer_owner.check()
+        if self.subtract is not None:
+            self.subtract.check()
         unchanged(self.hrefs, self.hm, self.hc)
         _need(asyncio.get_running_loop() is self.scope.loop, 'same_loop')
         if self.bound is None:
@@ -435,7 +440,13 @@ class _OperandClockOwner:
         self._arm(name, self.scope.loop.time() + c.engine._max_sub_interval.total_seconds())
         step['deadline_after'] = c.deadline
 
+    def after_exact_schedule(self, entity):
+        if self.subtract is not None:
+            self.subtract.after_exact_schedule(entity)
+
     def after_exact_transfer(self, entity):
+        if self.subtract is not None:
+            self.subtract.after_exact_transfer(entity)
         c = self.states.get(entity.entity_id)
         if c is None:
             return
@@ -448,6 +459,8 @@ class _OperandClockOwner:
                            'old': id(c.old), 'new': id(entity), 'deadline': c.deadline})
 
     def observe(self, frame, phase):
+        if self.subtract is not None:
+            self.subtract.observe(frame, phase)
         code, obj = frame.f_code, frame.f_locals.get('self')
         if code is self.hc[4] and phase == 'start':
             self._emission(frame)
@@ -694,6 +707,8 @@ class _OperandClockOwner:
     def finish(self, current):
         from .powercalc_profile_binding import _energy_listeners
         self.check()
+        _need(self.subtract.pending_native is None and self.subtract.depth == 0,
+              'subtract_incomplete_native_handoff')
         _need(all(c.phase == 'native' and c.handle is None and c.transport is None
                   and not c.neutralizing and current[name] is c.engine
                   for name, c in self.states.items()), 'incomplete_direct_clock_handoff')
@@ -704,10 +719,16 @@ class _OperandClockOwner:
             policy.state.head, policy.source_hashes_json,
             _json({'root_id': policy.chain.root_id, 'operation_id': policy.chain.operation_id,
                    'direct_pairs': [[name, c.power.entity_id] for name, c in self.states.items()],
+                   'subtract_quiet_handoff': {'phase': self.subtract.phase,
+                       'steps': self.subtract.steps},
                    'time_policy': 'actual_update_return_utc_v1', 'ha_codes': [id(code) for code in self.hc]}),
             _json(self.steps), _json(self.timer_proofs))
 
     def annotate(self, error):
+        if self.subtract is not None:
+            error.add_note('powercalc_subtract_clock_partial=' + _json(
+                {'phase': self.subtract.phase, 'steps': self.subtract.steps}).decode()
+                + ';no_numeric_rollback')
         error.add_note('powercalc_operand_clock_partial=' + _json(self.steps).decode())
         error.add_note('powercalc_operand_clock_refusal=' + str(self.error) + ';no_numeric_rollback')
 

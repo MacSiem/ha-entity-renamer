@@ -155,6 +155,22 @@ class _GroupHeadFacts:
                 power = Decimal(local['old_state_state'])
                 assert power.is_finite() and start is not None and end is not None
                 return start, end, power, 'source'
+            owner_type = self.case.module('powercalc_subtract_clock')._SubtractClockOwner
+            if node.f_code is owner_type._handoff.__code__:
+                owner = local.get('self')
+                assert type(owner) is owner_type and owner.scope.hass is self.hass
+                assert owner.c.old is self.old_subtract and owner.c.engine is entity
+                assert owner.target is entity and owner.phase == 'integrating' and owner.depth == 1
+                assert owner.quiet() and owner.original_state.entity_id == self.case.subtract_power.entity_id
+                assert _numeric(owner.original_state, 'W') == self.held_power
+                # Native arithmetic's actual typed producer and observed endpoints
+                # are qualified here. Expected area still comes from independent
+                # child W and datetime geometry; no receipt/area/HEAD is an oracle.
+                assert owner.c.value == self.held_power
+                assert owner.c.old.entity_id in owner.scope.removed and not owner.c.old._on_remove
+                end = local['end']
+                assert type(end) is datetime and end >= owner.c.anchor
+                return owner.c.anchor, end, self.held_power, 'retained_signed_quiet'
         raise AssertionError('unqualified subtract integral producer; no replacement oracle')
 
     def observe(self, frame, phase, returned=None):
@@ -424,6 +440,11 @@ class NativePowercalcGroupHeadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.original_runtime_token, self.original_runtime.structural_token)
         self.assertFalse(result.migration_ready)
         facts.assert_oracles()
+        quiet = json.loads(result.operand_clock.scope_bindings_json)['subtract_quiet_handoff']
+        self.assertEqual(quiet['phase'], 'native')
+        self.assertEqual(len(quiet['steps']), 1)
+        self.assertEqual(quiet['steps'][0]['old_engine'], id(facts.old_subtract))
+        self.assertEqual(quiet['steps'][0]['new_engine'], id(facts.last_new_engine))
 
 
 def load_tests(loader, tests, pattern):

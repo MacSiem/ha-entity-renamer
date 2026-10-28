@@ -231,6 +231,8 @@ class _ExactFieldsOwner:
                     'post_seam_fields_changed')
                 del self.open[name]
                 self.complete.add(name)
+                if self.scope.clock_owner is not None:
+                    self.scope.clock_owner.after_exact_schedule(entity)
             return
         if name in self.complete:
             _need(self.targets.get(name) is entity, 'foreign_replacement_type')
