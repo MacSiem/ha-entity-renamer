@@ -8,6 +8,21 @@ references visible through Home Assistant's APIs.
 
 [![Version](https://img.shields.io/github/v/release/MacSiem/ha-entity-renamer)](https://github.com/MacSiem/ha-entity-renamer/releases) [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+## Development branch
+
+The unreleased migration panel lets an administrator import a JSON change plan,
+choose entity and device rows separately, and explicitly request dependency and
+conflict analysis from the optional backend. Choosing an entity does not select
+its device. The imported file and selection stay in memory and are cleared when
+the account, permissions or connection changes.
+
+Backend status and recovery are available in the active card, including when
+help is hidden. Checking status does not apply a change. Recovery requires a
+separate inspection and confirmation; an uncertain result requires another
+status check. Full automatic dependency migration is still under development
+and the import panel does not offer Apply. The released queue workflow described
+below continues to require separate review of affected references.
+
 ## How it works
 
 1. **Devices and entities from the registries.** On load, the card fetches

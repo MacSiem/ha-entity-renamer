@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Import JSON change plans for explicit backend dependency/conflict analysis, with separate entity/device selection and a reason for each rejected registry row.
+- Keep migration status and explicit inspect/confirm recovery in the active card when optional help is hidden.
+- Clear imported plans after authority or connection changes and discard analysis results for an older selection. Automatic dependency application remains under development.
+
 ## 4.5.0 (2026-10-22)
 
 - Keep confirmation button labels whole at narrow widths (GitHub #9), use theme-aware primary contrast and neutral removal actions.
