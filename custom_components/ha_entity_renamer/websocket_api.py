@@ -45,7 +45,7 @@ async def _discovery_output_lease(runtime):
         yield
 
 
-async def _read_discovery(hass, connection, message, *, preview):
+async def _read_discovery(hass, connection, message, *, preview, imported=False):
     runtime = hass.data.get(DATA_RUNTIME)
     user_id = connection.user.id
     current_user = connection.user
@@ -101,9 +101,9 @@ async def _read_discovery(hass, connection, message, *, preview):
             from .discovery_final_fence import _Preview, async_finalize_discovery
             if preview:
                 if type(result) is _Preview:
-                    from .discovery import compose_preview
+                    from .discovery import compose_preview, compose_import_preview
                     capture = await async_finalize_discovery(hass,result.capture,guard)
-                    result = compose_preview(capture)
+                    result = (compose_import_preview(capture) if imported else compose_preview(capture))
             else:
                 capture = await async_finalize_discovery(hass,capture,guard)
                 result = capture.summary()
@@ -233,4 +233,4 @@ async def ws_import_preview(hass, connection, message):
     except ValueError as error:
         _send_discovery_error(connection, message, error)
         return
-    await _read_discovery(hass, connection, {**message, 'proposal': proposal}, preview=True)
+    await _read_discovery(hass, connection, {**message, 'proposal': proposal}, preview=True, imported=True)

@@ -110,6 +110,33 @@ def compose_preview(capture):
     return result
 
 
+
+def compose_import_preview(capture):
+    """Add only rejected rows from the caller's own normalized proposal.
+
+    No physical UUID, unrelated registry rows, YAML, names or private errors
+    are returned. This is the same final read capture, not new authority.
+    """
+    from .manifest import registry_conflicts
+    result = compose_preview(capture)
+    families = {row.name: row for row in capture.families}
+    result['registry_conflicts'] = None
+    if any(families[name].status != 'COMPLETE'
+           for name in ('entity_registry', 'device_registry')):
+        return result
+    manifest = parse_manifest(json.loads(capture.proposal_json))
+    entities = json.loads(families['entity_registry'].payload_json)['document']['entities']
+    devices = json.loads(families['device_registry'].payload_json)['document']['devices']
+    rows = []
+    for conflict in registry_conflicts(manifest, entities, devices):
+        row = {'kind': conflict.kind, 'index': conflict.index, 'reason': conflict.reason}
+        if conflict.kind == 'entity':
+            row['entity_id'] = manifest.entities[conflict.index].old_id
+        rows.append(row)
+    result['registry_conflicts'] = rows
+    return result
+
+
 def _proposal(document):
     try:
         raw = _json(document)

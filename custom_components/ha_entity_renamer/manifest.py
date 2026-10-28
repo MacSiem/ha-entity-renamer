@@ -117,33 +117,69 @@ def parse_manifest(document: Any) -> Manifest:
     return Manifest(tuple(entities), tuple(devices), statistics)
 
 
-def bind_registry(manifest: Manifest, entities: list[dict], devices: list[dict]) -> Manifest:
-    """Bind a preview to fresh stable identities; later apply must revalidate it.
-
-    Recorder destination collisions and dependent reference coverage are separate
-    mandatory preflight checks; this result alone never authorizes a mutation.
-    """
+def _registry_indexes(entities, devices):
     by_id = {row["entity_id"]: row for row in entities}
     by_device = {row["id"]: row for row in devices}
     if len(by_id) != len(entities) or len(by_device) != len(devices):
         raise ValueError("ambiguous_registry")
-    bound = []
-    for change in manifest.entities:
-        current = by_id.get(change.old_id)
-        if current is None:
-            raise ValueError("source_missing")
-        if change.new_id != change.old_id and change.new_id in by_id:
-            raise ValueError("destination_occupied")
-        if current.get("device_id") != change.device_id:
-            raise ValueError("device_changed")
-        bound.append(replace(change,
-            registry_id=_text(current.get("id"), "registry_id"),
-            unique_id=_text(current.get("unique_id"), "unique_id"),
-            platform=_text(current.get("platform"), "platform"),
-            disabled_by=current.get("disabled_by")))
+    return by_id, by_device
+
+
+def _bind_entity(change, by_id):
+    current = by_id.get(change.old_id)
+    if current is None:
+        raise ValueError("source_missing")
+    if change.new_id != change.old_id and change.new_id in by_id:
+        raise ValueError("destination_occupied")
+    if current.get("device_id") != change.device_id:
+        raise ValueError("device_changed")
+    return replace(change,
+        registry_id=_text(current.get("id"), "registry_id"),
+        unique_id=_text(current.get("unique_id"), "unique_id"),
+        platform=_text(current.get("platform"), "platform"),
+        disabled_by=current.get("disabled_by"))
+
+
+def bind_registry(manifest: Manifest, entities: list[dict], devices: list[dict]) -> Manifest:
+    """Bind fresh stable identities using the same policy as conflict reporting.
+
+    Recorder collisions and complete dependency coverage remain separate
+    mandatory checks. A missing source never means an already-applied change.
+    """
+    by_id, by_device = _registry_indexes(entities, devices)
+    bound = tuple(_bind_entity(change, by_id) for change in manifest.entities)
     if any(change.device_id not in by_device for change in manifest.devices):
         raise ValueError("device_missing")
-    return Manifest(tuple(bound), manifest.devices, dict(manifest.statistics))
+    return Manifest(bound, manifest.devices, dict(manifest.statistics))
+
+
+@dataclass(frozen=True)
+class RegistryConflict:
+    kind: str
+    index: int | None
+    reason: str
+
+
+def registry_conflicts(manifest: Manifest, entities: list[dict],
+                       devices: list[dict]) -> tuple[RegistryConflict, ...]:
+    """Report every rejected proposal row without exposing registry contents."""
+    try:
+        by_id, by_device = _registry_indexes(entities, devices)
+    except ValueError:
+        return (RegistryConflict('registry', None, 'ambiguous_registry'),)
+    result = []
+    for index, change in enumerate(manifest.entities):
+        try:
+            _bind_entity(change, by_id)
+        except ValueError as error:
+            reason = error.args[0]
+            if reason not in ('source_missing', 'destination_occupied', 'device_changed'):
+                reason = 'identity_unverified'
+            result.append(RegistryConflict('entity', index, reason))
+    for index, change in enumerate(manifest.devices):
+        if change.device_id not in by_device:
+            result.append(RegistryConflict('device', index, 'device_missing'))
+    return tuple(result)
 
 
 # The approved local proposal contains descriptive inventory alongside changes.
