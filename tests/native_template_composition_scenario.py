@@ -13,6 +13,21 @@ async def fresh_reverse_scenario(test, module, operation, fingerprint, baseline_
     hass = test.f.hass
     import importlib
     backend = importlib.import_module(module('const').__package__)
+    # Baseline unit fixtures pre-create a namespace-only package. Execute the
+    # ACTUAL installed backend __init__ in that same package before constructing
+    # its real Runtime; do not inject a Runtime double or replace native code.
+    if not hasattr(backend, 'Runtime'):
+        import importlib.util
+        from pathlib import Path
+        source = Path(module('const').__file__).with_name('__init__.py')
+        spec = importlib.util.spec_from_file_location(backend.__name__, source,
+                    submodule_search_locations=list(backend.__path__))
+        test.assertIsNotNone(spec)
+        test.assertIsNotNone(spec.loader)
+        backend.__spec__, backend.__loader__ = spec, spec.loader
+        backend.__package__, backend.__file__ = backend.__name__, str(source)
+        spec.loader.exec_module(backend)
+    test.assertEqual(backend.Runtime.__module__, backend.__name__)
     prep, journal_api, rr, lm = (module(n) for n in
         ('prepared', 'journal', 'native_registry_receipts', 'native_helper_lifecycle'))
     fresh_preps, fresh_journal = prep.native_prepared_store(hass), journal_api.native_journal(hass)
