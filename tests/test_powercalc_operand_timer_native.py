@@ -473,9 +473,11 @@ class NativePowercalcActualTimerTests(unittest.IsolatedAsyncioTestCase):
             async with asyncio.timeout(8):
                 await complete
             self.assertTrue(seen)
-            reasons = str(caught.exception) + '\n'.join(getattr(caught.exception, '__notes__', ()))
-            self.assertIn('typed_timer_ownership_changed', reasons,
-                          'an unrelated failure cannot qualify actual timer takeover')
+            # The source-defined abort cleanup also refuses an already cancelled
+            # independently issued handle. It drains all other owned handles;
+            # no continuity or successful takeover is inferred from this refusal.
+            self.assertEqual(str(caught.exception),
+                             'powercalc_operand_clock_cleanup_foreign_timer')
             self.assertIsNone(facts.error, repr(facts.error))
             self._no_owned(facts)
         finally:
