@@ -99,3 +99,36 @@ test('missing sources are explicit conflicts tied only to the imported scope',as
  assert.doesNotMatch(node(f,'renamerMigrationPanel').textContent,/unrequested_private/);
  }finally{f.dom.window.close();}
 });
+
+test('explicit subset sends only chosen rows and never infers device renames',async()=>{
+ const f=await fixture();try{
+ await file(f,JSON.stringify({entities:[
+ {entity_id:'sensor.old',proposed_entity_id:'sensor.new'},
+ {entity_id:'sensor.second',proposed_entity_id:'sensor.next'},
+ {entity_id:'sensor.keep',proposed_entity_id:'sensor.keep'}],devices:[
+ {device_id:'device-a',current_name:'Old device',proposed_name:'New device'}]}));
+ const mode=node(f,'renamerImportSubset');assert.ok(mode,'explicit subset choice');
+ mode.checked=true;mode.dispatchEvent(new f.dom.window.Event('change'));
+ assert.equal(node(f,'analyzeRenamerImport').disabled,true);
+ const row=f.card.shadowRoot.querySelector('[data-import-entity="0"]');assert.ok(row);
+ row.checked=true;row.dispatchEvent(new f.dom.window.Event('change'));
+ assert.equal(f.card.shadowRoot.querySelectorAll('[data-import-entity]').length,2);
+ await analyze(f);
+ assert.deepEqual(Array.from(packets(f)[0].entity_ids),['sensor.old']);
+ assert.deepEqual(Array.from(packets(f)[0].device_ids),[]);
+ assert.equal(f.dom.window.localStorage.length,0);
+ }finally{f.dom.window.close();}
+});
+
+test('changing subset discards a pending result and requires explicit fresh analysis',async()=>{
+ const f=await fixture();try{
+ await file(f);let resolve;f.setResponse(()=>new Promise(r=>resolve=r));
+ node(f,'analyzeRenamerImport').click();
+ const mode=node(f,'renamerImportSubset');assert.ok(mode);
+ mode.checked=true;mode.dispatchEvent(new f.dom.window.Event('change'));
+ resolve(preview());await flush();
+ assert.equal(f.card._migration.summary,null);
+ assert.equal(packets(f).length,1);
+ assert.equal(node(f,'analyzeRenamerImport').disabled,true);
+ }finally{f.dom.window.close();}
+});
