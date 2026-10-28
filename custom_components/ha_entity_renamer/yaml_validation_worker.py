@@ -265,6 +265,7 @@ def _pure_template_metadata(cfg):
     """Exact original bodies and attribute keys, shared by checker and live proof."""
     from collections.abc import Mapping
     from homeassistant.helpers.template import Template
+    from homeassistant.util.yaml.objects import NodeStrClass
     result = []
     for key in ('availability', 'icon', 'picture'):
         value = cfg.get(key)
@@ -278,7 +279,7 @@ def _pure_template_metadata(cfg):
         raise ValueError('template_metadata_attributes_unverified')
     values = []
     for key, value in (attributes or {}).items():
-        if (type(key) is not str or not key or key in ('friendly_name', 'icon', 'entity_picture',
+        if (type(key) not in (str, NodeStrClass) or not key or key in ('friendly_name', 'icon', 'entity_picture',
                 'unit_of_measurement', 'device_class', 'state_class', 'assumed_state', 'supported_features')
                 or type(value) is not Template):
             raise ValueError('template_metadata_attributes_unverified')
