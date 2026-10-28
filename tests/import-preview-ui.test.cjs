@@ -10,6 +10,8 @@ const preview = () => ({capture_id:'opaque',digest:'a'.repeat(64),migration_read
  {family:'external',status:'UNKNOWN',reason:'external_inventory_unverified',blockers:[]}]});
 async function fixture({admin=true,language='en'}={}) {
  const dom=new JSDOM('',{url:'http://localhost',runScripts:'dangerously',pretendToBeVisual:true});
+ // JSDOM does not expose the browser TextEncoder; use Node's native implementation.
+ dom.window.TextEncoder=TextEncoder;
  dom.window.eval(readFileSync('ha-entity-renamer.js','utf8'));
  const card=dom.window.document.createElement('ha-entity-renamer');card.setConfig({show_support:false,show_help:false});dom.window.document.body.append(card);
  const messages=[];let respond=async()=>preview();const connection=new dom.window.EventTarget();connection.connected=true;
