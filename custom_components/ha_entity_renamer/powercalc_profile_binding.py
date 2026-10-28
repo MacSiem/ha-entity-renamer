@@ -10,12 +10,17 @@ from pathlib import Path
 import sys
 from types import CodeType, MethodType
 
-from .powercalc_profile_inputs import need, digest, table_digest, PreparedProfileFiles
+from .powercalc_profile_inputs import (
+    need, digest, table_digest, PreparedProfileFiles, custom_profile_locator,
+    assert_profile_cache_directories,
+)
 
 
 def extend_vendor(vendor):
     """Only already-loaded official modules/classes; never call their factories."""
     extra = (
+        ('power_profile.library', 'ProfileLibrary', ('get_profile', 'create_power_profile', '_load_model_data')),
+        ('power_profile.loader.local', 'LocalLoader', ('__init__', 'load_model', '_load_custom_model', '_load_json')),
         ('power_profile.power_profile', 'PowerProfile', ('__init__', 'get_model_directory',
             'select_sub_profile', 'json_data', 'sub_profile_select', 'standby_power',
             'standby_power_on', 'has_sub_profile_select_matchers', 'manufacturer', 'model',
@@ -51,6 +56,10 @@ def extend_vendor(vendor):
         need(isinstance(cls, type) and cls.__module__ == module.__name__, 'official_class_required')
         vendor.classes[name] = cls
         refs.extend((cls, method) for method in methods)
+    factory = sys.modules.get('custom_components.powercalc.power_profile.factory')
+    power = sys.modules.get('custom_components.powercalc.sensors.power')
+    need(factory is not None and power is not None, 'profile_factory_module_required')
+    refs.extend(((factory, 'get_power_profile'), (power, 'get_power_profile')))
     refs.extend((vendor.classes['VirtualPowerSensor'], name)
                 for name in ('ensure_strategy_instance', '_select_new_sub_profile'))
     refs.extend((vendor.classes['PowerCalculationStrategyInterface'], name)
@@ -181,6 +190,19 @@ def _energy_listeners(hass, entity, source, vendor):
     return tuple(ids)
 
 
+def assert_custom_profile_locator(entity, profile, root):
+    """Live memory-only provenance check; never call a loader or read a file."""
+    expected = profile.get('custom_model_directory')
+    actual = entity._sensor_config.get('custom_model_directory')
+    if expected is None:
+        need(actual is None, 'custom_locator_changed')
+    else:
+        need(custom_profile_locator(actual) == custom_profile_locator(expected)
+             and profile['directory'] == expected
+             and Path(entity._power_profile._directory) == Path(root) / expected,
+             'custom_locator_changed')
+
+
 def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity, listeners, global_ok, prepared):
     from .powercalc_source_binding import PowercalcBoundRow, _dispatch_token
     # No filesystem read or gzip/CSV decoding in this event-loop suffix.
@@ -189,6 +211,7 @@ def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity
          and prepared.receipt_json == evidence.receipt_json == original.receipt_json
          and prepared.closed_graph_json == original.closed_graph_json, 'prepared_original_mismatch')
     graph = json.loads(original.closed_graph_json)
+    assert_profile_cache_directories(graph['profiles'])
     need(prepared.files == tuple(tuple(row) for row in graph['files']), 'prepared_profile_files_changed')
     need(global_ok and not pending(hass), 'global_or_pending_runtime')
     documents = {row.key: json.loads(row.manager_json) for row in observed.files}
@@ -224,6 +247,7 @@ def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity
                  and actual.manufacturer == profile['manufacturer'] and actual.model == profile['model']
                  and Path(actual._directory) == Path(hass.config.config_dir) / profile['directory'],
                  'profile_owner_changed')
+            assert_custom_profile_locator(entity, profile, hass.config.config_dir)
             # Compare native-memory JSON with the isolated ORIGINAL compiler's
             # digests; parsing measurement files belongs to that worker only.
             need(digest(actual._base_json_data) == profile['base_sha256']

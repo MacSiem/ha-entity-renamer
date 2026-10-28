@@ -353,6 +353,8 @@ class _RetainedProducerOwner:
                 selected.update(variants[0])
             _need(_json(selected) == _json(profile._json_data), 'native_active_profile_data_changed')
             spec = self.profile_specs[name]
+            from .powercalc_profile_binding import assert_custom_profile_locator
+            assert_custom_profile_locator(old, spec, self.scope.hass.config.config_dir)
             variants = [v for v in spec['variants'] if v['name'] == profile.sub_profile]
             _need(len(variants) == 1 and profile._hass is self.scope.hass
                   and profile.manufacturer == spec['manufacturer'] and profile.model == spec['model']

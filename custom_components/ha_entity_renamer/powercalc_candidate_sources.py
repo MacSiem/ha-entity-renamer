@@ -105,6 +105,9 @@ def seal_powercalc_candidate(receipt, plan, original, planned, native, document_
           and [(r['origin'], r['unique_id']) for r in old['groups']] ==
               [(r['origin'], r['unique_id']) for r in new['groups']],
           'candidate_inventory_changed')
+    _need([(r['origin'], r.get('custom_model_directory')) for r in old['profiles']] ==
+          [(r['origin'], r.get('custom_model_directory')) for r in new['profiles']],
+          'candidate_custom_locator_changed')
     # Source and derived-selector names may move; native physical identity must
     # remain the same. Membership/order/roles are compiled in both staged images.
     def physical(graph):

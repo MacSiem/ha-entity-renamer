@@ -188,6 +188,30 @@ async def async_add_powercalc_source_inputs(hass, plan, *, guard):
     return replace(plan, powercalc_inputs=inputs)
 
 
+def custom_profile_locator(value):
+    """Literal validation before Path can normalize away unsafe components."""
+    from annotatedyaml.objects import NodeStrClass
+    need(type(value) in (str, NodeStrClass), 'custom_directory_literal_required')
+    value = str(value)
+    parts = value.split('/')
+    need(len(parts) > 2 and parts[:2] == ['powercalc', 'profiles']
+         and all(part not in ('', '.', '..') for part in parts)
+         and not any(char in value for char in ('\\', '\x00', ':')),
+         'custom_directory_unverified')
+    return value
+
+
+def assert_profile_cache_directories(profiles):
+    """The official LUT key omits directory: refuse ambiguous input identity."""
+    directories = {}
+    for profile in profiles:
+        for variant in profile['variants']:
+            for mode in variant['modes']:
+                key = (profile['manufacturer'], profile['model'], mode, variant['name'])
+                previous = directories.setdefault(key, profile['directory'])
+                need(previous == profile['directory'], 'cache_key_directory_conflict')
+
+
 def source_config(cfg):
     """One local LUT source subset, with Energy explicit; no hidden overrides."""
     from annotatedyaml.objects import NodeDictClass, NodeStrClass
@@ -195,14 +219,17 @@ def source_config(cfg):
     # Accept their exact types, without coercing arbitrary config objects.
     text_types = (str, NodeStrClass)
     allowed = {'name', 'entity_id', 'unique_id', 'sensor_type', 'manufacturer', 'model',
-        'mode', 'create_energy_sensor', '_power_entity', '_energy_entity'}
+        'mode', 'create_energy_sensor', '_power_entity', '_energy_entity', 'custom_model_directory'}
     need(type(cfg) in (dict, NodeDictClass) and not set(cfg) - allowed
          and cfg.get('sensor_type', 'virtual_power') == 'virtual_power'
          and cfg.get('mode', 'lut') == 'lut' and cfg.get('create_energy_sensor') is True
          and type(cfg.get('entity_id')) in text_types and cfg['entity_id'].startswith('light.')
          and type(cfg.get('manufacturer')) in text_types and type(cfg.get('model')) in text_types,
          'source_variant_unverified')
-    return {key: str(cfg[key]) for key in ('entity_id', 'manufacturer', 'model')}
+    result = {key: str(cfg[key]) for key in ('entity_id', 'manufacturer', 'model')}
+    if 'custom_model_directory' in cfg:
+        result['custom_model_directory'] = custom_profile_locator(cfg['custom_model_directory'])
+    return result
 
 
 def profile_json(value):
@@ -364,10 +391,22 @@ async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
         source = create_source_entity(semantic['entity_id'], hass)
         need(source.entity_entry is er.async_get(hass).async_get(semantic['entity_id']),
              'source_registry_required')
-        profile = await library.get_profile(ModelInfo(semantic['manufacturer'], semantic['model']), source)
+        locator = semantic.get('custom_model_directory')
+        # read_bundle already walked every component no-follow, rejecting links,
+        # non-regular inputs and membership drift. No alternate loader root.
+        if locator is not None:
+            need(locator + '/model.json' in bundle, 'custom_model_json_missing')
+            profile = await library.get_profile(
+                ModelInfo(semantic['manufacturer'], semantic['model']), source, str(Path(root) / locator))
+        else:
+            profile = await library.get_profile(ModelInfo(semantic['manufacturer'], semantic['model']), source)
         directory = Path(profile.get_model_directory(root_only=True)).relative_to(root).as_posix()
         need(directory.startswith('powercalc/profiles/'), 'profile_loader_unverified')
+        if locator is not None:
+            need(directory == locator, 'custom_native_directory_changed')
         data = compile_profile(directory, profile._base_json_data, profile._sub_profiles, bundle)
+        if locator is not None:
+            data['custom_model_directory'] = locator
         data.update(origin=origin, source=semantic['entity_id'], manufacturer=profile.manufacturer,
                     model=profile.model, config_sha256=digest(cfg),
                     unique_id=configured_unique_id or source.unique_id)
@@ -388,6 +427,7 @@ async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
             bindings.append([origin, [[role, eid, row.id, row.unique_id, row.platform]
                 for role, eid, row in dependencies]])
     need(bool(profiles) and len({r['origin'] for r in profiles}) == len(profiles), 'profile_membership')
+    assert_profile_cache_directories(profiles)
     energy_path = Path(root) / '.storage/energy'
     settings = None if not energy_path.exists() else json.loads(energy_path.read_bytes())['data']
     refs = []
