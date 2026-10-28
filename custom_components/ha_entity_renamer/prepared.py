@@ -71,7 +71,7 @@ class PreparedStore:
             raise ValueError('preparation_not_found_or_changed')
         return deepcopy(row['payload'])
 
-    async def create_native_inputs(self, preparation_id, baseline):
+    async def create_native_inputs(self, preparation_id, baseline, *, composition=None):
         """Persist one full batch baseline BEFORE constructing its Plan.
 
         Caller must capture once under the coordinator/editor locks before any
@@ -84,6 +84,9 @@ class PreparedStore:
         payload = {'kind': 'native_input_baseline', 'schema': 1,
                    'codec': base64.b64encode(raw).decode('ascii'),
                    'baseline_digest': native_digest}
+        if composition is not None:
+            from .native_template_composition import encode_composition
+            payload.update(schema=2, composition=encode_composition(composition, baseline))
         digest = await self.create(preparation_id, payload)
         return (preparation_id, digest, native_digest)
 
@@ -97,10 +100,11 @@ class PreparedStore:
             raise ValueError('invalid_native_input_reference') from None
         payload = self.resolve(reference[0], reference[1])
         try:
-            if (type(payload) is not dict
-                    or set(payload) != {'kind', 'schema', 'codec', 'baseline_digest'}
+            if (type(payload) is not dict or canonical(payload)[1] != reference[1]
+                    or set(payload) != ({'kind', 'schema', 'codec', 'baseline_digest'} |
+                        ({'composition'} if payload.get('schema') == 2 else set()))
                     or payload['kind'] != 'native_input_baseline'
-                    or type(payload['schema']) is not int or payload['schema'] != 1
+                    or type(payload['schema']) is not int or payload['schema'] not in (1, 2)
                     or payload['baseline_digest'] != reference[2]
                     or type(payload['codec']) is not str):
                 raise ValueError()
@@ -108,9 +112,39 @@ class PreparedStore:
             if baseline.digest != reference[2]:
                 raise ValueError()
             assert_baseline_receipt(baseline, original_receipt)
+            if payload['schema'] == 2:
+                from .native_template_composition import decode_composition
+                decode_composition(payload['composition'], baseline)
             return baseline
         except (ValueError, TypeError, KeyError):
             raise ValueError('native_input_preparation_rejected') from None
+
+    def resolve_composition(self, reference):
+        """Strict private reopen; schema1 stays readable but cannot bind reverse.
+
+        The composition is already pinned by Plan.native_inputs[1]. The caller
+        still needs actual current IO/authorization; decoding grants no writer.
+        """
+        from .native_input_baseline import decode_baseline
+        from .native_template_composition import decode_composition
+        from .transaction import validate_native_input_ref
+        validate_native_input_ref(reference)
+        payload = self.resolve(reference[0], reference[1])
+        try:
+            if (type(payload) is not dict or canonical(payload)[1] != reference[1]
+                    or set(payload) != {'kind', 'schema', 'codec', 'baseline_digest', 'composition'}
+                    or payload['kind'] != 'native_input_baseline'
+                    or type(payload['schema']) is not int or payload['schema'] != 2):
+                raise ValueError()
+            baseline = decode_baseline(base64.b64decode(payload['codec'], validate=True))
+            if baseline.digest != reference[2] or payload['baseline_digest'] != reference[2]:
+                raise ValueError()
+            composition = decode_composition(payload['composition'], baseline)
+            # Shared existing validation also checks exact envelope and receipt.
+            self.resolve_native_inputs(reference, baseline.receipt)
+            return baseline, composition
+        except (ValueError, TypeError, KeyError):
+            raise ValueError('native_input_composition_rejected') from None
 
     async def create(self, plan_id, payload):
         if type(plan_id) is not str or not _ID.fullmatch(plan_id):

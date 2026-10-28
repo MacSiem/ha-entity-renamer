@@ -299,6 +299,21 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         obj._reconstruct()  # Includes pending intent detection and graph checks.
         return obj
 
+    @classmethod
+    async def async_bind_template_reverse(cls, hass, operation_id, fingerprint, *,
+                                          activation_lease, guard, refresh, expected_head=None):
+        """Installed admission; never upgrades this class's readonly reopen.
+
+        Returns a scoped reverse session, with actual freshly loaded durable
+        stores and native proofs. No caller-provided evidence/proof callbacks.
+        """
+        if cls is not RegistryReceiptChain:
+            _fail('installed_binding_required')
+        from .native_template_reverse import NativeTemplateReverse
+        return await NativeTemplateReverse.bind(hass, operation_id, fingerprint,
+            activation_lease=activation_lease, guard=guard, refresh=refresh,
+            expected_head=expected_head)
+
     def _context(self, context):
         if (type(context) is not PhaseContext
                 or context.record.operation_id != self.operation_id

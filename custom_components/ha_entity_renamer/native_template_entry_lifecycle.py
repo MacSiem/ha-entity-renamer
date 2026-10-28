@@ -204,6 +204,15 @@ class NativeTemplateEntryObserver:
     def loaded_sample(self, snapshot):
         self.check()
         self.detached()
+        return self.live_sample(snapshot)
+
+    def live_sample(self, snapshot):
+        """Actual loaded graph before unload; does not assert old detachment.
+
+        The pre-unload admission witness is still live by definition. Post-setup
+        verifiers must use loaded_sample, which retains the detachment check.
+        """
+        self.check()
         _need(read_entry(self.hass,self.entry_id) == snapshot, 'loaded_config')
         entry = self.hass.config_entries.async_get_entry(self.entry_id)
         _need(entry.state.value == 'loaded' and entry.disabled_by is None, 'loaded_entry')
@@ -245,10 +254,18 @@ class NativeTemplateEntryObserver:
     async def capture_loaded(self):
         snapshot = read_entry(self.hass,self.entry_id)
         await self.verify_loaded(snapshot)
+        self.capture_loaded_witness(snapshot)
+
+    def capture_loaded_witness(self, snapshot):
+        """Retain actual identities in the final synchronous admission suffix.
+
+        Installed caller first proves accepted semantics/source/history. No
+        re-render, callback execution, new baseline or serialization occurs here.
+        A retained loaded witness is only checked as detached AFTER unload.
+        """
         entity, _, _, _ = self.loaded_sample(snapshot)
         info = entity._template_result_info
-        # This witness is transient. It is never persisted as a new baseline.
-        self.old_entities.append((entity,info,info._track_state_changes))
+        self.old_entities.append((entity, info, info._track_state_changes))
 
 
 @dataclass(frozen=True)
