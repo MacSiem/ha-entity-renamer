@@ -63,7 +63,7 @@ class IO:
     def runtime(self, change, target):
         return self.runtime_ok
 
-    async def settle(self):
+    async def settle(self, prepared=None):
         await asyncio.sleep(0)
         if self.after_settle:
             callback, self.after_settle = self.after_settle, None

@@ -128,8 +128,85 @@ class NativeRegistryIO:
         return (store._data is not None or store._write_lock.locked()
                 or store._delay_handle is not None)
 
-    async def settle(self):
-        await self.hass.async_block_till_done()
+    async def settle(self, prepared=None):
+        """Await native source registry processing, including its awaited re-add.
+
+        The pinned callback schedules this task eagerly during the synchronous
+        registry event dispatch. A completed callback needs no task fence. A
+        suspended callback retains its exact code and source object in its
+        coroutine chain while async_remove/async_add_entities and their awaited
+        native hooks run. Await that actual task, never unrelated HA work.
+
+        No-argument callers fence native registry callbacks only. Bridge callers
+        additionally bind the immutable registry UUID(s) of their preparation.
+        This is not persistence or arbitrary integration-background completion:
+        Store save/raw disk and the independent runtime/source probes still run.
+        """
+        import asyncio
+        from pathlib import Path
+        import homeassistant
+        from homeassistant.const import __version__
+        from homeassistant.helpers.entity import Entity
+        from homeassistant.helpers.entity_platform import EntityPlatform
+        from .native_unload_code_proof import prove_methods, unchanged
+        from .native_utility_setup_audit import _SOURCES
+
+        refs = [(Entity, '_async_registry_updated'),
+                (Entity, '_async_process_registry_update_or_remove'),
+                (Entity, 'async_remove'), (Entity, 'add_to_platform_finish'),
+                (EntityPlatform, 'async_add_entities'),
+                (EntityPlatform, '_async_add_entities'),
+                (EntityPlatform, '_async_add_entity')]
+        if __version__ == '2026.10.2':
+            refs.append((EntityPlatform, '_async_add_entity_impl'))
+        methods, codes = prove_methods(Path(homeassistant.__file__).resolve().parent,
+                                       _SOURCES[__version__], refs)
+        identities = None
+        if prepared is not None:
+            identities = ({prepared.identity} if prepared.kind == 'entity' else
+                          {row['id'] for row in self.document('entity')['entities']
+                           if row.get('device_id') == prepared.identity})
+        current = asyncio.current_task()
+        observed = set()
+        while True:
+            unchanged(refs, methods, codes)
+            pending = set()
+            for task in asyncio.all_tasks(self.hass.loop):
+                if task is current or task.done():
+                    continue
+                node, seen = task.get_coro(), set()
+                while node is not None and id(node) not in seen:
+                    seen.add(id(node))
+                    frame = getattr(node, 'cr_frame', None) or getattr(node, 'gi_frame', None)
+                    if frame is not None and frame.f_code is codes[1]:
+                        source = frame.f_locals.get('self')
+                        row = getattr(source, 'registry_entry', None)
+                        if (getattr(source, 'hass', None) is self.hass and row is not None
+                                and (identities is None or row.id in identities)):
+                            bound = source._async_process_registry_update_or_remove
+                            if getattr(bound, '__func__', None) is not methods[1]:
+                                raise RegistryConflict('native_registry_callback_binding_changed')
+                            pending.add(task)
+                            observed.add(source)
+                            break
+                    node = (getattr(node, 'cr_await', None)
+                            or getattr(node, 'gi_yieldfrom', None)
+                            or getattr(node, 'ag_await', None))
+            if not pending:
+                # No await separates this empty scoped scan from source readback.
+                # Failed native add can be logged/swallowed by EntityPlatform.
+                for source in observed:
+                    row = source.registry_entry
+                    if (row is None or self.registries['entity'].async_get(row.entity_id) is not row
+                            or (not row.disabled and
+                                (source.entity_id != row.entity_id
+                                 or source.platform.entities.get(row.entity_id) is not source
+                                 or self.hass.states.get(row.entity_id) is None))):
+                        raise RegistryConflict('native_registry_source_readback_failed')
+                return
+            # Cancellation of our inspection must not cancel a native mutation.
+            # Each task awaits its natural removal/addition descendants itself.
+            await asyncio.gather(*(asyncio.shield(task) for task in pending))
 
     def runtime(self, prepared, target, *, expected_documents=None):
         if prepared.kind == "device" or not prepared.mapping:
@@ -286,7 +363,7 @@ class NativeRegistryBridge:
                          history_before_json=json.dumps(history_before, sort_keys=True))
         capture = getattr(self.io, "capture_runtime", None)
         if capture is not None:
-            await self.io.settle()
+            await self.io.settle(change)
             self._fresh(change, before, guard)
             change = replace(change, runtime_before_json=capture(change))
         evidence = await self.inspect(change)
@@ -298,7 +375,7 @@ class NativeRegistryBridge:
     async def inspect(self, change):
         """Read-only recovery: BEFORE / AFTER / CONFLICT / UNKNOWN; no retry."""
         try:
-            await self.io.settle()  # Deliver event listeners BEFORE Recorder barrier.
+            await self.io.settle(change)  # Deliver event listeners BEFORE Recorder barrier.
             recorder = await self.recorder.snapshot(change.mapping) if change.mapping else None
             history = (await self._history().verify(json.loads(change.history_before_json))
                        if change.mapping else None)
@@ -381,7 +458,7 @@ class NativeRegistryBridge:
                     or node.target != target['entity_id']):
                 raise RegistryConflict('own_helper_effect_binding_mismatch')
             stamp = node.mutate()
-        await self.io.settle()
+        await self.io.settle(change)
         self._fresh(change, target, guard)
         await self.io.flush(change.kind)
         self._fresh(change, target, guard)
