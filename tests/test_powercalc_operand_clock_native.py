@@ -42,10 +42,12 @@ class _ClockFacts:
         self.energy_by_power = {e._sensor_source_id: e.entity_id for e in self.old_e.values()}
         self.baselines, self.transport, self.after_transport = {}, {}, {}
         self.numeric, self.cutovers, self.first_base = {}, {}, {}
+        self.timer_deliveries = []
         self.keep, self.error, self.tool = {}, None, None
 
     async def prepare(self):
         from homeassistant.core import EventBus, StateMachine
+        from homeassistant.helpers import event
         from homeassistant.helpers.entity import Entity
         from homeassistant.helpers.entity_registry import RegistryEntry
         subject = self.case.module('powercalc_source_binding')
@@ -61,7 +63,8 @@ class _ClockFacts:
                      (StateMachine, 'async_set_internal'),
                      (EventBus, 'async_fire_internal'),
                      (integration, '_integrate_on_state_change_with_max_sub_interval'),
-                     (integration, '_schedule_max_sub_interval_exceeded_if_state_is_numeric'))
+                     (integration, '_schedule_max_sub_interval_exceeded_if_state_is_numeric'),
+                     (event, '_run_async_call_action'))
         pins = dict(audit._SOURCES['2026.10.2'])
         pins.update(self.vendor.ha_pins)
         def prove():
@@ -71,6 +74,8 @@ class _ClockFacts:
         self.methods, self.codes = await executor(self.hass, prove)
         self.tags = {self.codes[0]: 'remove', self.codes[4]: 'fire',
                      self.codes[5]: 'changed', self.codes[6]: 'base'}
+        self.timer_action = self.case.module('powercalc_operand_clock')._OperandTimerAction
+        self.tags[self.timer_action.__call__.__code__] = 'operand_timer'
         self.unchanged = proof.unchanged
 
     def _ancestors(self, frame, code):
@@ -125,6 +130,15 @@ class _ClockFacts:
             self.unchanged(self.refs, self.methods, self.codes)
             tag = self.tags[frame.f_code]
             entity = frame.f_locals.get('self')
+            if tag == 'operand_timer':
+                if phase == 'start':
+                    action = frame.f_locals['self']
+                    assert type(action) is self.timer_action and action.owner.scope.hass is self.hass
+                    dispatch = list(self._ancestors(frame, self.codes[7]))
+                    assert any(row.get('hass') is self.hass
+                               and getattr(row.get('job'), 'target', None) is action for row in dispatch)
+                    self.timer_deliveries.append((action.name, self.hass.loop.time(), frame.f_locals['now']))
+                return
             if tag == 'remove':
                 name = getattr(entity, 'entity_id', None)
                 if phase == 'start' and self.old_e.get(name) is entity:
@@ -350,8 +364,12 @@ class NativePowercalcOperandClockRedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(baseline.unit_time, Decimal(3600))
         self.assertEqual(type(old_e._method).__name__, '_Left')
         self.assertTrue(baseline.source_power.is_finite())
-        self.assertLess(cutover_loop, baseline.deadline,
-            'window crossed the inherited deadline: extend actual timer log/oracle before interpreting RED')
+        # A changed real W operand rearms its timer. Crossing the inherited
+        # deadline is harmless when that obsolete callback never actually ran.
+        # This two-segment oracle still refuses any genuine timer partition.
+        self.assertFalse([row for row in facts.timer_deliveries
+                          if row[0] == name and row[1] <= cutover_loop],
+            'actual timer partition requires the extended independent interval oracle')
         outcomes = [row for row in result.retained_producers.calculations if row.producer is old_w]
         self.assertEqual(len(outcomes), 1)
         outcome = outcomes[0]
