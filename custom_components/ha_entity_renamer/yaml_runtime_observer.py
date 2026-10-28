@@ -329,7 +329,7 @@ class NativeYAMLRuntimeReadback:
                         or script._hass is not self.hass or script.domain != domain
                         or getattr(script.change_listener, '__self__', None) is not entity
                         or getattr(script.change_listener, '__func__', None)
-                            is not AutomationEntity.async_change_listener):
+                            is not AutomationEntity.async_write_ha_state):
                     raise ValueError('automation_listener_proof_unavailable')
                 if entity._is_enabled is True:
                     identities[-1] = (entity.entity_id, id(entity), id(script),

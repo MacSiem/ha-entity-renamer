@@ -55,7 +55,6 @@ class NativeTemplateForwardConsumerTests(forward.NativeTemplateForwardTests):
         self.assertEqual((observed.dashboard.status, observed.energy.status), ('COMPLETE', 'COMPLETE'))
         # Qualify the actual settled native runtime before invoking the writer.
         # Keep the original projection error instead of its sanitized wrapper.
-        from homeassistant.helpers.entity_component import DATA_INSTANCES
         for domain in ('automation', 'script'):
             module('yaml_runtime_observer').NativeYAMLRuntimeReadback(hass)._projection(domain)
         self.original_consumers = observed
