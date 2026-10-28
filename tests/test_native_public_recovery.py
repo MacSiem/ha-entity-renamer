@@ -118,6 +118,156 @@ class PublicRecoveryPhase(ack.RecoveryColdPhase):
         self.assertFalse(runtime.operation_lock.locked())
         self.assertFalse(entry.setup_lock.locked())
 
+    async def _cancel_after_native_unload(self):
+        """Cancel at actual native unload receipt IO, without replacing a writer.
+
+        sys.monitoring observes the genuine nested VerifiedStore write/readback
+        task. Its real pending await is the one qualification point. The test
+        does not hold or replace that IO, seed a Future, or demand full rollback
+        after cancellation. It proves that Runtime releases only after drain.
+        """
+        from homeassistant.config_entries import ConfigEntryState
+        module = cold.backend_fixture.installed_module
+        backend = self._loaded_backend()
+        hass, meta = self.f.hass, self.meta
+        runtime = hass.data[backend.DATA_RUNTIME]
+        entry = hass.config_entries.async_get_entry(meta['original']['identity']['entry_id'])
+        before = self._files()
+        connection, user, output = await self._connection(admin=True)
+        original_root = module('native_helper_lifecycle')._id([
+            'helper_lifecycle', meta['operation'], meta['fingerprint']])
+        persistence = module('persistence')
+        write_code, = [item for item in persistence.VerifiedStore.save.__code__.co_consts
+                       if isinstance(item, type(persistence.VerifiedStore.save.__code__))
+                       and item.co_name == 'write_and_readback']
+        runtime_code = backend.Runtime._recovery.__code__
+        drain_code = module('recovery_controller')._drain_restore.__code__
+        release_code = asyncio.Lock.release.__code__
+        facts = {}
+        qualified = hass.loop.create_future()
+        tool = None
+
+        def observe(code, offset, value=None):
+            try:
+                frame = sys._getframe()
+                while frame is not None and frame.f_code is not code:
+                    frame = frame.f_back
+                if frame is None:
+                    return
+                local = frame.f_locals
+                if code is runtime_code and local.get('self') is runtime and local.get('action') == 'restore':
+                    facts['caller'] = asyncio.current_task()
+                elif code is drain_code:
+                    facts['effect'] = local['task']
+                elif code is release_code and local.get('self') is runtime.operation_lock and facts.get('cancelled'):
+                    self.assertTrue(facts['effect'].done(), 'Runtime lock released before effect drain')
+                    self.assertTrue(facts['writer'].done(), 'Runtime lock released before actual Store IO ended')
+                    self.assertTrue(facts.get('readback'), 'Runtime lock released before native disk readback')
+                    facts['released_after_drain'] = True
+                elif code is write_code:
+                    store = local.get('self')
+                    if (type(store) is not persistence.VerifiedStore
+                            or store._key != 'ha_entity_renamer.helper_lifecycle'):
+                        return
+                    expected = local.get('expected', {})
+                    receipts = [row['payload'] for row in expected.get('events', {}).values()
+                        if row['payload'].get('kind') == 'helper_lifecycle_receipt'
+                        and row['payload'].get('stage') == 'unload'
+                        and row['payload'].get('root') != original_root]
+                    if not receipts:
+                        return
+                    current = asyncio.current_task()
+                    if 'writer' not in facts:
+                        # This real native IO await follows the actual verified
+                        # helper unload. A done Future would not qualify it.
+                        self.assertIsInstance(value, asyncio.Future)
+                        self.assertFalse(value.done(), 'qualification: Store IO already completed')
+                        self.assertIs(entry.state, ConfigEntryState.NOT_LOADED)
+                        self.assertTrue(runtime.operation_lock.locked())
+                        self.assertTrue(entry.setup_lock.locked())
+                        self.assertIs(type(facts['caller']), asyncio.Task)
+                        self.assertIs(type(facts['effect']), asyncio.Task)
+                        self.assertIsNot(current, facts['caller'])
+                        self.assertIsNot(current, facts['effect'])
+                        facts['writer'], facts['native_future'] = current, value
+                        facts['cancelled'] = facts['caller'].cancel()
+                        self.assertTrue(facts['cancelled'])
+                        qualified.set_result(True)
+                    elif current is facts['writer'] and local.get('actual') == expected and local.get('identity') is not None:
+                        # PY_RETURN after the actual supported writer AND strict
+                        # physical readback, no product-provided success counter.
+                        facts['readback'] = True
+            except BaseException as error:
+                facts['error'] = error
+                if not qualified.done():
+                    qualified.set_exception(error)
+
+        for ident in range(6):
+            try:
+                sys.monitoring.use_tool_id(ident, 'registered recovery actual Store cancellation')
+            except ValueError:
+                continue
+            tool = ident
+            break
+        self.assertIsNotNone(tool)
+        try:
+            for event in (sys.monitoring.events.PY_START, sys.monitoring.events.PY_YIELD,
+                          sys.monitoring.events.PY_RETURN):
+                sys.monitoring.register_callback(tool, event, observe)
+            sys.monitoring.set_local_events(tool, runtime_code, sys.monitoring.events.PY_START)
+            sys.monitoring.set_local_events(tool, drain_code, sys.monitoring.events.PY_YIELD)
+            sys.monitoring.set_local_events(tool, release_code, sys.monitoring.events.PY_START)
+            sys.monitoring.set_local_events(tool, write_code,
+                sys.monitoring.events.PY_YIELD | sys.monitoring.events.PY_RETURN)
+            connection.async_handle({'id': 1, 'type': 'ha_entity_renamer/recovery/restore',
+                'operation_id': meta['operation'], 'fingerprint': meta['fingerprint']})
+            done, _ = await asyncio.wait((qualified, output), timeout=120,
+                                        return_when=asyncio.FIRST_COMPLETED)
+            self.assertIn(qualified, done, 'qualification: genuine post-unload Store await was not reached')
+            await qualified
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(facts['caller']), 120)
+            if facts.get('error') is not None:
+                raise facts['error']
+            self.assertTrue(facts.get('released_after_drain'))
+            self.assertTrue(facts['writer'].done())
+            self.assertTrue(facts['effect'].done())
+            self.assertFalse(runtime.operation_lock.locked())
+            self.assertFalse(entry.setup_lock.locked())
+            self.assertFalse(output.done(), 'cancelled WS must not claim a completed restore')
+            self.assertIs(entry.state, ConfigEntryState.NOT_LOADED)
+            after = self._files()
+            # The genuine unload and lifecycle writes occurred. Source registry,
+            # helper options, immutable preparations and journal stay unchanged;
+            # the test does not claim a completed reverse or zero total effects.
+            for name in before:
+                if name != 'ha_entity_renamer.helper_lifecycle':
+                    self.assertEqual(before[name], after[name], name)
+            self.assertNotEqual(before['ha_entity_renamer.helper_lifecycle'],
+                                after['ha_entity_renamer.helper_lifecycle'])
+            self.assertEqual(self.f.entity.async_get(next(iter(meta['mapping'].values()))).id,
+                             meta['source_uuid'])
+            status = await self._ws('status')
+            self.assertTrue(status['success'], status)
+            self.assertTrue(status['result']['recovery_required'])
+            inspected = await self._ws('recovery/inspect')
+            self.assertTrue(inspected['success'], inspected)
+            self.assertFalse(inspected['result']['eligible'])
+            self.assertIn(inspected['result']['state'], ('UNKNOWN', 'refused'))
+            self.assertEqual(after, self._files(), 'post-cancel inspection must not retry effects')
+            print(json.dumps({'registered_restore_actual_native_unload_cancel': True,
+                'real_store_pending_at_cancel': True, 'writer_readback_before_runtime_release': True,
+                'completed_reverse_claimed': False, 'post_cancel_inspect_readonly': True}))
+        finally:
+            for code in (runtime_code, drain_code, release_code, write_code):
+                sys.monitoring.set_local_events(tool, code, 0)
+            for event in (sys.monitoring.events.PY_START, sys.monitoring.events.PY_YIELD,
+                          sys.monitoring.events.PY_RETURN):
+                sys.monitoring.register_callback(tool, event, None)
+            sys.monitoring.free_tool_id(tool)
+            if not output.done():
+                output.cancel()
+
     async def _verify_public_reverse(self):
         module = cold.backend_fixture.installed_module
         hass, m = self.f.hass, self.meta
@@ -170,6 +320,9 @@ class PublicRecoveryPhase(ack.RecoveryColdPhase):
                 await cold.ColdPhase.test_phase(self)
             else:
                 await ack.RecoveryColdPhase.test_phase(self)
+            return
+        if case == 'cancel_native_unload':
+            await self._cancel_after_native_unload()
             return
         if case in ('runtime_revoked', 'native_revoked'):
             await self._revocation_wait(case == 'native_revoked')
@@ -245,6 +398,9 @@ class NativePublicRecoveryTests(unittest.TestCase):
                     'PublicRecoveryPhase.test_phase'], env=env, capture_output=True, text=True, timeout=240)
                 print(result.stdout)
                 self.assertEqual(result.returncode, code, result.stderr[-20000:])
+
+    def test_registered_restore_cancel_after_actual_native_unload_drains_store(self):
+        self._run('cancel_native_unload')
 
     def test_registered_status_inspect_restore_after_cold_setup_ack_loss(self):
         self._run('recover')
