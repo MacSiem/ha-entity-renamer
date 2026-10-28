@@ -53,8 +53,8 @@ class PowercalcRuntimeNativeTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         from homeassistant.const import __version__
-        if __version__ != '2026.10.2':
-            self.skipTest('v1.26.1 native fixture targets compatible exact Core 2026.10.2')
+        if __version__ not in ('2026.10.2', '2026.10.4'):
+            self.skipTest('v1.26.1 native fixture targets verified exact Core 2026.10.2 or 2026.10.4')
         supplied = os.environ.get('POWERCALC_COMPONENT_DIR')
         if not supplied:
             self.skipTest('requires full public v1.26.1 POWERCALC_COMPONENT_DIR; not a PASS')

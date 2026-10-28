@@ -114,7 +114,7 @@ class _GroupHeadFacts:
             (self.integration, '_update_integral'), (self.integration, '_integrate_on_state_change'),
             (self.integration, '_schedule_max_sub_interval_exceeded_if_state_is_numeric'),
             (EventBus, 'async_fire_internal'))
-        pins = dict(self.case.module('native_utility_setup_audit')._SOURCES['2026.10.2'])
+        pins = dict(self.case.module('native_utility_setup_audit')._SOURCES[self.case.f.version])
         pins.update(self.vendor.ha_pins)
         def prove():
             self.vendor.sources()
@@ -533,7 +533,7 @@ class NativePowercalcGroupHeadTests(unittest.IsolatedAsyncioTestCase):
                 (integration.IntegrationSensor, '_update_integral'),
                 (integration.IntegrationSensor, '_schedule_max_sub_interval_exceeded_if_state_is_numeric'))
         proof = self.module('native_unload_code_proof')
-        pins = dict(self.module('native_utility_setup_audit')._SOURCES['2026.10.2'])
+        pins = dict(self.module('native_utility_setup_audit')._SOURCES[self.f.version])
         pins.update(facts.vendor.ha_pins)
         def prove():
             facts.vendor.sources()

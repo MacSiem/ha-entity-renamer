@@ -65,7 +65,7 @@ class _ClockFacts:
                      (integration, '_integrate_on_state_change_with_max_sub_interval'),
                      (integration, '_schedule_max_sub_interval_exceeded_if_state_is_numeric'),
                      (event, '_run_async_call_action'))
-        pins = dict(audit._SOURCES['2026.10.2'])
+        pins = dict(audit._SOURCES[self.case.f.version])
         pins.update(self.vendor.ha_pins)
         def prove():
             self.vendor.sources()
