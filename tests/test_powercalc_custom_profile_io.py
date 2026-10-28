@@ -1,6 +1,6 @@
 """Read-only native custom-profile IO proof shared by the two timer cases.
 
-Installed runtime pins came from owner readback (Python3.14.6), not public3.14.9.
+Installed runtime pins came from owner readback of both official HA images\n(Python3.14.6 and3.14.9); no inferred semver or rewritten interpreter.
 No loop/Task/State/Event/callback/cache replacement; no worker queue blocker.
 """
 import asyncio
@@ -16,6 +16,11 @@ import time
 _PYTHON = '3.14.6 (main, Jun 16 2026, 10:51:59) [GCC 15.2.0]'
 _RUNTIME_FILES = {'/usr/local/lib/python3.14/asyncio/base_events.py': '02a3fb293559af5e053396d47a4090f009b0746bf1df25462736657c1663495d', '/usr/local/lib/python3.14/asyncio/futures.py': '19398482eef563b3f88d183116aba596c80b99937e9566f2b6b934c7bd0dafa2', '/usr/local/lib/python3.14/asyncio/tasks.py': '00c9c08f6ca8692d873d1b5aab067a5932ae90fecea632d00de8ad48325ce5ab', '/usr/local/lib/python3.14/asyncio/events.py': '62e2c619c38407309c0d2c98638642174ee7be5b874676c0225392fed4a00b0f', '/usr/local/lib/python3.14/asyncio/selector_events.py': '2c15f1e7279f5baa09bc1fe4c6390d106cff3df6cf1493064ec0e86d846bc169', '/usr/local/lib/python3.14/asyncio/unix_events.py': '8cb0f7ff2418c6428a87ba5095d770010c030ad89c65e86c8aca3ac33ecbcacd', '/usr/local/lib/python3.14/lib-dynload/_asyncio.cpython-314-aarch64-linux-musl.so': 'a3bdbc33b8e402584fce739e6fc3ffabce89ab52d6be81abd6f10d9b1f50811f'}
 
+
+# Actual official HA image runtimes; source deltas reviewed, native IO qualification required.
+_RUNTIME_PINS = {_PYTHON: _RUNTIME_FILES,
+    '3.14.9 (main, Oct 22 2026, 08:07:04) [GCC 15.2.0]': {'/usr/local/lib/python3.14/asyncio/base_events.py': '3e54aa78ed18af0ee5a93384a63fd522496d1805b56ab6561e54c4fdb0869127', '/usr/local/lib/python3.14/asyncio/futures.py': '19398482eef563b3f88d183116aba596c80b99937e9566f2b6b934c7bd0dafa2', '/usr/local/lib/python3.14/asyncio/tasks.py': '85a314ab91924a253828211127d6498061b5f232cba01aec92de6172863e1f2e', '/usr/local/lib/python3.14/asyncio/events.py': '62e2c619c38407309c0d2c98638642174ee7be5b874676c0225392fed4a00b0f', '/usr/local/lib/python3.14/asyncio/selector_events.py': '3805eead73e63f10ef3600bb86bd08e960be82e186a27f6711891cc6894e42dc', '/usr/local/lib/python3.14/asyncio/unix_events.py': '4d6ce6127417781f059fcca8384754c04dfad4d6887bc6bd9a9b09004d4167ca', '/usr/local/lib/python3.14/lib-dynload/_asyncio.cpython-314-aarch64-linux-musl.so': '6169bbcbf697b75220ad09da3264235b72b1ba85a5b16c853f2d9947d2e39fe9'}}
+
 class CustomProfileIOProof:
     """Mixin for the existing real timer observer; never a product policy."""
     async def prepare(self):
@@ -26,7 +31,7 @@ class CustomProfileIOProof:
         self.io_rows = []
         self.deadline_wait = None
         self.io_loop_thread = threading.get_ident()
-        self.case.assertEqual(sys.version, _PYTHON)
+        self.case.assertIn(sys.version, _RUNTIME_PINS)\n        runtime_files = _RUNTIME_PINS[sys.version]
         self.case.assertIs(type(self.hass.loop), unix_events._UnixSelectorEventLoop)
         self.case.assertIs(asyncio.SelectorEventLoop, unix_events._UnixSelectorEventLoop)
         self.case.assertIs(asyncio.Future, _asyncio.Future)
@@ -36,12 +41,12 @@ class CustomProfileIOProof:
         self.case.assertIs(self.hass.loop._run_once.__func__, base_events.BaseEventLoop._run_once)
         proof = self.case.module('native_unload_code_proof')
         pins = {str(Path(path).relative_to('/usr/local/lib/python3.14')): value
-                for path, value in _RUNTIME_FILES.items()}
+                for path, value in runtime_files.items()}
         self.runtime_refs = ((base_events.BaseEventLoop, 'run_in_executor'),
                              (base_events.BaseEventLoop, '_run_once'),
                              (futures, 'wrap_future'), (futures, '_chain_future'))
         def runtime_prove():
-            for path, checksum in _RUNTIME_FILES.items():
+            for path, checksum in runtime_files.items():
                 assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == checksum, path
             return proof.prove_methods(Path('/usr/local/lib/python3.14'), pins, self.runtime_refs)
         self.runtime_prove = runtime_prove
