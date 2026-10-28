@@ -4,6 +4,8 @@ Reuse the forward/activation fixture, native Lovelace managers/Store and actual
 Energy singleton. No prepared inputs, State injection or writer interception.
 """
 import importlib
+import sys
+import threading
 import unittest
 
 import test_native_template_forward as forward
@@ -155,3 +157,53 @@ class NativeTemplateForwardConsumerTests(forward.NativeTemplateForwardTests):
 
     async def test_late_script_reload_refuses_before_unload(self):
         await self._consumer_negative('script', late=True)
+
+    async def test_source_manager_change_during_consumer_io_refuses_stale_observation(self):
+        module, entry, mapping, _, original, _ = await self._fixture()
+        runtime = await self._runtime(module)
+        factory_module = module('native_template_forward')
+        async def refresh():
+            return None
+        async with runtime.operation_lock:
+            session = await factory_module.NativeTemplateForward.prepare(
+                self.f.hass, mapping, guard=lambda: None, refresh=refresh)
+            changed = threading.Event()
+            seen = []
+            code = factory_module._UnchangedConsumers.physical.__code__
+            def change_native_source():
+                self.f.entity.async_update_entity(next(iter(mapping)), name='Foreign native edit')
+                seen.append(True)
+                changed.set()
+            def observe(current_code, offset):
+                frame = sys._getframe()
+                while frame is not None and frame.f_code is not current_code:
+                    frame = frame.f_back
+                if (frame is None or frame.f_locals.get('self') is not session._unchanged_consumers
+                        or changed.is_set()):
+                    return
+                self.f.hass.loop.call_soon_threadsafe(change_native_source)
+                if not changed.wait(10):
+                    raise AssertionError('native loop edit did not complete during actual consumer IO')
+            tool = None
+            for ident in range(6):
+                try:
+                    sys.monitoring.use_tool_id(ident, 'actual consumer IO native source drift')
+                except ValueError:
+                    continue
+                tool = ident
+                break
+            self.assertIsNotNone(tool)
+            try:
+                sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, observe)
+                sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
+                with self.assertRaises(ValueError):
+                    await session._observe()
+                self.assertEqual(seen, [True])
+                self.assertEqual(module('helper_native').read_entry(self.f.hass, entry.entry_id), original)
+                self.assertEqual(entry.state.value, 'loaded')
+                self.assertEqual(self.producer.entity_id, next(iter(mapping)))
+            finally:
+                sys.monitoring.set_local_events(tool, code, 0)
+                sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
+                sys.monitoring.free_tool_id(tool)
+                session.close()
