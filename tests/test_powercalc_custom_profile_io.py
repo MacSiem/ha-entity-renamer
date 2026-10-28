@@ -91,20 +91,14 @@ class CustomProfileIOProof:
         """Only wait for actual observed deadlines, immediately before real IO."""
         if self.deadline_wait is not None:
             return True
-        frame = sys._getframe().f_back
-        try:
-            while frame is not None and frame.f_code is not self.io_codes[5]:
-                frame = frame.f_back
-            if frame is None:
-                return False
-        finally:
-            del frame
         live = self.live_typed()
         if set(live) != set(self.old_e):
             return False
         assert not self.numeric and not self.cutovers
         scope = next(iter(live.values()))['action'].owner.scope
         assert all(i['action'].owner.scope is scope for i in live.values())
+        assert scope.started == 1 and scope.returned == 0
+        assert asyncio.current_task().get_context().get(scope.causal, None) is scope.marker
         assert all(scope.clock_owner.states[name].phase == 'retained' for name in self.old_e)
         assert all(self.baselines[name].handle.cancelled() for name in self.old_e)
         due = max(row['deadline'] for row in live.values())
@@ -145,11 +139,17 @@ class CustomProfileIOProof:
             if phase == 'start':
                 assert threading.get_ident() == self.io_loop_thread
                 task = asyncio.current_task()
-                assert type(task) is asyncio.Task and self.deadline_wait is not None
-                scope = self.deadline_wait['scope']
-                assert task.get_context().get(scope.causal, None) is scope.marker
+                assert type(task) is asyncio.Task
                 parents = list(self._ancestors(frame, self.io_codes[3]))
                 assert any(p.get('custom_directory') == loader._data_directory for p in parents)
+                factories = list(self._ancestors(frame, self.io_codes[4]))
+                assert any(p.get('hass') is self.hass for p in factories)
+                # The synchronous product guard is not called at every YAML
+                # frame. Stress scheduling at the observed REAL native read,
+                # then let the original loader submit and await its real IO.
+                assert self.wait_at_native_custom_setup(), 'both retained clocks before native model IO'
+                scope = self.deadline_wait['scope']
+                assert task.get_context().get(scope.causal, None) is scope.marker
                 self.io_rows.append({'loader': loader, 'task': task,
                     'directory': loader._data_directory, 'started_loop': self.hass.loop.time(),
                     'qualifying': not self.io_rows, 'resumes': []})

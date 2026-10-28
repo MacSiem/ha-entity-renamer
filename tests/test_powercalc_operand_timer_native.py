@@ -304,14 +304,11 @@ class NativePowercalcActualTimerTests(unittest.IsolatedAsyncioTestCase):
         await self.ready()
         facts = _CustomTimerFacts(self)
         await facts.prepare()
-        waited = False
         cancelled = False
         task = None
         def actual_slow_guard():
-            nonlocal waited, cancelled
+            nonlocal cancelled
             self.guard()
-            if not waited:
-                waited = facts.wait_at_native_custom_setup()
             if (cancel and not cancelled and facts.deliveries
                     and 'return_utc' in facts.deliveries[0] and len(facts.cutovers) < 2):
                 cancelled = True
@@ -329,7 +326,8 @@ class NativePowercalcActualTimerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(cancelled, 'cancel boundary did not occur; no protocol PASS')
             else:
                 result = await task
-            self.assertTrue(waited, 'both real typed issuances were not observed')
+            self.assertIsNone(facts.error, 'native IO observer: ' + repr(facts.error))
+            self.assertIsNotNone(facts.deadline_wait, 'both real typed issuances at native IO required')
             facts.assert_custom_read()
             self.assertIsNone(facts.error, 'observer/fixture failure: ' + repr(facts.error))
             executor = self.module('yaml_validation')._settled_executor
