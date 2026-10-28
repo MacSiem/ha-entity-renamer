@@ -56,16 +56,16 @@ def evidence(core='2026.10.2'):
             # Entity._async_write_ha_state explicitly forwards these preserved
             # values in addition to the changing original_device_class.
             for field in ('capabilities', 'supported_features') + (
-                    ('original_name',) if core == '2026.10.2' else ()):
+                    ('original_name',) if core in ('2026.10.2', '2026.10.4') else ()):
                 args[field] = before[field]
-        names = a._COMMON_ARGS | (a._EXTRA_ARGS if core == '2026.10.2' else set())
+        names = a._COMMON_ARGS | (a._EXTRA_ARGS if core in ('2026.10.2', '2026.10.4') else set())
         calls.append({'index': index, 'before': before, 'after': deepcopy(current),
                       'arguments': args, 'undefined': sorted(names - args.keys()),
                       'cause': {'kind': 'platform_add', 'call': None} if index < 3 else
                                {'kind': 'registry_event', 'call': 2},
                       'path': path, 'emission': deepcopy(payload)})
         events.append({'call': index, 'payload': deepcopy(payload)})
-    value = {'schema': 1, 'core': core, 'python': '3.14' if core == '2026.10.2' else '3.13',
+    value = {'schema': 1, 'core': core, 'python': '3.14' if core in ('2026.10.2', '2026.10.4') else '3.13',
              'entry_id': 'entry', 'source_pins': a._SOURCES[core], 'binding': binding,
              'calls': calls, 'events': events, 'final_rows': [current]}
     return baseline, doc['before'], rows, value
