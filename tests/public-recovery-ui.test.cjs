@@ -230,7 +230,7 @@ test('plural active card review, cancel focus, confirmation and coalesced exact 
  await click(f,'cancelRenamerRecovery');assert.equal(f.card.shadowRoot.activeElement,button(f,'askRenamerRecovery'));
  assert.equal(restores(f).length,0);await click(f,'askRenamerRecovery');const wait=deferred();f.setRecovery(()=>wait.promise);
  const confirm=button(f,'confirmRenamerRecovery');confirm.click();confirm.click();assert.equal(restores(f).length,1);
- assert.deepEqual(restores(f)[0],{type:'ha_entity_renamer/recovery/restore',...OP});
+ assert.deepEqual(JSON.parse(JSON.stringify(restores(f)[0])),{type:'ha_entity_renamer/recovery/restore',...OP});
  wait.resolve(inspection({state:'rolled_back',reason:'restored',eligible:false}));await flush();
  assert.equal(f.card.shadowRoot.querySelectorAll('#renamerRecoveryPanel').length,1);
  assert.equal(f.card.shadowRoot.querySelectorAll('#confirmRenamerRecovery').length,0);

@@ -92,6 +92,16 @@ class NativePublicYAMLRecoveryTests(unittest.IsolatedAsyncioTestCase):
             sys.monitoring.use_tool_id(tool, 'public YAML status during actual forward')
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, observe)
             sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
+        diagnostic = []
+        diagnostic_tool = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
+        def raised(code, offset, error):
+            if '/custom_components/ha_entity_renamer/' in code.co_filename:
+                diagnostic.append((code.co_name, type(error).__name__, str(error)))
+                if len(diagnostic) > 30:
+                    del diagnostic[0]
+        sys.monitoring.use_tool_id(diagnostic_tool, 'synthetic public flow failure diagnosis')
+        sys.monitoring.register_callback(diagnostic_tool, sys.monitoring.events.RAISE, raised)
+        sys.monitoring.set_events(diagnostic_tool, sys.monitoring.events.RAISE)
         try:
             try:
                 result = await runtime.native_forward(self.f.hass, mapping, guard=guard, refresh=refresh)
@@ -109,7 +119,14 @@ class NativePublicYAMLRecoveryTests(unittest.IsolatedAsyncioTestCase):
             if status_probe:
                 self.assertIsNotNone(poll_task)
                 await asyncio.wait_for(poll_task, 60)
+        except Exception:
+            print('QA_PRODUCT_EXCEPTIONS', diagnostic)
+            print('QA_JOURNAL', [(r.status, r.reason, r.phases) for r in await runtime.journal.all()])
+            raise
         finally:
+            sys.monitoring.set_events(diagnostic_tool, 0)
+            sys.monitoring.register_callback(diagnostic_tool, sys.monitoring.events.RAISE, None)
+            sys.monitoring.free_tool_id(diagnostic_tool)
             if tool is not None:
                 sys.monitoring.set_local_events(tool, code, 0)
                 sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
