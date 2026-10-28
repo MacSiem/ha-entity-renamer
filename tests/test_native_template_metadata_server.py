@@ -163,16 +163,25 @@ class NativeTemplateMetadataServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_preexisting_unavailable_held_outputs_refuse_before_effect(self):
         runtime, mapping, uuids, original = await self.data(variant='sensor')
         await self.sample(5)
-        held = dict(self.f.hass.states.get(self._current_consumer().entity_id).attributes)
+        from copy import deepcopy
+        entity = self._current_consumer()
+        held = (entity._attr_native_value, entity._attr_icon, entity._attr_entity_picture,
+                deepcopy(entity._attr_extra_state_attributes))
         await self.sample(-1)
-        unavailable = self.f.hass.states.get(self._current_consumer().entity_id)
+        unavailable = self.f.hass.states.get(entity.entity_id)
         self.assertEqual(unavailable.state, 'unavailable')
-        self.assertEqual(dict(unavailable.attributes), held)
+        # Native Entity hides extra attributes while unavailable, but the
+        # Template instance retains the actual prior output fields internally.
+        physical = dict(unavailable.attributes)
+        self.assertEqual((entity._attr_native_value, entity._attr_icon, entity._attr_entity_picture,
+                          entity._attr_extra_state_attributes), held)
         history = self.module('history_guard').NativeHistoryGuard(
             self.module('recorder_guard').NativeRecorderGuard(self.f.hass))
         consumer_history = await history.capture({self._current_consumer().entity_id: self._current_consumer().entity_id})
         await self.refuse_without_effect(runtime, mapping, uuids, original)
-        self.assertEqual(dict(self.f.hass.states.get(self._current_consumer().entity_id).attributes), held)
+        self.assertEqual(dict(self.f.hass.states.get(entity.entity_id).attributes), physical)
+        self.assertEqual((entity._attr_native_value, entity._attr_icon, entity._attr_entity_picture,
+                          entity._attr_extra_state_attributes), held)
         self.assertTrue(await history.verify(consumer_history))
 
     test_fresh_reverse_source_drift_refuses_without_effect = (
