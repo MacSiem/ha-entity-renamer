@@ -416,6 +416,69 @@ class NativeTemplateYAMLServer:
             obj.close()
             raise
 
+    @classmethod
+    async def bind_prepared(cls, hass, operation_id, plan, *, guard, refresh):
+        """Reopen a server-retained review; preserve its exact ORIGINAL/Plan.
+
+        This is an internal capability boundary. Websocket input never contains
+        a Plan, receipt, preparations, root or callback.
+        """
+        obj = await cls._open(hass, guard=guard, refresh=refresh)
+        try:
+            obj.operation_id, obj.plan = operation_id, plan
+            plan.validate()
+            baseline, obj.composition = obj.preparations.resolve_composition(plan.native_inputs)
+            obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
+            obj.digests = dict(obj.composition.prepared_digests)
+            _need(plan.coverage_evidence == obj.composition.coverage_sha256
+                  and plan.required_scopes == plan.covered_scopes == plan.verification_adapters == ('registry', 'yaml')
+                  and len(plan.steps) >= 2
+                  and tuple(s.adapter for s in plan.steps) == ('registry',) * (len(plan.steps) - 1) + ('yaml',)
+                  and not any(s.caused_by for s in plan.steps)
+                  and set(obj.digests) == {s.prepared_ref for s in plan.steps}, 'qualified_plan_required')
+            changes = [decode_change(obj.preparations.resolve(s.prepared_ref, obj.digests[s.prepared_ref]))
+                       for s in plan.steps]
+            obj.registry_changes, obj.change = tuple(changes[:-1]), changes[-1]
+            obj.mapping = {}
+            for change in obj.registry_changes:
+                _need(change.kind == 'entity' and len(change.mapping) == 1
+                      and change.before['platform'] != 'template'
+                      and set(k for k in change.before if change.before.get(k) != change.after.get(k))
+                          <= {'entity_id', 'modified_at'}
+                      and not set(obj.mapping) & set(change.mapping), 'source_mapping_required')
+                obj.mapping.update(change.mapping)
+            _need(len(set(obj.mapping.values())) == len(obj.mapping)
+                  and not set(obj.mapping) & set(obj.mapping.values()), 'independent_mapping_required')
+            obj.consumers = await _UnchangedConsumers.capture(hass, obj.mapping, guard=obj._scope)
+            obj._scope()
+            await obj.consumers.bind_sources(obj.receipt, obj.evidence, guard=obj._scope)
+            obj._scope()
+            obj.receipt_store = native_registry_receipt_store(hass, obj.preparations)
+            await obj.receipt_store.initialize()
+            obj._scope()
+            readonly = RegistryReceiptChain.reopen(obj.receipt_store, operation_id, plan,
+                                                   obj.receipt, obj.digests)
+            state = readonly.reconstruct_inputs()
+            _need(not readonly.writable and readonly.active is None
+                  and state.head == readonly.root_digest, 'pristine_review_required')
+            obj.chain = readonly
+            obj._install()
+            await refresh()
+            obj._scope()
+            await obj._fresh_stores(None)
+            await obj._common(False, initial=True)
+            # Admission constructs a separate writer; the reader stays readonly.
+            writer = RegistryReceiptChain(obj.receipt_store, operation_id, plan, obj.receipt, obj.digests)
+            _need(writer.root == readonly.root and writer.root_digest == readonly.root_digest
+                  and writer.reconstruct_inputs().same_evidence(state), 'head_changed')
+            writer.writable = True
+            obj.chain = writer
+            obj.observer.chain = writer
+            return obj
+        except BaseException:
+            obj.close()
+            raise
+
     async def _bind_accepted_sources(self):
         from .native_discovery_inputs import async_observe_discovery_inputs
         from .yaml_source_binding import _runtime_sample
