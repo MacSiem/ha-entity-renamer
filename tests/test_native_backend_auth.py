@@ -43,8 +43,13 @@ class NativeBackendAuthTests(unittest.IsolatedAsyncioTestCase):
         def collect(raw):
             self.assertFalse(output.done(), 'one request must have one response')
             output.set_result(json.loads(raw) if isinstance(raw, (bytes, str)) else raw)
+        from homeassistant.const import __version__
+        self.assertIn(__version__, ('2025.6.0', '2026.10.2'))
+        # Current Core requires the peer address; this collector models a local
+        # connection, not network authentication or a bypass of local-only rules.
+        peer = {'remote': '127.0.0.1'} if __version__ == '2026.10.2' else {}
         connection = ActiveConnection(logging.getLogger('native-renamer-ws'), hass,
-                                      collect, user, token)
+                                      collect, user, token, **peer)
         self.addCleanup(connection.async_handle_close)
         return connection, user, output
 
