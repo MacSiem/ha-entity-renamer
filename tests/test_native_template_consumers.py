@@ -21,7 +21,7 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
     _flush_documents = fixture.NativeHelperQuiescenceTests._flush_documents
 
     async def prepare(self, kind, *, foreign_runtime=False, sibling=False, variant='sensor',
-                      binary_extra=None, binary_device_class=None):
+                      binary_extra=None, binary_device_class=None, validate=True):
         self.assertIn(variant, ('sensor', 'binary_sensor', 'mixed'))
         self.template_variant = variant
         self.consumer_domain = 'binary_sensor' if variant == 'binary_sensor' else 'sensor'
@@ -96,6 +96,9 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
         self.consumer_identities = {(p.domain, e.unique_id): (e.entity_id, self.f.entity.async_get(e.entity_id).id)
             for p in async_get_platforms(hass, 'template') for e in p.entities.values()}
         await self._flush_documents(initialize=True)
+        if not validate:
+            # Data-only setup for the server producer: no fixture Plan/receipt.
+            return
         planner = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_plan')
         validation = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_validation')
         self.plan = planner.plan_yaml(root, {self.source_id: 'sensor.accepted_next'})

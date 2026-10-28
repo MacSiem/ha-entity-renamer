@@ -1,0 +1,353 @@
+"""Owner-run native server producer tests; worker does not execute these.
+
+Data setup reuses native fixtures with validation disabled. No fixture Plan,
+receipt, preparations, chain, observer or positive verifier enters product IO.
+"""
+import asyncio
+import importlib
+import os
+import sys
+import unittest
+from unittest.mock import patch
+
+import test_native_template_yaml_activation as activation
+import test_native_template_forward as entry_forward
+
+
+@unittest.skipUnless(activation.fixture.fixtures.HAS_HA, 'actual pinned HA required')
+class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
+    with_yaml = True
+    asyncSetUp = activation.NativeTemplateYAMLActivationTests.asyncSetUp
+    _before_start = activation.NativeTemplateYAMLActivationTests._before_start
+    _flush_documents = activation.NativeTemplateYAMLActivationTests._flush_documents
+    prepare = activation.NativeTemplateYAMLActivationTests.prepare
+    emit = activation.NativeTemplateYAMLActivationTests.emit
+    _runtime = entry_forward.NativeTemplateForwardTests._runtime
+
+    def module(self, name):
+        return importlib.import_module(activation.fixture.fixtures.PACKAGE + '.' + name)
+
+    async def data(self, *, multiple=False, variant='mixed', binary_extra=None):
+        from homeassistant.const import __version__
+        from homeassistant.core import Context
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        self.assertEqual(__version__, '2026.10.4')
+        self.assertEqual(sys.version_info[:3], (3, 14, 9))
+        await self.prepare('yaml', variant=variant, binary_extra=binary_extra, validate=False)
+        self.assertFalse(hasattr(self, 'plan'))
+        self.assertFalse(hasattr(self, 'receipt'))
+        self.assertFalse(hasattr(self, 'evidence'))
+        hass, root = self.f.hass, self.f.root
+        self.assertEqual(hass.config_entries.async_entries('template'), [])
+        mapping = {self.source_id: 'sensor.accepted_next'}
+        self.other = None
+        if multiple:
+            self.other = type(self.producer)()
+            self.other._attr_unique_id = 'template-runtime-second-producer'
+            self.other._attr_name = 'Second source'
+            await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([self.other])
+            mapping[self.other.entity_id] = 'sensor.accepted_second'
+            with (root / 'template.yaml').open('a') as handle:
+                handle.write('- unique_id: second\n  sensor:\n  - unique_id: value\n'
+                    '    name: Second consumer\n    state: "{{ states(\'' + self.other.entity_id
+                    + '\') | int(0) * 3 }}"\n')
+            await hass.services.async_call('template', 'reload', {}, blocking=True, context=Context())
+            await hass.async_block_till_done()
+            await self._flush_documents()
+        self.identities = {(p.domain, e.unique_id): (e.entity_id, self.f.entity.async_get(e.entity_id).id)
+            for p in async_get_platforms(hass, 'template') for e in p.entities.values()}
+        source_uuids = {old: self.f.entity.async_get(old).id for old in mapping}
+        before = (root / 'template.yaml').read_bytes()
+        # Retain descriptors only AFTER the real mutator returned real IO audit.
+        mutator = self.module('yaml_transaction')
+        actual_write = mutator.apply_file_patch
+        def retain(*args, **kwargs):
+            result = actual_write(*args, **kwargs)
+            fd = os.open(root / result['path'], os.O_RDONLY | os.O_NOFOLLOW)
+            self.addCleanup(os.close, fd)
+            info = os.fstat(fd)
+            self.assertEqual((info.st_dev, info.st_ino, info.st_mode), tuple(result['after_identity']))
+            return result
+        self.enterContext(patch.object(mutator, 'apply_file_patch', retain))
+        runtime = await self._runtime(self.module)
+        return runtime, mapping, source_uuids, before
+
+    async def stimulus(self, value):
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        await self.emit(value)
+        if self.other is not None:
+            self.other._attr_native_value = value
+            self.other.async_write_ha_state()
+            await self.f.hass.async_block_till_done()
+            consumer = next(e for p in async_get_platforms(self.f.hass, 'template')
+                            for e in p.entities.values() if e.unique_id == 'second-value')
+            self.assertEqual(self.f.hass.states.get(consumer.entity_id).state, str(value * 3))
+        self.assertEqual({(p.domain, e.unique_id): (e.entity_id, self.f.entity.async_get(e.entity_id).id)
+            for p in async_get_platforms(self.f.hass, 'template') for e in p.entities.values()}, self.identities)
+
+    async def flow(self, *, multiple=False, variant='mixed'):
+        runtime, mapping, uuids, original = await self.data(multiple=multiple, variant=variant)
+        hass = self.f.hass
+        for value in (5, 7):
+            await self.stimulus(value)
+        factory = self.module('native_template_yaml_server').NativeTemplateYAMLServer
+        captured, caller = [], None
+        code = factory._install.__code__
+        def installed(code_arg, offset):
+            frame = sys._getframe(1)
+            if frame.f_code is code and frame.f_locals['self'].hass is hass:
+                session = frame.f_locals['self']
+                captured.append((asyncio.current_task(), session.chain, session.preparations, session.journal))
+                self.assertTrue(runtime.operation_lock.locked())
+                self.assertIsNot(asyncio.current_task(), caller)
+        tool = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
+        sys.monitoring.use_tool_id(tool, 'native YAML server owner observation')
+        sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, installed)
+        sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        try:
+            caller = hass.async_create_task(runtime.native_forward(hass, mapping,
+                guard=lambda: None, refresh=refresh), 'foreground YAML server forward', eager_start=False)
+            result = await asyncio.wait_for(asyncio.shield(caller), 180)
+            self.assertEqual(result['state'], 'applied')
+            record = await runtime.journal.load(result['operation_id'])
+            self.assertEqual(tuple(s.adapter for s in record.plan.steps),
+                             ('registry',) * len(mapping) + ('yaml',))
+            baseline, composition = runtime.preparations.resolve_composition(record.plan.native_inputs)
+            original_ref, original_json = record.plan.native_inputs, baseline.receipt_json
+            self.assertEqual(baseline.receipt.changed_domains, ('template',))
+            for old, new in mapping.items():
+                self.assertIsNone(self.f.entity.async_get(old))
+                self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+            for value in (5, 7):
+                await self.stimulus(value)
+            # Only public operation identity crosses into the new session.
+            caller = hass.async_create_task(runtime.native_yaml_reverse(hass,
+                result['operation_id'], result['fingerprint'], guard=lambda: None, refresh=refresh),
+                'foreground YAML server reverse', eager_start=False)
+            reverse = await asyncio.wait_for(asyncio.shield(caller), 180)
+            self.assertEqual(reverse['state'], 'rolled_back')
+            self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+            final = await runtime.journal.load(result['operation_id'])
+            self.assertEqual(final.plan.native_inputs, original_ref)
+            reopened, restored = runtime.preparations.resolve_composition(original_ref)
+            self.assertEqual(reopened.receipt_json, original_json)
+            self.assertEqual(restored, composition)
+            self.assertEqual(final.phases, ('undone',) * len(final.plan.steps))
+            self.assertEqual(len(captured), 2)
+            self.assertIsNot(captured[0][0], captured[1][0])
+            self.assertTrue(all(row[0].done() for row in captured))
+            self.assertIsNot(captured[0][2], captured[1][2])
+            self.assertIsNot(captured[0][3], captured[1][3])
+            self.assertFalse(captured[1][1].writable, 'fresh reader must remain readonly')
+            self.assertIsNone(captured[1][1].active)
+            self.assertEqual(captured[1][1].root, captured[0][1].root)
+            for old in mapping:
+                self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+            for value in (5, 7):
+                await self.stimulus(value)
+            history = self.module('history_guard').NativeHistoryGuard(
+                self.module('recorder_guard').NativeRecorderGuard(hass))
+            self.assertTrue(await history.verify(composition.source_history))
+            self.assertTrue(await history.verify(composition.consumer_history))
+            self.assertFalse(runtime.operation_lock.locked())
+            self.assertIs(result['family_complete'], False)
+            self.assertIs(reverse['migration_ready'], False)
+        finally:
+            sys.monitoring.set_local_events(tool, code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
+            sys.monitoring.free_tool_id(tool)
+            if caller is not None and not caller.done():
+                caller.cancel()
+                await asyncio.gather(caller, return_exceptions=True)
+
+    async def test_foreground_mixed_one_plan_same_original_fresh_reverse(self):
+        await self.flow()
+
+    async def test_multiple_source_ids_one_plan_mixed_fresh_reverse(self):
+        await self.flow(multiple=True)
+
+    async def test_binary_numeric_scope_remains_supported(self):
+        await self.flow(variant='binary_sensor')
+
+    async def test_drift_refuses_fresh_reverse_without_any_rollback_effect(self):
+        runtime, mapping, uuids, _ = await self.data()
+        async def refresh():
+            return None
+        result = await runtime.native_forward(self.f.hass, mapping, guard=lambda: None, refresh=refresh)
+        self.assertEqual(result['state'], 'applied')
+        path = self.f.root / 'template.yaml'
+        with path.open('ab') as handle:
+            handle.write(b'\n# external edit after terminal forward\n')
+        edited = path.read_bytes()
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_yaml_reverse(self.f.hass, result['operation_id'], result['fingerprint'],
+                guard=lambda: None, refresh=refresh)
+        self.assertEqual(path.read_bytes(), edited)
+        for old, new in mapping.items():
+            self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+        record = await runtime.journal.load(result['operation_id'])
+        self.assertEqual((record.status, record.direction), ('applied', 'forward'))
+
+    async def test_authorization_revoked_while_waiting_for_runtime_lock(self):
+        runtime, mapping, uuids, original = await self.data()
+        authorized = True
+        def guard():
+            if not authorized:
+                raise PermissionError('revoked by actual caller')
+        async def refresh():
+            guard()
+        await runtime.operation_lock.acquire()
+        caller = self.f.hass.async_create_task(runtime.native_forward(self.f.hass, mapping,
+            guard=guard, refresh=refresh), 'queued YAML producer', eager_start=False)
+        await asyncio.sleep(0)
+        authorized = False
+        runtime.operation_lock.release()
+        with self.assertRaises(PermissionError):
+            await caller
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        for old in mapping:
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertFalse(await runtime.journal.active())
+
+    async def test_terminal_reverse_replay_refused(self):
+        runtime, mapping, _, original = await self.data()
+        async def refresh():
+            return None
+        result = await runtime.native_forward(self.f.hass, mapping, guard=lambda: None, refresh=refresh)
+        reverse = await runtime.native_yaml_reverse(self.f.hass, result['operation_id'],
+            result['fingerprint'], guard=lambda: None, refresh=refresh)
+        self.assertEqual(reverse['state'], 'rolled_back')
+        with self.assertRaises(self.module('transaction').Refused):
+            await runtime.native_yaml_reverse(self.f.hass, result['operation_id'],
+                result['fingerprint'], guard=lambda: None, refresh=refresh)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
+    async def test_reverse_revoked_after_actual_admission_waits(self):
+        runtime, mapping, uuids, _ = await self.data()
+        async def refresh_forward():
+            return None
+        result = await runtime.native_forward(self.f.hass, mapping,
+            guard=lambda: None, refresh=refresh_forward)
+        before_reverse = (self.f.root / 'template.yaml').read_bytes()
+        refreshes, authorized = 0, True
+        def guard():
+            if not authorized:
+                raise PermissionError('reverse authorization revoked')
+        async def refresh_reverse():
+            nonlocal refreshes, authorized
+            refreshes += 1
+            # Runtime refresh, factory refresh, then fresh terminal admission.
+            if refreshes == 3:
+                authorized = False
+        with self.assertRaises(PermissionError):
+            await runtime.native_yaml_reverse(self.f.hass, result['operation_id'],
+                result['fingerprint'], guard=guard, refresh=refresh_reverse)
+        self.assertEqual(refreshes, 3)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), before_reverse)
+        for old, new in mapping.items():
+            self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+        record = await runtime.journal.load(result['operation_id'])
+        self.assertEqual((record.status, record.direction), ('applied', 'forward'))
+
+    async def test_detached_actual_native_consumer_refuses_fresh_reverse(self):
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        runtime, mapping, uuids, _ = await self.data()
+        async def refresh():
+            return None
+        result = await runtime.native_forward(self.f.hass, mapping, guard=lambda: None, refresh=refresh)
+        path = self.f.root / 'template.yaml'
+        accepted = path.read_bytes()
+        consumer = next(e for p in async_get_platforms(self.f.hass, 'template')
+                        if p.domain == 'sensor' for e in p.entities.values())
+        consumer._template_result_info._track_state_changes.async_remove()
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_yaml_reverse(self.f.hass, result['operation_id'], result['fingerprint'],
+                guard=lambda: None, refresh=refresh)
+        self.assertEqual(path.read_bytes(), accepted)
+        for old, new in mapping.items():
+            self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+        record = await runtime.journal.load(result['operation_id'])
+        self.assertEqual((record.status, record.direction), ('applied', 'forward'))
+
+    async def test_cancel_owned_reload_drains_then_fresh_nonterminal_reverse_refuses(self):
+        from homeassistant.helpers import discovery
+        runtime, mapping, _, _ = await self.data()
+        hass = self.f.hass
+        factory = self.module('native_template_yaml_server').NativeTemplateYAMLServer
+        native = self.module('native_template_yaml')
+        install_code, discovery_code = factory._install.__code__, discovery.async_load_platform.__code__
+        owner, descendants, cancelled = [], [], []
+        def observe(code, offset):
+            frame = sys._getframe(1)
+            if code is install_code and frame.f_code is install_code:
+                session = frame.f_locals['self']
+                if session.hass is hass:
+                    owner.append(session.task)
+            if code is not discovery_code or frame.f_code is not discovery_code:
+                return
+            if frame.f_locals.get('hass') is not hass or frame.f_locals.get('platform') != 'template':
+                return
+            task = asyncio.current_task()
+            if not owner or task is owner[0] or cancelled:
+                return
+            descendants.extend(native._pending_template_tasks(hass) | {task})
+            self.assertTrue(runtime.operation_lock.locked())
+            self.assertTrue(all(row[3].locked() for row in
+                self.module('yaml_editor_locks').NativeYAMLEditorLocks(hass).enumerate()))
+            cancelled.append(owner[0].cancel())
+        tool = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
+        sys.monitoring.use_tool_id(tool, 'owned YAML reload cancellation')
+        sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, observe)
+        for code in (install_code, discovery_code):
+            sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
+        async def refresh():
+            return None
+        caller = None
+        try:
+            caller = hass.async_create_task(runtime.native_forward(hass, mapping,
+                guard=lambda: None, refresh=refresh), 'foreground cancelled YAML producer', eager_start=False)
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(caller), 180)
+            self.assertEqual(cancelled, [True])
+            self.assertTrue(descendants)
+            self.assertTrue(all(task.done() for task in descendants))
+            self.assertTrue(all(task.done() for task in owner))
+            self.assertFalse(native._pending_template_tasks(hass))
+            self.assertFalse(runtime.operation_lock.locked())
+            active = await runtime.journal.active()
+            self.assertEqual(len(active), 1)
+            pending = active[0]
+            self.assertNotEqual(pending.status, 'applied')
+            preps = self.module('prepared').native_prepared_store(hass)
+            await preps.initialize()
+            store = self.module('native_registry_receipts').native_registry_receipt_store(hass, preps)
+            await store.initialize()
+            baseline, composition = preps.resolve_composition(pending.plan.native_inputs)
+            with self.assertRaises(ValueError):
+                self.module('native_registry_receipts').RegistryReceiptChain.reopen(store,
+                    pending.operation_id, pending.plan, baseline.receipt, dict(composition.prepared_digests))
+            with self.assertRaises(self.module('transaction').Refused):
+                await runtime.native_yaml_reverse(hass, pending.operation_id, pending.plan.fingerprint,
+                    guard=lambda: None, refresh=refresh)
+        finally:
+            for code in (install_code, discovery_code):
+                sys.monitoring.set_local_events(tool, code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
+            sys.monitoring.free_tool_id(tool)
+            if caller is not None and not caller.done():
+                caller.cancel()
+                await asyncio.gather(caller, return_exceptions=True)
+
+    async def test_stateful_binary_source_refuses_before_registry_effect(self):
+        runtime, mapping, uuids, original = await self.data(variant='binary_sensor', binary_extra='delay_on')
+        async def refresh():
+            return None
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_forward(self.f.hass, mapping, guard=lambda: None, refresh=refresh)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        for old in mapping:
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertFalse(await runtime.journal.active())
