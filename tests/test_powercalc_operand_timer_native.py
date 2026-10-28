@@ -151,6 +151,16 @@ class _TimerFacts(baseline._ClockFacts):
         if phase == 'start':
             assert type(action) is self.timer_action
             matches = [r for r in self.issues if r['kind'] == 'typed' and r['action'] is action]
+            if not matches:
+                # A real first arm inside another monitoring callback has no
+                # recursive issue event. The debug loop retains the ACTUAL
+                # currently dispatching handle after removing it from ready.
+                # Read it; never construct one or use the product issuance ledger.
+                assert self.hass.loop.get_debug(), 'native dispatch handle unavailable'
+                handle = self.hass.loop._current_handle
+                assert type(handle) is asyncio.TimerHandle
+                self._remember_handle(handle, 'observed_native_dispatch_handle')
+                matches = [r for r in self.issues if r['kind'] == 'typed' and r['action'] is action]
             assert len(matches) == 1, 'an independently observed native handle must precede delivery'
             issue = matches[0]
             handle, job, now = issue['handle'], issue['job'], frame.f_locals['now']
