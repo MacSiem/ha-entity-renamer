@@ -62,9 +62,10 @@ class Runtime:
         cancellation cannot release this lock while its IO still runs.
         """
         from .native_template_forward import NativeTemplateForward
+        from .native_template_reverse import _authorize
         from .recovery_controller import _drain_restore as drain_effect
         def current():
-            guard()
+            _authorize(guard)
             if (hass.data.get(DATA_RUNTIME) is not self or not self.loaded or self.unloading):
                 raise ValueError('forward_runtime_unavailable')
         current()
@@ -73,7 +74,13 @@ class Runtime:
             await refresh()
             current()
             async def operation():
-                session = await NativeTemplateForward.prepare(hass, mapping,
+                # No Template ConfigEntry means the aggregate native YAML route.
+                # Selection is server-owned; unsupported populations refuse.
+                factory = NativeTemplateForward
+                if not hass.config_entries.async_entries('template'):
+                    from .native_template_yaml_server import NativeTemplateYAMLServer
+                    factory = NativeTemplateYAMLServer
+                session = await factory.prepare(hass, mapping,
                     guard=current, refresh=refresh)
                 try:
                     return await session.apply()
@@ -83,6 +90,33 @@ class Runtime:
             current()
             # No Plan, receipt, prepared refs or source documents cross this
             # boundary. Global/family readiness is still explicitly false.
+            return {'operation_id': record.operation_id,
+                'fingerprint': record.plan.fingerprint, 'state': record.status,
+                'reason': record.reason, 'migration_ready': False, 'family_complete': False}
+
+    async def native_yaml_reverse(self, hass, operation_id, fingerprint, *, guard, refresh):
+        """Private fresh terminal reverse; no retained forward session capability."""
+        from .native_template_yaml_server import NativeTemplateYAMLServer
+        from .native_template_reverse import _authorize
+        from .recovery_controller import _drain_restore as drain_effect
+        def current():
+            _authorize(guard)
+            if (hass.data.get(DATA_RUNTIME) is not self or not self.loaded or self.unloading):
+                raise ValueError('reverse_runtime_unavailable')
+        current()
+        async with self.operation_lock:
+            current()
+            await refresh()
+            current()
+            async def operation():
+                session = await NativeTemplateYAMLServer.bind_reverse(hass, operation_id,
+                    fingerprint, guard=current, refresh=refresh)
+                try:
+                    return await session.rollback()
+                finally:
+                    session.close()
+            record = await drain_effect(operation())
+            current()
             return {'operation_id': record.operation_id,
                 'fingerprint': record.plan.fingerprint, 'state': record.status,
                 'reason': record.reason, 'migration_ready': False, 'family_complete': False}

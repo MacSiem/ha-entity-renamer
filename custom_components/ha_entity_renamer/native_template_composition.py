@@ -1,9 +1,9 @@
-"""Private typed numeric-entry evidence codec; never authority or live tokens.
+"""Private typed entry/modern YAML evidence codec; never authority or live tokens.
 
 Stored only inside the existing immutable native_input_baseline preparation.
 Its existing PreparedStore canonical envelope supplies size/structure limits;
 this codec adds no unrelated record/string/depth caps.
-Powercalc and broader Template variants deliberately have no codec in this slice.
+Powercalc remains unsupported; installed admission checks the precise Template slice.
 """
 from __future__ import annotations
 
@@ -151,8 +151,17 @@ class TemplateComposition:
         evidence = self.evidence
         _need(type(evidence) is OriginalSourceEvidence
               and evidence.powercalc_sources is None and evidence.powercalc_candidate_sources is None
-              and not receipt.proposed_files and not receipt.changed_domains
               and receipt.ready_for_apply)
+        # Existing entry-only compositions retain their empty-YAML profile.
+        # The YAML server may persist the SAME ORIGINAL plus its sealed
+        # candidate for the qualified modern Template graph only.
+        if receipt.proposed_files or receipt.changed_domains:
+            _need(bool(receipt.proposed_files) and receipt.changed_domains == ('template',)
+                  and evidence.template_candidate_sources is not None
+                  and len(receipt.runtime_expected) == 1
+                  and receipt.runtime_expected[0][0] == 'template'
+                  and None not in receipt.runtime_expected[0][1:]
+                  and receipt.runtime_expected[0][1] != receipt.runtime_expected[0][2])
         evidence.assert_receipt(receipt)
         _ledger(evidence.ledger, 1)
         _need(tuple(row.domain for row in evidence.domains) == ('automation', 'script'))
