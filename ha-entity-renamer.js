@@ -1531,6 +1531,10 @@ class HAEntityRenamer extends HTMLElement {
       unavailable:'Nie udało się potwierdzić analizy. Sprawdź dostępność backendu i wybierz ponowną analizę.',
       unauthorized:'Analiza wymaga konta administratora HA.',
       entities:'Encje', devices:'Urządzenia', statistics:'Statystyki', conflicts:'Konflikty',
+      rejected:'Pozycje wymagające rozliczenia',entity:'Encja',device:'Urządzenie',registry:'Rejestr',
+      reasons:{source_missing:'Nie znaleziono źródła',destination_occupied:'Docelowy identyfikator jest zajęty',
+        device_changed:'Powiązanie urządzenia zmieniło się',identity_unverified:'Niepotwierdzona tożsamość',
+        device_missing:'Nie znaleziono urządzenia',ambiguous_registry:'Niejednoznaczny rejestr'},
       complete:'Rozpoznano', unknown:'Niepotwierdzone', blocked:'Wymaga obsługi', denied:'Brak dostępu',
       families:{entity_registry:'Rejestr encji',device_registry:'Rejestr urządzeń',automation:'Automatyzacje',
         script:'Skrypty',dashboard:'Dashboardy',template:'Szablony',energy:'Energy',powercalc:'Powercalc',
@@ -1545,6 +1549,10 @@ class HAEntityRenamer extends HTMLElement {
       unavailable:'Analysis could not be verified. Check the backend and explicitly analyze again.',
       unauthorized:'Analysis requires a Home Assistant administrator.',
       entities:'Entities',devices:'Devices',statistics:'Statistics',conflicts:'Conflicts',
+      rejected:'Rows that need reconciliation',entity:'Entity',device:'Device',registry:'Registry',
+      reasons:{source_missing:'Rename source not found',destination_occupied:'Destination identifier is occupied',
+        device_changed:'Device association changed',identity_unverified:'Identity is unverified',
+        device_missing:'Device not found',ambiguous_registry:'Ambiguous registry'},
       complete:'Identified',unknown:'Unverified',blocked:'Requires support',denied:'Access denied',
       families:{entity_registry:'Entity registry',device_registry:'Device registry',automation:'Automations',
         script:'Scripts',dashboard:'Dashboards',template:'Templates',energy:'Energy',powercalc:'Powercalc',
@@ -1560,11 +1568,13 @@ class HAEntityRenamer extends HTMLElement {
     const result = state?.summary;
     const details = result ? `<p>${t.entities}: ${result.changes.entities} · ${t.devices}: ${result.changes.devices} · ${t.statistics}: ${result.changes.statistics} · ${t.conflicts}: ${result.conflicts}</p>
       <ul>${result.families.map(row => `<li>${t.families[row.family]}: ${row.blocked ? t.blocked : row.status === 'COMPLETE' ? t.complete : row.status === 'DENIED' ? t.denied : t.unknown}</li>`).join('')}</ul>` : '';
+    const rejected = result?.registry_conflicts?.length ? '<p>'+t.rejected+'</p><ul>'+result.registry_conflicts.map(row =>
+      '<li>'+(row.kind === 'entity' ? _entityIdHtml(row.entity_id) : t[row.kind]+(Number.isInteger(row.index) ? ' '+(row.index+1) : ''))+': '+t.reasons[row.reason]+'</li>').join('')+'</ul>' : '';
     return `<h3>${t.title}</h3><label for="renamerImportFile">${t.file}</label>
       <input type="file" accept=".json,application/json" id="renamerImportFile">
       <p role="status" aria-live="polite" ${busy ? 'aria-busy="true"' : ''}>${t[state?.phase || 'idle'] || t.unavailable}</p>
       <div class="renamer-backend-row"><button type="button" class="btn btn-outline" id="analyzeRenamerImport" ${!state?.content || busy ? 'disabled' : ''}>${t.analyze}</button>
-      <button type="button" class="btn btn-outline" id="clearRenamerImport" ${!state ? 'disabled' : ''}>${t.clear}</button></div>${details}`;
+      <button type="button" class="btn btn-outline" id="clearRenamerImport" ${!state ? 'disabled' : ''}>${t.clear}</button></div>${details}${rejected}`;
   }
 
   _updateMigrationPanel() {
@@ -1620,15 +1630,27 @@ class HAEntityRenamer extends HTMLElement {
       const count = n => Number.isInteger(n) && n >= 0 && n <= 10000;
       const labels = this._migrationLabels().families;
       const families = result?.families;
+      const rejected = result?.registry_conflicts ?? [];
+      const imported = JSON.parse(state.content);
+      const sourceIds = new Set((imported.entities || []).map(row => row.entity_id));
+      const reasons = this._migrationLabels().reasons;
       if (result?.migration_ready !== false || !/^[a-f0-9]{64}$/.test(result.digest)
         || !result.changes || !['entities','devices','statistics'].every(key => count(result.changes[key]))
         || !Array.isArray(result.conflicts) || result.conflicts.length > 10000
+        || !Array.isArray(rejected) || rejected.length > 10000
+        || !rejected.every(row => row && ['entity','device','registry'].includes(row.kind)
+          && Object.hasOwn(reasons,row.reason)
+          && (row.kind === 'registry' ? row.index === null : count(row.index))
+          && (row.kind !== 'entity' || typeof row.entity_id === 'string' && sourceIds.has(row.entity_id)
+            && /^[a-z_][a-z0-9_]*\.[a-z0-9_]+$/.test(row.entity_id)))
         || !Array.isArray(families) || families.length > 13
         || new Set(families.map(row => row?.family)).size !== families.length
         || !families.every(row => Object.hasOwn(labels,row?.family) && ['COMPLETE','UNKNOWN','DENIED'].includes(row.status)
           && Array.isArray(row.blockers))) throw Error();
       state.summary = {changes:{entities:result.changes.entities,devices:result.changes.devices,statistics:result.changes.statistics},
-        conflicts:result.conflicts.length,families:families.map(row=>({family:row.family,status:row.status,blocked:row.blockers.length>0}))};
+        conflicts:result.conflicts.length,families:families.map(row=>({family:row.family,status:row.status,blocked:row.blockers.length>0})),
+        registry_conflicts:rejected.map(row=>({kind:row.kind,index:row.index,reason:row.reason,
+          ...(row.kind === 'entity' ? {entity_id:row.entity_id} : {})}))};
       state.phase = 'reviewed';
     } catch (error) {
       if (!current()) return;
