@@ -307,8 +307,14 @@ def _template_entity_keys(block, platform, root=None):
     if __package__:
         from .template_physical_identity import physical_template_key
     else:
-        # The existing checker is also launched directly as a script.
-        from template_physical_identity import physical_template_key
+        # The checker runs by absolute path with -I: its directory is not an
+        # import search path. Load only our explicitly colocated source file.
+        from importlib.util import module_from_spec, spec_from_file_location
+        spec = spec_from_file_location('_renamer_template_physical_identity',
+            Path(__file__).with_name('template_physical_identity.py'))
+        module = module_from_spec(spec)
+        spec.loader.exec_module(module)
+        physical_template_key = module.physical_template_key
     entities = list(block.get(platform, ()))
     if all(type(entity.get('unique_id')) is str and entity['unique_id'] for entity in entities):
         prefix = block.get('unique_id')

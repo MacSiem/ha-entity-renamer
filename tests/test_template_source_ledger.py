@@ -80,7 +80,7 @@ class TemplateSourceLedgerTests(unittest.TestCase):
     def test_old_automation_ledger_is_not_given_template_findings(self):
         from custom_components.ha_entity_renamer.yaml_source_ledger import extract_source_ledger
         plan, bundle = fixture.SourceLedgerTests().fixture({
-            'configuration.yaml': 'script: {one: {sequence: []}}\ntemplate:\n- sensor: [{state: "1"}]\n'})
+            'configuration.yaml': 'script: {one: {sequence: []}}\ntemplate:\n- button: [{name: Unsupported, press: []}]\n'})
         legacy = extract_source_ledger(plan, bundle)
         self.assertEqual(legacy.schema, 1)
         self.assertFalse(legacy.findings)
