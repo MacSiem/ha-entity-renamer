@@ -21,7 +21,7 @@ import test_receipted_helper_native as receipted
 SOURCE = {
     'manifest.json': json.dumps({'domain': 'renamer_cold_source', 'name': 'Cold source fixture',
         'version': '0.0.1', 'documentation': 'https://www.home-assistant.io/',
-        'requirements': [], 'codeowners': [], 'iot_class': 'local_push'}),
+        'requirements': [], 'codeowners': [], 'iot_class': 'local_push', 'config_flow': True}),
     '__init__.py': '''async def async_setup(hass, config):
     return True
 async def async_setup_entry(hass, entry):
@@ -29,6 +29,13 @@ async def async_setup_entry(hass, entry):
     return True
 async def async_unload_entry(hass, entry):
     return await hass.config_entries.async_unload_platforms(entry, ['sensor'])
+''',
+    'config_flow.py': '''from homeassistant.config_entries import ConfigFlow
+class ColdSourceConfigFlow(ConfigFlow, domain='renamer_cold_source'):
+    VERSION = 1
+    MINOR_VERSION = 1
+    async def async_step_user(self, user_input=None):
+        return self.async_create_entry(title='Persistent cold source', data={}, options={'initial': 7})
 ''',
     'sensor.py': '''from homeassistant.components.sensor import SensorEntity
 async def async_setup_entry(hass, entry, async_add_entities):
