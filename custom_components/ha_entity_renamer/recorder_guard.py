@@ -118,9 +118,9 @@ class NativeRecorderGuard:
         await asyncio.wait_for(asyncio.shield(future), timeout=60)
 
     async def snapshot(self, mapping):
-        # Preserve existing synchronization for the original snapshot consumers.
-        # Registry callbacks must enqueue migration work before the barrier.
-        await self.hass.async_block_till_done()
+        # Native registry metadata callbacks enqueue their work synchronously.
+        # Wait for that Recorder queue, not unrelated foreground reloads that
+        # may themselves be waiting for our held native activation lease.
         await self.async_synchronize()
         ids = tuple(sorted(set(mapping) | set(mapping.values())))
         return await self.instance.async_add_executor_job(partial(_read, self.instance, ids))
