@@ -187,7 +187,7 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
             from copy import deepcopy
             payload = deepcopy(reopened.resolve('template-entry-options', digests['template-entry-options']))
             payload['data']['after']['options']['availability'] = '{{ true }}'
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(module('transaction').Refused, '^helper_preparation_mismatch$'):
                 await module('yaml_validation').async_validate_proposed_with_sources(
                     hass,yaml_plan,root.parent,native_helpers=((
                         'template-entry-options',digests['template-entry-options'],payload),))
