@@ -170,10 +170,23 @@ test('late restore cannot project results after account, connection or DOM autho
  }finally{close(f);}}
 });
 
-test('hiding help invalidates pending status and removes private recovery RAM',async()=>{
+test('hiding help preserves explicit pending operation status in the active card',async()=>{
  const f=await fixture();try{const wait=deferred();f.setBackend(()=>wait.promise);button(f,'checkRenamerBackendStatus').click();
  f.card.setConfig({show_help:false,show_support:false});wait.resolve(ready({operations:[OP]}));await flush();
- assert.equal(f.card._recovery,null);assert.equal(button(f,'renamerRecoveryPanel'),null);
+ assert.ok(f.card._recovery);assert.ok(button(f,'renamerRecoveryPanel'));
+ assert.equal(f.card.shadowRoot.querySelectorAll('#checkRenamerBackendStatus').length,1);
+ assert.equal(restores(f).length,0);
+ }finally{close(f);}
+});
+
+test('recovery remains usable with help disabled and import changes do not replace its confirmation',async()=>{
+ const f=await fixture({showHelp:false});try{
+ await inspect(f);await click(f,'askRenamerRecovery');
+ const confirm=button(f,'confirmRenamerRecovery');assert.ok(confirm);
+ f.card._updateMigrationPanel();assert.equal(button(f,'confirmRenamerRecovery'),confirm);
+ await click(f,'confirmRenamerRecovery');assert.equal(restores(f).length,1);
+ assert.match(button(f,'renamerRecoveryPanel').textContent,/restored/i);
+ assert.equal(f.card.shadowRoot.querySelectorAll('#renamerRecoveryPanel').length,1);
  }finally{close(f);}
 });
 

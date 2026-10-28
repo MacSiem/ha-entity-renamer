@@ -230,10 +230,10 @@ test('same-session state and locale changes retain only sanitized status without
   } finally {clean(f);}
 });
 
-test('show_help=false leaves legacy card and network unchanged', async () => {
+test('show_help=false keeps explicit status available without automatic requests', async () => {
   const f = await fixture({showHelp:false});
   try {
-    assert.equal(f.card.shadowRoot.getElementById('checkRenamerBackendStatus'),null);
+    assert.ok(f.card.shadowRoot.getElementById('checkRenamerBackendStatus'));
     assert.equal(ws(f).length,0);
     assert.ok(f.card.shadowRoot.getElementById('searchInput'));
   } finally {clean(f);}
