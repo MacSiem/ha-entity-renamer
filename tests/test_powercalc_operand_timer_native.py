@@ -274,7 +274,13 @@ class _CustomTimerFacts(CustomProfileIOProof, _TimerFacts):
 @unittest.skipUnless(baseline.prior.accepted.fixture.HAS_HA, 'actual supported HA required')
 class NativePowercalcActualTimerTests(unittest.IsolatedAsyncioTestCase):
     namespace_source_bytes = baseline.NativePowercalcOperandClockRedTests.namespace_source_bytes
-    asyncSetUp = baseline.NativePowercalcOperandClockRedTests.asyncSetUp
+    async def asyncSetUp(self):
+        # Ordinary fixture selection must precede native setup and ORIGINAL.
+        self.custom_profile_directories = self._testMethodName in (
+            'test_both_direct_actual_timers_fire_rearm_and_handoff_with_independent_oracle',
+            'test_cancel_after_actual_timer_delivery_settles_without_leaking_or_cancelling_native_handoff')
+        await baseline.NativePowercalcOperandClockRedTests.asyncSetUp(self)
+
     _setup_real_vendor = baseline.NativePowercalcOperandClockRedTests._setup_real_vendor
     _flush_documents = baseline.NativePowercalcOperandClockRedTests._flush_documents
     guard = baseline.NativePowercalcOperandClockRedTests.guard
@@ -294,7 +300,7 @@ class NativePowercalcActualTimerTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(type(action) is facts.timer_action and action.owner.scope.hass is self.f.hass)
 
     async def _drive(self, *, cancel=False):
-        self.custom_profile_directories = True
+        self.assertTrue(self.custom_profile_directories)
         await self.ready()
         facts = _CustomTimerFacts(self)
         await facts.prepare()
