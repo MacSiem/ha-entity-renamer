@@ -1,4 +1,4 @@
-"""Admin-only backend status. Mutation commands require complete native coverage."""
+"""Admin-only discovery and narrowly qualified server-owned recovery commands."""
 from contextlib import asynccontextmanager
 
 import voluptuous as vol
@@ -12,6 +12,8 @@ def async_register(hass):
     websocket_api.async_register_command(hass, ws_status)
     websocket_api.async_register_command(hass, ws_discover)
     websocket_api.async_register_command(hass, ws_preview)
+    websocket_api.async_register_command(hass, ws_recovery_inspect)
+    websocket_api.async_register_command(hass, ws_recovery_restore)
 
 
 class _DiscoveryUnauthorized(PermissionError):
@@ -127,34 +129,89 @@ async def ws_preview(hass, connection, message):
     await _read_discovery(hass, connection, message, preview=True)
 
 
+def _recovery_authority(hass, connection, runtime):
+    """Synchronous AuthStore identity/role checks across every native await.
+
+    AuthManager.async_get_user is normal IO, never awaited through AuthStore.
+    The store reference is used only for the final synchronous continuation.
+    """
+    user_id = connection.user.id
+    current_user = connection.user
+    native_source = None
+    def guard():
+        if native_source is not None:
+            manager, store = native_source
+            if (hass.auth is not manager or manager._store is not store
+                    or type(store._users) is not dict
+                    or store._users.get(user_id) is not current_user):
+                raise _DiscoveryUnauthorized()
+        if (current_user is None or not current_user.is_active or not current_user.is_admin
+                or connection.user is not current_user or connection.user.id != user_id):
+            raise _DiscoveryUnauthorized()
+        if hass.data.get(DATA_RUNTIME) is not runtime or not runtime.loaded or runtime.unloading:
+            raise ValueError('recovery_runtime_unavailable')
+    async def refresh():
+        nonlocal current_user, native_source
+        guard()
+        from homeassistant.auth import AuthManager
+        if type(hass.auth) is not AuthManager:
+            raise _DiscoveryUnauthorized()
+        current_user = await hass.auth.async_get_user(user_id)
+        native_source = (hass.auth, hass.auth._store)
+        guard()
+    return guard, refresh
+
+
+async def _read_recovery(hass, connection, message, *, action):
+    from . import Runtime
+    runtime = hass.data.get(DATA_RUNTIME)
+    if type(runtime) is not Runtime or not runtime.loaded or runtime.unloading:
+        connection.send_error(message['id'], 'unavailable', 'Entity Renamer backend is not loaded')
+        return
+    guard, refresh = _recovery_authority(hass, connection, runtime)
+    try:
+        await refresh()
+        if action == 'status':
+            result = await runtime.recovery_status(hass, guard=guard, refresh=refresh)
+        elif action == 'inspect':
+            result = await runtime.recovery_inspect(hass, message['operation_id'], message['fingerprint'],
+                                                    guard=guard, refresh=refresh)
+        else:
+            result = await runtime.recovery_restore(hass, message['operation_id'], message['fingerprint'],
+                                                    guard=guard, refresh=refresh)
+        # Native controller owns its final source/history admission; no extra
+        # auth await can reopen that gap. The actual backing user is checked now.
+        guard()
+    except PermissionError:
+        connection.send_error(message['id'], 'unauthorized', 'Administrator permissions are required')
+    except Exception as error:
+        unavailable = type(error) is ValueError and error.args == ('recovery_runtime_unavailable',)
+        connection.send_error(message['id'], 'unavailable' if unavailable else 'recovery_unavailable',
+                              'Migration recovery could not be verified')
+    else:
+        connection.send_result(message['id'], result)
+
+
 @websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/status'})
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_status(hass, connection, message):
-    user_id = connection.user.id
-    runtime = hass.data.get(DATA_RUNTIME)
-    if runtime is None or not runtime.loaded or runtime.unloading:
-        connection.send_error(message['id'], 'unavailable', 'Entity Renamer backend is not loaded')
-        return
-    try:
-        active = await runtime.journal.active()
-        user = await hass.auth.async_get_user(user_id)
-    except Exception:
-        connection.send_error(message['id'], 'recovery_unavailable', 'Migration recovery status is unavailable')
-        return
-    if (user is None or not user.is_active or not user.is_admin
-            or connection.user.id != user_id or not connection.user.is_admin
-            or not connection.user.is_active):
-        connection.send_error(message['id'], 'unauthorized', 'Administrator permissions are required')
-        return
-    if hass.data.get(DATA_RUNTIME) is not runtime or not runtime.loaded or runtime.unloading:
-        connection.send_error(message['id'], 'unavailable', 'Entity Renamer backend was unloaded')
-        return
-    connection.send_result(message['id'], {
-        'version': VERSION,
-        'migration_ready': False,
-        'reason': 'dependency_coverage_incomplete',
-        'recovery_required': bool(active),
-        'operations': [{'operation_id': record.operation_id, 'status': record.status,
-                        'direction': record.direction} for record in active],
-    })
+    await _read_recovery(hass, connection, message, action='status')
+
+
+@websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/recovery/inspect',
+    vol.Required('operation_id'): vol.All(str, vol.Match(r'[A-Za-z0-9_-]{1,80}\Z')),
+    vol.Required('fingerprint'): vol.All(str, vol.Match(r'[0-9a-f]{64}\Z'))})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_recovery_inspect(hass, connection, message):
+    await _read_recovery(hass, connection, message, action='inspect')
+
+
+@websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/recovery/restore',
+    vol.Required('operation_id'): vol.All(str, vol.Match(r'[A-Za-z0-9_-]{1,80}\Z')),
+    vol.Required('fingerprint'): vol.All(str, vol.Match(r'[0-9a-f]{64}\Z'))})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_recovery_restore(hass, connection, message):
+    await _read_recovery(hass, connection, message, action='restore')

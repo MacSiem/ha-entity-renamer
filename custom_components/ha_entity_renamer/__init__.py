@@ -22,6 +22,38 @@ class Runtime:
     loaded: bool = True
     unloading: bool = False
 
+    async def _recovery(self, hass, action, operation_id=None, fingerprint=None, *, guard, refresh):
+        from .recovery_controller import RecoveryController
+        def current():
+            guard()
+            if (hass.data.get(DATA_RUNTIME) is not self or not self.loaded or self.unloading):
+                raise ValueError('recovery_runtime_unavailable')
+        current()
+        async with self.operation_lock:
+            current()  # Fresh identity/role after the native FIFO lock wait.
+            await refresh()
+            current()
+            controller = RecoveryController(hass, self, guard=current, refresh=refresh)
+            if action == 'status':
+                result = await controller.status()
+            elif action == 'inspect':
+                result = await controller.inspect(operation_id, fingerprint)
+            elif action == 'restore':
+                result = await controller.restore(operation_id, fingerprint)
+            else:
+                raise ValueError('recovery_invalid_action')
+            current()
+            return result
+
+    async def recovery_status(self, hass, *, guard, refresh):
+        return await self._recovery(hass, 'status', guard=guard, refresh=refresh)
+
+    async def recovery_inspect(self, hass, operation_id, fingerprint, *, guard, refresh):
+        return await self._recovery(hass, 'inspect', operation_id, fingerprint, guard=guard, refresh=refresh)
+
+    async def recovery_restore(self, hass, operation_id, fingerprint, *, guard, refresh):
+        return await self._recovery(hass, 'restore', operation_id, fingerprint, guard=guard, refresh=refresh)
+
     async def discover(self, hass, proposal, *, guard, refresh):
         """Server-owned read under the same lease used by migration/recovery.
 

@@ -84,6 +84,16 @@ class DurableJournal:
             self._ready()
             return self.records.get(operation_id)
 
+    async def all(self):
+        """Detached immutable records for server-owned recovery inventory.
+
+        Applied records may still have an unacknowledged lifecycle setup. The
+        public projection must not mistake active()==() for complete recovery.
+        """
+        async with self.lock:
+            self._ready()
+            return tuple(self.records[key] for key in sorted(self.records))
+
     async def active(self):
         async with self.lock:
             self._ready()
