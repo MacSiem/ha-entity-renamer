@@ -97,11 +97,14 @@ class NativePublicYAMLRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 result = await runtime.native_forward(self.f.hass, mapping, guard=guard, refresh=refresh)
             except self.module('yaml_validation').YAMLValidationError as exc:
                 if str(exc) == 'validation_graph_changed':
-                    import os
-                    for directory in sorted(self.f.root.rglob('*')):
-                        if directory.is_dir() and directory.parent == self.f.root:
-                            print('QA_ROOT_DIRECTORY', directory.name, sorted(x.name for x in directory.iterdir()))
-                    print('QA_ROOT_NAMES', sorted(x.name for x in self.f.root.iterdir()))
+                    trace = exc.__traceback__
+                    while trace is not None:
+                        frame = trace.tb_frame
+                        if frame.f_code.co_name == 'assert_validation_current':
+                            values = frame.f_locals
+                            print('QA_GRAPH_DIFF', values.get('path'),
+                                  'expected', values.get('expected'), 'current', values.get('current'))
+                        trace = trace.tb_next
                 raise
             if status_probe:
                 self.assertIsNotNone(poll_task)
