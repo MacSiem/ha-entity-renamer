@@ -8,11 +8,33 @@ remain unqualified; the enclosing diagnostic still reports UNKNOWN.
 from __future__ import annotations
 
 import asyncio
-from datetime import timezone
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from .powercalc_operand_clock import _Clock, _need, _numeric, _utc
 from .powercalc_source_binding import _dispatch_token
+
+
+@dataclass(frozen=True)
+class PowercalcSubtractClockInterval:
+    """Actual completed interval and local provenance, never computed energy.
+
+    Native arithmetic called inside sys.monitoring's callback is deliberately
+    not monitored recursively. These are the actual immutable datetime objects
+    used by that arithmetic, with its original live references for readback.
+    """
+    owner: object
+    start: datetime
+    end: datetime
+    old_engine: object
+    new_engine: object
+    original_source_state: object
+    new_source_state: object
+    producer: object
+    physical_inputs: tuple
+    native_update: object
+    native_one_state: object
 
 
 class _SubtractClockOwner:
@@ -62,6 +84,7 @@ class _SubtractClockOwner:
         self.target = None
         self.pending_native = None
         self.at_setup_seam = False
+        self.interval = None
 
     def quiet(self):
         return all(self.scope.hass.states.get(k) is v for k, v in self.inputs.items())
@@ -157,6 +180,24 @@ class _SubtractClockOwner:
             'old_engine': id(c.old), 'new_engine': id(c.engine), 'producer': id(new),
             'original_source_state': id(self.original_state), 'new_source_state': id(state)})
         self.phase = 'native'
+        if self.at_setup_seam:
+            self._complete_interval(state)
+
+    def _complete_interval(self, state):
+        c = self.c
+        handle, action, endpoint = self.parent._native_timer(c.engine)
+        _need(self.interval is None and self.phase == 'native' and not self.depth
+              and self.quiet() and endpoint is state
+              and c.engine._last_integration_time is c.endpoint
+              and c.engine._last_integration_trigger is self.integration._IntegrationTrigger.TimeElapsed,
+              'subtract_completed_interval_provenance')
+        # No computed area, counter, encoded receipt total or expected value is
+        # exposed by this fact. It records the endpoints actually consumed by
+        # the completed arithmetic, after native clock ownership readback.
+        self.interval = PowercalcSubtractClockInterval(self, c.anchor, c.endpoint,
+            c.old, c.engine, self.original_state, state,
+            self.scope.added[c.power.entity_id], tuple(self.inputs.items()),
+            c.engine._update_integral.__func__, c.engine._method.calculate_area_with_one_state.__func__)
 
     def observe(self, frame, phase):
         c, p = self.c, self.parent
@@ -182,6 +223,7 @@ class _SubtractClockOwner:
                 obj._last_integration_time = c.endpoint
                 obj._last_integration_trigger = self.integration._IntegrationTrigger.TimeElapsed
                 self.pending_native = None
+                self._complete_interval(endpoint)
             return
         if obj is not self.target or self.phase not in ('retired', 'integrating'):
             return

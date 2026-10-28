@@ -155,22 +155,6 @@ class _GroupHeadFacts:
                 power = Decimal(local['old_state_state'])
                 assert power.is_finite() and start is not None and end is not None
                 return start, end, power, 'source'
-            owner_type = self.case.module('powercalc_subtract_clock')._SubtractClockOwner
-            if node.f_code is owner_type._handoff.__code__:
-                owner = local.get('self')
-                assert type(owner) is owner_type and owner.scope.hass is self.hass
-                assert owner.c.old is self.old_subtract and owner.c.engine is entity
-                assert owner.target is entity and owner.phase == 'integrating' and owner.depth == 1
-                assert owner.quiet() and owner.original_state.entity_id == self.case.subtract_power.entity_id
-                assert _numeric(owner.original_state, 'W') == self.held_power
-                # Native arithmetic's actual typed producer and observed endpoints
-                # are qualified here. Expected area still comes from independent
-                # child W and datetime geometry; no receipt/area/HEAD is an oracle.
-                assert owner.c.value == self.held_power
-                assert owner.c.old.entity_id in owner.scope.removed and not owner.c.old._on_remove
-                end = local['end']
-                assert type(end) is datetime and end >= owner.c.anchor
-                return owner.c.anchor, end, self.held_power, 'retained_signed_quiet'
         raise AssertionError('unqualified subtract integral producer; no replacement oracle')
 
     def observe(self, frame, phase, returned=None):
@@ -300,6 +284,70 @@ class _GroupHeadFacts:
         for code in self.tags:
             monitor.set_local_events(self.tool, code, monitor.events.PY_START | monitor.events.PY_RETURN)
 
+    def capture_owned_interval(self, result):
+        # Calls made inside a sys.monitoring callback do not produce recursive
+        # monitoring events, including for another tool. Read the completed real
+        # clock interval before issuing the public stimulus. Counters/area in the
+        # product receipt are intentionally never read as an expected value.
+        module = self.case.module('powercalc_subtract_clock')
+        fact = result.operand_clock.subtract_interval
+        assert type(fact) is module.PowercalcSubtractClockInterval
+        owner = fact.owner
+        assert type(owner) is module._SubtractClockOwner and owner.interval is fact
+        assert owner.scope.hass is self.hass and owner.scope.original is self.case.original_runtime
+        assert owner.scope.evidence is self.case.evidence
+        assert owner.scope.exact_owner.policy.chain is self.case.chain
+        assert owner.phase == 'native' and owner.depth == 0 and owner.pending_native is None
+        assert fact.old_engine is self.old_subtract and fact.new_engine is owner.target
+        assert fact.new_engine is owner.c.engine and fact.new_engine is not self.old_subtract
+        assert fact.original_source_state is owner.original_state
+        assert fact.original_source_state.entity_id == self.case.subtract_power.entity_id
+        assert _numeric(fact.original_source_state, 'W') == self.held_power
+        assert fact.producer is owner.scope.added[self.case.subtract_power.entity_id]
+        assert fact.new_source_state.entity_id == self.case.subtract_power.entity_id
+        assert _numeric(fact.new_source_state, 'W') == self.held_power
+        assert tuple(owner.inputs.items()) == fact.physical_inputs and owner.quiet()
+        assert all(self.hass.states.get(key) is state for key, state in fact.physical_inputs)
+        assert fact.native_update is self.integration._update_integral
+        assert fact.native_one_state is self.vendor.integration._IntegrationMethod.calculate_area_with_one_state
+        start, end = fact.start, fact.end
+        assert start is owner.c.anchor and end is owner.c.endpoint
+        assert type(start) is datetime and type(end) is datetime and end >= start
+        assert self.departure is not None and self.baseline is not None
+        assert owner.c.old.entity_id in owner.scope.removed and not owner.c.old._on_remove
+        # The real owned interval precedes every later native interval. A native
+        # integral before handoff would have disqualified the product path.
+        assert all(left >= end for left, right in self.intervals)
+        key = (start, end, self.held_power)
+        assert key not in self.seen_intervals, 'same owned interval recorded twice'
+        self.seen_intervals.add(key)
+        increment = self.held_power * _seconds(end, start) / Decimal(3600000)
+        # Decimal addition is not associative. Replay the independently derived
+        # increments in actual chronological order, so the invisible earlier
+        # interval is added before later native inputs, rather than rounded last.
+        running = self.baseline + increment
+        references = {(): running}
+        assert len(self.intervals) == len(self.subtract_heads)
+        for index, row in enumerate(self.subtract_heads):
+            running += Decimal(row['increment'])
+            references[tuple(self.intervals[:index + 1])] = running
+            row['reference_without_missing_gap'] = str(running)
+        self.reference = running
+        # Reload may have delivered later real native integrals before returning
+        # this fact. Add only the invisible earlier interval to their test
+        # references/coverage; no actual HEAD is changed or adopted as baseline.
+        if self.first_new is not None:
+            point, head, reference, covered = self.first_new
+            assert point >= end
+            self.first_new = (point, head, references[covered], ((start, end), *covered))
+        self.checkpoints = [(point, head, references[covered], ((start, end), *covered))
+                            for point, head, reference, covered in self.checkpoints]
+        self.intervals.insert(0, (start, end))
+        self.subtract_heads.insert(0, {'kind': 'retained_signed_quiet',
+            'entity': id(fact.new_engine), 'start': start.isoformat(), 'end': end.isoformat(),
+            'actual_child_w': str(self.held_power), 'increment': str(increment),
+            'duplicate_interval': False, 'provenance': 'completed_typed_native_clock_interval'})
+
     def capture_final(self):
         # Native public platform inventory; no constructing/replacing entities.
         from homeassistant.helpers.entity_platform import async_get_platforms
@@ -421,6 +469,7 @@ class NativePowercalcGroupHeadTests(unittest.IsolatedAsyncioTestCase):
             result = await self.numeric.async_capture_powercalc_numeric_reload(
                 self.f.hass, self.chain, self.evidence, self.original_runtime, guard=self.guard,
                 exact_fields=True, retain_producers=True, operand_clock=True)
+            facts.capture_owned_interval(result)
             # One normal public Light stimulus after native reload, not a direct
             # calculator call. It supplies real signed child input/time endpoints.
             await self.sources[0].async_turn_on(brightness=1)

@@ -87,6 +87,7 @@ class PowercalcOperandClockReceipt:
     scope_bindings_json: bytes
     steps_json: bytes
     timer_proofs_json: bytes
+    subtract_interval: object | None = None
     direct_operand_clock_verified: bool = field(default=True, init=False)
     continuity_verified: bool = field(default=False, init=False)
     counter_ownership_verified: bool = field(default=False, init=False)
@@ -707,7 +708,8 @@ class _OperandClockOwner:
     def finish(self, current):
         from .powercalc_profile_binding import _energy_listeners
         self.check()
-        _need(self.subtract.pending_native is None and self.subtract.depth == 0,
+        _need(self.subtract.pending_native is None and self.subtract.depth == 0
+              and (self.subtract.phase != 'native' or self.subtract.interval is not None),
               'subtract_incomplete_native_handoff')
         _need(all(c.phase == 'native' and c.handle is None and c.transport is None
                   and not c.neutralizing and current[name] is c.engine
@@ -722,7 +724,8 @@ class _OperandClockOwner:
                    'subtract_quiet_handoff': {'phase': self.subtract.phase,
                        'steps': self.subtract.steps},
                    'time_policy': 'actual_update_return_utc_v1', 'ha_codes': [id(code) for code in self.hc]}),
-            _json(self.steps), _json(self.timer_proofs))
+            _json(self.steps), _json(self.timer_proofs),
+            subtract_interval=self.subtract.interval)
 
     def annotate(self, error):
         if self.subtract is not None:
