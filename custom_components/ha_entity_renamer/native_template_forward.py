@@ -71,13 +71,13 @@ class _UnchangedConsumers:
                 plan = planner(_plain(config), mapping)
                 _need(not plan.markers and not plan.changes, name + '_dependency_unsupported')
         obj.native = _ConsumerFence(hass, observed, _plain, names=tuple(names))
-        obj.runtime_sample = None
+        obj.runtime_sample = obj.runtime_sampler = None
         obj.evidence = obj.observed = None
         obj.check()
         return obj
 
     async def bind_sources(self, receipt, evidence, *, guard):
-        from .yaml_source_binding import async_bind_original_runtime, _runtime_sample
+        from .yaml_source_binding import async_bind_original_runtime, _RuntimeSourceSampler
         from .native_discovery_inputs import async_observe_discovery_inputs
         from .discovery import _runtime_family
         # A loaded component must have an actual settled complete projection;
@@ -92,10 +92,12 @@ class _UnchangedConsumers:
         _need(bound.verified, 'source_runtime_unqualified')
         observed = await async_observe_discovery_inputs(self.hass, guard=guard)
         guard()
-        sample = _runtime_sample(self.hass, evidence, observed)
+        sampler = _RuntimeSourceSampler.bind(evidence, observed)
+        sample = sampler.sample(self.hass, evidence, observed)
         _need(not sample[1] and sample[0] == bound.rows and sample[2] == bound.tokens,
               'source_runtime_changed')
-        self.evidence, self.observed, self.runtime_sample = evidence, observed, sample
+        self.evidence, self.observed, self.runtime_sample, self.runtime_sampler = (
+            evidence, observed, sample, sampler)
         self.check()
 
     def check(self):
@@ -109,9 +111,10 @@ class _UnchangedConsumers:
                   id(self.hass.data.get('energy_manager'))), 'consumer_inventory_changed')
         self.native.check()
         if self.runtime_sample is not None:
-            from .yaml_source_binding import _runtime_sample
-            _need(_runtime_sample(self.hass, self.evidence, self.observed) == self.runtime_sample,
-                  'source_runtime_changed')
+            from .yaml_source_binding import _RuntimeSourceSampler
+            _need(type(self.runtime_sampler) is _RuntimeSourceSampler
+                  and self.runtime_sampler.sample(self.hass, self.evidence, self.observed)
+                      == self.runtime_sample, 'source_runtime_changed')
 
     def physical(self):
         self.native.physical()

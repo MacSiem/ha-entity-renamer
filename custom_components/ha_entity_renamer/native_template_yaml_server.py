@@ -520,7 +520,7 @@ class NativeTemplateYAMLServer:
 
     async def _bind_accepted_sources(self):
         from .native_discovery_inputs import async_observe_discovery_inputs
-        from .yaml_source_binding import _runtime_sample
+        from .yaml_source_binding import _RuntimeSourceSampler
         from .discovery import _runtime_family
         for domain in ('automation', 'script'):
             if domain in self.consumers.loaded or self.evidence.ledger.keys_for_native_projection(domain):
@@ -528,10 +528,14 @@ class NativeTemplateYAMLServer:
                 _need(family.status == 'COMPLETE' and token is not None, 'source_runtime_unqualified')
         observed = await async_observe_discovery_inputs(self.hass, guard=self._scope)
         self._scope()
-        sample = _runtime_sample(self.hass, self.evidence, observed)
+        sampler = _RuntimeSourceSampler.bind(self.evidence, observed)
+        sample = sampler.sample(self.hass, self.evidence, observed)
         _need(not sample[1], 'source_runtime_unqualified')
-        self.consumers.evidence, self.consumers.observed = self.evidence, observed
-        self.consumers.runtime_sample = sample
+        # One synchronous replacement: guards never see a corpus from a
+        # different evidence/observation pair during forward/reverse binding.
+        (self.consumers.evidence, self.consumers.observed,
+         self.consumers.runtime_sample, self.consumers.runtime_sampler) = (
+            self.evidence, observed, sample, sampler)
         self._scope()
 
     async def _terminal(self, expected, *, rollback):

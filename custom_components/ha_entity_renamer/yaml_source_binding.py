@@ -15,6 +15,7 @@ from .template_source_evidence import OriginalTemplateSources, CandidateTemplate
 from .yaml_validation import assert_proposal_matches
 
 if TYPE_CHECKING:
+    from .native_discovery_inputs import DiscoveryNativeFile, DiscoveryNativeInputs
     from .powercalc_source_binding import OriginalPowercalcSources
     from .powercalc_candidate_sources import CandidatePowercalcSources
 
@@ -169,7 +170,62 @@ class BoundSourceRuntime:
         return False
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class _RuntimeSourceSampler:
+    """Task-local immutable row corpus; never serialized or accepted authority.
+
+    Strong references pin the exact frozen observation/evidence and bytes, so a
+    repeated sample need not hash or parse the entire manager document again.
+    Live managers/projections and full source fences remain the caller's work.
+    """
+    _evidence: OriginalSourceEvidence
+    _observed: DiscoveryNativeInputs
+    _files: tuple[DiscoveryNativeFile, ...]
+    _native: DiscoveryNativeFile
+    _manager_json: bytes
+    _rows: tuple[bytes, ...]
+
+    @classmethod
+    def bind(cls, evidence, observed):
+        import json
+        from .native_discovery_inputs import DiscoveryNativeFile, DiscoveryNativeInputs
+        _need(cls is _RuntimeSourceSampler and type(evidence) is OriginalSourceEvidence
+              and type(observed) is DiscoveryNativeInputs and type(observed.files) is tuple
+              and all(type(row) is DiscoveryNativeFile for row in observed.files)
+              and tuple(row.domain for row in evidence.domains) == _DOMAINS)
+        matches = tuple(row for row in observed.files if row.key == 'core.entity_registry')
+        _need(len(matches) == 1 and type(matches[0].manager_json) is bytes)
+        native = matches[0]
+        rows = tuple(json.dumps(row, sort_keys=True, separators=(',', ':'),
+            allow_nan=False).encode() for row in json.loads(native.manager_json)['entities']
+            if row.get('platform') in _DOMAINS
+            and row.get('entity_id', '').split('.', 1)[0] == row.get('platform'))
+        return cls(evidence, observed, observed.files, native, native.manager_json, rows)
+
+    def sample(self, hass, evidence, observed):
+        import json
+        # Identity checks also reject equivalent replacement snapshots. Frozen
+        # fields/bytes and strong refs prevent mutation or object-id reuse; no
+        # digest of the full manager image is needed on this synchronous path.
+        _need(type(self) is _RuntimeSourceSampler and evidence is self._evidence
+              and observed is self._observed and observed.files is self._files
+              and self._native.manager_json is self._manager_json)
+        # Decode only qualifying rows into fresh local dicts. No mutable expected
+        # row/projection is shared with a caller or a later sample.
+        return _runtime_rows_sample(hass, evidence,
+                                    (json.loads(row) for row in self._rows))
+
+
 def _runtime_sample(hass, evidence, observed):
+    """Default full-document path, with the same live verifier as bound samples."""
+    def rows():
+        import json
+        native = next(row for row in observed.files if row.key == 'core.entity_registry')
+        yield from json.loads(native.manager_json)['entities']
+    return _runtime_rows_sample(hass, evidence, rows())
+
+
+def _runtime_rows_sample(hass, evidence, registry_rows):
     """Same native projections, plus full ORIGINAL registry/object bijection."""
     import hashlib
     import json
@@ -179,8 +235,8 @@ def _runtime_sample(hass, evidence, observed):
     from .yaml_validation_worker import _fingerprint
     if _pending_native_work(hass, _DOMAINS):
         raise SourceBindingError('runtime_source_runtime_unavailable')
-    native = next(row for row in observed.files if row.key == 'core.entity_registry')
-    registry_rows = json.loads(native.manager_json)['entities']
+    # Materialize after the pending-work check, preserving default ordering.
+    registry_rows = tuple(registry_rows)
     registry = hass.data.get(er.DATA_REGISTRY)
     _need(type(registry) is er.EntityRegistry)
     observer = NativeYAMLRuntimeReadback(hass)
