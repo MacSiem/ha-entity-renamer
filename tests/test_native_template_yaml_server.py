@@ -181,6 +181,79 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_uidless_numeric_server_owned_forward_and_fresh_reverse_history(self):
         await self.flow(variant='sensor', uidless=True)
 
+    async def _prepared_review(self):
+        runtime, mapping, uuids, original = await self.data(variant='sensor', uidless=True)
+        hass = self.f.hass
+        factory = self.module('native_template_yaml_server').NativeTemplateYAMLServer
+        drain = self.module('recovery_controller')._drain_restore
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        async def caller():
+            async with runtime.operation_lock:
+                async def effect():
+                    session = await factory.prepare(hass, mapping, guard=lambda: None, refresh=refresh)
+                    try:
+                        return (session.operation_id, session.plan,
+                                session.chain.baseline.receipt_json, session.composition)
+                    finally:
+                        session.close()
+                return await drain(effect())
+        review = await hass.async_create_task(caller(), 'prepare actual YAML review', eager_start=False)
+        self.assertFalse(runtime.operation_lock.locked())
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        self.assertIsNone(await runtime.journal.load(review[0]))
+        return runtime, mapping, uuids, original, factory, refresh, review
+
+    async def test_uidless_review_gap_fresh_prepared_session_keeps_original(self):
+        runtime, mapping, uuids, original, factory, refresh, review = await self._prepared_review()
+        operation, plan, original_json, composition = review
+        hass = self.f.hass
+        for value in (5, 7):
+            await self.stimulus(value)
+        async def caller():
+            async with runtime.operation_lock:
+                async def effect():
+                    session = await factory.bind_prepared(hass, operation, plan,
+                        guard=lambda: None, refresh=refresh)
+                    try:
+                        self.assertEqual(session.plan, plan)
+                        self.assertEqual(session.chain.baseline.receipt_json, original_json)
+                        self.assertEqual(session.composition, composition)
+                        return await session.apply()
+                    finally:
+                        session.close()
+                return await self.module('recovery_controller')._drain_restore(effect())
+        result = await hass.async_create_task(caller(), 'confirm actual YAML review', eager_start=False)
+        self.assertEqual(result.status, 'applied')
+        for old, new in mapping.items():
+            self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+        restored = await runtime.native_yaml_reverse(hass, operation, plan.fingerprint,
+            guard=lambda: None, refresh=refresh)
+        self.assertEqual(restored['state'], 'rolled_back')
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        baseline, reopened = runtime.preparations.resolve_composition(plan.native_inputs)
+        self.assertEqual(baseline.receipt_json, original_json)
+        self.assertEqual(reopened, composition)
+        for value in (5, 7):
+            await self.stimulus(value)
+
+    async def test_prepared_review_source_edit_refuses_without_adopting_new_original(self):
+        runtime, mapping, uuids, _, factory, refresh, review = await self._prepared_review()
+        operation, plan, original_json, _ = review
+        path = self.f.root / 'template.yaml'
+        path.write_bytes(path.read_bytes() + b'\n# foreign edit in review gap\n')
+        edited = path.read_bytes()
+        async with runtime.operation_lock:
+            with self.assertRaises((ValueError, self.module('transaction').Refused)):
+                await factory.bind_prepared(self.f.hass, operation, plan,
+                    guard=lambda: None, refresh=refresh)
+        self.assertEqual(path.read_bytes(), edited)
+        self.assertIsNone(await runtime.journal.load(operation))
+        for old in mapping:
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertEqual(runtime.preparations.resolve_composition(plan.native_inputs)[0].receipt_json,
+                         original_json)
+
     async def test_uidless_binary_server_owned_forward_and_fresh_reverse_history(self):
         await self.flow(variant='binary_sensor', uidless=True)
 
