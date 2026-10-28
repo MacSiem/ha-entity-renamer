@@ -330,6 +330,16 @@ _SETUP_PINS = {'2025.6.0': {'components/template/__init__.py': 'ecbdfe7f1f184c80
                'helpers/entity_platform.py': '776e21f2ef16715b17e34fe27da33a3d30042b27988d75aaf5461ddcf736b09e',
                'helpers/entity_registry.py': 'f77b7ae946a0902136faadb3cfe45d17aca24fa639c43189295e101f5e47f425',
                'helpers/helper_integration.py': 'eedfca79e0ac213fcf45cd4bcab6fa82ddd0a511e3723485388ab55657fb8972',
+               'helpers/issue_registry.py': '7bda388e1aba697df84f0456c1fac165b776d2d03c31cef0c464c3f1fc5c6106'}, '2026.10.4': {'components/template/__init__.py': '33e9338f4bbc17c4e3be3f2383027ed63e6669a0679deec7a2e0b2f016a649ad',
+               'components/template/config_flow.py': '5d4c31026dc05738423da96199836d5134f1b57d274561cff51d6e0bc4d29020',
+               'components/template/helpers.py': 'a214dd203972f939e1460e82521758819e9482ecf0d66d84ce9792ad7f8c0bff',
+               'components/template/sensor.py': '171f6df16a272d352d0afe62cc35b9590f160c3e37180ab36dfb9afcdd49fb25',
+               'components/template/template_entity.py': '904c82d89b83b0cc097dbb482b50407a7d3dfa9109af1f468ca48420cf496d15',
+               'config_entries.py': '221e2672e9a8f0ec12fa62edbfdc2ef6d986331855797615c81ecbe99f8840db',
+               'helpers/device.py': '47cc4afc5d13def0f63fb854a74ae388cb0a877b25c6b717001abae6ca19d4a5',
+               'helpers/entity_platform.py': '776e21f2ef16715b17e34fe27da33a3d30042b27988d75aaf5461ddcf736b09e',
+               'helpers/entity_registry.py': 'f77b7ae946a0902136faadb3cfe45d17aca24fa639c43189295e101f5e47f425',
+               'helpers/helper_integration.py': 'eedfca79e0ac213fcf45cd4bcab6fa82ddd0a511e3723485388ab55657fb8972',
                'helpers/issue_registry.py': '7bda388e1aba697df84f0456c1fac165b776d2d03c31cef0c464c3f1fc5c6106'}}
 
 
@@ -368,7 +378,7 @@ class NativeTemplateSetupAudit:
         from homeassistant.components.template import sensor, helpers
         from homeassistant.config_entries import ConfigEntries
         refs=((ConfigEntries,'async_setup'),(self.native.sensor,'__init__'),
-              (sensor,'async_setup_entry'),(helpers,'async_setup_template_entry')) if self.chain.version=='2026.10.2' else (
+              (sensor,'async_setup_entry'),(helpers,'async_setup_template_entry')) if self.chain.version in ('2026.10.2', '2026.10.4') else (
               (ConfigEntries,'async_setup'),(self.native.sensor,'__init__'),(sensor,'async_setup_entry'))
         # The synchronous public update path is observed only to poison a live
         # audit after a real changed call, never to rewrite or serialize Core.
@@ -387,7 +397,7 @@ class NativeTemplateSetupAudit:
                 entity=frame.f_locals.get('self')
                 if getattr(entity,'unique_id',None)==self.entry_id:
                     parent=frame.f_back
-                    expected=self.codes[3] if self.chain.version=='2026.10.2' else self.codes[2]
+                    expected=self.codes[3] if self.chain.version in ('2026.10.2', '2026.10.4') else self.codes[2]
                     _need(parent is not None and parent.f_code is expected
                           and type(entity) is self.native.sensor and entity.hass is self.hass,
                           'native_constructor_cause')

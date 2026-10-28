@@ -183,7 +183,8 @@ async def async_observe_accepted_powercalc_consumers(hass, chain, evidence, capt
     evidence.assert_receipt(receipt)
     _need(type(evidence.powercalc_sources) is OriginalPowercalcSources
           and evidence.powercalc_sources.closed_graph_json is not None
-          and captured.version == receipt.version == '2026.10.2',
+          and captured.version == receipt.version
+          and receipt.version in ('2026.10.2', '2026.10.4'),
           'accepted_profile_scope_required')
     state = chain.reconstruct_inputs()  # Pending intent refuses, never sampled away.
 

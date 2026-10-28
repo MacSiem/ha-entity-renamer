@@ -29,6 +29,9 @@ _EXTRA = {
     '2026.10.2': {
         'helpers/event.py': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
         'helpers/start.py': '75110df1b5adb7912417cd23e77cfaae5c949c1e89eb188bb5a6b2b1e5eb0bcc',
+    }, '2026.10.4': {
+        'helpers/event.py': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
+        'helpers/start.py': '75110df1b5adb7912417cd23e77cfaae5c949c1e89eb188bb5a6b2b1e5eb0bcc',
     },
     '2025.6.0': {
         'helpers/event.py': 'd5e21c38afd9eafe566724b8db34ea2e87eaa8d6dc10c1719a82f5d90d43260e',

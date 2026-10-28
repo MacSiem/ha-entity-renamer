@@ -81,7 +81,7 @@ class _ExactFieldsPolicy:
     """Typed chain-bound request, never a caller-selected mutation callback."""
     def __init__(self, chain, evidence, original, guard):
         _need(type(chain) is RegistryReceiptChain
-              and chain.active is None and chain.original_receipt.version == '2026.10.2',
+              and chain.active is None and chain.original_receipt.version in ('2026.10.2', '2026.10.4'),
               'live_current_chain')
         self.chain, self.evidence, self.original, self.guard = chain, evidence, original, guard
         self.receipt = chain.original_receipt
@@ -101,7 +101,7 @@ class _ExactFieldsPolicy:
         # the event loop before and after this job, never inside the executor.
         from .native_utility_setup_audit import _SOURCES
         _accepted_sources(self.chain, self.state, self.receipt)
-        pins = dict(_SOURCES['2026.10.2'])
+        pins = dict(_SOURCES[self.receipt.version])
         pins.update(vendor.ha_pins)
         self.source_hashes_json = _json({'vendor': _pins(), 'ha': pins})
 

@@ -3,7 +3,7 @@
 The envelope is data, never rename authority. Callers must separately bind its
 capture to their original plan, UUID and native unload receipt. Native unload
 itself may already have lost Context.parent_id; we preserve what was captured.
-Only HA 2025.6.0 and 2026.10.2, RestoreState storage version/minor 1/1.
+Only HA 2025.6.0 and 2026.10.2/2026.10.4, RestoreState storage version/minor 1/1.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import math
 import re
 import sys
 
-PINS = ('2025.6.0', '2026.10.2')
+PINS = ('2025.6.0', '2026.10.2', '2026.10.4')
 MAX_BYTES = 1024 * 1024
 MAX_DEPTH = 32
 MAX_NODES = 32768
@@ -234,7 +234,7 @@ def _native_tree(value, api):
         elif isinstance(item, str):
             # Native JSON encodes the underlying string; never call __str__.
             _tree(str.__str__(item))
-        elif kind is datetime or (api[0] == '2026.10.2' and kind in (date, time)):
+        elif kind is datetime or (api[0] in ('2026.10.2', '2026.10.4') and kind in (date, time)):
             pass
         else:
             _tree(item)  # exact JSON scalar types only; unknown class refused

@@ -20,7 +20,7 @@ from .native_registry import PreparedRegistryChange
 
 MAX_DOCUMENT_BYTES = 32 * 1024 * 1024
 _SCHEMAS = {'2025.6.0': {'entity': (1, 17), 'device': (1, 9)},
-            '2026.10.2': {'entity': (1, 23), 'device': (3, 4)}}
+            '2026.10.2': {'entity': (1, 23), 'device': (3, 4)}, '2026.10.4': {'entity': (1, 23), 'device': (3, 4)}}
 
 
 class RegistryTransitionError(ValueError):
@@ -142,7 +142,7 @@ def _document(raw, kind, version):
             or type(doc['data']) is not dict):
         _fail('registry_transition_schema_invalid')
     lists = ['entities', 'deleted_entities'] if kind == 'entity' else ['devices', 'deleted_devices']
-    if version == '2026.10.2':
+    if version in ('2026.10.2', '2026.10.4'):
         if kind == 'entity' and type(doc['data'].get('settings')) is not dict:
             _fail('registry_transition_schema_invalid')
         if kind == 'device':

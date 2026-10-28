@@ -18,7 +18,7 @@ from .helper_native import NativeConfigMutation
 from .helper_transaction import PreparedHelper
 
 MAX_DOCUMENT_BYTES = 32 * 1024 * 1024
-_SCHEMAS = {'2025.6.0': (1, 5), '2026.10.2': (1, 5)}
+_SCHEMAS = {'2025.6.0': (1, 5), '2026.10.2': (1, 5), '2026.10.4': (1, 5)}
 _IDENTITY = ('entry_id', 'unique_id', 'title', 'version', 'minor_version',
              'source', 'disabled_by', 'pref_disable_new_entities', 'pref_disable_polling')
 _SUB_IDENTITY = ('subentry_id', 'subentry_type', 'unique_id', 'title')

@@ -103,7 +103,7 @@ class NativeHelperActivationLease:
         from .helper_plan import NATIVE_FIELDS
 
         if (cls is not NativeHelperActivationLease
-                or __version__ not in ('2025.6.0', '2026.10.2')
+                or __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4')
                 or type(hass) is not HomeAssistant
                 or type(manager) is not ConfigEntries
                 or hass.config_entries is not manager or manager.hass is not hass

@@ -75,7 +75,7 @@ def capture_powercalc_runtime(hass, *, guard):
     from homeassistant.helpers.entity import Entity
     from homeassistant.helpers.template import Template
     _guard(guard)
-    if __version__ not in ('2025.6.0', '2026.10.2'):
+    if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4'):
         raise ValueError('powercalc_core_inventory_layout_unsupported')
     manager = hass.config_entries
     registry = hass.data.get(er.DATA_REGISTRY)

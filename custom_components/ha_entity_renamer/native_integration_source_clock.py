@@ -147,12 +147,12 @@ class IntegrationSourceClockBinding:
             refs.extend(((method,'validate_states'), (method,'calculate_area_with_two_states')))
         refs.append((sensor._IntegrationMethod, 'calculate_area_with_one_state'))
         core = import_module('homeassistant.core')
-        if scope.version == '2026.10.2':
+        if scope.version in ('2026.10.2', '2026.10.4'):
             refs.append((core.EventBus,'_async_dispatch'))
         refs.append((scope.event, '_async_dispatch_entity_id_event'))
         self.refs = tuple(refs)
         self.methods, self.codes = prove_methods(scope.root, scope.pins, self.refs)
-        self.dispatch_code = (self.codes[-2] if scope.version == '2026.10.2' else scope.codes['fire'])
+        self.dispatch_code = (self.codes[-2] if scope.version in ('2026.10.2', '2026.10.4') else scope.codes['fire'])
 
     def check(self, scope):
         _need(scope is self.scope and self.chain.writable and not self.chain.store.poisoned
@@ -207,12 +207,12 @@ class IntegrationSourceClockBinding:
                 predecessor, old_time, left, predecessor_values = scope._pending_move
                 _need(self._values(scope,predecessor) == predecessor_values, 'removed_endpoint_mutated')
                 right = new.state
-                new_time = new.last_updated if scope.version == '2026.10.2' else new.last_reported
+                new_time = new.last_updated if scope.version in ('2026.10.2', '2026.10.4') else new.last_reported
                 self._creation_emitted, move = True, 'creation'
             else:
                 _need(old is self._emission_endpoint and name == physical, 'source_stream')
                 left,right,old_time = old.state,new.state,self._endpoint_time
-                new_time = new.last_updated if scope.version == '2026.10.2' else new.last_reported
+                new_time = new.last_updated if scope.version in ('2026.10.2', '2026.10.4') else new.last_reported
         else:
             _need(parent.f_code is scope.codes['source_set']
                   and new is parent.f_locals.get('old_state')
@@ -224,7 +224,7 @@ class IntegrationSourceClockBinding:
             _need(old_time == self._endpoint_time
                   and values[:4]+values[5:] == self._endpoint_values[:4]+self._endpoint_values[5:],
                   'reported_predecessor_mutated')
-            new_time = data['last_reported'] if scope.version == '2026.10.2' else new.last_reported
+            new_time = data['last_reported'] if scope.version in ('2026.10.2', '2026.10.4') else new.last_reported
         if new is not None:
             _need(type(new) is scope._state_cls and new is scope.hass.states.get(name)
                   and Decimal(new.state).is_finite()
@@ -373,7 +373,7 @@ class IntegrationSourceClockBinding:
         try:
             if stable_new and stable_old:
                 if interval.transport == 'creation':
-                    args = (None,None,old,new) if scope.version == '2026.10.2' else (None,old,new)
+                    args = (None,None,old,new) if scope.version in ('2026.10.2', '2026.10.4') else (None,old,new)
                     scope.old._integrate_on_state_update_with_max_sub_interval(*args)
                 else:
                     callback = (scope.old._integrate_on_state_change_with_max_sub_interval
@@ -400,7 +400,7 @@ class IntegrationSourceClockBinding:
                 engine._update_integral(area)
                 engine._derive_and_set_attributes_from_state(new)
                 engine.async_write_ha_state()  # Native REMOVED entity: no public write.
-                engine._last_integration_time = (sensor.dt_util.utcnow() if scope.version == '2026.10.2'
+                engine._last_integration_time = (sensor.dt_util.utcnow() if scope.version in ('2026.10.2', '2026.10.4')
                                                 else datetime.now(tz=import_module('datetime').UTC))
                 engine._last_integration_trigger = sensor._IntegrationTrigger.StateEvent
                 engine._schedule_max_sub_interval_exceeded_if_state_is_numeric(new)

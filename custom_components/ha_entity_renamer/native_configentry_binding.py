@@ -92,7 +92,7 @@ def bind_source_consumer(native, plans):
     and managers after awaiting other sources. No generated completeness claims.
     """
     try:
-        if (native.version not in ('2025.6.0','2026.10.2') or
+        if (native.version not in ('2025.6.0','2026.10.2', '2026.10.4') or
             type(native.files) is not tuple or len(native.files)!=3 or
             type(plans) is not tuple):
             _fail()

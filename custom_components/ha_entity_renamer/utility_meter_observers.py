@@ -18,7 +18,7 @@ from .helper_native import read_entry
 from .helper_plan import plan_helper, snapshot_equal
 from .helper_observers import RegistryMappingProof, registry_identity, require
 
-PINS = {'2025.6.0': (2, 1), '2026.10.2': (2, 2)}
+PINS = {'2025.6.0': (2, 1), '2026.10.2': (2, 2), '2026.10.4': (2, 2)}
 _BASIC = {'cycle': 'none', 'offset': 0, 'tariffs': [], 'net_consumption': False,
           'delta_values': False, 'periodically_resetting': False,
           'always_available': False}
@@ -222,7 +222,7 @@ def _payload(baseline):
             'utility_baseline_helper_rows')
     row = rows[0]
     expected_keys = _ROW_KEYS | ({'aliases_v2', 'object_id_base'}
-                                 if value['core'] == '2026.10.2' else set())
+                                 if value['core'] in ('2026.10.2', '2026.10.4') else set())
     require(set(row) == expected_keys, 'utility_baseline_helper_row_layout')
     require(before['identity']['disabled_by'] is None,
             'utility_baseline_inactive_not_runtime')

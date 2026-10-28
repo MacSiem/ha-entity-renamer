@@ -78,11 +78,11 @@ class PowercalcVendor:
     def __init__(self, hass, *, with_profiles=False):
         from homeassistant.const import __version__
         from homeassistant import loader
-        _need(__version__ == '2026.10.2', 'vendor_core_pair_unverified')
+        _need(__version__ in ('2026.10.2', '2026.10.4'), 'vendor_core_pair_unverified')
         loaded = hass.data.get(loader.DATA_INTEGRATIONS, {}).get('powercalc')
         _need(type(loaded) is loader.Integration and loaded.manifest.get('version') == 'v1.26.1',
               'loaded_vendor_unverified')
-        self.hass, self.loaded = hass, loaded
+        self.hass, self.loaded, self.core_version = hass, loaded, __version__
         module = sys.modules.get(_PREFIX)
         _need(module is not None, 'vendor_not_loaded')
         self.root = Path(hass.config.config_dir) / 'custom_components/powercalc'
@@ -564,4 +564,5 @@ async def async_bind_powercalc_sources(hass, receipt, evidence, captured, *, gua
     settings = (json.loads(evidence.powercalc_sources.closed_graph_json)['energy_settings_sha256']
                 if closed else None)
     return PowercalcSourceBindings(evidence.sha256, _sha(captured.payload_json), second,
+                                   core_version=captured.version,
                                    relationships=relationships, energy_settings_sha256=settings)

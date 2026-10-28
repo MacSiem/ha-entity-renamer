@@ -1,6 +1,6 @@
 """Actual unchanged-ORIGINAL Powercalc reload witness; default capture only.
 
-Current 2026.10.2 + official v1.26.1 only. No YAML activation integration,
+Current 2026.10.2/2026.10.4 + official v1.26.1 only. No YAML activation integration,
 replacement baseline, new root/journal, fake native input or Integration widening.
 Optional private exact-fields policy owns only its finite vendor setup seam.
 """
@@ -426,7 +426,7 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
           and (not _retain_producers or _exact_fields is not None),'typed_producer_policy')
     _need(type(_operand_clock) is bool and (not _operand_clock or _retain_producers),
           'typed_operand_clock_policy')
-    _need(__version__=='2026.10.2' and type(hass) is HomeAssistant,'supported_pair')
+    _need(__version__ in ('2026.10.2', '2026.10.4') and type(hass) is HomeAssistant,'supported_pair')
     if _exact_fields is not None:
         from .powercalc_exact_fields import _ExactFieldsPolicy
         _need(type(_exact_fields) is _ExactFieldsPolicy and _manage_global_rename,
@@ -487,7 +487,7 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
         if scope.exact_owner is not None:
             scope.exact_owner.policy.prove(scope.vendor)
         vm,vc=prove_methods(scope.vendor.root,_pins(),scope.vendor_refs)
-        pins=dict(_SOURCES['2026.10.2'])
+        pins=dict(_SOURCES[scope.receipt.version])
         pins.update(scope.vendor.ha_pins)
         hm,hc=prove_methods(scope.vendor.ha_root,pins,scope.ha_refs)
         return vm,vc,hm,hc

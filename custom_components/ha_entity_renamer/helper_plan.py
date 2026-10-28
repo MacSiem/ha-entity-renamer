@@ -1,4 +1,4 @@
-"""Bounded ConfigEntry reference plans for HA 2026.10.2 / Powercalc 1.26.1.
+"""Bounded ConfigEntry reference plans for HA 2026.10.2/2026.10.4 / Powercalc 1.26.1.
 
 No IO. A plan is not a completeness guarantee or a mutation authorization.
 """

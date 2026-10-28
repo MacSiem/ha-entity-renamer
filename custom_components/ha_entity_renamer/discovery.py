@@ -187,7 +187,7 @@ def _runtime_family(hass, domain):
     from .yaml_runtime_observer import NativeYAMLRuntimeReadback, _pending_native_work
     from .yaml_validation_worker import _normal, _fingerprint
     try:
-        if (__version__ not in ('2025.6.0', '2026.10.2')
+        if (__version__ not in ('2025.6.0', '2026.10.2', '2026.10.4')
                 or _pending_native_work(hass, (domain,))):
             raise ValueError('runtime_unsettled')
         rows, identities = NativeYAMLRuntimeReadback(hass)._projection(domain)

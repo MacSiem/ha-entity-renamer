@@ -20,7 +20,7 @@ from .native_helper_lifecycle import NativeHelperLifecycle
 from .native_helper_activation_lease import NativeHelperActivationLease
 from .transaction import PhaseContext
 
-PINS = ('2025.6.0', '2026.10.2')
+PINS = ('2025.6.0', '2026.10.2', '2026.10.4')
 SCHEMA = 'own_helper_placeholder_effect_v1'
 
 
@@ -79,7 +79,7 @@ def _installed_effect_methods(version):
     root = Path(homeassistant.__file__).resolve().parent
     methods = (core.StateMachine.async_remove, er.RegistryEntry.write_unavailable_state,
                er.EntityRegistry.async_update_entity, entity.Entity._Entity__async_remove_impl)
-    if version == '2026.10.2':
+    if version in ('2026.10.2', '2026.10.4'):
         methods += (er.async_get_legacy_friendly_name,)
     pins, compiled = {}, {}
     for relative in ('core.py', 'helpers/entity_registry.py', 'helpers/entity.py'):
@@ -407,7 +407,7 @@ class OwnHelperPlaceholder:
         _guard(self.live_guard)
         current_methods = (core.StateMachine.async_remove, er.RegistryEntry.write_unavailable_state,
                            er.EntityRegistry.async_update_entity, entity.Entity._Entity__async_remove_impl)
-        if self.version == '2026.10.2':
+        if self.version in ('2026.10.2', '2026.10.4'):
             current_methods += (er.async_get_legacy_friendly_name,)
         _need(all(a is b for a, b in zip(current_methods, self.native_methods, strict=True))
               and self.io.mutate.__func__ is self.io_mutate.__func__

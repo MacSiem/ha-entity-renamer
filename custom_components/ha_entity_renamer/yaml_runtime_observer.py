@@ -291,7 +291,7 @@ class NativeYAMLRuntimeReadback:
                 if type(entity) is not ScriptEntity:
                     raise ValueError('native_script_type')
                 script = entity.script
-                if (script.is_running or (script._unloaded if __version__ == '2026.10.2' else False) or not script.enabled
+                if (script.is_running or (script._unloaded if __version__ in ('2026.10.2', '2026.10.4') else False) or not script.enabled
                         or script._hass is not self.hass or script.domain != domain
                         or entity._blueprint_inputs is not None
                         or not self.hass.services.has_service('script', entity.unique_id)
@@ -323,9 +323,9 @@ class NativeYAMLRuntimeReadback:
                 if type(entity) is not AutomationEntity:
                     raise ValueError('native_automation_type')
                 script = entity.action_script
-                if ((entity._condition if __version__ == '2026.10.2' else entity._cond_func) is not None or entity._trigger_variables is not None
+                if ((entity._condition if __version__ in ('2026.10.2', '2026.10.4') else entity._cond_func) is not None or entity._trigger_variables is not None
                         or entity._blueprint_inputs is not None
-                        or script.is_running or (script._unloaded if __version__ == '2026.10.2' else False)
+                        or script.is_running or (script._unloaded if __version__ in ('2026.10.2', '2026.10.4') else False)
                         or script._hass is not self.hass or script.domain != domain
                         or getattr(script.change_listener, '__self__', None) is not entity
                         or getattr(script.change_listener, '__func__', None)
@@ -358,7 +358,7 @@ class NativeYAMLRuntimeReadback:
     def _sample(self, change):
         from homeassistant.const import __version__
         receipt = change.receipt
-        if (__version__ not in ('2025.6.0', '2026.10.2') or __version__ != receipt.version
+        if (__version__ not in ('2025.6.0', '2026.10.2', '2026.10.4') or __version__ != receipt.version
                 or str(Path(self.hass.config.config_dir).resolve()) != receipt.config_root):
             return Position.UNKNOWN, ()
         expected = {row[0]: row[1:] for row in receipt.runtime_expected}

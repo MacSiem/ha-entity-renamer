@@ -46,6 +46,17 @@ _PINS = {'2025.6.0': {'components/template/__init__.py': 'ecbdfe7f1f184c80aa6957
                'components/template/trigger_entity.py': 'c967d35e72be6b0ccbda3edbc45fceb2289822456028fb7723f00de39b37d21b',
                'helpers/entity_platform.py': '776e21f2ef16715b17e34fe27da33a3d30042b27988d75aaf5461ddcf736b09e',
                'helpers/event.py': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
+               'helpers/trigger_template_entity.py': 'f6411c6e1a65683e5427667358f7f5033cbad34ec5d32e6f84746a60e52c1b14'}, '2026.10.4': {'components/template/__init__.py': '33e9338f4bbc17c4e3be3f2383027ed63e6669a0679deec7a2e0b2f016a649ad',
+               'components/template/config.py': '82eeafd970eff28f66cb88a9a36e0f939597bea4425827b10dac75a1cdc2670d',
+               'components/template/const.py': 'ca3eaf720c5cb96985945ec68f3b7e5d0e9ad7af4d86f8f3f6ecb2ab2ed3e062',
+               'components/template/coordinator.py': 'e249458544f1c17e3b9c90ed246912d51795f8e7623ffdcc92abeba77f25c593',
+               'components/template/entity.py': '5904e1e43ed8812ed3ab72ded61a2bf7e7aa9941a6d52b1409609cfceb8a3ea3',
+               'components/template/helpers.py': 'a214dd203972f939e1460e82521758819e9482ecf0d66d84ce9792ad7f8c0bff',
+               'components/template/sensor.py': '171f6df16a272d352d0afe62cc35b9590f160c3e37180ab36dfb9afcdd49fb25',
+               'components/template/template_entity.py': '904c82d89b83b0cc097dbb482b50407a7d3dfa9109af1f468ca48420cf496d15',
+               'components/template/trigger_entity.py': 'c967d35e72be6b0ccbda3edbc45fceb2289822456028fb7723f00de39b37d21b',
+               'helpers/entity_platform.py': '776e21f2ef16715b17e34fe27da33a3d30042b27988d75aaf5461ddcf736b09e',
+               'helpers/event.py': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
                'helpers/trigger_template_entity.py': 'f6411c6e1a65683e5427667358f7f5033cbad34ec5d32e6f84746a60e52c1b14'}}
 
 
@@ -54,6 +65,9 @@ _BINARY_PINS = {
         'components/template/binary_sensor.py': 'bbe0f0b272f8173a5a09386752778ec758ae79f2ecf0e66ecc9d2e0fa31c15a7',
         'helpers/config_validation.py': '74ae0ebe29be4d28bc9ab31c5352599e2eccdc31bd534cb40d1b07f3765ce8ea'},
     '2026.10.2': {
+        'components/template/binary_sensor.py': 'b3e86b88a258760edbdcad2a79e929ee77346888d8d7ff793f1bb97003e3c857',
+        'helpers/template/helpers.py': '2f4796b9d35516ab9c39498365d4fcf843ebd3334ac9c1b07000d7811d706c67',
+        'helpers/config_validation.py': '78776d1584e83ec05c97dc138cbaf343233f0293597dda4eb1872106ecb97d0c'}, '2026.10.4': {
         'components/template/binary_sensor.py': 'b3e86b88a258760edbdcad2a79e929ee77346888d8d7ff793f1bb97003e3c857',
         'helpers/template/helpers.py': '2f4796b9d35516ab9c39498365d4fcf843ebd3334ac9c1b07000d7811d706c67',
         'helpers/config_validation.py': '78776d1584e83ec05c97dc138cbaf343233f0293597dda4eb1872106ecb97d0c'},
@@ -319,7 +333,7 @@ def _live_binary(native, entity):
           and boolean.forgiving_boolean.__globals__ is vars(boolean)
           and native.cv.boolean.__globals__ is vars(native.cv),
           'native_binary_boolean_binding_changed')
-    if native.version == '2026.10.2':
+    if native.version in ('2026.10.2', '2026.10.4'):
         _need(vars(boolean).get('cv') is native.cv,
               'native_binary_boolean_binding_changed')
     else:
@@ -436,7 +450,7 @@ def _source_semantics(native, entity, registry_row, semantic, evidence, document
               and entity.unique_id == entry_id, 'entry_source_identity_unverified')
         options = dict(source['options'])
         options.pop('template_type')
-        if native.version == '2026.10.2':
+        if native.version in ('2026.10.2', '2026.10.4'):
             additional = options.pop('additional_options', None)
             if additional:
                 options.update(additional)

@@ -39,7 +39,7 @@ _MAX_EVENTS = 128
 _MAX_BYTES = 1048576
 _EVENT = 'entity_registry_updated'
 # SHA-256 of full installed public source, SOURCE-READBACK.json (2026-10-25).
-_SOURCES = {'2026.10.2': {'components/utility_meter/sensor.py': 'e70eab00470d87551bbba68516d46b61a07e44422f39d7e3b3ea5ce2eb67d7bb', 'components/utility_meter/__init__.py': '0a29f1ec1f14b4445c5e96401187cbbe3cc166ef49d4d1c350c5f8acc9b1d7dc', 'components/sensor/__init__.py': 'c3cbda48f1cdfae2401e800ab0dd77399b12a64b654b728d0de28f2c07b5fd09', 'helpers/entity_platform.py': '776e21f2ef16715b17e34fe27da33a3d30042b27988d75aaf5461ddcf736b09e', 'helpers/entity_registry.py': 'f77b7ae946a0902136faadb3cfe45d17aca24fa639c43189295e101f5e47f425', 'helpers/restore_state.py': '9f6fcdca1a1b0b7301e2bb9d9ede036241ac06330bd041c54397b0c9eee78128', 'helpers/entity.py': '89d26ab379b47e68c02f3c816a5db7ad830610d39ad022395fe02e7d0b83a424', 'helpers/storage.py': '4d6b26e730eeea198196e2eb01ffc55432d9e79c06a65dca307ce664192e8025', 'core.py': '1fe2fcfb91fbb6edfb4450dad3ae5ebc4e325664770fedbd607d103d91ce4f19', 'config_entries.py': '221e2672e9a8f0ec12fa62edbfdc2ef6d986331855797615c81ecbe99f8840db', 'helpers/registry.py': 'a481648fdca6f27cb19a72ea44e0c42b204674a8f5c10ed52bcedb07ec220cae', 'helpers/helper_integration.py': 'eedfca79e0ac213fcf45cd4bcab6fa82ddd0a511e3723485388ab55657fb8972', 'helpers/device.py': '47cc4afc5d13def0f63fb854a74ae388cb0a877b25c6b717001abae6ca19d4a5'}, '2025.6.0': {'components/utility_meter/sensor.py': '054032cf80af12fcfa79da0b7f32875993b321d1f34b44592f53a9225e04dfed', 'components/utility_meter/__init__.py': '38f388087538a251e300fb83646601c742d5bfb2f1a308f1321aa699029563f0', 'components/sensor/__init__.py': 'c8144af56e98f34adf6b46c78bd81284b870c52573a4ca2f6a9e4e53b7ab5dc9', 'helpers/entity_platform.py': 'e1c976af7fb673fe3b5cf1c62be032c0d0e1740253bff65a528a9503ffca0ed6', 'helpers/entity_registry.py': 'f37dbf51693b7295f27a2d8356142be5aedc6bca8b9d4427405e3d49e25e4d76', 'helpers/restore_state.py': 'e3fad462c178587e3f2d669d8b5fc58c3ebea64af3d477dfacd1109432fb53d3', 'helpers/entity.py': '2c1e501decd5325763ca75314452bf10786aeddfbabfd9b11c3c5ae4ea4e3e44', 'helpers/storage.py': '26671506953b11a9bffc446193205f3ac909e58be13a71387aafdf01c212bfc0', 'core.py': '1b4eee1e4fb701669a4ed941f32bb36a977ce446dfa2c8d1ffb0beadc5a031a2', 'config_entries.py': '306340f94f1387bd6b73162cbc2c37ae1c095025d34b318fcf10b8b6c40dcffb', 'helpers/registry.py': '963a6f6c1042f959c63ee14603243223e4aa76a6f26e731a5848d6be5339cff9', 'helpers/helper_integration.py': '16549a97b848ce3f0e48a87a14dc2c01bb0d9a16289c182aadcc4c13e6186cd1', 'helpers/device.py': 'd74325a0ae07ba29f851d7f8e388e9b3506430b8bf0339d5f161b6c75ff3e841'}}
+_SOURCES = {'2026.10.2': {'components/utility_meter/sensor.py': 'e70eab00470d87551bbba68516d46b61a07e44422f39d7e3b3ea5ce2eb67d7bb', 'components/utility_meter/__init__.py': '0a29f1ec1f14b4445c5e96401187cbbe3cc166ef49d4d1c350c5f8acc9b1d7dc', 'components/sensor/__init__.py': 'c3cbda48f1cdfae2401e800ab0dd77399b12a64b654b728d0de28f2c07b5fd09', 'helpers/entity_platform.py': '776e21f2ef16715b17e34fe27da33a3d30042b27988d75aaf5461ddcf736b09e', 'helpers/entity_registry.py': 'f77b7ae946a0902136faadb3cfe45d17aca24fa639c43189295e101f5e47f425', 'helpers/restore_state.py': '9f6fcdca1a1b0b7301e2bb9d9ede036241ac06330bd041c54397b0c9eee78128', 'helpers/entity.py': '89d26ab379b47e68c02f3c816a5db7ad830610d39ad022395fe02e7d0b83a424', 'helpers/storage.py': '4d6b26e730eeea198196e2eb01ffc55432d9e79c06a65dca307ce664192e8025', 'core.py': '1fe2fcfb91fbb6edfb4450dad3ae5ebc4e325664770fedbd607d103d91ce4f19', 'config_entries.py': '221e2672e9a8f0ec12fa62edbfdc2ef6d986331855797615c81ecbe99f8840db', 'helpers/registry.py': 'a481648fdca6f27cb19a72ea44e0c42b204674a8f5c10ed52bcedb07ec220cae', 'helpers/helper_integration.py': 'eedfca79e0ac213fcf45cd4bcab6fa82ddd0a511e3723485388ab55657fb8972', 'helpers/device.py': '47cc4afc5d13def0f63fb854a74ae388cb0a877b25c6b717001abae6ca19d4a5'}, '2026.10.4': {'components/utility_meter/sensor.py': 'e70eab00470d87551bbba68516d46b61a07e44422f39d7e3b3ea5ce2eb67d7bb', 'components/utility_meter/__init__.py': '0a29f1ec1f14b4445c5e96401187cbbe3cc166ef49d4d1c350c5f8acc9b1d7dc', 'components/sensor/__init__.py': 'c3cbda48f1cdfae2401e800ab0dd77399b12a64b654b728d0de28f2c07b5fd09', 'helpers/entity_platform.py': '776e21f2ef16715b17e34fe27da33a3d30042b27988d75aaf5461ddcf736b09e', 'helpers/entity_registry.py': 'f77b7ae946a0902136faadb3cfe45d17aca24fa639c43189295e101f5e47f425', 'helpers/restore_state.py': '9f6fcdca1a1b0b7301e2bb9d9ede036241ac06330bd041c54397b0c9eee78128', 'helpers/entity.py': '89d26ab379b47e68c02f3c816a5db7ad830610d39ad022395fe02e7d0b83a424', 'helpers/storage.py': '4d6b26e730eeea198196e2eb01ffc55432d9e79c06a65dca307ce664192e8025', 'core.py': '1fe2fcfb91fbb6edfb4450dad3ae5ebc4e325664770fedbd607d103d91ce4f19', 'config_entries.py': '221e2672e9a8f0ec12fa62edbfdc2ef6d986331855797615c81ecbe99f8840db', 'helpers/registry.py': 'a481648fdca6f27cb19a72ea44e0c42b204674a8f5c10ed52bcedb07ec220cae', 'helpers/helper_integration.py': 'eedfca79e0ac213fcf45cd4bcab6fa82ddd0a511e3723485388ab55657fb8972', 'helpers/device.py': '47cc4afc5d13def0f63fb854a74ae388cb0a877b25c6b717001abae6ca19d4a5'}, '2025.6.0': {'components/utility_meter/sensor.py': '054032cf80af12fcfa79da0b7f32875993b321d1f34b44592f53a9225e04dfed', 'components/utility_meter/__init__.py': '38f388087538a251e300fb83646601c742d5bfb2f1a308f1321aa699029563f0', 'components/sensor/__init__.py': 'c8144af56e98f34adf6b46c78bd81284b870c52573a4ca2f6a9e4e53b7ab5dc9', 'helpers/entity_platform.py': 'e1c976af7fb673fe3b5cf1c62be032c0d0e1740253bff65a528a9503ffca0ed6', 'helpers/entity_registry.py': 'f37dbf51693b7295f27a2d8356142be5aedc6bca8b9d4427405e3d49e25e4d76', 'helpers/restore_state.py': 'e3fad462c178587e3f2d669d8b5fc58c3ebea64af3d477dfacd1109432fb53d3', 'helpers/entity.py': '2c1e501decd5325763ca75314452bf10786aeddfbabfd9b11c3c5ae4ea4e3e44', 'helpers/storage.py': '26671506953b11a9bffc446193205f3ac909e58be13a71387aafdf01c212bfc0', 'core.py': '1b4eee1e4fb701669a4ed941f32bb36a977ce446dfa2c8d1ffb0beadc5a031a2', 'config_entries.py': '306340f94f1387bd6b73162cbc2c37ae1c095025d34b318fcf10b8b6c40dcffb', 'helpers/registry.py': '963a6f6c1042f959c63ee14603243223e4aa76a6f26e731a5848d6be5339cff9', 'helpers/helper_integration.py': '16549a97b848ce3f0e48a87a14dc2c01bb0d9a16289c182aadcc4c13e6186cd1', 'helpers/device.py': 'd74325a0ae07ba29f851d7f8e388e9b3506430b8bf0339d5f161b6c75ff3e841'}}
 
 _COMMON_ARGS = frozenset(('aliases', 'area_id', 'categories', 'capabilities',
     'config_entry_id', 'config_subentry_id', 'device_class', 'device_id',
@@ -221,7 +221,7 @@ def _shape(value):
         _need(type(call['before']) is dict and type(call['after']) is dict, 'call_rows')
         _need(type(call['arguments']) is dict and type(call['undefined']) is list,
               'arguments_layout')
-        args = _COMMON_ARGS | (_EXTRA_ARGS if value['core'] == '2026.10.2' else set())
+        args = _COMMON_ARGS | (_EXTRA_ARGS if value['core'] in ('2026.10.2', '2026.10.4') else set())
         undefined = call['undefined']
         _need(all(type(k) is str for k in undefined)
               and undefined == sorted(set(undefined))
@@ -230,7 +230,7 @@ def _shape(value):
         path, cause = call['path'], call['cause']
         _need(type(path) is list and all(type(k) is str for k in path)
               and tuple(path) in _PATHS
-              and ('add_impl' not in path or value['core'] == '2026.10.2')
+              and ('add_impl' not in path or value['core'] in ('2026.10.2', '2026.10.4'))
               and (path != ['update', 'get_or_create', 'add']
                    or value['core'] == '2025.6.0'), 'caller_path')
         _need(type(cause) is dict and set(cause) == {'kind', 'call'}, 'cause_layout')
@@ -295,7 +295,7 @@ def validate_setup_audit(baseline, expected_snapshot, source_rows, audit, *,
             _need('original_device_class' in args and 'options' not in args, 'add_arguments')
         else:
             state_args = {'original_device_class', 'capabilities', 'supported_features'}
-            if value['core'] == '2026.10.2':
+            if value['core'] in ('2026.10.2', '2026.10.4'):
                 state_args.add('original_name')
             _need('original_device_class' in args and set(args) <= state_args,
                   'state_arguments')
@@ -308,7 +308,7 @@ def validate_setup_audit(baseline, expected_snapshot, source_rows, audit, *,
                 # mutation allowance. Other paths must use UNDEFINED.
                 native_state_arg = (call['path'][0] == 'update' and 'state' in call['path']
                     and name in ({'capabilities', 'supported_features', 'original_name'}
-                        if value['core'] == '2026.10.2' else {'capabilities', 'supported_features'}))
+                        if value['core'] in ('2026.10.2', '2026.10.4') else {'capabilities', 'supported_features'}))
                 _need(('get_or_create' in call['path'] or native_state_arg)
                       and name in before and _same(before[name], arg), 'foreign_argument')
         _need(args.keys() & {'original_device_class', 'options'}, 'empty_arguments')
@@ -378,7 +378,7 @@ def _installed_native():
         compiled[relative] = tuple(_code_objects(compile(raw, str(path), 'exec',
                                       dont_inherit=True, optimize=sys.flags.optimize)))
     methods = dict(_METHODS)
-    if version == '2026.10.2':
+    if version in ('2026.10.2', '2026.10.4'):
         methods['add_impl'] = ('helpers.entity_platform', 'EntityPlatform', '_async_add_entity_impl')
         methods['dispatch'] = ('core', 'EventBus', '_async_dispatch')
     objects, codes = {}, {}
@@ -642,7 +642,7 @@ class NativeUtilitySetupAudit:
               and self._new_entity.platform is self._platform
               and self._platform.hass is self._hass
               and self._platform.config_entry is self._entry, 'entity_binding_lost')
-        names = _COMMON_ARGS | (_EXTRA_ARGS if self._core == '2026.10.2' else set())
+        names = _COMMON_ARGS | (_EXTRA_ARGS if self._core in ('2026.10.2', '2026.10.4') else set())
         _need(set(local) == names | {'self', 'entity_id'}, 'writer_arguments_layout')
         defined, undefined = {}, []
         for name in sorted(names):

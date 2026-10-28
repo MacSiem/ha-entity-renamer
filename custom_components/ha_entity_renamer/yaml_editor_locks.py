@@ -17,7 +17,7 @@ class NativeYAMLEditorLocks:
         from homeassistant.const import __version__
         from homeassistant.components.config.view import BaseEditConfigView
         from homeassistant.components.http.view import request_handler_factory
-        if __version__ not in ('2025.6.0', '2026.10.2'):
+        if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4'):
             raise EditorLockConflict('unsupported_editor_runtime')
         self.hass = hass
         self.base_class = BaseEditConfigView

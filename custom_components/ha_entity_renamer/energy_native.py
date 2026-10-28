@@ -34,7 +34,7 @@ class NativeEnergy:
     def __init__(self, hass, manager):
         from homeassistant.components.energy.data import EnergyManager
         from homeassistant.const import __version__
-        if __version__ not in ('2025.6.0', '2026.10.2') or type(manager) is not EnergyManager:
+        if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4') or type(manager) is not EnergyManager:
             raise PersistenceError('unsupported_energy_runtime')
         self.hass, self.manager = hass, manager
         self._legacy = __version__ == '2025.6.0'

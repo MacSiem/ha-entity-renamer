@@ -76,7 +76,7 @@ def extend_vendor(vendor):
     from homeassistant.util import color
     from .native_integration_unload_audit import _INTEGRATION
     vendor.integration = integration
-    vendor.ha_pins['components/integration/sensor.py'] = _INTEGRATION['2026.10.2']
+    vendor.ha_pins['components/integration/sensor.py'] = _INTEGRATION[vendor.core_version]
     vendor.ha_pins['util/color.py'] = '20bf486782dfac8cb1607beddc26188fb82610bb5fabf42a6046b4e6b4ac4bb2'
     vendor.ha_refs += tuple((owner, name) for owner in (color, lut) for name in
         ('color_temperature_kelvin_to_mired', 'color_temperature_to_hs'))

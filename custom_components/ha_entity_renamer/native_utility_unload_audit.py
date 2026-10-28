@@ -286,7 +286,7 @@ class NativeUtilityUnloadAudit:
             (self._modules['core'].StateMachine, 'get'),
             (self._modules['core'].StateMachine, 'async_set_internal'),
             (self._modules['core'].State, '__init__')]
-        if self.core == '2026.10.2':
+        if self.core in ('2026.10.2', '2026.10.4'):
             self._refs.append((self.er, 'async_get_legacy_friendly_name'))
         from .native_unload_code_proof import prove_methods
         try:

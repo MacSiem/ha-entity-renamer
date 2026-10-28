@@ -282,7 +282,7 @@ async def async_capture_powercalc_numeric_reload(hass, chain, evidence, original
           'typed_retained_producer_option')
     _need(type(operand_clock) is bool and (not operand_clock or (exact_fields and retain_producers)),
           'typed_operand_clock_option')
-    _need(type(chain) is RegistryReceiptChain and chain.original_receipt.version == '2026.10.2',
+    _need(type(chain) is RegistryReceiptChain and chain.original_receipt.version in ('2026.10.2', '2026.10.4'),
           'same_chain_current_pair_required')
     receipt, state = chain.original_receipt, chain.reconstruct_inputs()
     evidence.assert_receipt(receipt)
@@ -308,7 +308,7 @@ async def async_capture_powercalc_numeric_reload(hass, chain, evidence, original
     def proof():
         vendor.sources()
         vm, vc = prove_methods(vendor.root, _pins(), vrefs)
-        pins = dict(_SOURCES['2026.10.2'])
+        pins = dict(_SOURCES[receipt.version])
         pins.update(vendor.ha_pins)
         hm, hc = prove_methods(vendor.ha_root, pins, hrefs)
         _accepted_sources(chain, state, receipt)

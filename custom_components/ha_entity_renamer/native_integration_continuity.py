@@ -31,7 +31,7 @@ from .prepared import canonical
 _NAME = 'ha_entity_renamer.integration_continuity'
 _EVENT_PINS = {
     '2025.6.0': 'd5e21c38afd9eafe566724b8db34ea2e87eaa8d6dc10c1719a82f5d90d43260e',
-    '2026.10.2': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
+    '2026.10.2': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269', '2026.10.4': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
 }
 
 

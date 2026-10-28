@@ -107,7 +107,7 @@ class NativeRegistryIO:
     def __init__(self, hass):
         from homeassistant.helpers import entity_registry, device_registry
         from homeassistant.const import __version__
-        if __version__ not in ('2025.6.0', '2026.10.2'):
+        if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4'):
             raise RegistryConflict('unsupported_registry_runtime')
         self.hass = hass
         self.registries = {"entity": entity_registry.async_get(hass),
@@ -157,7 +157,7 @@ class NativeRegistryIO:
                 (EntityPlatform, 'async_add_entities'),
                 (EntityPlatform, '_async_add_entities'),
                 (EntityPlatform, '_async_add_entity')]
-        if __version__ == '2026.10.2':
+        if __version__ in ('2026.10.2', '2026.10.4'):
             refs.append((EntityPlatform, '_async_add_entity_impl'))
         methods, codes = prove_methods(Path(homeassistant.__file__).resolve().parent,
                                        _SOURCES[__version__], refs)

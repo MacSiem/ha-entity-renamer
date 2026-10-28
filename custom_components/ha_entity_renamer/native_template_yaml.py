@@ -35,7 +35,7 @@ from .yaml_validation_worker import _fingerprint, template_state_runtime_project
 
 _SERVICE_PINS = {
     '2025.6.0': '6cdda27dd9e3cc25605e94365789062ffdddfe538f815bf7bf1f973bc1b8b157',
-    '2026.10.2': 'ccf389ff17d99fb40d43de156f7dcea77ccf121f5425961f068529a28a105340',
+    '2026.10.2': 'ccf389ff17d99fb40d43de156f7dcea77ccf121f5425961f068529a28a105340', '2026.10.4': 'ccf389ff17d99fb40d43de156f7dcea77ccf121f5425961f068529a28a105340',
 }
 
 
