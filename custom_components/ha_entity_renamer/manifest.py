@@ -144,3 +144,85 @@ def bind_registry(manifest: Manifest, entities: list[dict], devices: list[dict])
     if any(change.device_id not in by_device for change in manifest.devices):
         raise ValueError("device_missing")
     return Manifest(tuple(bound), manifest.devices, dict(manifest.statistics))
+
+
+# The approved local proposal contains descriptive inventory alongside changes.
+# These fields are read only for format validation and never become instructions.
+_IMPORT_FIELDS = {
+    'entities': {'entity_id', 'proposed_entity_id', 'current_name', 'proposed_name',
+        'device_id', 'device_current', 'device_proposed', 'disabled', 'platform',
+        'statistics', 'energy_source', 'energy_breakdown', 'references', 'role',
+        'scope', 'action', 'note'},
+    'devices': {'device_id', 'current_name', 'proposed_name', 'model', 'area_current',
+        'area_proposed', 'entities', 'disabled_entities', 'scope', 'action', 'note'},
+    'statistics': {'statistic_id', 'proposed_statistic_id', 'current_name',
+        'proposed_name', 'source', 'unit', 'has_sum', 'has_mean', 'entity_exists',
+        'action', 'note'},
+}
+_IMPORT_CHECKS = {'registry_entities', 'additional_live_entities', 'all_devices',
+    'all_statistics', 'proposed_devices', 'proposed_entities', 'mapped_statistics',
+    'statistics_without_current_entity', 'collisions', 'ha_writes'}
+
+
+def decode_import(content, *, entity_ids=None, device_ids=None):
+    """Strict JSON import, normalized through the existing manifest policy.
+
+    Returns a detached proposal for actual server discovery. No source paths,
+    receipts, steps, unchecked selection or descriptive metadata leave here.
+    Neither format checks nor the user's historical counts prove current state.
+    """
+    import json
+    def pairs(rows):
+        result = {}
+        for key, value in rows:
+            if key in result:
+                raise ValueError('invalid_import')
+            result[key] = value
+        return result
+    def constant(value):
+        raise ValueError('invalid_import')
+    try:
+        if type(content) is not str or len(content.encode('utf-8')) > 4_000_000:
+            raise ValueError('invalid_import')
+        document = json.loads(content, object_pairs_hook=pairs, parse_constant=constant)
+        if (type(document) is not dict
+                or set(document) - {'at', 'checks', 'entities', 'devices', 'statistics'}):
+            raise ValueError('invalid_import')
+        if 'at' in document and (type(document['at']) is not str or len(document['at']) > 255):
+            raise ValueError('invalid_import')
+        if 'checks' in document:
+            checks = document['checks']
+            if (type(checks) is not dict or set(checks) - _IMPORT_CHECKS
+                    or any(type(v) is not int or v < 0 for v in checks.values())):
+                raise ValueError('invalid_import')
+        for family, fields in _IMPORT_FIELDS.items():
+            for row in _rows(document, family):
+                if set(row) - fields:
+                    raise ValueError('invalid_import')
+                for field, value in row.items():
+                    if family == 'devices' and field in ('entities', 'disabled_entities'):
+                        valid = type(value) is int and value >= 0
+                    elif family == 'statistics' and field in ('has_sum', 'has_mean'):
+                        valid = type(value) is bool
+                    else:
+                        valid = (type(value) is str and len(value) <= 16_384
+                                 or value is None and field in ('proposed_name', 'device_id'))
+                    if not valid:
+                        raise ValueError('invalid_import')
+        manifest = parse_manifest(document)
+        if entity_ids is not None or device_ids is not None:
+            manifest = manifest.select([] if entity_ids is None else entity_ids,
+                device_ids=[] if device_ids is None else device_ids)
+        if not manifest.entities and not manifest.devices:
+            raise ValueError('invalid_import')
+        return {
+            'entities': [{'entity_id': row.old_id, 'proposed_entity_id': row.new_id,
+                          'proposed_name': row.name, 'device_id': row.device_id}
+                         for row in manifest.entities],
+            'devices': [{'device_id': row.device_id, 'proposed_name': row.name}
+                        for row in manifest.devices],
+            'statistics': [{'statistic_id': old, 'proposed_statistic_id': new}
+                           for old, new in manifest.statistics.items()],
+        }
+    except (ValueError, TypeError, RecursionError, UnicodeError):
+        raise ValueError('discovery_invalid_proposal') from None

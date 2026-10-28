@@ -12,6 +12,7 @@ def async_register(hass):
     websocket_api.async_register_command(hass, ws_status)
     websocket_api.async_register_command(hass, ws_discover)
     websocket_api.async_register_command(hass, ws_preview)
+    websocket_api.async_register_command(hass, ws_import_preview)
     websocket_api.async_register_command(hass, ws_recovery_inspect)
     websocket_api.async_register_command(hass, ws_recovery_restore)
 
@@ -215,3 +216,21 @@ async def ws_recovery_inspect(hass, connection, message):
 @websocket_api.async_response
 async def ws_recovery_restore(hass, connection, message):
     await _read_recovery(hass, connection, message, action='restore')
+
+
+@websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/import/preview',
+    vol.Required('manifest'): vol.All(str, vol.Length(max=4_000_000)),
+    vol.Optional('entity_ids'): vol.All([str], vol.Length(max=10000)),
+    vol.Optional('device_ids'): vol.All([str], vol.Length(max=10000))})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_import_preview(hass, connection, message):
+    """Normalize the approved proposal format into the existing read-only route."""
+    from .manifest import decode_import
+    try:
+        proposal = decode_import(message['manifest'], entity_ids=message.get('entity_ids'),
+                                 device_ids=message.get('device_ids'))
+    except ValueError as error:
+        _send_discovery_error(connection, message, error)
+        return
+    await _read_discovery(hass, connection, {**message, 'proposal': proposal}, preview=True)
