@@ -34,6 +34,7 @@ assert len(mounts) == 1 and '/ha-tools-v4-20261016/renamer222-' in mounts[0]
 paths = list((ROOT/'custom_components/ha_entity_renamer').glob('*.py'))
 paths += list((ROOT/'custom_components/ha_entity_renamer').glob('*.json'))
 paths += list((ROOT/'tests').glob('test*.py'))
+paths += [ROOT/'tests/native_template_composition_scenario.py']
 paths += [ROOT/'ha-entity-renamer.js', ROOT/'scripts/stage_hacs_companion.py']
 sources = {str(p.relative_to(ROOT)): p.read_text() for p in paths}
 if args.powercalc_component_dir is not None:
