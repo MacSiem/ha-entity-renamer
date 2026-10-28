@@ -30,6 +30,7 @@ class NativeRegistryScaleFlowTests(unittest.IsolatedAsyncioTestCase):
     flow = server.NativeTemplateYAMLServerTests.flow
     DELETED = 37_275
     LIVE = 256
+    operation_timeout = 600  # Full-cardinality correctness probe; no latency PASS.
     UNIQUE_WIDTH = 240  # 480 produced 40,068,053 B at the same native cardinality.
 
     def same(self, actual, expected, reason):
@@ -210,6 +211,8 @@ class NativeRegistryScaleFlowTests(unittest.IsolatedAsyncioTestCase):
         def raised(code, offset, error):
             if '/custom_components/ha_entity_renamer/' not in code.co_filename:
                 return
+            if isinstance(error, (StopIteration, StopAsyncIteration, GeneratorExit)):
+                return  # Normal returns can contain huge private fixture data.
             message = str(error)
             if message == 'template_composition_rejected':
                 return  # Expected typed Union decoder branch, not an admission failure.

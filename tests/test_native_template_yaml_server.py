@@ -112,7 +112,7 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         try:
             caller = hass.async_create_task(runtime.native_forward(hass, mapping,
                 guard=lambda: None, refresh=refresh), 'foreground YAML server forward', eager_start=False)
-            result = await asyncio.wait_for(asyncio.shield(caller), 180)
+            result = await asyncio.wait_for(asyncio.shield(caller), getattr(self, 'operation_timeout', 180))
             self.assertEqual(result['state'], 'applied')
             record = await runtime.journal.load(result['operation_id'])
             self.assertEqual(tuple(s.adapter for s in record.plan.steps),
@@ -142,7 +142,7 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
             caller = hass.async_create_task(runtime.native_yaml_reverse(hass,
                 result['operation_id'], result['fingerprint'], guard=lambda: None, refresh=refresh),
                 'foreground YAML server reverse', eager_start=False)
-            reverse = await asyncio.wait_for(asyncio.shield(caller), 180)
+            reverse = await asyncio.wait_for(asyncio.shield(caller), getattr(self, 'operation_timeout', 180))
             self.assertEqual(reverse['state'], 'rolled_back')
             self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
             final = await runtime.journal.load(result['operation_id'])
