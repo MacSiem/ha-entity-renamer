@@ -512,49 +512,66 @@ class NativePowercalcActualTimerTests(unittest.IsolatedAsyncioTestCase):
         attempted = False
         source_task = None
         published_state = published_power = None
-        vendor_code = facts.vendor.classes['VirtualEnergySensor']._schedule_max_sub_interval_exceeded_if_state_is_numeric.__code__
-        def real_source_before_BASE():
-            nonlocal attempted, source_task, published_state, published_power
-            self.guard()
-            if attempted or self.static_energy.entity_id in facts.first_base:
-                return
-            from homeassistant.helpers.entity_platform import async_get_platforms
-            powers = [e for p in async_get_platforms(self.f.hass, 'powercalc')
-                      for e in p.entities.values() if e.entity_id == self.static_power.entity_id]
-            if (len(powers) != 1 or powers[0] is self.static_power
-                    or powers[0]._platform_state.name != 'ADDED' or powers[0]._power is not None):
-                return
-            frame = sys._getframe().f_back
-            at_setup = False
+        # Core async_added_to_hass reads source_state before calling the vendor
+        # schedule override. Stimulating from that later guard changes HA's live
+        # State but cannot change the argument already captured by the caller.
+        integration = facts.vendor.integration.IntegrationSensor
+        facts.refs += ((integration, 'async_added_to_hass'),)
+        executor = self.module('yaml_validation')._settled_executor
+        facts.methods, facts.codes = await executor(self.f.hass, facts.prove)
+        added_code = facts.codes[-1]
+        stimulus_error = None
+        stimulus_tool = None
+        def real_source_before_native_added(code, offset):
+            nonlocal attempted, source_task, published_state, published_power, stimulus_error
             try:
-                while frame is not None:
-                    if frame.f_code is vendor_code:
-                        e = frame.f_locals.get('self')
-                        if (getattr(e, 'entity_id', None) == self.static_energy.entity_id
-                                and e is not self.static_energy):
-                            at_setup = True
-                            break
-                    frame = frame.f_back
-            finally:
-                del frame
-            if not at_setup:
-                return
-            attempted = True
-            # The genuine fixture Light API has no await inside its state write;
-            # native cached LUT calculation can therefore publish new W here.
-            # No State, Event, vendor method or timer is constructed/replaced.
-            source_task = self.f.hass.async_create_task(
-                self.sources[0].async_turn_on(brightness=1),
-                'test.real-source-before-first-BASE', eager_start=True)
-            published_state = self.f.hass.states.get(self.static_power.entity_id)
-            published_power = powers[0]._power
+                facts.unchanged(facts.refs, facts.methods, facts.codes)
+                frame = sys._getframe(1)
+                entity = frame.f_locals.get('self')
+                if (attempted or type(entity) is not facts.cls or entity is self.static_energy
+                        or entity.entity_id != self.static_energy.entity_id):
+                    return
+                from homeassistant.helpers.entity_platform import async_get_platforms
+                powers = [e for p in async_get_platforms(self.f.hass, 'powercalc')
+                          for e in p.entities.values() if e.entity_id == self.static_power.entity_id]
+                assert code is added_code and frame.f_code is added_code
+                assert 'source_state' not in frame.f_locals and entity.entity_id not in facts.first_base
+                assert entity._platform_state.name == 'ADDING'
+                assert entity.registry_entry is self.static_energy.registry_entry
+                assert (len(powers) == 1 and powers[0] is not self.static_power
+                        and type(powers[0]) is type(self.static_power)
+                        and powers[0].registry_entry is self.static_power.registry_entry
+                        and powers[0]._platform_state.name == 'ADDED' and powers[0]._power is None), \
+                    'genuine replacement W must be present before native added entry'
+                attempted = True
+                # Actual public fixture API; the cached native LUT calculation
+                # finishes eagerly before this source-pinned PY_START returns.
+                # Core has not yet executed its source_state = hass.states.get.
+                source_task = self.f.hass.async_create_task(
+                    self.sources[0].async_turn_on(brightness=1),
+                    'test.real-source-before-native-added', eager_start=True)
+                assert source_task.done() and source_task.exception() is None
+                published_state = self.f.hass.states.get(self.static_power.entity_id)
+                published_power = powers[0]._power
+                assert type(published_power) is Decimal and published_power.is_finite()
+                assert Decimal(published_state.state) == published_power
+            except BaseException as error:
+                stimulus_error = (type(error).__name__, str(error))
         try:
             facts.install()
+            free = [i for i in range(6) if sys.monitoring.get_tool(i) is None]
+            self.assertTrue(free, 'no monitoring slot for the actual native entry stimulus')
+            stimulus_tool = free[0]
+            sys.monitoring.use_tool_id(stimulus_tool, 'renamer.test.before_native_added')
+            sys.monitoring.register_callback(stimulus_tool, sys.monitoring.events.PY_START,
+                                             real_source_before_native_added)
+            sys.monitoring.set_local_events(stimulus_tool, added_code, sys.monitoring.events.PY_START)
             with self.assertRaises(ValueError) as caught:
                 await self.numeric.async_capture_powercalc_numeric_reload(
                     self.f.hass, self.chain, self.evidence, self.original_runtime,
-                    guard=real_source_before_BASE,
+                    guard=self.guard,
                     exact_fields=True, retain_producers=True, operand_clock=True)
+            self.assertIsNone(stimulus_error, repr(stimulus_error))
             self.assertTrue(attempted, 'fixture did not expose the real numeric-first setup seam')
             self.assertIsNotNone(source_task)
             self.assertTrue(source_task.done(), 'native source calculation remained inconclusive')
@@ -576,4 +593,8 @@ class NativePowercalcActualTimerTests(unittest.IsolatedAsyncioTestCase):
                             'an unrelated refusal cannot qualify numeric-first handling')
             self._no_owned(facts)
         finally:
+            if stimulus_tool is not None:
+                sys.monitoring.set_local_events(stimulus_tool, added_code, 0)
+                sys.monitoring.register_callback(stimulus_tool, sys.monitoring.events.PY_START, None)
+                sys.monitoring.free_tool_id(stimulus_tool)
             facts.close()
