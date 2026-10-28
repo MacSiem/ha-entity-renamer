@@ -9,14 +9,23 @@ from unittest.mock import patch
 
 
 async def fresh_reverse_scenario(test, module, operation, fingerprint, baseline_digest,
-                                 original_receipt_json, consumer_identity, original, mapping, fault):
+                                 original_receipt_json, consumer_identity, original, mapping, fault, *,
+                                 native_backend_lifecycle=False):
     hass = test.f.hass
     import importlib
+    if native_backend_lifecycle:
+        # Opt-in TEST ONLY: public native ConfigEntry reload, after the caller
+        # already proved every forward proof object's weak reference dead.
+        # The returned importer belongs to the actually loaded component.
+        module = await test._reload_backend_for_reverse(operation, fingerprint,
+                                                        baseline_digest, original_receipt_json)
     backend = importlib.import_module(module('const').__package__)
     # Baseline unit fixtures pre-create a namespace-only package. Execute the
     # ACTUAL installed backend __init__ in that same package before constructing
     # its real Runtime; do not inject a Runtime double or replace native code.
-    if not hasattr(backend, 'Runtime'):
+    if native_backend_lifecycle:
+        test.assertTrue(hasattr(backend, 'Runtime'))
+    elif not hasattr(backend, 'Runtime'):
         import importlib.util
         from pathlib import Path
         source = Path(module('const').__file__).with_name('__init__.py')
@@ -30,11 +39,20 @@ async def fresh_reverse_scenario(test, module, operation, fingerprint, baseline_
     test.assertEqual(backend.Runtime.__module__, backend.__name__)
     prep, journal_api, rr, lm = (module(n) for n in
         ('prepared', 'journal', 'native_registry_receipts', 'native_helper_lifecycle'))
-    fresh_preps, fresh_journal = prep.native_prepared_store(hass), journal_api.native_journal(hass)
-    await fresh_preps.initialize()
-    await fresh_journal.initialize()
-    runtime = backend.Runtime('numeric-reverse-fixture', fresh_journal, fresh_preps)
-    hass.data[backend.DATA_RUNTIME] = runtime
+    if native_backend_lifecycle:
+        # No hand-made Runtime or hass.data insertion on this branch.
+        backend_entry = hass.config_entries.async_get_entry(test.backend_entry_id)
+        test.assertIsNotNone(backend_entry)
+        runtime = backend_entry.runtime_data
+        test.assertIs(type(runtime), backend.Runtime)
+        test.assertIs(hass.data.get(backend.DATA_RUNTIME), runtime)
+        fresh_preps, fresh_journal = runtime.preparations, runtime.journal
+    else:
+        fresh_preps, fresh_journal = prep.native_prepared_store(hass), journal_api.native_journal(hass)
+        await fresh_preps.initialize()
+        await fresh_journal.initialize()
+        runtime = backend.Runtime('numeric-reverse-fixture', fresh_journal, fresh_preps)
+        hass.data[backend.DATA_RUNTIME] = runtime
     record = await fresh_journal.load(operation)
     before_documents = await test._flush_documents()
     entry = hass.config_entries.async_get_entry(original['identity']['entry_id'])
@@ -203,6 +221,14 @@ async def fresh_reverse_scenario(test, module, operation, fingerprint, baseline_
             test.assertFalse(readonly_life.writable)
             test.assertEqual(readonly_life.inspect()['pending'], [])
             test.assertTrue(readonly_life.inspect()['activation_receipts_complete'])
+            if native_backend_lifecycle:
+                test.assertIs(backend_entry.runtime_data, runtime)
+                test.assertIs(hass.data.get(backend.DATA_RUNTIME), runtime)
+                test.assertEqual(type(session).__module__, backend.__name__ + '.native_template_reverse')
+                test.assertEqual(type(composition.evidence).__module__,
+                                 backend.__name__ + '.yaml_source_binding')
+                test._assert_backend_original_row(baseline)
+
     finally:
         if session is not None:
             session.close()

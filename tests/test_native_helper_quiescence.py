@@ -31,6 +31,11 @@ class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
         (root / 'configuration.yaml').write_bytes(b'script: {}\n')
         hass = HomeAssistant(str(root))
         self.addAsyncCleanup(hass.async_stop, force=True)
+        # Some consumers alias asyncSetUp without inheriting this class. Their
+        # historical path remains a noop unless they opt in to this test hook.
+        before_loader = getattr(self, '_before_loader', None)
+        if before_loader is not None:
+            await before_loader(hass, root)
         loader.async_setup(hass)
         hass.config_entries = ConfigEntries(hass, {})
         await loader.async_get_custom_components(hass)
@@ -44,6 +49,9 @@ class NativeHelperQuiescenceTests(unittest.IsolatedAsyncioTestCase):
                         for name in ('native_registry', 'native_registry_transition',
                                      'helper_native', 'helper_transaction',
                                      'native_config_transition')}
+
+    async def _before_loader(self, hass, root):
+        """Optional public component installation before native loader discovery."""
 
     async def _before_start(self, hass, root):
         """Optional actual-component bootstrap for derived integration probes."""
