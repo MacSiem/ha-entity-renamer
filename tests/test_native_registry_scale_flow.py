@@ -178,6 +178,12 @@ class NativeRegistryScaleFlowTests(unittest.IsolatedAsyncioTestCase):
             self.phase_start = perf_counter()
 
     async def test_core104_real_37275_deleted_full_original_yaml_forward_fresh_reverse_history(self):
+        await self._execute(readonly=False)
+
+    async def test_core104_readonly_preflight_diagnosis(self):
+        await self._execute(readonly=True)
+
+    async def _execute(self, *, readonly):
         self.metrics = {}
         self.profile_phase = 'fixture'
         samples = Counter()
@@ -198,10 +204,71 @@ class NativeRegistryScaleFlowTests(unittest.IsolatedAsyncioTestCase):
                     samples[self.profile_phase, *leaf, product] += 1
         sampler = threading.Thread(target=sample, name='scale-readonly-stack-sampler', daemon=True)
         sampler.start()
+        failures, inspections, graph_diffs = [], [], []
+        tool = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
+        sys.monitoring.use_tool_id(tool, 'actual scale readonly admission diagnosis')
+        def raised(code, offset, error):
+            if '/custom_components/ha_entity_renamer/' not in code.co_filename:
+                return
+            message = str(error)
+            if message == 'template_composition_rejected':
+                return  # Expected typed Union decoder branch, not an admission failure.
+            row = (Path(code.co_filename).name, code.co_name, type(error).__name__, message[:180])
+            if row not in failures:
+                failures.append(row)
+                if len(failures) > 80:
+                    del failures[0]
+            if code.co_filename.endswith('accepted_input_state.py') and 'input_graph_changed' in message:
+                frame = sys._getframe(1)
+                while frame is not None and frame.f_code.co_name != 'assert_current':
+                    frame = frame.f_back
+                if frame is not None:
+                    values = frame.f_locals
+                    expected, current = values.get('expected'), values.get('current')
+                    if isinstance(expected, (tuple, list)) and isinstance(current, (tuple, list)):
+                        row = {'directory':values.get('directory'), 'names':values.get('names'),
+                               'removed':sorted(set(map(tuple, expected))-set(map(tuple, current)))[:12],
+                               'added':sorted(set(map(tuple, current))-set(map(tuple, expected)))[:12]}
+                        if row not in graph_diffs:
+                            graph_diffs.append(row)
+        codes = [self.module('native_registry').NativeRegistryBridge.inspect.__code__,
+                 self.module('native_registry_transaction').ReceiptedRegistryTransactionAdapter.inspect.__code__,
+                 self.module('native_yaml_transaction').ReceiptedYAMLTransactionAdapter.inspect.__code__]
+        def inspected(code, offset, value):
+            row = {'file':Path(code.co_filename).name}
+            if type(value).__name__ == 'RegistryEvidence':
+                row.update({key:getattr(value,key) for key in ('position','reason','identity','runtime','durability','recorder_metadata','complete_history')})
+            else:
+                row['position'] = getattr(value, 'value', type(value).__name__)
+            inspections.append(row)
+        sys.monitoring.register_callback(tool, sys.monitoring.events.RAISE, raised)
+        sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, inspected)
+        sys.monitoring.set_events(tool, sys.monitoring.events.RAISE)
+        for code in codes:
+            sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_RETURN)
         start = perf_counter()
         try:
             # Reuses actual server producer, real Recorder, independent 5/7
             # output/UUID/history assertions and fresh reverse session checks.
+            if readonly:
+                runtime, mapping, _, _ = await self.data(variant='sensor')
+                for value in (5, 7):
+                    await self.stimulus(value)
+                async def refresh():
+                    self.assertTrue(runtime.operation_lock.locked())
+                async with runtime.operation_lock:
+                    factory = self.module('native_template_yaml_server').NativeTemplateYAMLServer
+                    session = await factory.prepare(self.f.hass, mapping, guard=lambda: None, refresh=refresh)
+                    try:
+                        coordinator = session._coordinator()
+                        positions = [await coordinator._adapter(step).inspect(step) for step in session.plan.steps]
+                        self.assertEqual(await runtime.journal.all(), ())
+                        self.assert_population()
+                        self.assertTrue(all(p is self.module('transaction').Position.BEFORE for p in positions),
+                                        'actual read-only native preflight must admit every real server step')
+                    finally:
+                        session.close()
+                return
             await self.flow(variant='sensor')
             self.assertEqual(self.stimulus_count, 6)
             prep, record, baseline, composition = await self.original_from_fresh_stores()
@@ -247,6 +314,15 @@ class NativeRegistryScaleFlowTests(unittest.IsolatedAsyncioTestCase):
                 trace = trace.tb_next
             raise
         finally:
+            sys.monitoring.set_events(tool, 0)
+            for code in codes:
+                sys.monitoring.set_local_events(tool, code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.RAISE, None)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, None)
+            sys.monitoring.free_tool_id(tool)
+            print('NATIVE_SCALE_ADMISSION_FAILURES', json.dumps(failures))
+            print('NATIVE_SCALE_INSPECTIONS', json.dumps(inspections[-20:]))
+            print('NATIVE_SCALE_GRAPH_DIFFS', json.dumps(graph_diffs))
             stop.set()
             sampler.join(1)
             print('NATIVE_SCALE_STACK_SAMPLES', json.dumps([
