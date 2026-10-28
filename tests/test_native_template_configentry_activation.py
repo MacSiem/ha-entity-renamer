@@ -25,6 +25,12 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
     with_yaml = False
 
     async def test_numeric_entry_source_rename_can_acquire_native_activation_scope(self):
+        await self._scope(entry_unique_id='template-entry-activation')
+
+    async def test_actual_gui_entry_without_unique_id_can_acquire_same_scope(self):
+        await self._scope(entry_unique_id=None)
+
+    async def _scope(self, *, entry_unique_id):
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.components.template.config_flow import TemplateConfigFlowHandler
         from homeassistant.config_entries import ConfigEntry, ConfigEntryState
@@ -58,7 +64,7 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
             version=TemplateConfigFlowHandler.VERSION,
             minor_version=TemplateConfigFlowHandler.MINOR_VERSION,
             source='user', discovery_keys=MappingProxyType({}), subentries_data=[],
-            unique_id='template-entry-activation', pref_disable_polling=True)
+            unique_id=entry_unique_id, pref_disable_polling=True)
         await hass.config_entries.async_add(entry)
         await hass.async_block_till_done()
         self.assertIs(entry.state, ConfigEntryState.LOADED)

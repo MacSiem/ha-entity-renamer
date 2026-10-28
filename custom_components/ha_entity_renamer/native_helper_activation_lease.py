@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from types import MappingProxyType
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -44,6 +45,31 @@ def _idle(lock: asyncio.Lock) -> bool:
             all(waiter.cancelled() for waiter in lock._waiters)))
 
 
+def _template_state_sensor_entry_shape(entry: object) -> bool:
+    """Only the pinned simple Template state-sensor ConfigEntry *shape*.
+
+    Does NOT establish numeric/Jinja semantics or an ORIGINAL receipt.
+    A lease is merely native lock ownership. The installed caller must still
+    prove the full ORIGINAL/source/schema/semantic and authorization fences.
+    This predicate deliberately excludes binary, trigger, availability,
+    additional options and modified/disabled/foreign Template entries.
+    """
+    options = entry.options
+    return (
+        entry.domain == 'template'
+        and type(entry.data) in (dict, MappingProxyType) and not entry.data
+        and type(options) in (dict, MappingProxyType)
+        and set(options) == {'template_type', 'name', 'state'}
+        and options['template_type'] == 'sensor'
+        and type(options['name']) is str and bool(options['name'])
+        and type(options['state']) is str and bool(options['state'].strip())
+        and entry.source == 'user'
+        and entry.disabled_by is None
+        and (entry.unique_id is None or (type(entry.unique_id) is str and bool(entry.unique_id)))
+        and not getattr(entry, 'subentries', ())
+    )
+
+
 class NativeHelperActivationLease:
     """Finite, task-local scope owning a precise set of real installed locks.
 
@@ -61,7 +87,8 @@ class NativeHelperActivationLease:
     """
 
     __slots__ = ('_hass', '_manager', '_entries', '_locks', '_owned', '_guard',
-                 '_task', '_loop', '_live', '_entered', '_core')
+                 '_task', '_loop', '_live', '_entered', '_core', '_template_entries',
+                 '_template_pins')
 
     def __init__(self) -> None:
         _fail('acquisition_required')
@@ -86,7 +113,8 @@ class NativeHelperActivationLease:
         if any(type(entry) is not ConfigEntry for entry in entries):
             _fail('native_entry_required')
         if (any(type(entry.entry_id) is not str or not entry.entry_id
-                or entry.domain not in NATIVE_FIELDS for entry in entries)
+                or (entry.domain not in NATIVE_FIELDS
+                    and not _template_state_sensor_entry_shape(entry)) for entry in entries)
                 or len({entry.entry_id for entry in entries}) != len(entries)):
             _fail('entry_scope_invalid')
         entries = tuple(sorted(entries, key=lambda entry: entry.entry_id))
@@ -96,6 +124,12 @@ class NativeHelperActivationLease:
             _fail('native_lock_required')
         obj = object.__new__(cls)
         obj._hass, obj._manager, obj._entries, obj._locks = hass, manager, entries, locks
+        obj._template_entries = tuple(entry.domain == 'template' for entry in entries)
+        # Lease checks must not accept a different, still shape-valid consumer.
+        # Exact ORIGINAL and native Jinja semantics remain external fences.
+        obj._template_pins = tuple(
+            (entry.unique_id, entry.options['name'], entry.options['state'])
+            if entry.domain == 'template' else None for entry in entries)
         obj._owned = []
         obj._guard = guard
         obj._task, obj._loop = asyncio.current_task(), asyncio.get_running_loop()
@@ -154,9 +188,11 @@ class NativeHelperActivationLease:
                 or self._hass.config_entries is not self._manager
                 or self._manager.hass is not self._hass):
             _fail('runtime_changed')
-        for entry, lock in zip(self._entries, self._locks, strict=True):
+        for entry, lock, is_template in zip(self._entries, self._locks,
+                                            self._template_entries, strict=True):
             if (self._manager.async_get_entry(entry.entry_id) is not entry
-                    or entry.setup_lock is not lock):
+                    or entry.setup_lock is not lock
+                    or (is_template and not _template_state_sensor_entry_shape(entry))):
                 _fail('entry_changed')
 
     def check(self) -> None:
@@ -173,12 +209,27 @@ class NativeHelperActivationLease:
         self.check()
         return any(candidate is entry for candidate in self._entries)
 
+    def _template_mutation_pin(self, entry: ConfigEntry) -> None:
+        # check() remains lock/shape only. Mutating native calls additionally
+        # bind the exact options that existed on this lease acquisition.
+        # This is not a substitute for installed ORIGINAL/semantic receipts.
+        for candidate, pin in zip(self._entries, self._template_pins, strict=True):
+            if candidate is entry:
+                if pin is not None and (
+                        not _template_state_sensor_entry_shape(entry)
+                        or (entry.unique_id, entry.options['name'],
+                            entry.options['state']) != pin):
+                    _fail('entry_changed')
+                return
+        _fail('entry_outside_scope')
+
     def _entry(self, entry_id: str) -> ConfigEntry:
         self.check()
         if type(entry_id) is not str:
             _fail('entry_outside_scope')
         for entry in self._entries:
             if entry.entry_id == entry_id:
+                self._template_mutation_pin(entry)
                 return entry
         _fail('entry_outside_scope')
 
@@ -192,14 +243,16 @@ class NativeHelperActivationLease:
         self.check()
         result = await self._manager.async_setup(entry_id, _lock=False)
         self.check()
+        self._template_mutation_pin(entry)
         return result
 
     async def async_unload(self, entry_id: str) -> bool:
         self._task_check()
-        self._entry(entry_id)
+        entry = self._entry(entry_id)
         self.check()
         result = await self._manager.async_unload(entry_id, _lock=False)
         self.check()
+        self._template_mutation_pin(entry)
         return result
 
     def _task_check(self) -> None:
