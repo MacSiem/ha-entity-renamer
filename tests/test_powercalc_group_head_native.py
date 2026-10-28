@@ -311,6 +311,7 @@ class _GroupHeadFacts:
         assert fact.native_update is self.integration._update_integral
         assert fact.native_one_state is self.vendor.integration._IntegrationMethod.calculate_area_with_one_state
         start, end = fact.start, fact.end
+        self.owned_interval_end = end
         assert start is owner.c.anchor and end is owner.c.endpoint
         assert type(start) is datetime and type(end) is datetime and end >= start
         assert self.departure is not None and self.baseline is not None
@@ -383,12 +384,31 @@ class _GroupHeadFacts:
         missing = sum((self.held_power * _seconds(right, left) / Decimal(3600000)
                        for left, right in gaps), Decimal(0))
         expected = reference + missing
+        later_native_gaps = []
+        for point, head, independent, covered in self.checkpoints:
+            stop = min(point, self.quiet_until) if self.quiet_until is not None else point
+            holes = _uncovered(self.departure, stop, covered)
+            # Keep natural native gaps visible. The first no-owner oracle still
+            # demands exact reload coverage; no hole may be relabelled as native
+            # if it starts before the proven actual clock handoff endpoint.
+            case.assertTrue(all(left >= self.owned_interval_end for left, right in holes),
+                            'uncovered interval before actual native handoff')
+            if holes:
+                later_native_gaps.append({'checkpoint': point.isoformat(),
+                    'classification': 'native_source_or_timer_bookkeeping_anchor',
+                    'source_rule': 'integration/sensor.py:508-512,608-620',
+                    'intervals': [(a.isoformat(), b.isoformat()) for a, b in holes],
+                    'held_power_area_diagnostic_only': str(sum((self.held_power * _seconds(b, a)
+                        / Decimal(3600000) for a, b in holes), Decimal(0)))})
         diagnostics = {'kind': 'powercalc_group_subtract_head_independent_oracle',
             'group_initial_head': str(self.initial_head), 'group_initial_prior': self.initial_prior,
             'group_expected_final': str(self.group_ref), 'group_heads': [(str(a), str(e)) for a, e in self.group_heads],
             'store': self.store_rows, 'group_inputs': self.rows, 'signed_power': self.signed_rows,
             'subtract_old_head': str(self.baseline), 'signed_actual_child_w': str(self.held_power),
             'departure': self.departure.isoformat(), 'quiet_endpoint': end.isoformat(),
+            'physical_quiet_until': None if self.quiet_until is None else self.quiet_until.isoformat(),
+            'actual_handoff_end': self.owned_interval_end.isoformat(),
+            'later_diagnosed_native_semantics_gaps': later_native_gaps,
             'uncovered_intervals': [(a.isoformat(), b.isoformat()) for a, b in gaps],
             'independent_missing_area_kwh': str(missing),
             'subtract_expected': str(expected), 'subtract_actual': str(actual),
@@ -407,10 +427,10 @@ class _GroupHeadFacts:
         # Include all later real integrals and a final native object read. A later
         # field overwrite must not hide behind an earlier successful callback.
         for point, head, independent, covered in self.checkpoints:
-            point = min(point, self.quiet_until) if self.quiet_until is not None else point
-            missing_later = sum((self.held_power * _seconds(right, left) / Decimal(3600000)
-                for left, right in _uncovered(self.departure, point, covered)), Decimal(0))
-            case.assertEqual(head, independent + missing_later, 'later subtract full HEAD lost/doubled energy')
+            # Native source and timer callbacks set their next bookkeeping anchor
+            # to utcnow() after the actual area endpoint. These natural gaps are
+            # diagnosed above; they are not additional reload-owned arithmetic.
+            case.assertEqual(head, independent, 'later subtract full HEAD lost/doubled energy')
         case.assertTrue(self.signed_rows, 'no actual signed grouped W calculation')
         for row in self.signed_rows:
             case.assertEqual(Decimal(row['actual']), Decimal(row['expected']))
@@ -494,6 +514,170 @@ class NativePowercalcGroupHeadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(quiet['steps']), 1)
         self.assertEqual(quiet['steps'][0]['old_engine'], id(facts.old_subtract))
         self.assertEqual(quiet['steps'][0]['new_engine'], id(facts.last_new_engine))
+
+
+
+    async def test_native_subtract_anchor_processing_gap_without_reload(self):
+        """One actual source→timer control for the pinned Core anchor rule."""
+        from homeassistant.core import HassJob, HassJobType
+        from homeassistant.helpers import event as native_event
+        await self.ready()
+        entity = self.subtract_energy  # Existing native object; no replacement.
+        initial_object, initial_registry = entity, entity.registry_entry
+        original_head = self.chain.reconstruct_inputs().head
+        facts = _GroupHeadFacts(self)
+        await facts.prepare()
+        integration = facts.vendor.integration
+        refs = ((integration.IntegrationSensor, '_integrate_on_state_update_with_max_sub_interval'),
+                (integration.IntegrationSensor, '_integrate_on_state_change'),
+                (integration.IntegrationSensor, '_update_integral'),
+                (integration.IntegrationSensor, '_schedule_max_sub_interval_exceeded_if_state_is_numeric'))
+        proof = self.module('native_unload_code_proof')
+        pins = dict(self.module('native_utility_setup_audit')._SOURCES['2026.10.2'])
+        pins.update(facts.vendor.ha_pins)
+        def prove():
+            facts.vendor.sources()
+            return proof.prove_methods(facts.vendor.ha_root, pins, refs)
+        methods, codes = await self.module('yaml_validation')._settled_executor(self.f.hass, prove)
+        nested = [code for code in self.module('native_utility_setup_audit')._code_objects(codes[3])
+                  if code.co_name == '_integrate_on_max_sub_interval_exceeded_callback']
+        self.assertEqual(len(nested), 1)
+        timer_code = nested[0]
+        self.assertIs(type(entity._method), integration._Left)
+        baseline = entity._state  # One genuine pre-observation baseline, never rebased.
+        self.assertIs(type(baseline), Decimal)
+        reference = baseline
+        stack, operations, rows, errors = [], {}, [], []
+        clock_refs = []
+        timer_done = self.f.hass.loop.create_future()
+        tracked = (*codes, timer_code)
+        free = [i for i in range(6) if sys.monitoring.get_tool(i) is None]
+        self.assertTrue(free)
+        tool = free[0]
+        sys.monitoring.use_tool_id(tool, 'renamer.test.native_anchor_control')
+
+        def observe(frame, phase):
+            nonlocal reference
+            try:
+                proof.unchanged(refs, methods, codes)
+                if frame.f_locals.get('self') is not entity:
+                    return
+                if frame.f_code is codes[2]:
+                    if phase == 'start':
+                        ancestors = list(facts._ancestors(frame))
+                        timers = [f for f in ancestors if f.f_code is timer_code
+                                  and f.f_locals.get('self') is entity]
+                        if timers:
+                            producer = timers[0]
+                            start, end = entity._last_integration_time, producer.f_locals['now']
+                            power = _numeric(producer.f_locals['source_state'], 'W')
+                            kind = 'timer'
+                        else:
+                            maths = [f for f in ancestors if f.f_code is codes[1]
+                                     and f.f_locals.get('self') is entity]
+                            wrappers = [f for f in ancestors if f.f_code is codes[0]
+                                        and f.f_locals.get('self') is entity]
+                            assert len(maths) == len(wrappers) == 1
+                            producer, local = wrappers[0], maths[0].f_locals
+                            start = (entity._last_integration_time
+                                if entity._last_integration_trigger is integration._IntegrationTrigger.TimeElapsed
+                                else local['old_timestamp'])
+                            end, power = local['new_timestamp'], Decimal(local['old_state_state'])
+                            kind = 'source'
+                        assert power.is_finite() and type(start) is datetime and type(end) is datetime
+                        # Preserve signed native intervals; this control does
+                        # not impose monotonic sampling on the Core.
+                        # Independent State/clock inputs, never native elapsed,
+                        # area, update argument or an encoded product receipt.
+                        increment = power * _seconds(end, start) / Decimal(3600000)
+                        stack.append((producer, start, end, kind, increment))
+                    else:
+                        producer, start, end, kind, increment = stack.pop()
+                        reference += increment
+                        assert entity._state == reference, 'native control HEAD differs from independent LEFT inputs'
+                        operations[id(producer)] = (start, end, kind, entity._state, reference)
+                    return
+                if frame.f_code not in (codes[0], timer_code) or phase != 'return':
+                    return
+                operation = operations.pop(id(frame), None)
+                if operation is None:
+                    return  # Nonnumeric/no-area native update is not this control.
+                start, end, kind, actual, expected = operation
+                anchor, trigger = entity._last_integration_time, entity._last_integration_trigger
+                assert type(anchor) is datetime and anchor > end
+                assert trigger is (integration._IntegrationTrigger.StateEvent if kind == 'source'
+                                   else integration._IntegrationTrigger.TimeElapsed)
+                clock_refs.append((kind, start, end, anchor))
+                rows.append({'kind': kind, 'area_start': start.isoformat(), 'area_end': end.isoformat(),
+                    'next_anchor': anchor.isoformat(), 'trigger': trigger.name,
+                    'actual': str(actual), 'independent': str(expected)})
+                if kind == 'timer' and not timer_done.done():
+                    timer_done.set_result(None)
+            except BaseException as error:
+                errors.append((type(error).__name__, str(error)))
+                if not timer_done.done():
+                    timer_done.set_result(None)
+
+        def started(code, offset):
+            observe(sys._getframe(1), 'start')
+        def returned(code, offset, value):
+            observe(sys._getframe(1), 'return')
+        monitor = sys.monitoring
+        monitor.register_callback(tool, monitor.events.PY_START, started)
+        monitor.register_callback(tool, monitor.events.PY_RETURN, returned)
+        for code in tracked:
+            monitor.set_local_events(tool, code, monitor.events.PY_START | monitor.events.PY_RETURN)
+        try:
+            # Public fixture input. No reload, retained owner, direct calculator,
+            # State/Task replacement, timer mutation or simulated clock advance.
+            await self.sources[0].async_turn_on(brightness=1)
+            await self.f.hass.async_block_till_done()
+            self.assertFalse(errors, errors)
+            self.assertTrue(any(row['kind'] == 'source' for row in rows))
+            callback = entity._max_sub_interval_exceeded_callback
+            handle = getattr(callback, '__self__', None)
+            self.assertIs(type(handle), asyncio.TimerHandle)
+            self.assertEqual(callback, handle.cancel)
+            self.assertFalse(handle.cancelled())
+            self.assertIs(handle._loop, self.f.hass.loop)
+            self.assertIs(handle._callback, native_event._run_async_call_action)
+            self.assertIs(handle._args[0], self.f.hass)
+            job = handle._args[1]
+            self.assertIs(type(job), HassJob)
+            self.assertIs(job.job_type, HassJobType.Callback)
+            self.assertIs(job.target.__code__, timer_code)
+            closure = dict(zip(job.target.__code__.co_freevars,
+                (cell.cell_contents for cell in job.target.__closure__), strict=True))
+            self.assertIs(closure['self'], entity)
+            self.assertEqual(closure['source_state'].entity_id, entity._sensor_source_id)
+            self.assertEqual(closure['source_state_dec'], _numeric(closure['source_state'], 'W'))
+            # Wait only for this already-existing genuine native deadline.
+            await asyncio.sleep(max(0, handle.when() - self.f.hass.loop.time()))
+            await self.f.hass.async_block_till_done()
+            await asyncio.shield(timer_done)
+            self.assertFalse(errors, errors)
+            self.assertTrue(any(row['kind'] == 'timer' for row in rows))
+            self.assertTrue(any(source[0] == 'source' and timer[0] == 'timer'
+                                and timer[1] is source[3]
+                                for source in clock_refs for timer in clock_refs),
+                            'no actual timer consumed the source callback bookkeeping anchor')
+            self.assertFalse(stack)
+            self.assertEqual(entity._state, reference)
+            self.assertIs(entity, initial_object)
+            self.assertIs(entity.registry_entry, initial_registry)
+            self.assertEqual(self.chain.reconstruct_inputs().head, original_head)
+            self.assertEqual(await self.module('yaml_validation')._settled_executor(self.f.hass, prove),
+                             (methods, codes))
+            self.assertFalse(errors, errors)
+            self.assertEqual(entity._state, reference)
+            print(json.dumps({'kind': 'native_subtract_anchor_control_without_reload',
+                'source_pins': pins, 'intervals_and_native_anchor_assignments': rows}, sort_keys=True))
+        finally:
+            for code in tracked:
+                monitor.set_local_events(tool, code, 0)
+            monitor.register_callback(tool, monitor.events.PY_START, None)
+            monitor.register_callback(tool, monitor.events.PY_RETURN, None)
+            monitor.free_tool_id(tool)
 
 
 def load_tests(loader, tests, pattern):

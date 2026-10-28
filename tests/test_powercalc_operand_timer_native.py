@@ -16,7 +16,7 @@ import unittest
 import test_powercalc_operand_clock_native as baseline
 from test_powercalc_custom_profile_io import CustomProfileIOProof
 
-_CLOCK_SHA256 = 'cba3f660e308325ae2ff2b6527da6c0a178b65181b5e3b004b7e7023f672ca8d'
+_CLOCK_SHA256 = '559e9539e409c219971b24567fa9f616704ab966e3542e7a8883116648fbed64'
 
 
 def _utc():
