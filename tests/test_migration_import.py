@@ -74,3 +74,30 @@ class ManifestImportTests(unittest.TestCase):
         document = self.source(); before = copy.deepcopy(document)
         self.decode(document)
         self.assertEqual(document, before)
+
+
+class RegistryConflictTests(unittest.TestCase):
+    def test_all_missing_and_occupied_rows_are_reported_without_assuming_migration(self):
+        proposal = module.parse_manifest({'entities': [
+            {'entity_id': 'sensor.missing', 'proposed_entity_id': 'sensor.destination'},
+            {'entity_id': 'sensor.old', 'proposed_entity_id': 'sensor.occupied'}],
+            'devices': [{'device_id': 'missing-device', 'proposed_name': 'New'}]})
+        rows = [{'entity_id': 'sensor.old', 'id': 'stable', 'unique_id': 'source',
+                 'platform': 'demo', 'device_id': None},
+                {'entity_id': 'sensor.occupied', 'id': 'other', 'unique_id': 'foreign',
+                 'platform': 'demo', 'device_id': None}]
+        result = module.registry_conflicts(proposal, rows, [])
+        self.assertEqual([(r.kind, r.index, r.reason) for r in result],
+            [('entity', 0, 'source_missing'), ('entity', 1, 'destination_occupied'),
+             ('device', 0, 'device_missing')])
+        with self.assertRaisesRegex(ValueError, 'source_missing'):
+            module.bind_registry(proposal, rows, [])
+
+    def test_identity_and_device_drift_reuse_the_binding_policy(self):
+        manifest = module.parse_manifest({'entities': [
+            {'entity_id': 'sensor.old', 'proposed_entity_id': 'sensor.new', 'device_id': 'expected'}]})
+        row = {'entity_id': 'sensor.old', 'id': 'stable', 'unique_id': 'source',
+               'platform': 'demo', 'device_id': 'different'}
+        self.assertEqual(module.registry_conflicts(manifest, [row], [])[0].reason, 'device_changed')
+        row['device_id'] = 'expected'; row['id'] = None
+        self.assertEqual(module.registry_conflicts(manifest, [row], [])[0].reason, 'identity_unverified')
