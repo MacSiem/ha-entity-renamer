@@ -1,6 +1,7 @@
 """Read-only native custom-profile IO proof shared by the two timer cases.
 
-Installed runtime pins came from owner readback of both official HA images\n(Python3.14.6 and3.14.9); no inferred semver or rewritten interpreter.
+Installed runtime pins came from owner readback of both official HA images
+(Python3.14.6 and3.14.9); no inferred semver or rewritten interpreter.
 No loop/Task/State/Event/callback/cache replacement; no worker queue blocker.
 """
 import asyncio
@@ -31,7 +32,8 @@ class CustomProfileIOProof:
         self.io_rows = []
         self.deadline_wait = None
         self.io_loop_thread = threading.get_ident()
-        self.case.assertIn(sys.version, _RUNTIME_PINS)\n        runtime_files = _RUNTIME_PINS[sys.version]
+        self.case.assertIn(sys.version, _RUNTIME_PINS)
+        runtime_files = _RUNTIME_PINS[sys.version]
         self.case.assertIs(type(self.hass.loop), unix_events._UnixSelectorEventLoop)
         self.case.assertIs(asyncio.SelectorEventLoop, unix_events._UnixSelectorEventLoop)
         self.case.assertIs(asyncio.Future, _asyncio.Future)
