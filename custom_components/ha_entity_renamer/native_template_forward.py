@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 import uuid
 
@@ -31,6 +32,91 @@ def _need(value, reason):
         raise Refused('template_forward_' + reason) from None
 
 
+class _UnchangedConsumers:
+    """Task-local read comparisons, never an adapter or effect capability."""
+
+    @classmethod
+    async def capture(cls, hass, mapping, *, guard):
+        from .native_discovery_consumers import async_observe_discovery_consumers
+        from .discovery import _plain
+        from .discovery_final_fence import _ConsumerFence
+        from .dashboard_plan import plan_dashboard
+        from .energy_plan import plan_energy
+        from homeassistant.components.lovelace.const import LOVELACE_DATA
+        obj = cls()
+        obj.hass, obj.thread = hass, threading.get_ident()
+        obj.loaded = frozenset(hass.config.components) & {'automation', 'script', 'lovelace', 'energy'}
+        # Missing readers are never evidence for a loaded/native-present family.
+        obj.presence = (id(hass.data.get(LOVELACE_DATA)), id(hass.data.get('energy_manager')))
+        observed = await async_observe_discovery_consumers(hass, guard=guard)
+        guard()
+        names = []
+        for name, component, present in (
+                ('dashboard', 'lovelace', hass.data.get(LOVELACE_DATA) is not None),
+                ('energy', 'energy', hass.data.get('energy_manager') is not None)):
+            result = getattr(observed, name)
+            if component not in obj.loaded and not present:
+                continue
+            _need(result.status == 'COMPLETE', name + '_evidence_unavailable')
+            names.append(name)
+            if name == 'dashboard':
+                # File/hash inventory alone cannot prove YAML dashboard semantics.
+                _need(not result.value.yaml_sources, 'dashboard_yaml_route_unqualified')
+                configs = [row.config for row in result.value.snapshots if row.config is not None]
+                planner = plan_dashboard
+            else:
+                configs = [] if result.value.value is None else [result.value.value]
+                planner = plan_energy
+            for config in configs:
+                plan = planner(_plain(config), mapping)
+                _need(not plan.markers and not plan.changes, name + '_dependency_unsupported')
+        obj.native = _ConsumerFence(hass, observed, _plain, names=tuple(names))
+        obj.runtime_sample = None
+        obj.evidence = obj.observed = None
+        obj.check()
+        return obj
+
+    async def bind_sources(self, receipt, evidence, *, guard):
+        from .yaml_source_binding import async_bind_original_runtime, _runtime_sample
+        from .native_discovery_inputs import async_observe_discovery_inputs
+        from .discovery import _runtime_family
+        # A loaded component must have an actual settled complete projection;
+        # _runtime_sample's absent-component path cannot prove loaded emptiness.
+        for domain in ('automation', 'script'):
+            if domain in self.loaded or evidence.ledger.keys_for_native_projection(domain):
+                family, token = _runtime_family(self.hass, domain)
+                _need(family.status == 'COMPLETE' and token is not None,
+                      domain + '_runtime_unqualified')
+        bound = await async_bind_original_runtime(self.hass, receipt, evidence, guard=guard)
+        guard()
+        _need(bound.verified, 'source_runtime_unqualified')
+        observed = await async_observe_discovery_inputs(self.hass, guard=guard)
+        guard()
+        sample = _runtime_sample(self.hass, evidence, observed)
+        _need(not sample[1] and sample[0] == bound.rows and sample[2] == bound.tokens,
+              'source_runtime_changed')
+        self.evidence, self.observed, self.runtime_sample = evidence, observed, sample
+        self.check()
+
+    def check(self):
+        # The composer's guard is also called by physical IO workers. Native
+        # managers, EntityComponent and registrations are checked only on-loop.
+        if threading.get_ident() != self.thread:
+            return
+        from homeassistant.components.lovelace.const import LOVELACE_DATA
+        _need(frozenset(self.hass.config.components) & {'automation', 'script', 'lovelace', 'energy'}
+              == self.loaded and self.presence == (id(self.hass.data.get(LOVELACE_DATA)),
+                  id(self.hass.data.get('energy_manager'))), 'consumer_inventory_changed')
+        self.native.check()
+        if self.runtime_sample is not None:
+            from .yaml_source_binding import _runtime_sample
+            _need(_runtime_sample(self.hass, self.evidence, self.observed) == self.runtime_sample,
+                  'source_runtime_changed')
+
+    def physical(self):
+        self.native.physical()
+
+
 class NativeTemplateForward:
     """Task-local one-shot writer built only by installed native qualification."""
 
@@ -40,7 +126,12 @@ class NativeTemplateForward:
     # Share the installed exact accepted-head, finite-history and adapter
     # implementations. These functions consume this object's own graph; no
     # reverse binding, readonly promotion or second ORIGINAL is involved.
-    _observe = NativeTemplateReverse._observe
+    async def _observe(self):
+        observed = await NativeTemplateReverse._observe(self)
+        await _drained(self.hass.async_add_executor_job, self._unchanged_consumers.physical)
+        self._scope()
+        return observed
+
     _history_current = NativeTemplateReverse._history_current
     _final_loaded_history = NativeTemplateReverse._final_loaded_history
     _coordinator = NativeTemplateReverse._coordinator
@@ -71,15 +162,16 @@ class NativeTemplateForward:
 
         def runtime_scope():
             _authorize(guard)
-            # This private slice supplies no dashboard/Energy/YAML runtime or
-            # external consumer adapters. Refuse their active requirements even
-            # if a read-only discovery view could enumerate them.
-            _need(not ({'automation', 'script', 'scene', 'lovelace', 'energy', 'powercalc',
-                        'mqtt', 'rest', 'command_line'} & set(hass.config.components)),
+            # The four qualified families remain unchanged. No external or
+            # other native consumer adapter is supplied by this private slice.
+            _need(not ({'scene', 'powercalc', 'mqtt', 'rest', 'command_line'}
+                       & set(hass.config.components)),
                   'other_consumer_scope_unsupported')
             _need(hass.data.get(DATA_RUNTIME) is runtime and runtime.loaded
                   and not runtime.unloading and runtime.operation_lock is obj.lock
                   and obj.lock.locked(), 'runtime_scope_lost')
+            if hasattr(obj, '_unchanged_consumers'):
+                obj._unchanged_consumers.check()
 
         def scope():
             runtime_scope()
@@ -97,6 +189,8 @@ class NativeTemplateForward:
         try:
             scope()
             await refresh()
+            scope()
+            obj._unchanged_consumers = await _UnchangedConsumers.capture(hass, obj.mapping, guard=scope)
             scope()
             obj.preparations, obj.journal = native_prepared_store(hass), native_journal(hass)
             await obj.preparations.initialize()
@@ -184,11 +278,13 @@ class NativeTemplateForward:
                 hass, yaml, root.parent, native_helpers=tuple(requests))
             scope()
             _need(obj.receipt.ready_for_apply, 'validation_required')
-            # No automation/script/YAML/external writer is composed by this
-            # component. Broader operations must use the future controller.
-            _need(not obj.evidence.ledger.definitions
-                  and not obj.evidence.template_sources.ledger.definitions,
+            # Unchanged automation/script sources require the SAME ORIGINAL
+            # ledger/checker projection and genuine settled native registrations.
+            # YAML patches and Template YAML remain outside this private writer.
+            _need(not obj.evidence.template_sources.ledger.definitions,
                   'other_source_scope_unsupported')
+            await obj._unchanged_consumers.bind_sources(obj.receipt, obj.evidence, guard=scope)
+            scope()
             baseline = await async_capture_native_input_baseline(hass, obj.receipt, guard=scope)
             scope()
             source_history = await obj.history.capture(obj.mapping)
@@ -262,6 +358,8 @@ class NativeTemplateForward:
         await _drained(self.hass.async_add_executor_job, lambda: assert_validation_current(receipt))
         self._scope()
         observed = await async_observe_native_inputs(self.hass, receipt, guard=self._scope)
+        self._scope()
+        await _drained(self.hass.async_add_executor_job, self._unchanged_consumers.physical)
         self._scope()
         baseline = self.chain.baseline
         _need(observed.original_receipt_json == baseline.receipt_json and observed.files == baseline.files,

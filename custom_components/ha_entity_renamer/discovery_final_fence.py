@@ -48,6 +48,12 @@ class _ConsumerFence:
         from .energy_native import NativeEnergy
         self.hass,self.observed,self.plain = hass,observed,plain
         self.dashboard=self.energy=None
+        # Pin native locations on-loop. physical() only reads these immutable
+        # descriptors and detached snapshots, never HA/config/manager objects.
+        from pathlib import Path
+        self.root = Path(hass.config.config_dir)
+        self.storage_root = Path(hass.config.path('.storage'))
+        self.energy_path = self.energy_minor = None
         if 'dashboard' in names and observed.dashboard.status=='COMPLETE':
             native=NativeLovelace(hass)
             token=_inventory(hass,native,observed.version)
@@ -60,6 +66,8 @@ class _ConsumerFence:
                 if type(manager) is native._storage_class and manager.config is not None)
         if 'energy' in names and observed.energy.status=='COMPLETE':
             self.energy=NativeEnergy(hass,_energy_manager(hass))
+            self.energy_path = Path(self.energy._store.path)
+            self.energy_minor = self.energy._minor_version
         self.check()
 
     def check(self):
@@ -92,7 +100,7 @@ class _ConsumerFence:
         if self.dashboard is not None:
             native,_=self.dashboard
             value=self.observed.dashboard.value
-            collection,_=durable_snapshot(Path(self.hass.config.path('.storage','lovelace_dashboards')),
+            collection,_=durable_snapshot(self.storage_root / 'lovelace_dashboards',
                                           'lovelace_dashboards')
             items=[] if collection is None else collection.get('items')
             if (type(items) is not list or any(type(item) is not dict for item in items)
@@ -100,15 +108,15 @@ class _ConsumerFence:
                 raise ValueError('discovery_dashboard_collection_changed')
             for row in value.snapshots:
                 # Paths/keys are captured native descriptors, never request data.
-                data,identity=durable_snapshot(Path(self.hass.config.path('.storage',row.dashboard.key)),row.dashboard.key)
+                data,identity=durable_snapshot(self.storage_root / row.dashboard.key,row.dashboard.key)
                 config=None if data is None else data.get('config')
                 if identity!=row.file_identity or revision(config)!=row.revision:
                     raise ValueError('discovery_dashboard_disk_changed')
             for source in value.yaml_sources:
-                if _yaml_file(self.hass.config.config_dir,source.filename)!=(source.file_identity,source.sha256):
+                if _yaml_file(self.root,source.filename)!=(source.file_identity,source.sha256):
                     raise ValueError('discovery_dashboard_yaml_changed')
         if self.energy is not None:
-            data,identity=durable_snapshot(Path(self.energy._store.path),'energy',1,self.energy._minor_version)
+            data,identity=durable_snapshot(self.energy_path,'energy',1,self.energy_minor)
             expected=self.observed.energy.value
             if identity!=expected.file_identity or revision(data)!=expected.revision:
                 raise ValueError('discovery_energy_disk_changed')

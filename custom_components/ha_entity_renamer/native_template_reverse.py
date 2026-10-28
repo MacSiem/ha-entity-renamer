@@ -343,6 +343,12 @@ class NativeTemplateReverse:
         mapping = self.change.mapping
 
         def compare():
+            # Forward's optional read-only consumer fence shares this LAST IO
+            # continuation with source/history comparisons. No manager reads
+            # occur in the worker; the ordinary _scope suffix checks them.
+            consumers = getattr(self, '_unchanged_consumers', None)
+            if consumers is not None:
+                consumers.physical()
             state.assert_current(self.receipt)
             with session_scope(session=instance.get_session(), read_only=True) as sql:
                 for historical in (self.composition.source_history, self.composition.consumer_history):
@@ -359,6 +365,8 @@ class NativeTemplateReverse:
                         verifier = verify_rollback if next(iter(mapping)) in metadata['states'] else verify
                         _need(verifier(mapping, json.loads(self.registry_change.recorder_before_json), metadata),
                               'source_metadata_changed')
+            if consumers is not None:
+                consumers.physical()
             state.assert_current(self.receipt)
         await _drained(self.hass.async_add_executor_job, compare)
         # Synchronous suffix: no source/auth/history gap introduced after IO.
