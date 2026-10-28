@@ -132,6 +132,81 @@ class NativeBackendAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runtime.operation_lock.locked())
         self.assertEqual(await runtime.journal.active(), ())
 
+    async def test_public_backend_reload_waits_for_runtime_lock_without_blocking_reads(self):
+        from homeassistant.config_entries import ConfigEntryState
+        backend = self._loaded_backend()
+        hass = self.f.hass
+        entry = hass.config_entries.async_get_entry(self.backend_entry_id)
+        runtime = entry.runtime_data
+        self.assertIs(hass.data[backend.DATA_RUNTIME], runtime)
+        lock = runtime.operation_lock
+        seen = hass.loop.create_future()
+        lock_code = asyncio.Lock.acquire.__code__
+        unload_code = backend.async_unload_entry.__code__
+        reload_task = None
+        tool = None
+        def observe(code, offset, value):
+            nonlocal reload_task
+            try:
+                frame = sys._getframe()
+                while frame is not None and frame.f_code is not code:
+                    frame = frame.f_back
+                if frame is None or frame.f_locals.get('self') is not lock:
+                    return
+                frame = frame.f_back
+                while frame is not None:
+                    if (frame.f_code is unload_code and frame.f_locals.get('runtime') is runtime
+                            and frame.f_locals.get('entry') is entry):
+                        reload_task = asyncio.current_task()
+                        if not seen.done():
+                            seen.set_result(reload_task)
+                        return
+                    frame = frame.f_back
+            except BaseException as error:
+                if not seen.done():
+                    seen.set_exception(error)
+        for ident in range(6):
+            try:
+                sys.monitoring.use_tool_id(ident, 'native backend reload lock facts')
+            except ValueError:
+                continue
+            tool = ident
+            break
+        self.assertIsNotNone(tool)
+        await lock.acquire()
+        try:
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_YIELD, observe)
+            sys.monitoring.set_local_events(tool, lock_code, sys.monitoring.events.PY_YIELD)
+            # Core creates the foreground reload task. The test never constructs it.
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+            task = await seen
+            self.assertIs(type(task), asyncio.Task)
+            self.assertIn(task, hass._tasks)
+            self.assertNotIn(task, hass._background_tasks)
+            self.assertIn(task._fut_waiter, lock._waiters)
+            self.assertTrue(runtime.unloading)
+            recorder = backend_fixture.installed_module('recorder_guard').NativeRecorderGuard(hass)
+            metadata = await recorder.snapshot({})
+            self.assertEqual(metadata, {'states': {}, 'statistics': {}})
+            io = backend_fixture.installed_module('native_registry').NativeRegistryIO(hass)
+            await io.settle()
+            self.assertFalse(task.done())
+            self.assertTrue(lock.locked())
+        finally:
+            sys.monitoring.set_local_events(tool, lock_code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_YIELD, None)
+            sys.monitoring.free_tool_id(tool)
+            lock.release()
+            if reload_task is not None:
+                self.assertTrue(await reload_task)
+        self.assertIs(entry.state, ConfigEntryState.LOADED)
+        self.assertIsNot(entry.runtime_data, runtime)
+        self.assertIs(hass.data[backend.DATA_RUNTIME], entry.runtime_data)
+        self.assertFalse(runtime.loaded)
+        self.assertTrue(entry.runtime_data.loaded)
+        self.assertFalse(entry.runtime_data.unloading)
+        self.assertEqual(await entry.runtime_data.journal.active(), ())
+
     async def test_registered_discover_background_waiter_rechecks_real_user_role(self):
         await self._revocation_while_waiting('discover')
 
