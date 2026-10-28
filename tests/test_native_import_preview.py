@@ -90,3 +90,18 @@ class NativeImportPreviewTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(response['result']['migration_ready'])
         for path, raw in original.items():
             self.assertEqual(path.read_bytes(), raw)
+
+    async def test_registered_preview_reports_all_missing_sources_without_registry_disclosure(self):
+        await self._flush_documents(initialize=True)
+        document = {'entities': [
+            {'entity_id': 'sensor.missing_a', 'proposed_entity_id': 'sensor.destination_a'},
+            {'entity_id': 'sensor.missing_b', 'proposed_entity_id': 'sensor.destination_b'}]}
+        response = await self.request(json.dumps(document))
+        self.assertTrue(response['success'], response)
+        result = response['result']
+        self.assertFalse(result['migration_ready'])
+        self.assertEqual(result['registry_conflicts'], [
+            {'kind': 'entity', 'index': 0, 'reason': 'source_missing', 'entity_id': 'sensor.missing_a'},
+            {'kind': 'entity', 'index': 1, 'reason': 'source_missing', 'entity_id': 'sensor.missing_b'}])
+        self.assertNotIn(self.backend_entry_id, json.dumps(result))
+        self.assertEqual(result['conflicts'], ['registry_mapping_conflict'])

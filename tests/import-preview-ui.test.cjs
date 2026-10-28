@@ -85,3 +85,17 @@ test('localized result safely lists known families and preserves external focus 
  assert.match(node(f,'renamerMigrationPanel').textContent,language==='pl'?/zależności|zewnętrzni/:/dependencies|External/);
  }finally{f.dom.window.close();}}
 });
+
+test('missing sources are explicit conflicts tied only to the imported scope',async()=>{
+ const f=await fixture();try{
+ await file(f);f.setResponse(async()=>({...preview(),registry_conflicts:[
+ {kind:'entity',index:0,reason:'source_missing',entity_id:'sensor.old'}]}));await analyze(f);
+ assert.match(node(f,'renamerMigrationPanel').textContent,/sensor.old/);
+ assert.match(node(f,'renamerMigrationPanel').textContent,/source.*missing|source.*not found/i);
+ assert.equal(node(f,'applyRenamerImport'),null);
+ f.setResponse(async()=>({...preview(),registry_conflicts:[
+ {kind:'entity',index:0,reason:'source_missing',entity_id:'sensor.unrequested_private'}]}));await analyze(f);
+ assert.equal(f.card._migration.phase,'unavailable');
+ assert.doesNotMatch(node(f,'renamerMigrationPanel').textContent,/unrequested_private/);
+ }finally{f.dom.window.close();}
+});
