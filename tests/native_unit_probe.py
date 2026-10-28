@@ -12,7 +12,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
-parser.add_argument('--container', choices=('ha-renamer-qa222', 'ha-renamer-min222'), default='ha-renamer-qa222')
+parser.add_argument('--container', choices=('ha-renamer-qa222', 'ha-renamer-min222', 'ha-renamer-core104222'), default='ha-renamer-qa222')
 parser.add_argument('--pattern', default='test*.py')
 parser.add_argument('--repeat', type=int, default=1)
 parser.add_argument('--timeout', type=int, default=600, help='Container suite timeout in seconds')
