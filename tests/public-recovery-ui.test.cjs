@@ -133,12 +133,12 @@ test('household and unresolved admin have no recovery controls or direct request
  const f=await fixture();try{f.card.hass={...f.hass,user:{id:'admin-a'}};await f.card._checkBackendStatus();assert.equal(packets(f).length,0);}finally{close(f);}
 });
 
-test('late inspect only updates its panel, preserves draft focus and queue, escapes summary, PL/EN',async()=>{
+test('late inspect only updates its panel, preserves draft focus and queue, PL/EN',async()=>{
  for(const language of ['en','pl']){const f=await fixture({language});try{
  await click(f,'checkRenamerBackendStatus');const wait=deferred();f.setRecovery(()=>wait.promise);
  const external=f.dom.window.document.createElement('input');f.card.shadowRoot.append(external);external.value='draft';external.focus();
  const queue=f.card._renameQueue;button(f,'reviewRenamerRecovery').click();external.focus();
- wait.resolve(inspection({change_summary:{source:{current_entity_id:'sensor.<img src=x>',original_entity_id:'sensor.original'},consumers:{count:1,domains:['sensor']}}}));await flush();
+ wait.resolve(inspection({change_summary:{source:{current_entity_id:'sensor.changed',original_entity_id:'sensor.original'},consumers:{count:1,domains:['sensor']}}}));await flush();
  assert.equal(f.card.shadowRoot.activeElement,external);assert.equal(external.value,'draft');assert.equal(f.card._renameQueue,queue);
  assert.equal(button(f,'renamerRecoveryPanel').querySelector('img'),null);
  assert.ok(button(f,'renamerRecoveryPanel').querySelector('wbr'));
@@ -165,7 +165,7 @@ test('late restore cannot project results after account, connection or DOM autho
  if(mode==='connection')f.connection.dispatchEvent(new f.dom.window.Event('disconnected'));
  if(mode==='detach')f.card.remove();
  wait.resolve(inspection({state:'rolled_back',reason:'restored',eligible:false}));await flush();
- assert.equal(f.card._recovery,null);assert.doesNotMatch(f.card.shadowRoot.innerHTML,/Original identifier and linked entities restored|sensor.changed/);
+ assert.equal(f.card._recovery,null);assert.doesNotMatch(f.card.shadowRoot.innerHTML,/Original identifiers and linked entities restored|sensor.changed/);
  assert.equal(restores(f).length,1);
  }finally{close(f);}}
 });
@@ -210,5 +210,62 @@ test('an existing legacy rename confirmation cannot acquire recovery confirmatio
  button(f,'askRenamerRecovery').click();await flush();
  assert.equal(f.card._recovery.phase,'inspected');assert.equal(button(f,'renamerRecoveryConfirm'),null);
  assert.equal(restores(f).length,0);assert.equal(f.card._renameQueue.length,1);
+ }finally{close(f);}
+});
+
+const pluralSummary = () => ({sources:[
+ {current_entity_id:'sensor.changed',original_entity_id:'sensor.original'},
+ {current_entity_id:'sensor.changed_second',original_entity_id:'sensor.original_second'}],
+ consumers:{count:3,domains:['binary_sensor','sensor']}});
+
+test('plural active card review, cancel focus, confirmation and coalesced exact operation restore',async()=>{
+ for(const language of ['en','pl']){const f=await fixture({language,showHelp:false});try{
+ f.setRecovery(async()=>inspection({change_summary:pluralSummary()}));await inspect(f);
+ const panel=button(f,'renamerRecoveryPanel');
+ assert.match(panel.textContent,/sensor.changed_second/);assert.match(panel.textContent,/sensor.original_second/);
+ assert.match(panel.textContent,/3/);assert.equal(panel.querySelectorAll('code').length,4);
+ assert.equal(button(f,'confirmRenamerRecovery'),null);assert.equal(restores(f).length,0);
+ await click(f,'askRenamerRecovery');assert.equal(f.card.shadowRoot.activeElement,button(f,'cancelRenamerRecovery'));
+ assert.equal(button(f,'renamerRecoveryConfirm').querySelectorAll('code').length,4);
+ await click(f,'cancelRenamerRecovery');assert.equal(f.card.shadowRoot.activeElement,button(f,'askRenamerRecovery'));
+ assert.equal(restores(f).length,0);await click(f,'askRenamerRecovery');const wait=deferred();f.setRecovery(()=>wait.promise);
+ const confirm=button(f,'confirmRenamerRecovery');confirm.click();confirm.click();assert.equal(restores(f).length,1);
+ assert.deepEqual(restores(f)[0],{type:'ha_entity_renamer/recovery/restore',...OP});
+ wait.resolve(inspection({state:'rolled_back',reason:'restored',eligible:false}));await flush();
+ assert.equal(f.card.shadowRoot.querySelectorAll('#renamerRecoveryPanel').length,1);
+ assert.equal(f.card.shadowRoot.querySelectorAll('#confirmRenamerRecovery').length,0);
+ }finally{close(f);}}
+});
+
+test('malformed plural scope cannot acquire confirmation or render unexpected authority',async()=>{
+ const invalid = [
+ {...pluralSummary(),sources:[]},
+ {...pluralSummary(),sources:[pluralSummary().sources[0],pluralSummary().sources[0]]},
+ {...pluralSummary(),sources:Array(1001).fill(pluralSummary().sources[0])},
+ {...pluralSummary(),source:pluralSummary().sources[0]},
+ {...pluralSummary(),path:'/PRIVATE/configuration.yaml'},
+ {...pluralSummary(),sources:[{...pluralSummary().sources[0],uuid:'PRIVATE_UUID'}]},
+ {...pluralSummary(),sources:[{current_entity_id:'sensor.<img src=x>',original_entity_id:'sensor.original'}]},
+ {...pluralSummary(),sources:[{current_entity_id:'sensor.same',original_entity_id:'sensor.same'}]},
+ {...pluralSummary(),consumers:{count:10001,domains:['sensor']}},
+ {...pluralSummary(),consumers:{count:1,domains:['sensor','sensor']}},
+ {...pluralSummary(),consumers:{count:1,domains:['automation']}},
+ {...pluralSummary(),consumers:{count:1,domains:[]}},
+ {...pluralSummary(),consumers:{count:0,domains:['sensor']}},
+ ];
+ for(const summary of invalid){const f=await fixture({showHelp:false});try{
+ f.setRecovery(async()=>inspection({change_summary:summary}));await inspect(f);
+ assert.equal(button(f,'askRenamerRecovery'),null);assert.equal(button(f,'confirmRenamerRecovery'),null);
+ assert.equal(restores(f).length,0);assert.doesNotMatch(button(f,'renamerRecoveryPanel').innerHTML,/PRIVATE|<img/);
+ }finally{close(f);}}
+});
+
+test('late plural authority is discarded after role revocation and preserves queue',async()=>{
+ const f=await fixture({showHelp:false});try{const wait=deferred();f.setRecovery(()=>wait.promise);
+ const queue=f.card._renameQueue;await click(f,'checkRenamerBackendStatus');button(f,'reviewRenamerRecovery').click();
+ f.card.hass={...f.hass,user:{id:'admin-a',is_admin:false}};
+ wait.resolve(inspection({change_summary:pluralSummary()}));await flush();
+ assert.equal(f.card._recovery,null);assert.equal(f.card._renameQueue,queue);
+ assert.doesNotMatch(f.card.shadowRoot.innerHTML,/sensor.changed_second/);assert.equal(restores(f).length,0);
  }finally{close(f);}
 });
