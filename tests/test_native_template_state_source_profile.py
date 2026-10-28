@@ -240,16 +240,21 @@ class NativeTemplateStateSourceProfileTests(unittest.IsolatedAsyncioTestCase):
         projection = worker.template_state_source_projection(checked, str(self.f.root))
         row = projection['states'][0]
         self.assertTrue(row[3]['variables'])
-        self.assertTrue(any(slot['path'][:2] == ['block', 'variables'] for slot in row[3]['slots']))
+        block = checked['template'][0]
+        entity = block['sensor'][0]
+        # Current native resolver moves section variables into each entity.
+        # Seal/observe its actual normalized location, never a guessed raw path.
+        context_at_block = 'variables' in block
+        prefix = ['block' if context_at_block else 'entity', 'variables']
+        self.assertTrue(any(slot['path'][:2] == prefix for slot in row[3]['slots']))
         before = worker._fingerprint(worker._template_source_projection(checked, str(self.f.root)))
         worker.template_state_source_projection(checked, str(self.f.root))
         self.assertEqual(before, worker._fingerprint(worker._template_source_projection(checked, str(self.f.root))))
-        block = checked['template'][0]
-        entity = block['sensor'][0]
-        without_context = dict(block)
+        without_context = dict(block if context_at_block else entity)
         without_context.pop('variables')
         self.assertNotEqual(row[2], worker._fingerprint(worker.full_template_state_semantics(
-            without_context, 'sensor', entity)))
+            without_context if context_at_block else block, 'sensor',
+            entity if context_at_block else without_context)))
         # Zero/false native defaults remain typed inputs, not truthy omissions.
         normal = worker._normal(worker.full_template_state_semantics(block, 'sensor', entity))
         self.assertEqual(row[2], worker._fingerprint(worker.full_template_state_semantics(block, 'sensor', entity)))
