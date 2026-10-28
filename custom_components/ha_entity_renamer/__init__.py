@@ -29,14 +29,22 @@ class Runtime:
             if (hass.data.get(DATA_RUNTIME) is not self or not self.loaded or self.unloading):
                 raise ValueError('recovery_runtime_unavailable')
         current()
+        if action == 'status':
+            # Inventory has no native capability and must remain available while
+            # an owned mutation drains. Never install its fresh readers in Runtime.
+            await refresh()
+            current()
+            controller = RecoveryController(hass, self, guard=current, refresh=refresh,
+                                            status_only=True)
+            result = await controller.status()
+            current()
+            return result
         async with self.operation_lock:
             current()  # Fresh identity/role after the native FIFO lock wait.
             await refresh()
             current()
             controller = RecoveryController(hass, self, guard=current, refresh=refresh)
-            if action == 'status':
-                result = await controller.status()
-            elif action == 'inspect':
+            if action == 'inspect':
                 result = await controller.inspect(operation_id, fingerprint)
             elif action == 'restore':
                 result = await controller.restore(operation_id, fingerprint)

@@ -1718,9 +1718,9 @@ class HAEntityRenamer extends HTMLElement {
       available:'Możesz przejrzeć zapisane operacje. Migracja zależności pozostaje niegotowa.',
       confirming:'Sprawdź zakres i potwierdź wycofanie.', inspecting:'Sprawdzanie możliwości wycofania…', inspected:'Przejrzano zmianę. Serwer ponownie sprawdzi warunki przy wycofaniu.',
       consumers:'Liczba powiązanych encji', ask:'Wycofaj tę zmianę…', title:'Potwierdź przywrócenie oryginału',
-      consent:'Przywrócić oryginalny identyfikator i powiązane encje pokazane poniżej?',
+      consent:'Przywrócić oryginalne identyfikatory i powiązane encje pokazane poniżej?',
       cancel:'Anuluj', restore:'Wycofaj zmianę', restoring:'Trwa przywracanie…',
-      restored:'Przywrócono oryginalny identyfikator i powiązane encje. Migracja zależności pozostaje niegotowa.',
+      restored:'Przywrócono oryginalne identyfikatory i powiązane encje. Migracja zależności pozostaje niegotowa.',
       refused:'Serwer odmówił wycofania. Sprawdź ponownie stan przed dalszą decyzją.',
       unknown:'Nie udało się potwierdzić możliwości wycofania. Brak zgody na przywrócenie.',
       uncertain:'Wynik przywracania jest nieznany. Zmiany mogły zostać zapisane. Sprawdź ponownie stan przed dalszą decyzją.',
@@ -1731,9 +1731,9 @@ class HAEntityRenamer extends HTMLElement {
       available:'You can review recorded operations. Dependency migration remains not ready.',
       confirming:'Review the scope and confirm restoration.', inspecting:'Checking whether this change can be restored…', inspected:'Change reviewed. The server will check conditions again when restoring.',
       consumers:'Linked entities', ask:'Undo this change…', title:'Confirm original restoration',
-      consent:'Restore the original identifier and linked entities shown below?',
+      consent:'Restore the original identifiers and linked entities shown below?',
       cancel:'Cancel', restore:'Undo change', restoring:'Restoring…',
-      restored:'Original identifier and linked entities restored. Dependency migration remains not ready.',
+      restored:'Original identifiers and linked entities restored. Dependency migration remains not ready.',
       refused:'The server refused restoration. Check status again before deciding what to do next.',
       unknown:'Unable to confirm restoration eligibility. Restoration is not authorized.',
       uncertain:'Restoration outcome is unknown. Changes may have been written. Check status again before deciding what to do next.',
@@ -1749,7 +1749,7 @@ class HAEntityRenamer extends HTMLElement {
     const phase = state.phase;
     const choices = state.operations.length > 1 && phase === 'available'
       ? `<label for="selectRenamerRecovery">${t.select}</label><select id="selectRenamerRecovery">${state.operations.map((_, i) => `<option value="${i}" ${i === state.selected ? 'selected' : ''}>${t.operation} ${i + 1}</option>`).join('')}</select>` : '';
-    const summary = state.summary ? `<p><code>${_entityIdHtml(state.summary.current)}</code> → <code>${_entityIdHtml(state.summary.original)}</code></p><p>${t.consumers}: ${state.summary.count}</p>` : '';
+    const summary = state.summary ? state.summary.sources.map(source => `<p><code>${_entityIdHtml(source.current)}</code> → <code>${_entityIdHtml(source.original)}</code></p>`).join('') + `<p>${t.consumers}: ${state.summary.count}</p>` : '';
     const review = phase === 'available' ? `<button id="reviewRenamerRecovery" type="button" class="btn btn-outline">${t.review}</button>` : '';
     const ask = phase === 'inspected' ? `<button id="askRenamerRecovery" type="button" class="btn btn-outline" ${this._loading || this._applyOperation || this._confirmDialogOpen ? 'disabled' : ''}>${t.ask}</button>` : '';
     const confirm = ['confirming','restoring'].includes(phase) ? `<div id="renamerRecoveryConfirm" role="dialog" aria-labelledby="renamerRecoveryTitle" ${phase === 'restoring' ? 'aria-busy="true"' : ''} tabindex="-1">
@@ -1806,6 +1806,37 @@ class HAEntityRenamer extends HTMLElement {
       && reply.migration_ready === false && reply.family_complete === false;
   }
 
+  _sanitizeRecoverySummary(summary) {
+    const keys = (value, expected) => value && typeof value === 'object' && !Array.isArray(value)
+      && Object.keys(value).sort().join(',') === expected.slice().sort().join(',');
+    // Legacy singular replies remain accepted, but an ambiguous mixed shape does not.
+    let sources;
+    if (keys(summary, ['sources','consumers'])) sources = summary.sources;
+    else if (keys(summary, ['source','consumers'])) sources = [summary.source];
+    else return null;
+    if (!Array.isArray(sources) || sources.length < 1 || sources.length > 10000
+      || !keys(summary.consumers, ['count','domains'])) return null;
+    const {count, domains} = summary.consumers;
+    if (!Number.isSafeInteger(count) || count < 1 || count > 10000
+      || !Array.isArray(domains) || domains.length < 1 || domains.length > 2
+      || new Set(domains).size !== domains.length
+      || count < domains.length
+      || domains.some(domain => !['sensor','binary_sensor'].includes(domain))) return null;
+    const validId = value => typeof value === 'string' && value.length <= 255
+      && /^[a-z_][a-z0-9_]*\.[a-z0-9_]+$/.test(value);
+    const originals = new Set(), currents = new Set(), clean = [];
+    for (const source of sources) {
+      if (!keys(source, ['current_entity_id','original_entity_id'])
+        || !validId(source.current_entity_id) || !validId(source.original_entity_id)
+        || source.current_entity_id.split('.')[0] !== source.original_entity_id.split('.')[0]
+        || originals.has(source.original_entity_id) || currents.has(source.current_entity_id)) return null;
+      originals.add(source.original_entity_id); currents.add(source.current_entity_id);
+      clean.push({current:source.current_entity_id, original:source.original_entity_id});
+    }
+    if ([...originals].some(id => currents.has(id))) return null;
+    return {sources:clean, count};
+  }
+
   async _inspectRecovery() {
     const state = this._recovery;
     if (!this._recoveryAvailable() || state?.phase !== 'available') return;
@@ -1819,13 +1850,10 @@ class HAEntityRenamer extends HTMLElement {
     try {
       const reply = await read.hass.callWS({type:'ha_entity_renamer/recovery/inspect', ...operation});
       if (!current()) return;
-      const summary = reply?.change_summary;
-      const source = summary?.source;
-      const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 255;
+      const summary = this._sanitizeRecoverySummary(reply?.change_summary);
       if (this._recoveryReplyMatches(reply, operation) && reply.state === 'applied' && reply.eligible === true
-        && validId(source?.current_entity_id) && validId(source?.original_entity_id)
-        && Number.isSafeInteger(summary?.consumers?.count) && summary.consumers.count > 0) {
-        state.summary = {current:source.current_entity_id, original:source.original_entity_id, count:summary.consumers.count};
+        && summary) {
+        state.summary = summary;
         state.phase = 'inspected';
       } else state.phase = reply?.state === 'refused' ? 'refused' : 'unknown';
     } catch (error) {

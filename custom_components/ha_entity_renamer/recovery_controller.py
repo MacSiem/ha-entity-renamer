@@ -1,4 +1,4 @@
-"""Server-owned public recovery for one already qualified numeric Template plan.
+"""Server-owned public recovery for qualified Template entry and YAML plans.
 
 No client Plan/roots/paths, new Store, readiness promotion or uncertain replay.
 Inspect is evidence only. Restore repeats admission, optionally acknowledges a
@@ -55,6 +55,22 @@ def _prepared_scope(record, preparations):
     return _PreparedScope(entry_id, {
         'source': {'current_entity_id': new, 'original_entity_id': old},
         'consumers': {'count': 1, 'domains': ['sensor']}})
+
+
+def _yaml_summary(session):
+    """Sanitized exact scope after the existing strict server binder admitted it."""
+    sources = [{'current_entity_id': new, 'original_entity_id': old}
+               for old, new in sorted(session.mapping.items())]
+    definitions = session.evidence.template_sources.ledger.definitions
+    consumers = [(row.domain.removeprefix('template.'), row.native_key)
+                 for row in definitions
+                 if row.domain in ('template.sensor', 'template.binary_sensor')]
+    if (not 1 <= len(sources) <= 10000 or not 1 <= len(consumers) <= 10000
+            or len(set(consumers)) != len(consumers)):
+        raise Refused('unsupported_recovery_plan')
+    return {'sources': sources,
+            'consumers': {'count': len(consumers),
+                          'domains': sorted({domain for domain, _ in consumers})}}
 
 
 async def _acquire_lease(hass, entry, *, guard, refresh):
@@ -122,14 +138,16 @@ async def _drain_restore(operation):
 
 
 class RecoveryController:
-    def __init__(self, hass, runtime, *, guard, refresh):
+    def __init__(self, hass, runtime, *, guard, refresh, status_only=False):
         self.hass, self.runtime = hass, runtime
         self.guard, self.refresh = guard, refresh
+        self.status_only = status_only
 
     def check(self):
         self.guard()
         if (self.hass.data.get(DATA_RUNTIME) is not self.runtime or not self.runtime.loaded
-                or self.runtime.unloading or not self.runtime.operation_lock.locked()):
+                or self.runtime.unloading
+                or (not self.status_only and not self.runtime.operation_lock.locked())):
             raise ValueError('recovery_runtime_unavailable')
 
     async def _read(self):
@@ -147,6 +165,9 @@ class RecoveryController:
         This is server-owned inventory, NOT full admission or a restore grant.
         Public inspect performs fresh full native IO before marking eligible.
         """
+        # Independent readers never replace the active session's Runtime caches.
+        # Each journal lock covers only the detached inventory snapshot, not the
+        # long-running native operation or a restore/inspect capability.
         journal, preparations = await self._read()
         records = await journal.all()
         self.check()
@@ -160,6 +181,16 @@ class RecoveryController:
             need, reason = True, 'unsupported_recovery_state'
             if record.status in ('applied', 'rolled_back'):
                 try:
+                    if (record.status == 'applied' and record.direction == 'forward'
+                            and record.plan.required_scopes == ('registry', 'yaml')):
+                        # Snapshot inventory is never full native/source admission.
+                        # Only explicit inspect may qualify this terminal plan.
+                        operations.append({'operation_id': record.operation_id,
+                            'fingerprint': record.plan.fingerprint, 'status': record.status,
+                            'direction': record.direction, 'recovery_required': need,
+                            'reason': 'inspection_available', 'eligible': False})
+                        required = required or need
+                        continue
                     scope = _prepared_scope(record, preparations)
                     baseline, composition = preparations.resolve_composition(record.plan.native_inputs)
                     roots = [key for key, row in store.rows.items()
@@ -190,6 +221,7 @@ class RecoveryController:
                 'fingerprint': record.plan.fingerprint, 'status': record.status,
                 'direction': record.direction, 'recovery_required': need,
                 'reason': reason, 'eligible': False})
+        await self.refresh()
         self.check()
         return {'version': VERSION, 'migration_ready': False, 'family_complete': False,
             'reason': 'dependency_coverage_incomplete', 'recovery_required': required,
@@ -202,6 +234,8 @@ class RecoveryController:
         return await _drain_restore(self._operation(operation_id, fingerprint, restore=True))
 
     async def _operation(self, operation_id, fingerprint, *, restore):
+        if self.status_only:
+            raise ValueError('recovery_status_only')
         self.check()
         lease = session = None
         try:
@@ -216,6 +250,21 @@ class RecoveryController:
             if (record.status != 'applied' or record.direction != 'forward'
                     or record.phases != ('verified',) * len(record.plan.steps)):
                 return _result(operation_id, fingerprint, 'UNKNOWN', 'unsupported_recovery_state')
+            if record.plan.required_scopes == ('registry', 'yaml'):
+                from .native_template_yaml_server import NativeTemplateYAMLServer
+                # Fresh actual source/history/auth admission, independently repeated
+                # for restore; no inspect result is retained as write authority.
+                session = await NativeTemplateYAMLServer.bind_reverse(self.hass,
+                    operation_id, fingerprint, guard=self.check, refresh=self.refresh)
+                self.check()
+                summary = _yaml_summary(session)
+                if not restore:
+                    return _result(operation_id, fingerprint, 'applied', 'complete', summary=summary)
+                result = await session.rollback()
+                self.check()
+                if result.status != 'rolled_back':
+                    return _result(operation_id, fingerprint, 'UNKNOWN', 'restore_unproven')
+                return _result(operation_id, fingerprint, 'rolled_back', 'restored')
             scope = _prepared_scope(record, preparations)
             entry = self.hass.config_entries.async_get_entry(scope.entry_id)
             if entry is None:
