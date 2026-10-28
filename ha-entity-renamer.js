@@ -1532,6 +1532,7 @@ class HAEntityRenamer extends HTMLElement {
       unauthorized:'Analiza wymaga konta administratora HA.',
       entities:'Encje', devices:'Urządzenia', statistics:'Statystyki', conflicts:'Konflikty',
       rejected:'Pozycje wymagające rozliczenia',entity:'Encja',device:'Urządzenie',registry:'Rejestr',
+      subset:'Wybierz część planu',selection:'Pozycje do analizy',selected:'Wybrano',
       reasons:{source_missing:'Nie znaleziono źródła',destination_occupied:'Docelowy identyfikator jest zajęty',
         device_changed:'Powiązanie urządzenia zmieniło się',identity_unverified:'Niepotwierdzona tożsamość',
         device_missing:'Nie znaleziono urządzenia',ambiguous_registry:'Niejednoznaczny rejestr'},
@@ -1550,6 +1551,7 @@ class HAEntityRenamer extends HTMLElement {
       unauthorized:'Analysis requires a Home Assistant administrator.',
       entities:'Entities',devices:'Devices',statistics:'Statistics',conflicts:'Conflicts',
       rejected:'Rows that need reconciliation',entity:'Entity',device:'Device',registry:'Registry',
+      subset:'Choose a subset of the plan',selection:'Rows to analyze',selected:'Selected',
       reasons:{source_missing:'Rename source not found',destination_occupied:'Destination identifier is occupied',
         device_changed:'Device association changed',identity_unverified:'Identity is unverified',
         device_missing:'Device not found',ambiguous_registry:'Ambiguous registry'},
@@ -1570,10 +1572,16 @@ class HAEntityRenamer extends HTMLElement {
       <ul>${result.families.map(row => `<li>${t.families[row.family]}: ${row.blocked ? t.blocked : row.status === 'COMPLETE' ? t.complete : row.status === 'DENIED' ? t.denied : t.unknown}</li>`).join('')}</ul>` : '';
     const rejected = result?.registry_conflicts?.length ? '<p>'+t.rejected+'</p><ul>'+result.registry_conflicts.map(row =>
       '<li>'+(row.kind === 'entity' ? _entityIdHtml(row.entity_id) : t[row.kind]+(Number.isInteger(row.index) ? ' '+(row.index+1) : ''))+': '+t.reasons[row.reason]+'</li>').join('')+'</ul>' : '';
+    const choices = state?.choices;
+    const empty = state?.subset && !state.entity_ids.size && !state.device_ids.size;
+    const selection = choices ? '<label><input type="checkbox" id="renamerImportSubset" '+(state.subset ? 'checked' : '')+'>'+t.subset+'</label>'
+      +(state.subset ? '<fieldset><legend>'+t.selection+'</legend><p>'+t.selected+': '+(state.entity_ids.size+state.device_ids.size)+'</p>'
+      +choices.entities.map((row,i)=>'<label style="display:block"><input type="checkbox" data-import-entity="'+i+'" '+(state.entity_ids.has(row.id) ? 'checked' : '')+'>'+_entityIdHtml(row.id)+' → '+_entityIdHtml(row.target)+'</label>').join('')
+      +choices.devices.map((row,i)=>'<label style="display:block"><input type="checkbox" data-import-device="'+i+'" '+(state.device_ids.has(row.id) ? 'checked' : '')+'>'+t.device+' '+(i+1)+': '+_esc(row.name)+'</label>').join('')+'</fieldset>' : '') : '';
     return `<h3>${t.title}</h3><label for="renamerImportFile">${t.file}</label>
       <input type="file" accept=".json,application/json" id="renamerImportFile">
       <p role="status" aria-live="polite" ${busy ? 'aria-busy="true"' : ''}>${t[state?.phase || 'idle'] || t.unavailable}</p>
-      <div class="renamer-backend-row"><button type="button" class="btn btn-outline" id="analyzeRenamerImport" ${!state?.content || busy ? 'disabled' : ''}>${t.analyze}</button>
+      ${selection}<div class="renamer-backend-row"><button type="button" class="btn btn-outline" id="analyzeRenamerImport" ${!state?.content || busy || empty ? 'disabled' : ''}>${t.analyze}</button>
       <button type="button" class="btn btn-outline" id="clearRenamerImport" ${!state ? 'disabled' : ''}>${t.clear}</button></div>${details}${rejected}`;
   }
 
@@ -1585,6 +1593,24 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _bindMigrationPanel() {
+    const changed = (update,focus) => {
+      if (!this._renameAuthorityAvailable() || !this._migration?.choices) return;
+      update(this._migration);
+      this._migrationEpoch++;
+      this._migration.phase = 'loaded'; this._migration.summary = null;
+      this._updateMigrationPanel();
+      this.shadowRoot.querySelector(focus)?.focus();
+    };
+    this.shadowRoot.getElementById('renamerImportSubset')?.addEventListener('change', event =>
+      changed(state => { state.subset = event.target.checked; }, '#renamerImportSubset'));
+    for (const family of ['entity','device']) this.shadowRoot.querySelectorAll('[data-import-'+family+']').forEach(input => {
+      input.addEventListener('change', () => changed(state => {
+        const rows = state.choices[family === 'entity' ? 'entities' : 'devices'];
+        const row = rows[Number(input.getAttribute('data-import-'+family))];
+        const ids = state[family+'_ids'];
+        if (row) { if (input.checked) ids.add(row.id); else ids.delete(row.id); }
+      }, '[data-import-'+family+'="'+input.getAttribute('data-import-'+family)+'"]'));
+    });
     this.shadowRoot.getElementById('renamerImportFile')?.addEventListener('change', event => {
       const file = event.target.files?.[0];
       if (file) this._readMigrationFile(file);
@@ -1608,7 +1634,22 @@ class HAEntityRenamer extends HTMLElement {
       const content = await file.text();
       if (!current()) return;
       if (typeof content !== 'string' || !content.trim() || new TextEncoder().encode(content).length > 4_000_000) throw Error();
-      this._migration = {phase:'loaded',content,summary:null};
+      // This list is for selection only. The server still strictly decodes the
+      // ORIGINAL file and validates the selected scope on every request.
+      const document = JSON.parse(content);
+      const rows = key => Array.isArray(document?.[key]) && document[key].length <= 10000 ? document[key] : [];
+      const entityId = id => typeof id === 'string' && /^[a-z_][a-z0-9_]*\.[a-z0-9_]+$/.test(id);
+      const entities = rows('entities').filter(row => row && entityId(row.entity_id)
+        && entityId(row.proposed_entity_id ?? row.entity_id)
+        && (row.entity_id !== (row.proposed_entity_id ?? row.entity_id)
+          || typeof row.proposed_name === 'string' && row.proposed_name.trim() && row.proposed_name !== row.current_name))
+        .map(row => ({id:row.entity_id,target:row.proposed_entity_id ?? row.entity_id}));
+      const devices = rows('devices').filter(row => row && typeof row.device_id === 'string'
+        && row.device_id.length > 0 && row.device_id.length <= 16384
+        && typeof row.proposed_name === 'string' && row.proposed_name.trim() && row.proposed_name !== row.current_name)
+        .map(row => ({id:row.device_id,name:row.proposed_name}));
+      this._migration = {phase:'loaded',content,summary:null,choices:{entities,devices},subset:false,
+        entity_ids:new Set(),device_ids:new Set()};
     } catch (_) {
       if (!current()) return;
       this._migration = {phase:'invalid',content:null,summary:null};
@@ -1618,21 +1659,23 @@ class HAEntityRenamer extends HTMLElement {
 
   async _previewMigration() {
     const state = this._migration;
-    if (!this._renameAuthorityAvailable() || !state?.content || ['reading','analyzing'].includes(state.phase)) return;
+    if (!this._renameAuthorityAvailable() || !state?.content || ['reading','analyzing'].includes(state.phase)
+      || state.subset && !state.entity_ids.size && !state.device_ids.size) return;
     const read = this._captureRead();
     const epoch = ++this._migrationEpoch;
     const current = () => epoch === this._migrationEpoch && read.current() && this._renameAuthorityAvailable();
     state.phase = 'analyzing'; state.summary = null;
     this._updateMigrationPanel();
     try {
-      const result = await read.hass.callWS({type:'ha_entity_renamer/import/preview',manifest:state.content});
+      const result = await read.hass.callWS({type:'ha_entity_renamer/import/preview',manifest:state.content,
+        ...(state.subset ? {entity_ids:[...state.entity_ids],device_ids:[...state.device_ids]} : {})});
       if (!current()) return;
       const count = n => Number.isInteger(n) && n >= 0 && n <= 10000;
       const labels = this._migrationLabels().families;
       const families = result?.families;
       const rejected = result?.registry_conflicts ?? [];
       const imported = JSON.parse(state.content);
-      const sourceIds = new Set((imported.entities || []).map(row => row.entity_id));
+      const sourceIds = state.subset ? state.entity_ids : new Set((imported.entities || []).map(row => row.entity_id));
       const reasons = this._migrationLabels().reasons;
       if (result?.migration_ready !== false || !/^[a-f0-9]{64}$/.test(result.digest)
         || !result.changes || !['entities','devices','statistics'].every(key => count(result.changes[key]))
