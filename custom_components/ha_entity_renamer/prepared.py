@@ -12,6 +12,7 @@ from copy import deepcopy
 import hashlib
 import json
 import re
+import zlib
 
 _ID = re.compile(r'[A-Za-z0-9_-]{1,80}\Z')
 _MAX_PLANS = 1000
@@ -87,32 +88,66 @@ class PreparedStore:
         if composition is not None:
             from .native_template_composition import encode_composition
             payload.update(schema=2, composition=encode_composition(composition, baseline))
+        # Select before the sole Store write. Old small envelopes retain their
+        # exact schema/bytes/digest; a lost write acknowledgment is never retried.
+        if len(json.dumps(payload, sort_keys=True, separators=(',', ':'),
+                          allow_nan=False).encode()) > _MAX_BYTES:
+            payload.update(schema=3, encoding='zlib+base64',
+                           codec=base64.b64encode(zlib.compress(raw)).decode('ascii'))
         digest = await self.create(preparation_id, payload)
         return (preparation_id, digest, native_digest)
 
-    def resolve_native_inputs(self, reference, original_receipt):
-        """Reopen exact immutable bytes and ORIGINAL receipt, without HA effects."""
-        from .native_input_baseline import decode_baseline, assert_baseline_receipt
+    def _resolve_native_payload(self, reference):
+        """One strict reader for old bytes and the bounded compressed envelope."""
+        from .native_input_baseline import decode_baseline, MAX_ENCODED_BYTES
         from .transaction import validate_native_input_ref, Refused
         try:
             validate_native_input_ref(reference)
         except Refused:
             raise ValueError('invalid_native_input_reference') from None
         payload = self.resolve(reference[0], reference[1])
+        if (type(payload) is not dict or canonical(payload)[1] != reference[1]
+                or type(payload.get('schema')) is not int
+                or payload['schema'] not in (1, 2, 3)):
+            raise ValueError()
+        schema = payload['schema']
+        keys = {'kind', 'schema', 'codec', 'baseline_digest'}
+        if schema == 2 or schema == 3 and 'composition' in payload:
+            keys.add('composition')
+        if schema == 3:
+            keys.add('encoding')
+        if (set(payload) != keys or payload['kind'] != 'native_input_baseline'
+                or payload['baseline_digest'] != reference[2]
+                or type(payload['codec']) is not str):
+            raise ValueError()
+        raw = base64.b64decode(payload['codec'], validate=True)
+        if schema == 3:
+            if payload['encoding'] != 'zlib+base64':
+                raise ValueError()
+            # max_length bounds allocation. Do not use flush(): its length is
+            # only an initial buffer size, not a bound on decompressed output.
+            # eof plus both tails reject truncation, trailing and second streams.
+            decoder = zlib.decompressobj()
+            try:
+                raw = decoder.decompress(raw, MAX_ENCODED_BYTES)
+            except zlib.error:
+                raise ValueError() from None
+            if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+                raise ValueError()
+        baseline = decode_baseline(raw)
+        if baseline.digest != reference[2]:
+            raise ValueError()
+        # Native decode validates the EXACT original uncompressed canonical
+        # codec. Compressed bytes need not be identical across zlib versions.
+        return payload, baseline
+
+    def resolve_native_inputs(self, reference, original_receipt):
+        """Reopen exact immutable bytes and ORIGINAL receipt, without HA effects."""
+        from .native_input_baseline import assert_baseline_receipt
         try:
-            if (type(payload) is not dict or canonical(payload)[1] != reference[1]
-                    or set(payload) != ({'kind', 'schema', 'codec', 'baseline_digest'} |
-                        ({'composition'} if payload.get('schema') == 2 else set()))
-                    or payload['kind'] != 'native_input_baseline'
-                    or type(payload['schema']) is not int or payload['schema'] not in (1, 2)
-                    or payload['baseline_digest'] != reference[2]
-                    or type(payload['codec']) is not str):
-                raise ValueError()
-            baseline = decode_baseline(base64.b64decode(payload['codec'], validate=True))
-            if baseline.digest != reference[2]:
-                raise ValueError()
+            payload, baseline = self._resolve_native_payload(reference)
             assert_baseline_receipt(baseline, original_receipt)
-            if payload['schema'] == 2:
+            if 'composition' in payload:
                 from .native_template_composition import decode_composition
                 decode_composition(payload['composition'], baseline)
             return baseline
@@ -120,28 +155,15 @@ class PreparedStore:
             raise ValueError('native_input_preparation_rejected') from None
 
     def resolve_composition(self, reference):
-        """Strict private reopen; schema1 stays readable but cannot bind reverse.
+        """Strict private reopen; a composition remains required for reverse.
 
         The composition is already pinned by Plan.native_inputs[1]. The caller
         still needs actual current IO/authorization; decoding grants no writer.
         """
-        from .native_input_baseline import decode_baseline
         from .native_template_composition import decode_composition
-        from .transaction import validate_native_input_ref
-        validate_native_input_ref(reference)
-        payload = self.resolve(reference[0], reference[1])
         try:
-            if (type(payload) is not dict or canonical(payload)[1] != reference[1]
-                    or set(payload) != {'kind', 'schema', 'codec', 'baseline_digest', 'composition'}
-                    or payload['kind'] != 'native_input_baseline'
-                    or type(payload['schema']) is not int or payload['schema'] != 2):
-                raise ValueError()
-            baseline = decode_baseline(base64.b64decode(payload['codec'], validate=True))
-            if baseline.digest != reference[2] or payload['baseline_digest'] != reference[2]:
-                raise ValueError()
+            payload, baseline = self._resolve_native_payload(reference)
             composition = decode_composition(payload['composition'], baseline)
-            # Shared existing validation also checks exact envelope and receipt.
-            self.resolve_native_inputs(reference, baseline.receipt)
             return baseline, composition
         except (ValueError, TypeError, KeyError):
             raise ValueError('native_input_composition_rejected') from None
