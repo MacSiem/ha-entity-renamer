@@ -12,7 +12,7 @@ from pathlib import Path
 import uuid
 
 from .const import DATA_RUNTIME
-from .transaction import Refused, Plan, Step, PhaseContext
+from .transaction import Refused, Plan, Step, PhaseContext, Record
 from .native_template_reverse import NativeTemplateReverse, _authorize
 from .native_input_baseline import _drained, async_capture_native_input_baseline
 from .native_input_observation import async_observe_native_inputs
@@ -317,6 +317,15 @@ class NativeTemplateForward:
 
             setup = NativeHelperSetupEffects(self.hass, self.chain, self._observe,
                                              self.journal.load, guard=self._scope)
+            # Persist the existing operation record BEFORE any native helper
+            # unload. A crash/cancel in lifecycle quiescence must remain visible
+            # to the ordinary journal inventory, even before registry effects.
+            self.plan.validate()
+            await self.journal.create(Record(self.operation_id, self.plan,
+                phases=('pending',) * len(self.plan.steps)))
+            self._scope()
+            await self.refresh()
+            self._scope()
             self.lifecycle = await NativeHelperLifecycle.start(self.lifecycle_store,
                 self.hass.config_entries, self.operation_id, self.plan, self.receipt, self.digests,
                 activation_lease=self.lease, guard=self._scope,
@@ -324,7 +333,17 @@ class NativeTemplateForward:
                 verify_inactive=self.observer.verify_inactive, verify_runtime=loaded,
                 verify_accepted_native_chain=self._accepted, setup_effect=setup)
             await self.lifecycle.quiesce()
-            result = await self._coordinator().apply(self.plan, self.fingerprint, self.operation_id)
+            # The record already exists. Use the existing read-only effect
+            # reconciliation and explicit ready-only resume; apply() correctly
+            # refuses to replay an existing operation. Every revision/capability
+            # is checked again by Coordinator before its first actual write.
+            coordinator = self._coordinator()
+            ready = await coordinator.reconcile(self.operation_id)
+            self._scope()
+            _need(ready.status == 'ready' and ready.direction == 'forward'
+                  and ready.phases == ('pending',) * len(self.plan.steps),
+                  'initial_effects_not_pristine')
+            result = await coordinator.resume(self.operation_id)
             self._scope()
             _need(result.status == 'applied', 'apply_incomplete')
             await self._acquire(self.change.after)
