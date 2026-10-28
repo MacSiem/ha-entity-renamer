@@ -55,7 +55,54 @@ class NativeTemplateReverse:
     @classmethod
     async def bind(cls, hass, operation_id, fingerprint, *, activation_lease,
                    guard, refresh, expected_head=None):
+        return await cls._bind(hass, operation_id, fingerprint,
+            activation_lease=activation_lease, guard=guard, refresh=refresh,
+            expected_head=expected_head)
+
+    @classmethod
+    async def classify_setup_ack(cls, hass, operation_id, fingerprint, *,
+                                 activation_lease, guard, refresh):
+        """Read-only classification for a cold, audited setup with missing ACK.
+
+        Applied describes the native result only. UNKNOWN never grants a writer
+        or infers a historical API outcome from today's loaded state.
+        """
+        from .native_template_setup_recovery import SetupRecoveryClassification
+        try:
+            return await cls._bind(hass, operation_id, fingerprint,
+                activation_lease=activation_lease, guard=guard, refresh=refresh,
+                _recovery='inspect')
+        except PermissionError:
+            raise  # Authorization loss must remain explicit to the controller.
+        except Refused as error:
+            refused = str(error) in {
+                'template_reverse_installed_binding_required',
+                'template_reverse_recovery_operation_binding',
+                'template_reverse_qualified_plan_required',
+                'template_reverse_one_numeric_entry_required',
+                'template_reverse_reverse_already_started'}
+            return SetupRecoveryClassification('refused' if refused else 'UNKNOWN',
+                                               'scope_refused' if refused else 'recovery_unproven')
+        except (ValueError, OSError):
+            return SetupRecoveryClassification('UNKNOWN', 'recovery_unproven')
+
+    @classmethod
+    async def recover_setup_ack(cls, hass, operation_id, fingerprint, *,
+                                activation_lease, guard, refresh):
+        """Append only a missing lifecycle marker, never call native setup again.
+
+        Repeats every independent admission read. Returned classification is
+        evidence only; normal strict bind() still owns all reverse admission.
+        """
+        return await cls._bind(hass, operation_id, fingerprint,
+            activation_lease=activation_lease, guard=guard, refresh=refresh,
+            _recovery='repair')
+
+    @classmethod
+    async def _bind(cls, hass, operation_id, fingerprint, *, activation_lease,
+                    guard, refresh, expected_head=None, _recovery=None):
         from . import Runtime
+        _need(_recovery in (None, 'inspect', 'repair'), 'installed_binding_required')
         from homeassistant.core import HomeAssistant
         _need(cls is NativeTemplateReverse and type(hass) is HomeAssistant
               and type(operation_id) is str and type(fingerprint) is str
@@ -98,6 +145,9 @@ class NativeTemplateReverse:
         scope()
         record = await obj.journal.load(operation_id)
         scope()
+        if _recovery is not None:
+            _need(record is not None and record.plan.fingerprint == fingerprint
+                  and record.operation_id == operation_id, 'recovery_operation_binding')
         _need(record is not None and record.plan.fingerprint == fingerprint
               and record.operation_id == operation_id and record.status == 'applied'
               and record.direction == 'forward'
@@ -139,11 +189,13 @@ class NativeTemplateReverse:
         state = readonly.reconstruct_inputs()  # Refuses every pending native intent.
         obj.head = state.head
         _need(expected_head is None or expected_head == obj.head, 'wrong_head')
-        forward = obj._forward_witness()
-        status = forward.inspect()
-        _need(not forward.writable and not status['pending']
-              and status['inactive_receipts_complete']
-              and status['activation_receipts_complete'], 'forward_activation_incomplete')
+        if _recovery is None:
+            forward = obj._forward_witness()
+            candidate = None
+        else:
+            from .native_template_setup_recovery import setup_ack_candidate
+            forward = obj._forward_graph()
+            candidate = setup_ack_candidate(obj, forward)
         _need(len(forward.ids) == 1 and forward.ids == (obj.entry_id,)
               and forward.source_authorization is None
               and forward.root['original'][0]['state'] == 'loaded', 'forward_activation_scope')
@@ -171,6 +223,37 @@ class NativeTemplateReverse:
         await obj._accepted_forward()
         await obj._final_loaded_history(obj.change.after)
         scope()
+        if _recovery is not None:
+            from .native_template_setup_recovery import (SetupRecoveryClassification,
+                check_recovery_disk, setup_ack_candidate)
+            await check_recovery_disk(obj)
+            scope()
+            await refresh()
+            scope()
+            await obj._accepted_forward()
+            await obj._final_loaded_history(obj.change.after)
+            scope()
+            _need(setup_ack_candidate(obj, obj._forward_graph()) == candidate,
+                  'forward_activation_changed')
+            _need(obj.lifecycle_store.read(obj.reverse_root_id) is None, 'reverse_already_started')
+            if _recovery == 'inspect':
+                return SetupRecoveryClassification('applied',
+                    'setup_ack_missing' if candidate is not None else 'complete')
+            if candidate is not None:
+                key, marker = candidate
+                # This dedicated event append is NOT writable promotion of the
+                # lifecycle reader. It acknowledges an existing audited effect.
+                scope()
+                await obj.lifecycle_store.create(key, marker)
+                scope()
+                await check_recovery_disk(obj)
+                scope()
+                await obj._accepted_forward()
+                await obj._final_loaded_history(obj.change.after)
+                scope()
+            obj._forward_witness()
+            return SetupRecoveryClassification('applied',
+                'setup_ack_recovered' if candidate is not None else 'complete')
         obj._forward_witness()  # Recheck exact lifecycle graph after all awaits.
         _need(obj.lifecycle_store.read(obj.reverse_root_id) is None, 'reverse_already_started')
         # Construct a DIFFERENT live chain only after actual admission. The
@@ -187,11 +270,14 @@ class NativeTemplateReverse:
         obj.bound = True
         return obj
 
-    def _forward_witness(self):
+    def _forward_graph(self):
         self._scope()
         key = _id(['helper_lifecycle', self.operation_id, self.plan.fingerprint])
-        forward = validate_lifecycle_receipt_witness(self.lifecycle_store, self.operation_id,
+        return validate_lifecycle_receipt_witness(self.lifecycle_store, self.operation_id,
             self.plan, self.receipt, self.digests, root_id=key)
+
+    def _forward_witness(self):
+        forward = self._forward_graph()
         status = forward.inspect()
         _need(not forward.writable and not status['pending']
               and status['inactive_receipts_complete'] and status['activation_receipts_complete'],
