@@ -30,7 +30,10 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
     async def test_actual_gui_entry_without_unique_id_can_acquire_same_scope(self):
         await self._scope(entry_unique_id=None)
 
-    async def _scope(self, *, entry_unique_id):
+    async def test_entry_only_proposal_can_receive_original_native_validation(self):
+        await self._scope(entry_unique_id=None, validate_entry_proposal=True)
+
+    async def _scope(self, *, entry_unique_id, validate_entry_proposal=False):
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.components.template.config_flow import TemplateConfigFlowHandler
         from homeassistant.config_entries import ConfigEntry, ConfigEntryState
@@ -156,6 +159,17 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
                           current.config_entry_id, current.hidden_by, current.name), consumer_identity)
         self.assertEqual(self.f.entity.async_get(self.source_id).id, source_uuid)
         self.assertIs(entry.state, ConfigEntryState.LOADED)
+
+        if validate_entry_proposal:
+            # Genuine native input preparation has no YAML edit. The existing
+            # checker must qualify this natural proposal, not a source_probe.
+            # No receipt is constructed or an expected exception caught here.
+            receipt, evidence = await module('yaml_validation').async_validate_proposed_with_sources(
+                hass, yaml_plan, root.parent)
+            self.assertTrue(receipt.ready_for_apply)
+            self.assertEqual(receipt.proposed_files, ())
+            self.assertEqual(receipt.changed_domains, ())
+            self.assertIsNotNone(evidence)
 
         # First missing real prerequisite: existing native lease refuses domain
         # template, before any unload/write. No fake receipt, expectedFailure,
