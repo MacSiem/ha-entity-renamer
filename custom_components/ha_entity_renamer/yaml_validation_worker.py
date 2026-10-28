@@ -371,7 +371,7 @@ def template_state_runtime_projection(rows):
     return ['template_state_entities_v2', sorted(rows)]
 
 
-def _template_entity_keys(block, platform, root=None):
+def _template_entity_keys(block, platform, root=None, *, full_state=False):
     """Same native schema: complete raw/checked bijection, physical coordinates.
 
     A raw occurrence supplies the key; full normalized schema output supplies
@@ -417,10 +417,11 @@ def _template_entity_keys(block, platform, root=None):
         if not path.is_absolute() or not path.is_relative_to(base):
             raise ValueError('template_physical_path_unverified')
         checked = schema(item)
-        semantic = (simple_template_sensor_semantics(checked) if platform == 'sensor'
-                    else simple_template_binary_semantics(checked))
-        if platform == 'sensor':
-            _qualified_state_expression(semantic[1])
+        if not full_state:
+            semantic = (simple_template_sensor_semantics(checked) if platform == 'sensor'
+                        else simple_template_binary_semantics(checked))
+            if platform == 'sensor':
+                _qualified_state_expression(semantic[1])
         candidates.append((_fingerprint(checked), physical_template_key(
             'template.' + platform, path.relative_to(base).as_posix(), line)))
     result = []
@@ -439,7 +440,7 @@ def _template_entity_keys(block, platform, root=None):
     return result
 
 
-def _template_source_projection(checked, root=None):
+def _template_source_projection(checked, root=None, *, full_state=False):
     """Native validated ORIGINAL blocks + every platform entity, no rendering.
 
     Distinct from _expected_runtime: a source row alone grants no activation.
@@ -455,7 +456,7 @@ def _template_source_projection(checked, root=None):
         entities = []
         for platform in PLATFORMS:
             for entity, key in zip(cfg.get(platform, ()),
-                    _template_entity_keys(cfg, platform, root), strict=True):
+                    _template_entity_keys(cfg, platform, root, full_state=full_state), strict=True):
                 # Include parent trigger/variables/action context in the entity
                 # digest; a matching entity body alone is insufficient later.
                 entities.append(['template.' + platform, key, entity])
@@ -468,13 +469,13 @@ def _template_source_projection(checked, root=None):
         rows.append(['template.' + mode, block_key, cfg])
         for domain, key, entity in entities:
             payload = [block_key, cfg, entity]  # preserve previous source proof
-            if (mode == 'state' and domain == 'template.sensor' and not any(
+            if (not full_state and mode == 'state' and domain == 'template.sensor' and not any(
                     cfg.get(key) for key in ('variables', 'actions', 'conditions'))):
                 try:
                     payload = [block_key, simple_template_sensor_semantics(entity)]
                 except ValueError:
                     pass  # unsupported remains full source inventory, not empty
-            elif (mode == 'state' and domain == 'template.binary_sensor' and not any(
+            elif (not full_state and mode == 'state' and domain == 'template.binary_sensor' and not any(
                     cfg.get(key) for key in ('variables', 'actions', 'conditions'))):
                 try:
                     payload = [block_key, simple_template_binary_semantics(entity)]
@@ -555,7 +556,162 @@ def qualified_template_state_projection(checked, root=None):
     return template_state_runtime_projection(rows)
 
 
-async def _expected_template_sources(hass, config):
+# Explicit internal source contract. It never replaces the legacy runtime digest.
+TEMPLATE_STATE_SOURCE_PROFILE = 'template_state_source_v3'
+
+
+def _source_module(name):
+    """Load colocated product code under -I; never from the configuration root."""
+    from importlib import import_module
+    from pathlib import Path
+    from types import ModuleType
+    if __package__:
+        return import_module('.' + name, __package__)
+    package_name = '_renamer_isolated_source_profile'
+    if package_name not in sys.modules:
+        package = ModuleType(package_name)
+        package.__path__ = [str(Path(__file__).resolve().parent)]
+        sys.modules[package_name] = package
+    return import_module(package_name + '.' + name)
+
+
+def full_template_state_semantics(block, platform, entity):
+    """Full native-normalized state config, without a second Jinja evaluator.
+
+    The caller must have obtained block/entity from native schema validation.
+    Context includes effective shared defaults, variables and flags. Sibling
+    entities belong to the separate whole-source inventory, so editing one
+    sibling body does not change another consumer's semantic digest. Template constructors
+    supply their exact native .strip() bodies through _normal, never our strip.
+    This is a source declaration, not permission to run or rebind anything.
+    """
+    if platform not in ('sensor', 'binary_sensor') or 'triggers' in block or 'trigger' in block:
+        raise ValueError('template_state_profile_family')
+    from homeassistant.components.template.const import PLATFORMS
+    context = {key: value for key, value in block.items() if key not in PLATFORMS}
+    return ['template_state_entity_v3', platform, context, entity]
+
+
+def _template_state_features(block, entity):
+    """Declare proof obligations for every native Template; parse, never render.
+
+    No node/filter/operator admission list: native Jinja/schema own validity.
+    Name/attribute/call/filter/test inventories let the runtime authenticate its
+    actual environment, including aliases or functions outside the time list.
+    Any use of this other than direct this.entity_id conservatively needs memory
+    proof. Declarations cannot stand in for that actual lifecycle proof.
+    """
+    from collections.abc import Mapping
+    from homeassistant.helpers.template import Template
+    from homeassistant.helpers.script_variables import ScriptVariables
+    from jinja2 import Environment, nodes
+    slots = []
+    def visit(value, path, depth=0):
+        if depth > 64:
+            raise ValueError('template_state_profile_depth')
+        if isinstance(value, Template):
+            tree = Environment(extensions=('jinja2.ext.loopcontrols', 'jinja2.ext.do')).parse(value.template)
+            parents = {id(child): parent for parent in tree.find_all(nodes.Node)
+                       for child in parent.iter_child_nodes()}
+            names = sorted({n.name for n in tree.find_all(nodes.Name) if n.ctx == 'load'})
+            this_nodes = [n for n in tree.find_all(nodes.Name) if n.name == 'this' and n.ctx == 'load']
+            identity = [n for n in this_nodes if isinstance(parents.get(id(n)), nodes.Getattr)
+                        and parents[id(n)].attr == 'entity_id']
+            calls = sorted({n.node.name for n in tree.find_all(nodes.Call)
+                            if isinstance(n.node, nodes.Name)})
+            slots.append({'path': path, 'body_sha256': _fingerprint(value),
+                'names': names, 'calls': calls,
+                'filters': sorted({n.name for n in tree.find_all(nodes.Filter)}),
+                'tests': sorted({n.name for n in tree.find_all(nodes.Test)}),
+                'attributes': sorted({n.attr for n in tree.find_all(nodes.Getattr)}),
+                'this_identity': bool(identity), 'this_memory': len(identity) != len(this_nodes),
+                'time': sorted(set(names) & {'now', 'utcnow', 'today_at', 'relative_time', 'time_since', 'time_until'}),
+                'local_bindings': sorted({n.name for n in tree.find_all(nodes.Name) if n.ctx in ('store', 'param')})})
+        elif isinstance(value, ScriptVariables):
+            visit(value.as_dict(), path + ['$variables'], depth + 1)
+        elif isinstance(value, Mapping):
+            for key, child in value.items():
+                if not isinstance(key, str):
+                    raise ValueError('template_state_profile_key')
+                visit(child, path + [str(key)], depth + 1)
+        elif isinstance(value, (tuple, list)):
+            for index, child in enumerate(value):
+                visit(child, path + [index], depth + 1)
+    visit(entity, ['entity'])
+    from homeassistant.components.template.const import PLATFORMS
+    for key, value in block.items():
+        if key not in PLATFORMS:
+            visit(value, ['block', str(key)])
+    return {'slots': slots, 'variables': bool(block.get('variables') or entity.get('variables')),
+        'block_actions': bool(block.get('actions')), 'block_conditions': bool(block.get('conditions')),
+        'availability': entity.get('availability') is not None,
+        'delay_on': entity.get('delay_on') is not None,
+        'delay_off': entity.get('delay_off') is not None,
+        'auto_off': entity.get('auto_off') is not None,
+        'pending_delay_proof_required': any(entity.get(k) is not None for k in ('delay_on', 'delay_off', 'auto_off'))}
+
+
+def template_state_source_projection(checked, root=None):
+    """V3 complete inventory plus explicit sensor/binary source semantics.
+
+    Trigger/action/button/switch rows remain distinct full inventory. They do
+    not acquire state-consumer qualification from this profile.
+    """
+    projection = _template_source_projection(checked, root, full_state=True)
+    states = []
+    for block in checked.get('template', ()):
+        if 'triggers' in block or 'trigger' in block:
+            continue
+        for platform in ('sensor', 'binary_sensor'):
+            for entity, key in zip(block.get(platform, ()),
+                    _template_entity_keys(block, platform, root, full_state=True), strict=True):
+                states.append(['template.' + platform, key,
+                    _fingerprint(full_template_state_semantics(block, platform, entity)),
+                    _template_state_features(block, entity)])
+    return {'profile': TEMPLATE_STATE_SOURCE_PROFILE,
+        'projection': _fingerprint(projection),
+        'rows': [[r[0], r[1], _fingerprint(r)] for r in projection],
+        'families': [[r[0], r[1], ('trigger' if r[0] == 'template.trigger' or
+            (r[0] not in ('template.state', 'template.trigger') and
+             any(k in r[2][1] for k in ('triggers', 'trigger'))) else 'state')] for r in projection],
+        'states': sorted(states, key=lambda r: (r[0], r[1]))}
+
+
+def _template_reference_proof(before_root, proposed_root, mapping):
+    """Reuse actual source planner/dataflow, bind exact ORIGINAL/proposal files.
+
+    A native-validated config says nothing about source rewrite safety. Rebuild
+    the existing full YAML plan, including cross-slot variable provenance, and
+    reject every dynamic/unresolved/shadowed marker before emitting profile v3.
+    No caller-supplied ready flag or serialized planner result is trusted.
+    """
+    import hashlib
+    from pathlib import Path
+    planner = _source_module('yaml_plan')
+    plan = planner.plan_yaml(before_root, mapping)
+    if not plan.ready:
+        raise ValueError('template_state_profile_source_plan_rejected')
+    proposed = {p.path: p.proposed_bytes for p in plan.patches}
+    rows = []
+    for item in plan.files:
+        old = (Path(before_root) / item.path).read_bytes()
+        expected = proposed.get(item.path, old)
+        if (hashlib.sha256(old).hexdigest() != item.sha256
+                or (Path(proposed_root) / item.path).read_bytes() != expected):
+            raise ValueError('template_state_profile_proposal_changed')
+        rows.append([item.path, item.sha256, hashlib.sha256(expected).hexdigest()])
+    # The parent receipt's graph/directory fences remain mandatory; this is
+    # only a source proof and must never reconstruct writer authority.
+    return {'planner': 'yaml_plan_source_reference_v1', 'mapping': [list(row) for row in sorted(mapping.items())],
+        'files': sorted(rows),
+        'variable_bindings_sha256': hashlib.sha256(json.dumps([
+            [p.path, p.source_line, p.entity_id, p.producer_occurrences,
+             p.yaml_occurrences, p.accounted_occurrences, list(p.consumer_counts), p.approved]
+            for p in plan.variable_bindings], sort_keys=True, separators=(',', ':'),
+            allow_nan=False).encode()).hexdigest()}
+
+
+async def _expected_template_sources(hass, config, *, state_profile=None):
     """Same ORIGINAL checker instance/config; no factory, setup or rendering."""
     from homeassistant.const import __version__
     from homeassistant.config import async_process_component_and_handle_errors
@@ -566,16 +722,23 @@ async def _expected_template_sources(hass, config):
             checked = await async_process_component_and_handle_errors(hass, config, integration)
             if checked is None:
                 raise ValueError('template_native_source_unverified')
+            if state_profile is not None:
+                state_profile.update(template_state_source_projection(checked, hass.config.config_dir))
             projection = _template_source_projection(checked, hass.config.config_dir)
         else:
             projection = []  # exact absent modern YAML; legacy stays ledger UNKNOWN
+            if state_profile is not None:
+                state_profile.update(template_state_source_projection({}, hass.config.config_dir))
         return {'version': __version__, 'projection': _fingerprint(projection),
                 'rows': [[row[0], row[1], _fingerprint(row)] for row in projection]}
     except Exception:
+        if state_profile is not None and not state_profile:
+            raise  # explicit v3 failure never silently degrades to legacy UNKNOWN
         return {'version': __version__, 'projection': None, 'rows': None}
 
 
-async def _expected_runtime(root, domains, *, source_rows=None, template_sources=None):
+async def _expected_runtime(root, domains, *, source_rows=None, template_sources=None,
+                            template_state_profile=None):
     """Native schema projections in the isolated validator, without component setup.
 
     No scripts/actions/templates are run and no scene is activated. The trusted
@@ -598,7 +761,8 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
             await trigger.async_setup(hass)
         config = await async_hass_config_yaml(hass)
         if template_sources is not None:
-            template_sources.update(await _expected_template_sources(hass, config))
+            template_sources.update(await _expected_template_sources(
+                hass, config, state_profile=template_state_profile))
         for domain in domains:
             try:
                 if domain in ('automation', 'script') and not any(
@@ -840,11 +1004,20 @@ def _check_template_entries(root, request, version):
 
 
 async def check(before_root, proposed_root, *, with_sources=False, powercalc_profiles=False,
-                powercalc_candidate=False, native_helpers=()):
+                powercalc_candidate=False, native_helpers=(), template_source_profile=None,
+                template_reference_mapping=None):
     from homeassistant.const import __version__
     from homeassistant.scripts.check_config import async_check_config
     if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4'):
         return {'status': 'unsupported_runtime'}
+    if template_source_profile is not None and (
+            template_source_profile != TEMPLATE_STATE_SOURCE_PROFILE or not with_sources
+            or type(template_reference_mapping) is not dict):
+        raise ValueError('template_state_profile_request_invalid')
+    if template_source_profile is None and template_reference_mapping is not None:
+        raise ValueError('template_state_profile_request_invalid')
+    reference_proof = (_template_reference_proof(before_root, proposed_root, template_reference_mapping)
+                       if template_source_profile is not None else None)
     checked = await async_check_config(proposed_root)
     if checked.errors or checked.warnings:
         # Native diagnostics may contain expanded !secret values. Return counts only.
@@ -858,11 +1031,14 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
     source_rows = {} if with_sources else None
     original_domains = sorted(set(changed) | {'automation', 'script'}) if with_sources else changed
     template_sources = {} if with_sources else None
+    old_state_profile = {} if template_source_profile is not None else None
+    new_state_profile = {} if template_source_profile is not None else None
     old_runtime = await _expected_runtime(before_root, original_domains,
-        source_rows=source_rows, template_sources=template_sources)
+        source_rows=source_rows, template_sources=template_sources,
+        template_state_profile=old_state_profile)
     candidate_templates = {} if with_sources else None
     new_runtime = await _expected_runtime(proposed_root, changed,
-        template_sources=candidate_templates)
+        template_sources=candidate_templates, template_state_profile=new_state_profile)
     if (with_sources and changed == ['template']
             and old_runtime.get('template') is not None
             and new_runtime.get('template') is not None
@@ -872,6 +1048,11 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
               'unsupported_domains': unsupported,
               'runtime_expected': [(domain, old_runtime.get(domain), new_runtime.get(domain))
                                    for domain in changed]}
+    if template_source_profile is not None:
+        for value in (old_state_profile, new_state_profile):
+            value.update(version=__version__, reference_proof=reference_proof)
+        result['template_state_source_profile'] = old_state_profile
+        result['template_candidate_state_source_profile'] = new_state_profile
     if helper_seal is not None:
         result['runtime_expected'].append(helper_seal)
     if with_sources:
@@ -900,6 +1081,34 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
     return result
 
 
+def _template_mapping_request(arguments):
+    """Strict bounded new CLI payload; the legacy command shape is unchanged."""
+    flag = '--template-reference-mapping'
+    selected = '--template-state-source-v3'
+    if selected not in arguments and flag not in arguments:
+        return None
+    if arguments.count(selected) != 1 or arguments.count(flag) != 1:
+        raise ValueError('template_state_profile_request_invalid')
+    index = arguments.index(flag)
+    if index + 1 >= len(arguments):
+        raise ValueError('template_state_profile_request_invalid')
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('template_state_profile_request_invalid')
+            result[key] = value
+        return result
+    with open(arguments[index + 1], 'rb') as stream:
+        raw = stream.read(1_000_001)
+    if len(raw) > 1_000_000:
+        raise ValueError('template_state_profile_request_invalid')
+    value = json.loads(raw, object_pairs_hook=unique)
+    if type(value) is not dict:
+        raise ValueError('template_state_profile_request_invalid')
+    return value
+
+
 def main():
     logging.disable(logging.CRITICAL)
     try:
@@ -909,6 +1118,9 @@ def main():
                                        with_sources='--source-evidence' in sys.argv[3:],
                                        powercalc_profiles='--powercalc-profile-inputs' in sys.argv[3:],
                                        powercalc_candidate='--powercalc-candidate-inputs' in sys.argv[3:],
+                                       template_source_profile=(TEMPLATE_STATE_SOURCE_PROFILE
+                                           if '--template-state-source-v3' in sys.argv[3:] else None),
+                                       template_reference_mapping=_template_mapping_request(sys.argv[3:]),
                                        native_helpers=(json.load(open(sys.argv[sys.argv.index('--native-helpers')+1]))
                                            if '--native-helpers' in sys.argv[3:] else ())),
                                  loop_factory=getattr(runner, 'create_event_loop', None))
