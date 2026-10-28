@@ -334,24 +334,24 @@ class NativePublicYAMLRecoveryTests(unittest.IsolatedAsyncioTestCase):
         connection, user, output = await self._connection(admin=True)
         code = self.module('journal').DurableJournal.initialize.__code__
         revoked = None
-        actual_pending = False
+        actual_read = False
         async def revoke():
             await self.f.hass.auth.async_update_user(user, group_ids=[GROUP_ID_USER])
             self.assertFalse(user.is_admin)
         def observe(code_arg, offset, value):
-            nonlocal revoked, actual_pending
-            if revoked is None and isinstance(value, asyncio.Future) and not value.done():
-                actual_pending = True
+            nonlocal revoked, actual_read
+            if revoked is None:
+                actual_read = True
                 revoked = self.f.hass.async_create_task(revoke(), 'native status user role change', eager_start=False)
         tool = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
         sys.monitoring.use_tool_id(tool, 'public YAML status actual journal read revocation')
         before = self._files()
         try:
-            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_YIELD, observe)
-            sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_YIELD)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, observe)
+            sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_RETURN)
             connection.async_handle({'id':1,'type':'ha_entity_renamer/status'})
             response = await asyncio.wait_for(output, 120)
-            self.assertTrue(actual_pending, 'must observe actual journal IO, not a seeded waiter')
+            self.assertTrue(actual_read, 'must observe completed fresh native journal read, not a seeded waiter')
             self.assertIsNotNone(revoked)
             await revoked
             self.assertFalse(response['success'])
@@ -359,7 +359,7 @@ class NativePublicYAMLRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('result', response)
         finally:
             sys.monitoring.set_local_events(tool, code, 0)
-            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_YIELD, None)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, None)
             sys.monitoring.free_tool_id(tool)
         self.assertEqual(before, self._files())
         self.assertFalse(runtime.operation_lock.locked())
