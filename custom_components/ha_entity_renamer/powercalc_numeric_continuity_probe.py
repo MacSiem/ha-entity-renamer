@@ -71,6 +71,7 @@ class PowercalcNumericProbeResult:
     trace_json: bytes
     exact_fields: object | None = None
     retained_producers: object | None = None
+    operand_clock: object | None = None
     continuity_verified: bool = field(default=False, init=False)
     counter_ownership_verified: bool = field(default=False, init=False)
     migration_ready: bool = field(default=False, init=False)
@@ -265,7 +266,8 @@ class _Probe:
 
 
 async def async_capture_powercalc_numeric_reload(hass, chain, evidence, original, *, guard,
-                                                exact_fields=False, retain_producers=False):
+                                                exact_fields=False, retain_producers=False,
+                                                operand_clock=False):
     """ONE unchanged-ORIGINAL G4 call, actual numeric boundary facts only.
 
     exact_fields=True selects the typed live-field prerequisite only. The
@@ -278,6 +280,8 @@ async def async_capture_powercalc_numeric_reload(hass, chain, evidence, original
     _need(type(exact_fields) is bool, 'typed_exact_fields_option')
     _need(type(retain_producers) is bool and (not retain_producers or exact_fields),
           'typed_retained_producer_option')
+    _need(type(operand_clock) is bool and (not operand_clock or (exact_fields and retain_producers)),
+          'typed_operand_clock_option')
     _need(type(chain) is RegistryReceiptChain and chain.original_receipt.version == '2026.10.2',
           'same_chain_current_pair_required')
     receipt, state = chain.original_receipt, chain.reconstruct_inputs()
@@ -321,8 +325,14 @@ async def async_capture_powercalc_numeric_reload(hass, chain, evidence, original
     probe.tags[timer[0]] = 'timer'
     try:
         probe.install()
-        exact_receipt = producer_receipt = None
-        if retain_producers:
+        exact_receipt = producer_receipt = clock_receipt = None
+        if operand_clock:
+            from .powercalc_operand_clock import async_reload_with_powercalc_operand_clock
+            owned = await async_reload_with_powercalc_operand_clock(
+                hass, chain, evidence, original, guard=check)
+            lifecycle, exact_receipt = owned.lifecycle, owned.exact_fields
+            producer_receipt, clock_receipt = owned.retained_producers, owned.operand_clock
+        elif retain_producers:
             from .powercalc_retained_producer import async_reload_with_powercalc_retained_producers
             owned = await async_reload_with_powercalc_retained_producers(
                 hass, chain, evidence, original, guard=check)
@@ -346,6 +356,6 @@ async def async_capture_powercalc_numeric_reload(hass, chain, evidence, original
         unchanged(hrefs, hm, hc)
         trace = _json(probe.rows)
         return PowercalcNumericProbeResult(evidence.sha256, original.structural_token,
-                                            state.head, lifecycle, trace, exact_receipt, producer_receipt)
+                                            state.head, lifecycle, trace, exact_receipt, producer_receipt, clock_receipt)
     finally:
         probe.close()

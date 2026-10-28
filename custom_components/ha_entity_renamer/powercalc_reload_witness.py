@@ -78,6 +78,7 @@ class _Reload:
         self.listener_owner=None
         self.exact_owner=None
         self.producer_owner=None
+        self.clock_owner=None
 
     def check(self):
         _guard(self.guard)
@@ -95,6 +96,8 @@ class _Reload:
             self.exact_owner.check()
         if self.producer_owner is not None:
             self.producer_owner.check()
+        if self.clock_owner is not None:
+            self.clock_owner.check()
         entries=tuple(self.hass.config_entries.async_entries('powercalc'))
         _need(len(entries)==len(self.entries)
               and all(a is b for a,b in zip(entries,self.entries,strict=True)),
@@ -139,7 +142,10 @@ class _Reload:
                   and cancel==handle.cancel and math.isfinite(handle.when()),'actual_timer_shape')
             timer={'deadline':handle.when(),'cancelled':handle.cancelled()}
             if not handle.cancelled():
-                _energy_listeners(self.hass,entity,entity._sensor_source_id,self.vendor)
+                if self.clock_owner is not None and self.clock_owner.native_departure_snapshot(entity,handle):
+                    timer['listener_proof']='observed_native_removal_in_progress'
+                else:
+                    _energy_listeners(self.hass,entity,entity._sensor_source_id,self.vendor)
                 job=handle._args[1]
                 action=job.target
                 cells=dict(zip(action.__code__.co_freevars,
@@ -170,6 +176,8 @@ class _Reload:
                           group_states_process_id=id(states) if present else None,
                           store_process_id=id(store),states_process_id=id(store.states),
                           start_at_zero=entity._sensor_config.get('group_energy_start_at_zero',True))
+        if self.clock_owner is not None:
+            result['operand_timer']=self.clock_owner.snapshot(entity)
         return result
 
     def rename_listeners(self):
@@ -222,6 +230,10 @@ class _Reload:
             code=frame.f_code
             entity=frame.f_locals.get('self')
             tag=self.tags.get(code)
+            if self.clock_owner is not None:
+                self.clock_owner.observe(frame,phase)
+            if tag=='clock_only':
+                return
             if tag.startswith('producer_'):
                 _need(self.producer_owner is not None,'producer_owner_missing')
                 self.producer_owner.observe(tag,frame,phase,result)
@@ -325,7 +337,7 @@ class _Reload:
                 try:
                     detail=(error.args[0] if type(error) is ValueError
                         and len(error.args)==1 and type(error.args[0]) is str
-                        and error.args[0].startswith(('powercalc_reload_','powercalc_exact_fields_','powercalc_retained_producer_')) else None)
+                        and error.args[0].startswith(('powercalc_reload_','powercalc_exact_fields_','powercalc_retained_producer_','powercalc_operand_clock_')) else None)
                     self.first_failure=(tag,phase,frame.f_code.co_qualname,
                         frame.f_lineno,type(error).__module__+'.'+type(error).__qualname__,detail)
                 except BaseException:
@@ -396,7 +408,7 @@ class _Reload:
 
 async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,original,*,guard,
                                                   _manage_global_rename=False, _exact_fields=None,
-                                                  _retain_producers=False):
+                                                  _retain_producers=False, _operand_clock=False):
     """Own ONE real service call under unchanged ORIGINAL. Caller owns admin/IO lease.
 
     PERFORMS a real vendor reload, which may reset numeric state. This function
@@ -412,6 +424,8 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
     _need(type(_manage_global_rename) is bool,'global_policy_shape')
     _need(type(_retain_producers) is bool
           and (not _retain_producers or _exact_fields is not None),'typed_producer_policy')
+    _need(type(_operand_clock) is bool and (not _operand_clock or _retain_producers),
+          'typed_operand_clock_policy')
     _need(__version__=='2026.10.2' and type(hass) is HomeAssistant,'supported_pair')
     if _exact_fields is not None:
         from .powercalc_exact_fields import _ExactFieldsPolicy
@@ -443,6 +457,9 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
     if _retain_producers:
         from .powercalc_retained_producer import _RetainedProducerOwner
         scope.producer_owner=_RetainedProducerOwner(scope)
+    if _operand_clock:
+        from .powercalc_operand_clock import _OperandClockOwner
+        scope.clock_owner=_OperandClockOwner(scope)
     native=import_module('custom_components.powercalc')
     scope.vendor_refs=tuple((native,name) for name in ('register_services','async_setup_entry',
                                                        'async_unload_entry','_async_load_yaml_sensor'))
@@ -463,6 +480,8 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
     if scope.producer_owner is not None:
         scope.vendor_refs+=scope.producer_owner.vrefs
         scope.ha_refs+=scope.producer_owner.hrefs
+    if scope.clock_owner is not None:
+        scope.ha_refs+=scope.clock_owner.hrefs
     def prove():
         scope.vendor.sources()
         if scope.exact_owner is not None:
@@ -497,6 +516,9 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
         scope.tags.update(scope.exact_owner.bind_codes())
     if scope.producer_owner is not None:
         scope.tags.update(scope.producer_owner.bind_codes())
+    if scope.clock_owner is not None:
+        for code in scope.clock_owner.bind_codes():
+            scope.tags.setdefault(code,'clock_only')
     scope.codes=tuple(scope.tags)
     scope.context=Context()
     scope.call_class=ServiceCall
@@ -514,6 +536,8 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
         scope.exact_owner.bind_original(second)
     if scope.producer_owner is not None:
         scope.producer_owner.bind_original(second)
+    if scope.clock_owner is not None:
+        scope.clock_owner.bind_original(second)
     token=scope.causal.set(scope.marker)
     task=None
     try:
@@ -612,7 +636,12 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
             # Complete exact-fields validation before committing global ownership.
             exact_receipt=(None if scope.exact_owner is None else scope.exact_owner.finish(current))
             producer_receipt=(None if scope.producer_owner is None else scope.producer_owner.finish(current))
+            clock_receipt=(None if scope.clock_owner is None else scope.clock_owner.finish(current))
             native_receipt=scope.listener_owner.finish(rename_after)
+            if clock_receipt is not None:
+                from .powercalc_operand_clock import PowercalcOperandClockReloadWitness
+                return PowercalcOperandClockReloadWitness(
+                    lifecycle,native_receipt,exact_receipt,producer_receipt,clock_receipt)
             if producer_receipt is not None:
                 from .powercalc_retained_producer import PowercalcRetainedProducerReloadWitness
                 return PowercalcRetainedProducerReloadWitness(
@@ -626,6 +655,12 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
         scope.annotate(error)
         if scope.exact_owner is not None:
             scope.exact_owner.annotate(error)
+        if scope.clock_owner is not None:
+            scope.clock_owner.annotate(error)
+            try:
+                scope.clock_owner.close()
+            except BaseException as cleanup_error:
+                error.add_note('powercalc_operand_clock_cleanup_refused:'+type(cleanup_error).__name__)
         if scope.producer_owner is not None:
             scope.producer_owner.annotate(error)
             try:
@@ -644,7 +679,11 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
     finally:
         scope.causal.reset(token)
         try:
-            if scope.producer_owner is not None:
-                scope.producer_owner.close()
+            try:
+                if scope.clock_owner is not None:
+                    scope.clock_owner.close()
+            finally:
+                if scope.producer_owner is not None:
+                    scope.producer_owner.close()
         finally:
             scope.close()

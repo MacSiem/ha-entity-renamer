@@ -251,6 +251,34 @@ class NativePowercalcOperandClockRedTests(unittest.IsolatedAsyncioTestCase):
     chain_root = prior.PowercalcNumericContinuityNativeTests.chain_root
     ready = prior.PowercalcNumericContinuityNativeTests.ready
 
+
+    def _assert_operand_trace(self, receipt, *, name, calc, event_data, native_state):
+        """Test-only causal readback, never an HA writer."""
+        pairs = json.loads(receipt.scope_bindings_json)["direct_pairs"]
+        expected_pairs = [
+            [self.static_energy.entity_id, self.static_power.entity_id],
+            [self.dynamic_energy.entity_id, self.dynamic_power.entity_id],
+        ]
+        self.assertCountEqual(pairs, expected_pairs,
+            "both native fixture Energy-to-W edges must match the receipt")
+        self.assertIn([name, calc.producer.entity_id], pairs)
+        steps = json.loads(receipt.steps_json)
+        operands = [(i, r) for i, r in enumerate(steps)
+                    if r.get("kind") == "operand" and r.get("entity_id") == name]
+        handoffs = [(i, r) for i, r in enumerate(steps)
+                    if r.get("kind") == "native_handoff" and r.get("entity_id") == name]
+        self.assertEqual(len(operands), 1)
+        self.assertEqual(len(handoffs), 1)
+        self.assertLess(operands[0][0], handoffs[0][0])
+        row = operands[0][1]
+        self.assertEqual(row["result"], id(calc))
+        self.assertEqual(row["endpoint"], calc.update_returned_at.isoformat())
+        self.assertEqual(row["power_before"], str(calc.previous_native_power))
+        self.assertEqual(row["power_after"], str(calc.native_power))
+        self.assertEqual(handoffs[0][1]["event_data"], id(event_data))
+        self.assertEqual(handoffs[0][1]["native_source_state"], id(native_state))
+        return {"energy_entity_id":name, "power_entity_id":calc.producer.entity_id}
+
     async def _actual_short_gap(self, *, selector):
         if selector:
             await self.selector.async_select_option('25%')
@@ -286,7 +314,10 @@ class NativePowercalcOperandClockRedTests(unittest.IsolatedAsyncioTestCase):
             facts.install()
             result = await self.numeric.async_capture_powercalc_numeric_reload(
                 self.f.hass, self.chain, self.evidence, self.original_runtime, guard=self.guard,
-                exact_fields=True, retain_producers=True)
+                exact_fields=True, retain_producers=True, operand_clock=True)
+            self.assertIsNotNone(result.operand_clock,
+                'two direct native tests must run the cumulative operand clock candidate')
+            self.assertTrue(result.operand_clock.direct_operand_clock_verified)
             async with asyncio.timeout(8):
                 await completed
             self.assertTrue(seen)
@@ -327,6 +358,9 @@ class NativePowercalcOperandClockRedTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(outcome.native_value_changed and outcome.native_write_suppressed)
         self.assertEqual(outcome.previous_native_power, baseline.source_power)
         self.assertLessEqual(outcome.update_returned_at, cutover_time)
+        self._assert_operand_trace(
+            result.operand_clock, name=name, calc=outcome,
+            event_data=event.data, native_state=native_state)
         # Declared observational operand clock: normalized W changes take effect
         # at actual native update-return; this is NOT a fictitious W State time.
         origin = baseline.anchor if baseline.trigger == 'TimeElapsed' else baseline.source_reported

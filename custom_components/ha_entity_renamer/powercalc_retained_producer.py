@@ -743,6 +743,12 @@ class _RetainedProducerOwner:
                                       or flight.previous_available != old._attr_available),
                 native_write_attempted=bool(flight.write_attempts),
                 native_write_returned_at=flight.native_write_returned_at))
+            if self.scope.clock_owner is not None:
+                try:
+                    self.scope.clock_owner.consume(self.results[-1])
+                except BaseException as error:
+                    self.scope.clock_owner.poison(error)
+                    raise
             self.operations.append(['calculation_complete', name, flight.sequence, id(flight.task)])
         except BaseException as error:
             self._poison(error)

@@ -296,6 +296,8 @@ class _ExactFieldsOwner:
         after = _values(entity, self.integration)
         _need(all(a is b for a, b in zip(after, live, strict=True)), 'actual_field_assignment_readback')
         row['new_after'] = _encoded(after)
+        if self.scope.clock_owner is not None:
+            self.scope.clock_owner.after_exact_transfer(entity)
         self.open[name] = (entity, asyncio.current_task(), 'vendor_enter')
 
     def finish(self, current):
