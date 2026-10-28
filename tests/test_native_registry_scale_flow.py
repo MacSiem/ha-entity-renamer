@@ -27,7 +27,7 @@ class NativeRegistryScaleFlowTests(unittest.IsolatedAsyncioTestCase):
     flow = server.NativeTemplateYAMLServerTests.flow
     DELETED = 37_275
     LIVE = 256
-    UNIQUE_WIDTH = 480  # Initial calibration, NOT a measured raw file size.
+    UNIQUE_WIDTH = 240  # 480 produced 40,068,053 B at the same native cardinality.
 
     def same(self, actual, expected, reason):
         # Do not let unittest dump full 25+ MB documents on a failed assertion.
