@@ -24,6 +24,7 @@ from test_powercalc_profile_inputs import ProfileLight, InfraredSelector, stage_
 class PowercalcProfileEnergyNativeTests(unittest.IsolatedAsyncioTestCase):
     namespace_source_bytes = b'# ORIGINAL public profile native fixture namespace\n'
     asyncSetUp = existing.PowercalcRuntimeNativeTests.asyncSetUp
+    custom_profile_directories = False
     _flush_documents = existing.PowercalcRuntimeNativeTests._flush_documents
     guard = existing.PowercalcRuntimeNativeTests.guard
 
@@ -61,6 +62,10 @@ class PowercalcProfileEnergyNativeTests(unittest.IsolatedAsyncioTestCase):
             '  sensors:\n    - entity_id: ' + self.yaml_source + '\n'
             '      unique_id: public-profile-static\n      manufacturer: signify\n'
             '      model: LWA001\n      create_energy_sensor: true\n')
+        custom = getattr(self, 'custom_profile_directories', False)
+        self.assertIs(type(custom), bool)
+        if custom:
+            config += '      custom_model_directory: powercalc/profiles/signify/LWA001\n'
         (self.f.root / 'configuration.yaml').write_text(config)
         self.assertTrue(await async_setup_component(hass, 'powercalc', await async_hass_config_yaml(hass)))
         def entry(name, unique_id, data):
@@ -79,7 +84,8 @@ class PowercalcProfileEnergyNativeTests(unittest.IsolatedAsyncioTestCase):
             return found[0]
         self.entry = entry('Public dynamic', 'public-profile-dynamic', {
             'entity_id': self.gui_source, 'sensor_type': 'virtual_power',
-            'manufacturer': 'lifx', 'model': 'LHB30E27UC10P', 'create_energy_sensor': True})
+            'manufacturer': 'lifx', 'model': 'LHB30E27UC10P', 'create_energy_sensor': True,
+            **({'custom_model_directory': 'powercalc/profiles/lifx/LHB30E27UC10P'} if custom else {})})
         await add(self.entry)
         self.static_power = entity(VirtualPowerSensor, 'public-profile-static')
         self.dynamic_power = entity(VirtualPowerSensor, 'public-profile-dynamic')

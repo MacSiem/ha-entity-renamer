@@ -14,6 +14,7 @@ import time
 import unittest
 
 import test_powercalc_operand_clock_native as baseline
+from test_powercalc_custom_profile_io import CustomProfileIOProof
 
 _CLOCK_SHA256 = 'cba3f660e308325ae2ff2b6527da6c0a178b65181b5e3b004b7e7023f672ca8d'
 
@@ -266,6 +267,10 @@ class _TimerFacts(baseline._ClockFacts):
             monitor.set_local_events(self.tool, code, monitor.events.PY_START | monitor.events.PY_RETURN)
 
 
+class _CustomTimerFacts(CustomProfileIOProof, _TimerFacts):
+    pass
+
+
 @unittest.skipUnless(baseline.prior.accepted.fixture.HAS_HA, 'actual supported HA required')
 class NativePowercalcActualTimerTests(unittest.IsolatedAsyncioTestCase):
     namespace_source_bytes = baseline.NativePowercalcOperandClockRedTests.namespace_source_bytes
@@ -289,8 +294,9 @@ class NativePowercalcActualTimerTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(type(action) is facts.timer_action and action.owner.scope.hass is self.f.hass)
 
     async def _drive(self, *, cancel=False):
+        self.custom_profile_directories = True
         await self.ready()
-        facts = _TimerFacts(self)
+        facts = _CustomTimerFacts(self)
         await facts.prepare()
         waited = False
         cancelled = False
@@ -298,14 +304,8 @@ class NativePowercalcActualTimerTests(unittest.IsolatedAsyncioTestCase):
         def actual_slow_guard():
             nonlocal waited, cancelled
             self.guard()
-            live = facts.live_typed()
-            if not waited and set(live) == set(facts.old_e):
-                waited = True
-                # Actual wall-clock time in an operator/IO guard, not a clock
-                # advance or handle rewrite. The real event loop must then
-                # deliver both due callbacks; assertions refuse a no-fire run.
-                time.sleep(max(0.0, max(i['deadline'] for i in live.values())
-                               - self.f.hass.loop.time()) + 0.03)
+            if not waited:
+                waited = facts.wait_at_native_custom_setup()
             if (cancel and not cancelled and facts.deliveries
                     and 'return_utc' in facts.deliveries[0] and len(facts.cutovers) < 2):
                 cancelled = True
@@ -324,11 +324,16 @@ class NativePowercalcActualTimerTests(unittest.IsolatedAsyncioTestCase):
             else:
                 result = await task
             self.assertTrue(waited, 'both real typed issuances were not observed')
+            facts.assert_custom_read()
             self.assertIsNone(facts.error, 'observer/fixture failure: ' + repr(facts.error))
             executor = self.module('yaml_validation')._settled_executor
             self.assertEqual(await executor(self.f.hass, facts.prove), (facts.methods, facts.codes))
             self.assertEqual(await executor(self.f.hass, facts.product_prove),
                              (facts.product_methods, facts.product_codes))
+            self.assertEqual(await executor(self.f.hass, facts.runtime_prove),
+                             (facts.runtime_methods, facts.runtime_codes))
+            self.assertEqual(await executor(self.f.hass, facts.io_prove),
+                             (facts.io_methods, facts.io_codes))
         finally:
             facts.close()
         return result, error, facts
