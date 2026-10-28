@@ -166,10 +166,15 @@ class _OperandClockOwner:
     def bind_original(self, bound):
         self.bound = bound
         rows = {row.entity_id: row for row in bound.rows}
+        # Integral rows encode producer ownership as graph edges; scalar source
+        # fields belong to the physical-input profile rows, not this relation.
         _need(all(rows[name].source_verified and rows[name].relation_kind == 'energy_integral'
-                  and rows[name].source == c.power.entity_id
-                  and rows[name].source_registry_id == c.power.registry_entry.id
-                  and rows[name].registry_id == c.old.registry_entry.id for name, c in self.states.items()),
+                  and rows[name].edges == ((c.power.entity_id, name, 1),)
+                  and rows[name].registry_id == c.old.registry_entry.id
+                  and rows[c.power.entity_id].source_verified
+                  and rows[c.power.entity_id].relation_kind == 'profile_lut'
+                  and rows[c.power.entity_id].registry_id == c.power.registry_entry.id
+                  for name, c in self.states.items()),
               'original_direct_source_graph')
         self.identities = {name: (c.old.registry_entry, c.old.unique_id,
             c.old.platform.config_entry, c.old._sensor_source_id, c.old._source_entity,
