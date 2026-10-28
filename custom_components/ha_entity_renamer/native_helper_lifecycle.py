@@ -194,6 +194,8 @@ class NativeHelperLifecycle:
         if (type(prepared_digests) is not dict
                 or set(prepared_digests) != {s.prepared_ref for s in plan.steps}):
             _fail('preparation_binding_invalid')
+        from .native_template_entry_lifecycle import validate_preparations
+        template_changes = validate_preparations(store.preparations,plan,receipt,prepared_digests)
         ids = set()
         self.expected_metadata = {}
         self.helper_changes = {}
@@ -206,7 +208,8 @@ class NativeHelperLifecycle:
                                                   prepared_digests[step.prepared_ref])
             change = decode_change(payload)
             if (step.caused_by or type(change) is not PreparedHelper
-                    or change.before['domain'] not in NATIVE_FIELDS
+                    or (change.before['domain'] not in NATIVE_FIELDS
+                        and change.before['identity']['entry_id'] not in template_changes)
                     or (change.identity, change.before_revision, change.after_revision)
                        != (step.identity, step.before_revision, step.after_revision)):
                 _fail('ordinary_helper_binding_required')
@@ -544,7 +547,8 @@ class NativeHelperLifecycle:
         for row in obj.root['original']:
             if (set(row) != {'entry_id', 'domain', 'state', 'disabled_by',
                              'pref_disable_new_entities', 'pref_disable_polling'}
-                    or row['domain'] not in NATIVE_FIELDS
+                    or (row['domain'] not in NATIVE_FIELDS
+                        and not (row['domain']=='template' and row['entry_id'] in obj.helper_changes))
                     or row['state'] not in ('loaded', 'not_loaded')
                     or type(row['pref_disable_new_entities']) is not bool
                     or type(row['pref_disable_polling']) is not bool
@@ -671,7 +675,7 @@ class NativeHelperLifecycle:
                     'stage': stage, 'entry_id': key,
                     'api_called': original['state'] == 'loaded',
                     'state': 'not_loaded' if stage == 'unload' else original['state']}
-                if stage == 'setup' and original['state'] == 'loaded' and (original['domain'] == 'utility_meter'
+                if stage == 'setup' and original['state'] == 'loaded' and (original['domain'] in ('utility_meter','template')
                         or original['domain'] == 'integration' and (key in self.own_registry_changes
                             or key in self.root.get('integration_clocks', {}))):
                     effect = receipt.get('native_effect')
@@ -776,7 +780,7 @@ class NativeHelperLifecycle:
             self._inactive(original)
             await self._verify(self.verify_inactive, key)
             self._inactive(original)
-        audited_setup = stage == 'setup' and active and (original['domain'] == 'utility_meter'
+        audited_setup = stage == 'setup' and active and (original['domain'] in ('utility_meter','template')
             or original['domain'] == 'integration' and (key in self.own_registry_changes
                             or key in self.root.get('integration_clocks', {})))
         if audited_setup and not callable(self.setup_effect):

@@ -52,10 +52,10 @@ def _digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def _stage(config_root, plan, baseline, proposed, with_sources=False):
+def _stage(config_root, plan, baseline, proposed, with_sources=False, native_helpers=()):
     reader = _Reader(config_root, Limits(max_file_bytes=_MAX_BYTES))
     try:
-        return _stage_owned(reader, plan, baseline, proposed, with_sources=with_sources)
+        return _stage_owned(reader, plan, baseline, proposed, with_sources=with_sources, native_helpers=native_helpers)
     except (OSError, ValueError) as error:
         if isinstance(error, YAMLValidationError):
             raise
@@ -64,8 +64,8 @@ def _stage(config_root, plan, baseline, proposed, with_sources=False):
         os.close(reader.root)
 
 
-def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False):
-    if not plan.ready or not plan.patches:
+def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native_helpers=()):
+    if not plan.ready or (not plan.patches and not native_helpers):
         raise YAMLValidationError('yaml_plan_not_ready')
     reachable = {'configuration.yaml'}
     while True:
@@ -299,7 +299,7 @@ async def _settled_executor(hass, function, *args):
 
 
 async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, with_sources=False,
-                                   powercalc_bundle=None, powercalc_candidate_documents=None):
+                                   powercalc_bundle=None, powercalc_candidate_documents=None, native_helpers=()):
     """Return only after native validation of the entire proposed graph succeeds.
 
     scratch_parent must be private local storage OUTSIDE config_root. It contains
@@ -311,6 +311,20 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
         if (not with_sources or powercalc_bundle is None or plan.powercalc_inputs is None
                 or type(powercalc_candidate_documents) is not PlannedPowercalcDocuments):
             raise YAMLValidationError('powercalc_candidate_profile_scope_required')
+    if native_helpers:
+        from .prepared import canonical, decode_change
+        from .helper_transaction import PreparedHelper
+        from .yaml_validation_worker import template_entry_seal
+        if not with_sources or type(native_helpers) is not tuple:
+            raise YAMLValidationError('native_helpers_private_source_scope_required')
+        for ref, digest, payload in native_helpers:
+            change = decode_change(payload)
+            if type(change) is not PreparedHelper or canonical(payload)[1] != digest:
+                raise YAMLValidationError('native_helpers_preparation_changed')
+            change.plan()
+        # Freeze mutable payloads across ALL staging/worker awaits.
+        native_helpers = tuple((ref,digest,canonical(payload)[0])
+                               for ref,digest,payload in native_helpers)
     root = Path(hass.config.config_dir).resolve()
     scratch = Path(scratch_parent).resolve()
     if scratch == root or root in scratch.parents:
@@ -321,7 +335,8 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
             before.mkdir(mode=0o700)
             after.mkdir(mode=0o700)
             staged = await _settled_executor(hass, _stage, root, plan, before, after,
-                                             *((True,) if with_sources else ()))
+                                             *((with_sources,native_helpers) if native_helpers
+                                               else ((True,) if with_sources else ())))
             sources, directories = staged[:2]
             if powercalc_bundle is not None:
                 from .powercalc_source_binding import stage_powercalc_bundle
@@ -330,9 +345,19 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 from .powercalc_candidate_sources import stage_candidate_documents
                 await _settled_executor(hass, stage_candidate_documents,
                     powercalc_candidate_documents, before, after)
+            helper_args = ()
+            if native_helpers:
+                request = Path(stage)/'native-helpers.json'
+                encoded = json.dumps(native_helpers,sort_keys=True,separators=(',',':'),allow_nan=False)
+                if len(encoded.encode()) > 16_000_000:
+                    raise YAMLValidationError('native_helpers_request_limit')
+                request.write_text(encoded)
+                request.chmod(0o600)
+                helper_args = ('--native-helpers',str(request))
             worker = str(Path(__file__).with_name('yaml_validation_worker.py'))
             process = await asyncio.create_subprocess_exec(
                 sys.executable, '-I', worker, str(before), str(after),
+                *helper_args,
                 *(('--source-evidence',) if with_sources else ()),
                 *(('--powercalc-profile-inputs',) if plan.powercalc_inputs is not None else ()),
                 *(('--powercalc-candidate-inputs',) if powercalc_candidate_documents is not None else ()),
@@ -355,6 +380,12 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 error = YAMLValidationError('native_config_rejected')
                 error.add_note(checker_failure_note(result, process.returncode))
                 raise error
+            if native_helpers:
+                expected = template_entry_seal(native_helpers,result['version'])
+                received = [tuple(row) for row in result.get('runtime_expected',())
+                            if row[0] == 'template.config_entries']
+                if received != [expected]:
+                    raise YAMLValidationError('native_helpers_validation_seal_mismatch')
             if ('template' in result['changed_domains']
                     and (not with_sources or staged[3].findings
                          or any(row.domain not in ('template.state', 'template.sensor', 'template.binary_sensor')
@@ -393,14 +424,14 @@ async def async_validate_proposed(hass, plan, scratch_parent, *, timeout=120):
     return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout)
 
 
-async def async_validate_proposed_with_sources(hass, plan, scratch_parent, *, timeout=120):
+async def async_validate_proposed_with_sources(hass, plan, scratch_parent, *, timeout=120, native_helpers=()):
     """Same ORIGINAL staging/checker, plus detached source evidence for preparation.
 
     This server API never creates a second ValidationReceipt or gains mutation
     authority. The normal receipt/CAS remains independently required by apply.
     """
     return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
-                                         with_sources=True)
+                                         with_sources=True, native_helpers=native_helpers)
 
 
 def assert_proposal_matches(receipt, plan):

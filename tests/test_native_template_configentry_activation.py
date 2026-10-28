@@ -1,11 +1,12 @@
 """Real numeric Template ConfigEntry activation-scope RED; owner runs FIFO.
 
-This first prerequisite has no YAML changes and needs no YAML ValidationReceipt.
-Actual producer/consumer, native source binding, immutable preparations and
-Recorder history precede the ordinary product lease request. No lifecycle,
-Coordinator migration, accepted chain or fresh-reverse completion is claimed.
+Natural ConfigEntry-only native checker, actual Coordinator forward and fresh
+reverse, lifecycle setup effects, UUID/preferences and Recorder continuity.
+The original two lease prerequisites remain separate. Owner executes via FIFO;
+merely discovering these tests is no native acceptance.
 """
 import importlib
+from dataclasses import replace
 import json
 from types import MappingProxyType
 import unittest
@@ -33,7 +34,29 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
     async def test_entry_only_proposal_can_receive_original_native_validation(self):
         await self._scope(entry_unique_id=None, validate_entry_proposal=True)
 
-    async def _scope(self, *, entry_unique_id, validate_entry_proposal=False):
+    async def test_actual_numeric_entry_source_rename_unload_setup_and_fresh_reverse(self):
+        await self._scope(entry_unique_id='template-entry-activation', full_flow=True)
+
+    async def test_actual_gui_none_entry_source_rename_unload_setup_and_fresh_reverse(self):
+        await self._scope(entry_unique_id=None, full_flow=True)
+
+    async def test_tampered_prepared_request_never_mints_native_receipt(self):
+        await self._scope(entry_unique_id=None, validate_entry_proposal=True, fault='request')
+
+    async def test_missing_helper_seal_refuses_before_unload(self):
+        await self._scope(entry_unique_id=None, full_flow=True, fault='seal')
+
+    async def test_setup_metadata_delta_refuses_receipt_and_preserves_unknown(self):
+        await self._scope(entry_unique_id=None, full_flow=True, fault='metadata')
+
+    async def test_real_core_options_update_during_setup_stays_unknown_without_replay(self):
+        await self._scope(entry_unique_id=None, full_flow=True, fault='update')
+
+    async def test_setup_receipt_ack_loss_reopens_without_replay(self):
+        await self._scope(entry_unique_id=None, full_flow=True, fault='ack')
+
+    async def _scope(self, *, entry_unique_id, validate_entry_proposal=False,
+                     full_flow=False, fault=None):
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.components.template.config_flow import TemplateConfigFlowHandler
         from homeassistant.config_entries import ConfigEntry, ConfigEntryState
@@ -160,20 +183,38 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(self.f.entity.async_get(self.source_id).id, source_uuid)
         self.assertIs(entry.state, ConfigEntryState.LOADED)
 
-        if validate_entry_proposal:
+        if fault == 'request':
+            from copy import deepcopy
+            payload = deepcopy(reopened.resolve('template-entry-options', digests['template-entry-options']))
+            payload['data']['after']['options']['availability'] = '{{ true }}'
+            with self.assertRaises(ValueError):
+                await module('yaml_validation').async_validate_proposed_with_sources(
+                    hass,yaml_plan,root.parent,native_helpers=((
+                        'template-entry-options',digests['template-entry-options'],payload),))
+            self.assertEqual(native.read_entry(hass,entry.entry_id),original)
+            self.assertIs(entry.state,ConfigEntryState.LOADED)
+            return
+
+        if validate_entry_proposal or full_flow:
             # Genuine native input preparation has no YAML edit. The existing
             # checker must qualify this natural proposal, not a source_probe.
             # No receipt is constructed or an expected exception caught here.
             receipt, evidence = await module('yaml_validation').async_validate_proposed_with_sources(
-                hass, yaml_plan, root.parent)
+                hass, yaml_plan, root.parent, native_helpers=((
+                    'template-entry-options', digests['template-entry-options'],
+                    reopened.resolve('template-entry-options', digests['template-entry-options'])),))
             self.assertTrue(receipt.ready_for_apply)
             self.assertEqual(receipt.proposed_files, ())
             self.assertEqual(receipt.changed_domains, ())
             self.assertIsNotNone(evidence)
 
-        # First missing real prerequisite: existing native lease refuses domain
-        # template, before any unload/write. No fake receipt, expectedFailure,
-        # assertRaises or invented future API turns that refusal into a PASS.
+        if full_flow:
+            return await self._full_flow(module, receipt, evidence, preparations, digests,
+                entry, helper_change, registry_change, recorder, history, consumer_history,
+                consumer_identity, original, mapping, fault)
+
+        # This already qualified native lease prerequisite remains independent
+        # of the full Coordinator/lifecycle flow above.
         lease_api = module('native_helper_activation_lease')
         async with await lease_api.NativeHelperActivationLease.acquire(
                 hass, hass.config_entries, (entry,), guard=lambda: None) as lease:
@@ -181,6 +222,281 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
             self.assertIs(lease.manager, hass.config_entries)
             self.assertTrue(lease.owns_entry(entry))
         self.assertFalse(entry.setup_lock.locked())
+
+    async def _full_flow(self, module, receipt, evidence, preparations, digests,
+                         entry, helper_change, registry_change, recorder, history,
+                         consumer_history, consumer_identity, original, mapping, fault):
+        from homeassistant.config_entries import ConfigEntryState
+        from homeassistant.helpers import entity_platform as ep
+        from unittest.mock import patch
+        hass = self.f.hass
+        prep, tx, rr, lm = (module(n) for n in
+            ('prepared', 'transaction', 'native_registry_receipts', 'native_helper_lifecycle'))
+        template = module('native_template_entry_lifecycle')
+        original_inputs = await module('native_input_baseline').async_capture_native_input_baseline(
+            hass, receipt, guard=lambda: None)
+        inputs = await preparations.create_native_inputs('template-flow-original', original_inputs)
+        scopes = ('registry', 'helpers')
+        steps = tuple(tx.Step(ref, scope, change.identity, change.before_revision,
+                              change.after_revision, ref)
+            for ref, scope, change in (('template-entry-source', 'registry', registry_change),
+                                      ('template-entry-options', 'helpers', helper_change)))
+        plan = tx.Plan('template-numeric-entry-flow', scopes, scopes, steps,
+                       'actual-template-numeric-entry', scopes, inputs)
+        operation = 'template-numeric-entry-operation'
+        journal = module('journal').native_journal(hass)
+        await journal.initialize()
+        store = rr.native_registry_receipt_store(hass, preparations)
+        await store.initialize()
+        chain = await rr.RegistryReceiptChain.start(store, operation, plan, receipt, digests)
+        observation_state = chain.reconstruct_inputs()
+        lease = None
+        lifecycle = None
+        source_history = await history.capture(mapping)
+        current_config = original
+
+        def outer_guard():
+            self.assertIs(hass.config_entries.async_get_entry(entry.entry_id), entry)
+            self.assertIsNone(entry.disabled_by)
+
+        async def observe():
+            nonlocal observation_state
+            outer_guard()
+            try:
+                observation_state = chain.reconstruct_inputs()
+            except rr.RegistryReceiptError:
+                self.assertIsNotNone(chain.active)
+                self.assertIn(store.read(chain.active.reference[0])['payload']['kind'],
+                              ('registry_intent', 'helper_setup_intent'))
+            return await module('native_input_observation').async_observe_native_inputs(
+                hass, receipt, guard=outer_guard, input_state=observation_state)
+
+        async def accepted(authorization):
+            record = await journal.load(operation)
+            observed = await observe()
+            chain.expected(tx.PhaseContext(record, 0), tuple(rr.RegistryRawObservation(
+                f.key, f.raw, f.identity) for f in observed.files))
+            return chain.verify_setup_authorization(authorization)
+
+        async def original_fence(reference, checked_receipt):
+            self.assertEqual((reference, checked_receipt), (inputs, receipt))
+            module('yaml_validation').assert_validation_current(receipt)
+            observed = await module('native_input_observation').async_observe_native_inputs(
+                hass, receipt, guard=outer_guard)
+            return (observed.original_receipt_json == original_inputs.receipt_json
+                    and observed.files == original_inputs.files)
+
+        observer = template.NativeTemplateEntryObserver(hass, chain, evidence, guard=outer_guard)
+        await observer.capture_loaded()
+        lifecycle_store = lm.native_helper_lifecycle_store(hass, preparations)
+        await lifecycle_store.initialize()
+        base_args = lifecycle_store, hass.config_entries, operation, plan, receipt, digests
+        async def inactive(key):
+            return await observer.verify_inactive(key)
+        async def loaded(key, activation, authorization):
+            await observer.verify_loaded(helper_change.after if authorization.status == 'applied'
+                                         else helper_change.before)
+            return True
+        setup = module('native_helper_setup_effects').NativeHelperSetupEffects(
+            hass, chain, observe, journal.load, guard=outer_guard)
+        callbacks = dict(guard=outer_guard, verify_original_native_inputs=original_fence,
+            settle=observer.settle, verify_inactive=inactive, verify_runtime=loaded,
+            verify_accepted_native_chain=accepted, setup_effect=setup)
+        lease_api = module('native_helper_activation_lease').NativeHelperActivationLease
+        async def acquire(snapshot):
+            nonlocal lease
+            outer_guard()
+            self.assertEqual(module('helper_native').read_entry(hass, entry.entry_id), snapshot)
+            if lease is not None:
+                lease.release()
+            lease = await lease_api.acquire(hass, hass.config_entries, (entry,), guard=outer_guard)
+            self.assertEqual(module('helper_native').read_entry(hass, entry.entry_id), snapshot)
+            observer.lease = lease
+            if lifecycle is not None:
+                lifecycle.activation_lease = lease
+        try:
+            await acquire(original)
+            if fault == 'seal':
+                # This receipt is deliberately corrupted as a negative input;
+                # no positive path creates or substitutes a validation receipt.
+                bad = replace(receipt, runtime_expected=())
+                with self.assertRaises(ValueError):
+                    await lm.NativeHelperLifecycle.start(lifecycle_store, hass.config_entries,
+                        operation, plan, bad, digests, activation_lease=lease, **callbacks)
+                self.assertIs(entry.state, ConfigEntryState.LOADED)
+                self.assertEqual(lifecycle_store.rows, {})
+                return
+            lifecycle = await lm.NativeHelperLifecycle.start(*base_args,
+                activation_lease=lease, **callbacks)
+            await lifecycle.quiesce()
+            await observer.verify_inactive(entry.entry_id)
+            resolver = lambda ref: prep.decode_change(preparations.resolve(ref, digests[ref]))
+
+            def compose(log):
+                bridge = module('native_registry').NativeRegistryBridge(
+                    module('native_registry').NativeRegistryIO(hass), recorder,
+                    native_images=chain.accepted_documents)
+                inner = module('helper_transaction').HelperTransactionAdapter(hass, resolver,
+                    resolve_step=lambda key: next(s for s in steps if s.key == key),
+                    settle=observer.settle, validate_snapshot=observer.validate_snapshot,
+                    verify_activation=observer.verify_activation, verify_runtime=observer.verify_activation,
+                    verify_inventory=observer.verify_inventory,
+                    verify_original_inventory=observer.verify_original_inventory)
+                async def full(reverse):
+                    await observer.verify_inventory_snapshot(helper_change.before if reverse
+                                                             else helper_change.after)
+                    return await history.verify(source_history) and await history.verify(consumer_history)
+                helper = module('native_helper_transaction').ReceiptedHelperTransactionAdapter(
+                    inner, chain, observe, log.load, lifecycle.require_quiescent,
+                    full_verify=lambda _: full(False), full_verify_rollback=lambda _: full(True),
+                    activation_lease=lease)
+                registry = module('native_registry_transaction').ReceiptedRegistryTransactionAdapter(
+                    bridge, resolver, chain, observe, log.load, helper.guard,
+                    full_verify=lambda _: full(False), full_verify_rollback=lambda _: full(True))
+                return tx.Coordinator({'registry': registry, 'helpers': helper}, log,
+                                      helper.guard, required_scopes=scopes)
+
+            forward = compose(journal)
+            record = await forward.apply(plan, plan.fingerprint, operation)
+            self.assertEqual(record.status, 'applied', (record.reason, record.phases))
+            current_config = helper_change.after
+            await acquire(current_config)
+            auth = lm.RestoreAuthorization(operation, plan.fingerprint,
+                chain.expected(tx.PhaseContext(record, 0), tuple(rr.RegistryRawObservation(
+                    f.key, f.raw, f.identity) for f in (await observe()).files)), record.status)
+            if fault == 'metadata':
+                self.f.entity.async_update_entity(self.consumer.entity_id, name='foreign preference')
+                with self.assertRaises(ValueError):
+                    await lifecycle.restore(auth)
+                self.assertFalse(lifecycle.inspect()['activation_receipts_complete'])
+                return
+            if fault == 'update':
+                from homeassistant.core import callback
+                from homeassistant.config_entries import SIGNAL_CONFIG_ENTRY_CHANGED
+                from homeassistant.helpers.dispatcher import async_dispatcher_connect
+                updates = []
+                @callback
+                def foreign_update(change, changed_entry):
+                    if (changed_entry is entry and entry.state.value == 'setup_in_progress'
+                            and not updates):
+                        options = dict(entry.options)
+                        options['state'] = options['state'].replace('* 2', '* 3')
+                        updates.append(hass.config_entries.async_update_entry(entry, options=options))
+                remove = async_dispatcher_connect(hass, SIGNAL_CONFIG_ENTRY_CHANGED, foreign_update)
+                try:
+                    with self.assertRaises(ValueError):
+                        await lifecycle.restore(auth)
+                finally:
+                    remove()
+                self.assertEqual(updates, [True])
+                self.assertEqual(lifecycle.inspect()['pending'],
+                                 [{'stage':'setup','entry_id':entry.entry_id}])
+                self.assertFalse(any(r['payload']['kind']=='helper_setup_receipt'
+                                     for r in store.rows.values()))
+                # Read actual Core effect, never a synthetic manager marker.
+                changed_entity = next(e for p in ep.async_get_platforms(hass,'template')
+                    if p.config_entry is entry for e in p.entities.values())
+                native = module('native_template_consumers')._Native(hass)
+                semantic, actual_template, _ = module('native_template_consumers')._live_sensor(
+                    native, changed_entity)
+                self.assertEqual(semantic[1], entry.options['state'])
+                self.assertIn('* 3', semantic[1])
+                self.assertIs(entry.state, ConfigEntryState.LOADED)
+                # No cleanup write or retry is performed after the uncertain effect.
+                return
+            if fault == 'ack':
+                native_save = store.store.save
+                async def lost_ack(document):
+                    await native_save(document)
+                    if any(r['payload']['kind'] == 'helper_setup_receipt'
+                           for r in document['events'].values()):
+                        raise OSError('owned setup receipt ACK lost')
+                with patch.object(store.store, 'save', lost_ack):
+                    with self.assertRaises((ValueError, OSError)):
+                        await lifecycle.restore(auth)
+                fresh_preps = prep.native_prepared_store(hass)
+                await fresh_preps.initialize()
+                fresh_receipts = rr.native_registry_receipt_store(hass, fresh_preps)
+                await fresh_receipts.initialize()
+                fresh_chain = rr.RegistryReceiptChain.reopen(
+                    fresh_receipts,operation,plan,receipt,digests)
+                self.assertFalse(fresh_chain.writable)
+                fresh_chain.reconstruct_inputs()
+                fresh_life_store = lm.native_helper_lifecycle_store(hass, fresh_preps)
+                await fresh_life_store.initialize()
+                readonly = lm.NativeHelperLifecycle.reopen(fresh_life_store,
+                    *base_args[1:], **callbacks)
+                self.assertFalse(readonly.writable)
+                before_state = entry.state
+                with self.assertRaises(ValueError):
+                    await readonly.restore(auth)
+                self.assertIs(entry.state, before_state)
+                return
+            await lifecycle.restore(auth)
+            await observer.verify_loaded(current_config)
+            self.assertTrue(lifecycle.inspect()['activation_receipts_complete'])
+            self.assertTrue(any(r['payload']['kind'] == 'helper_setup_receipt'
+                                for r in store.rows.values()))
+            for value in (5, 7):
+                await self.emit(value)
+            self.assertEqual(self.producer.entity_id, next(iter(mapping.values())))
+            self.assertEqual(self.f.entity.async_get(self.producer.entity_id).id, registry_change.identity)
+            fresh_preps = prep.native_prepared_store(hass)
+            await fresh_preps.initialize()
+            fresh_store = rr.native_registry_receipt_store(hass, fresh_preps)
+            await fresh_store.initialize()
+            readonly = rr.RegistryReceiptChain.reopen(fresh_store, operation, plan, receipt, digests)
+            self.assertFalse(readonly.writable)
+            self.assertTrue(readonly.reconstruct_inputs().same_evidence(chain.reconstruct_inputs()))
+            fresh_log = module('journal').native_journal(hass)
+            await fresh_log.initialize()
+            # DurableJournal.load is instance-cached: reverse IO must all use
+            # the fresh writer's authoritative journal, including setup effects.
+            journal = fresh_log
+            callbacks['setup_effect'] = module('native_helper_setup_effects').NativeHelperSetupEffects(
+                hass,chain,observe,journal.load,guard=outer_guard)
+            forward_auth = lm.RestoreAuthorization(operation, plan.fingerprint,
+                chain.reconstruct_inputs().head, 'applied')
+            await observer.capture_loaded()
+            lifecycle = await lm.NativeHelperLifecycle.start(*base_args,
+                activation_lease=lease, source_authorization=forward_auth, **callbacks)
+            await lifecycle.quiesce()
+            reverse = compose(fresh_log)
+            rolled = await reverse.rollback(operation)
+            self.assertEqual(rolled.status, 'rolled_back', (rolled.reason, rolled.phases))
+            current_config = original
+            await acquire(original)
+            reverse_auth = lm.RestoreAuthorization(operation, plan.fingerprint,
+                chain.reconstruct_inputs().head, 'rolled_back')
+            await lifecycle.restore(reverse_auth)
+            await observer.verify_loaded(original)
+            for value in (5, 7):
+                await self.emit(value)
+            current = self.f.entity.async_get(self.consumer.entity_id)
+            self.assertEqual((current.entity_id, current.id, current.unique_id,
+                current.config_entry_id, current.hidden_by, current.name), consumer_identity)
+            self.assertEqual(module('helper_native').read_entry(hass, entry.entry_id), original)
+            self.assertEqual(self.producer.entity_id, next(iter(mapping)))
+            self.assertEqual(self.f.entity.async_get(self.producer.entity_id).id, registry_change.identity)
+            self.assertTrue(await history.verify(source_history))
+            self.assertTrue(await history.verify(consumer_history))
+            self.assertTrue(lifecycle.inspect()['activation_receipts_complete'])
+            final_preps = prep.native_prepared_store(hass)
+            await final_preps.initialize()
+            final_store = rr.native_registry_receipt_store(hass,final_preps)
+            await final_store.initialize()
+            final_chain = rr.RegistryReceiptChain.reopen(final_store,operation,plan,receipt,digests)
+            self.assertTrue(final_chain.reconstruct_inputs().same_evidence(chain.reconstruct_inputs()))
+            final_life_store = lm.native_helper_lifecycle_store(hass,final_preps)
+            await final_life_store.initialize()
+            final_life = lm.NativeHelperLifecycle.reopen(final_life_store,*base_args[1:],
+                source_authorization=forward_auth,**callbacks)
+            self.assertFalse(final_life.writable)
+            self.assertEqual(final_life.inspect()['pending'],[])
+            self.assertTrue(final_life.inspect()['activation_receipts_complete'])
+        finally:
+            if lease is not None:
+                lease.release()
 
     def _same_native_documents(self, before, after):
         self.assertEqual(set(before), set(after))

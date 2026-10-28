@@ -597,8 +597,107 @@ async def _expected_powercalc_sources(root, *, profiles=False, bindings=False):
         await hass.async_stop(force=True)
 
 
+
+def template_entry_semantic(snapshot):
+    """Pure expected narrow semantics, independent of native schema approval."""
+    if (type(snapshot) is not dict or set(snapshot) != {'domain','identity','data','options','subentries'}
+            or snapshot['domain'] != 'template' or snapshot['data'] != {}
+            or snapshot['subentries'] != {} or type(snapshot['options']) is not dict
+            or set(snapshot['options']) != {'template_type','name','state'}
+            or snapshot['options']['template_type'] != 'sensor'):
+        raise ValueError('template_entry_subset_unverified')
+    identity, options = snapshot['identity'], snapshot['options']
+    fields = {'entry_id','unique_id','title','version','minor_version','source','disabled_by',
+              'pref_disable_new_entities','pref_disable_polling'}
+    if (type(identity) is not dict or set(identity) != fields
+            or identity['source'] != 'user' or identity['disabled_by'] is not None
+            or type(identity['title']) is not str
+            or type(identity['version']) is not int or identity['version'] < 1
+            or type(identity['minor_version']) is not int or identity['minor_version'] < 0
+            or type(identity['entry_id']) is not str or not identity['entry_id']
+            or identity['unique_id'] is not None and (type(identity['unique_id']) is not str
+                                                     or not identity['unique_id'])
+            or any(type(identity[f]) is not bool for f in ('pref_disable_new_entities','pref_disable_polling'))
+            or any(type(options[f]) is not str or not options[f].strip() for f in ('name','state'))):
+        raise ValueError('template_entry_identity_unverified')
+    return ['state_sensor_v1',options['state'],options['name'],None,None,None]
+
+
+def template_entry_seal(request, version):
+    """Digest exact private preparation inputs; no schema approval by this hash."""
+    import hashlib
+    rows = [[], []]
+    refs, entries = set(), set()
+    if type(request) not in (tuple,list) or not request or len(request) > 100:
+        raise ValueError('template_entry_request_invalid')
+    for ref, digest, payload in request:
+        if (type(ref) is not str or not ref or ref in refs or type(digest) is not str
+                or type(payload) is not dict or set(payload) != {'kind','data'}
+                or payload['kind'] != 'helper' or set(payload['data']) != {'before','after','mapping'}):
+            raise ValueError('template_entry_request_invalid')
+        encoded = json.dumps(payload,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
+        if len(encoded) > 16_000_000 or hashlib.sha256(encoded).hexdigest() != digest:
+            raise ValueError('template_entry_preparation_changed')
+        before, after = payload['data']['before'], payload['data']['after']
+        old, new = template_entry_semantic(before), template_entry_semantic(after)
+        key = before['identity']['entry_id']
+        if (key in entries or before['identity'] != after['identity']
+                or before['options']['name'] != after['options']['name'] or old == new):
+            raise ValueError('template_entry_change_unverified')
+        helper_digest = hashlib.sha256(json.dumps(payload['data'],sort_keys=True,
+            separators=(',',':'),allow_nan=False).encode()).hexdigest()
+        for result, snapshot, semantic in zip(rows,(before,after),(old,new),strict=True):
+            result.append([version,ref,digest,helper_digest,key,snapshot,semantic])
+        refs.add(ref); entries.add(key)
+    # Plain JSON only: pure receipt reopen must not import a native runtime.
+    return ('template.config_entries',*(hashlib.sha256(json.dumps(
+        sorted(v,key=lambda row:row[1]),sort_keys=True,separators=(',',':'),
+        allow_nan=False).encode()).hexdigest() for v in rows))
+
+
+def _template_entry_projection(row):
+    fields = ('entry_id','unique_id','title','version','minor_version','source','disabled_by',
+              'pref_disable_new_entities','pref_disable_polling')
+    return {'domain':row['domain'],'identity':{k:row[k] for k in fields},
+            'data':row['data'],'options':row['options'],
+            'subentries':{s['subentry_id']:{'identity':{k:s[k] for k in
+                ('subentry_id','subentry_type','unique_id','title')},'data':s['data']}
+                for s in row.get('subentries',[])}}
+
+
+def _check_template_entries(root, request, version):
+    from pathlib import Path
+    from homeassistant.components.template import sensor
+    from homeassistant.components.template.config_flow import TemplateConfigFlowHandler
+    seal = template_entry_seal(request,version)
+    document = json.loads((Path(root)/'.storage/core.config_entries').read_bytes())
+    if (set(document) != {'version','minor_version','key','data'}
+            or document['key'] != 'core.config_entries'
+            or (document['version'],document['minor_version']) != (1,5)
+            or set(document['data']) != {'entries'}):
+        raise ValueError('template_entry_original_schema')
+    for _,_,payload in request:
+        before,after = (payload['data'][k] for k in ('before','after'))
+        matches = [row for row in document['data']['entries']
+                   if row['entry_id'] == before['identity']['entry_id']]
+        if len(matches) != 1 or _template_entry_projection(matches[0]) != before:
+            raise ValueError('template_entry_original_changed')
+        for snapshot in (before,after):
+            ident = snapshot['identity']
+            if (ident['version'],ident['minor_version']) != (
+                    TemplateConfigFlowHandler.VERSION,TemplateConfigFlowHandler.MINOR_VERSION):
+                raise ValueError('template_entry_migration_unsupported')
+            options = dict(snapshot['options']);options.pop('template_type')
+            schema = sensor.SENSOR_CONFIG_SCHEMA if version == '2025.6.0' else sensor.SENSOR_CONFIG_ENTRY_SCHEMA
+            semantic = simple_template_sensor_semantics(schema(options))
+            if semantic != template_entry_semantic(snapshot):
+                raise ValueError('template_entry_semantics_changed')
+            _qualified_state_expression(snapshot['options']['state'])
+    return seal
+
+
 async def check(before_root, proposed_root, *, with_sources=False, powercalc_profiles=False,
-                powercalc_candidate=False):
+                powercalc_candidate=False, native_helpers=()):
     from homeassistant.const import __version__
     from homeassistant.scripts.check_config import async_check_config
     if __version__ not in ('2025.6.0', '2026.10.2'):
@@ -610,7 +709,8 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
                 'warnings': len(checked.warnings), 'version': __version__}
     before, after = await _effective(before_root), await _effective(proposed_root)
     changed, unsupported = changed_domains(before, after)
-    if not changed:
+    helper_seal = _check_template_entries(before_root,native_helpers,__version__) if native_helpers else None
+    if not changed and helper_seal is None:
         return {'status': 'no_effective_config_change'}
     source_rows = {} if with_sources else None
     original_domains = sorted(set(changed) | {'automation', 'script'}) if with_sources else changed
@@ -629,6 +729,8 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
               'unsupported_domains': unsupported,
               'runtime_expected': [(domain, old_runtime.get(domain), new_runtime.get(domain))
                                    for domain in changed]}
+    if helper_seal is not None:
+        result['runtime_expected'].append(helper_seal)
     if with_sources:
         if os.path.isfile(os.path.join(before_root, 'custom_components/powercalc/manifest.json')):
             result['powercalc_sources'] = await _expected_powercalc_sources(
@@ -663,7 +765,9 @@ def main():
             result = asyncio.run(check(sys.argv[1], sys.argv[2],
                                        with_sources='--source-evidence' in sys.argv[3:],
                                        powercalc_profiles='--powercalc-profile-inputs' in sys.argv[3:],
-                                       powercalc_candidate='--powercalc-candidate-inputs' in sys.argv[3:]),
+                                       powercalc_candidate='--powercalc-candidate-inputs' in sys.argv[3:],
+                                       native_helpers=(json.load(open(sys.argv[sys.argv.index('--native-helpers')+1]))
+                                           if '--native-helpers' in sys.argv[3:] else ())),
                                  loop_factory=getattr(runner, 'create_event_loop', None))
     except BaseException as error:
         result = {'status': 'checker_failed', 'diagnostic': _checker_diagnostic(error)}

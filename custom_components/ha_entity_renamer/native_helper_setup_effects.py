@@ -1,6 +1,6 @@
-"""Installed Utility and own-ID Integration setup IO under the existing lifecycle scope.
+"""Installed Utility, Integration and numeric Template setup in the existing lifecycle.
 
-Actual API, CPython call/return evidence, guarded native flush and independent
+Actual API, CPython call/return evidence, scoped native persistence and independent
 full-three observations. No endpoint, replacement baseline or recovery replay.
 """
 from __future__ import annotations
@@ -78,7 +78,8 @@ class NativeHelperSetupEffects:
         self.chain.expected(context, before)
         self.chain.verify_setup_authorization(authorization)
         integration = original['domain'] == 'integration'
-        if not integration:
+        template = original['domain'] == 'template'
+        if not integration and not template:
             baseline, = tuple(value for value in lifecycle.runtime_baselines() if value.entry_id == entry_id)
         before_snapshot, after_snapshot = lifecycle.helper_snapshots[entry_id]
         snapshot = after_snapshot if authorization.status == 'applied' else before_snapshot
@@ -116,6 +117,10 @@ class NativeHelperSetupEffects:
                 collector_type = NativeIntegrationClockSetupAudit
             collector = collector_type(self.hass,lifecycle,self.chain,entry_id,source_rows,
                 guard=lambda:self._scope(lifecycle),setup_intent=intent)
+        elif template:
+            from .native_template_entry_lifecycle import NativeTemplateSetupAudit
+            collector = NativeTemplateSetupAudit(self.hass,lifecycle,self.chain,entry_id,
+                source_rows,guard=lambda:self._scope(lifecycle))
         elif integration:
             from .native_integration_setup_audit import NativeIntegrationSetupAudit
             collector = NativeIntegrationSetupAudit(self.hass, lifecycle, self.chain, entry_id,
@@ -139,7 +144,8 @@ class NativeHelperSetupEffects:
             # Native setup schedules the registry's native delayed write. The
             # existing trusted writer flushes that exact manager under this scope;
             # independent raw/manager/fsync reads, not a save ACK, prove durability.
-            await io.flush('entity')
+            if not template:
+                await io.flush('entity')
             self._scope(lifecycle)
             if gap is not None:
                 gap.check()

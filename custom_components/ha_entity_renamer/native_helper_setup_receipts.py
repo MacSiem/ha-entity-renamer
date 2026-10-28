@@ -1,4 +1,4 @@
-"""Offline fold of native Utility and own-ID Integration setup effects into the original receipt chain.
+"""Offline fold of Utility, Integration and exact no-op Template setup receipts.
 
 No HA calls, saves of native registries, authorization grants, baseline capture,
 replay, timestamp normalization or result-only adoption. A typed native audit is
@@ -124,7 +124,7 @@ def _activation(chain, lifecycle, entry_id, *, live):
     if root_row != {'digest': root_ref[1], 'payload': lifecycle.root}:
         _fail('lifecycle_root')
     originals = [row for row in lifecycle.root['original'] if row['entry_id'] == entry_id]
-    if (len(originals) != 1 or originals[0]['domain'] not in ('utility_meter', 'integration')
+    if (len(originals) != 1 or originals[0]['domain'] not in ('utility_meter', 'integration', 'template')
             or originals[0]['state'] != 'loaded'):
         _fail('unsupported_activation')
     key = lifecycle._slot('setup', entry_id, 'intent')
@@ -134,7 +134,12 @@ def _activation(chain, lifecycle, entry_id, *, live):
             or row['payload'].get('original') != originals[0]):
         _fail('lifecycle_setup_binding')
     values = [value for value in lifecycle.runtime_baselines() if value.entry_id == entry_id]
-    if originals[0]['domain'] == 'integration':
+    if originals[0]['domain'] == 'template':
+        from .native_template_entry_lifecycle import activation_baseline
+        if values:
+            _fail('template_does_not_use_utility_baseline')
+        encoded = activation_baseline(chain,lifecycle,entry_id)
+    elif originals[0]['domain'] == 'integration':
         from .native_integration_setup_audit import activation_baseline
         if values:
             _fail('integration_does_not_use_utility_baseline')
@@ -175,11 +180,16 @@ def _validate_activation(chain, activation):
             or intent['payload'].get('original') != activation['original']
             or intent['payload'].get('authorization') != activation['authorization']
             or activation['original'] not in obj.root['original']
-            or activation['original']['domain'] not in ('utility_meter', 'integration')
+            or activation['original']['domain'] not in ('utility_meter', 'integration', 'template')
             or activation['original']['state'] != 'loaded'):
         _fail('activation_binding')
     values = [value for value in obj.runtime_baselines()
               if value.entry_id == activation['entry_id']]
+    if activation['original']['domain'] == 'template':
+        from .native_template_entry_lifecycle import activation_baseline
+        if values or activation_baseline(chain,obj,activation['entry_id']) != activation['baseline']:
+            _fail('template_activation_binding')
+        return obj,activation['baseline']
     if activation['original']['domain'] == 'integration':
         from .native_integration_setup_audit import activation_baseline
         if values or activation_baseline(chain, obj, activation['entry_id']) != activation['baseline']:
@@ -288,7 +298,18 @@ def fold_receipt(chain, states, intent, receipt):
     rows = states[ENTITY]['document']['data']['entities']
     indices = [i for i, row in enumerate(rows) if row.get('config_entry_id') == entry_id]
     source = [deepcopy(rows[i]) for i in indices]
-    if intent['activation']['original']['domain'] == 'integration':
+    if intent['activation']['original']['domain'] == 'template':
+        from .native_template_entry_lifecycle import (decode_setup_audit as decode_template,
+                                                     validate_setup_audit as validate_template)
+        audit = decode_template(receipt['audit'])
+        final = validate_template(baseline,source,audit,core=chain.version,entry_id=entry_id)
+        if receipt['result'] != chain._summary(states):
+            _fail('template_requires_exact_noop')
+        expected = 'after' if intent['binding']['direction']=='forward' else 'before'
+        from .yaml_validation_worker import template_entry_semantic
+        if receipt['audit']['semantic'] != template_entry_semantic(baseline[expected]):
+            _fail('template_setup_direction')
+    elif intent['activation']['original']['domain'] == 'integration':
         from .native_integration_setup_audit import (decode_setup_audit as decode_integration,
                                                   validate_setup_audit as validate_integration)
         audit = decode_integration(receipt['audit'])
@@ -410,7 +431,9 @@ async def complete(chain, intent, context, before, after, *, audit):
                        'identity': list(obs.identity)} for obs in after}
     chain._observe(after, result)
     domain = source['activation']['original']['domain']
-    if domain == 'integration':
+    if domain == 'template':
+        from .native_template_entry_lifecycle import encode_setup_audit
+    elif domain == 'integration':
         from .native_integration_setup_audit import encode_setup_audit
     elif domain == 'utility_meter':
         from .native_utility_setup_audit import encode_setup_audit
@@ -437,4 +460,3 @@ def verify_authorization(chain, authorization):
         _fail('unknown_unresolved_intent')
     return authorization_matches(chain, authorization, completed=completed,
                                  head=head, history=chain._setup_history)
-
