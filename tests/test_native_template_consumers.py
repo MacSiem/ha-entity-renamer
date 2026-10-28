@@ -21,8 +21,14 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
     _flush_documents = fixture.NativeHelperQuiescenceTests._flush_documents
 
     async def prepare(self, kind, *, foreign_runtime=False, sibling=False, variant='sensor',
-                      binary_extra=None, binary_device_class=None, validate=True):
+                      binary_extra=None, binary_device_class=None, validate=True,
+                      uidless=False, duplicate_uidless=False, uidless_alias=False):
         self.assertIn(variant, ('sensor', 'binary_sensor', 'mixed'))
+        if uidless:
+            self.assertEqual(kind, 'yaml')
+            self.assertIn(variant, ('sensor', 'binary_sensor'))
+        if duplicate_uidless:
+            self.assertTrue(uidless)
         self.template_variant = variant
         self.consumer_domain = 'binary_sensor' if variant == 'binary_sensor' else 'sensor'
         self.binary_match = 7 if foreign_runtime and variant == 'binary_sensor' else 5
@@ -66,6 +72,14 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
                          '    state: "{{ is_state(\'' + self.source_id + '\', \'5\') }}"\n')
             if sibling:
                 text += '  binary_sensor:\n  - unique_id: flag\n    name: Runtime flag\n    state: "{{ states(\'' + self.source_id + '\') | int(0) > 0 }}"\n'
+            if uidless:
+                text = text.replace('- unique_id: scope\n  ', '- ', 1)
+                text = text.replace('  - unique_id: value\n    name:', '  - name:', 1)
+                if duplicate_uidless:
+                    text += '  - name: Runtime consumer\n    state: "' + state + '"\n'
+                if uidless_alias:
+                    text = text.replace('state: "', 'state: &shared_state "', 1)
+                    text += '  - name: Other consumer\n    state: *shared_state\n'
             (root / 'template.yaml').write_text(text)
             (root / 'configuration.yaml').write_text('template: !include template.yaml\n')
             cfg = await async_hass_config_yaml(hass)
@@ -74,7 +88,7 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
                     state.replace("'5'", "'7'") if variant == 'binary_sensor'
                     else state.replace('* 2', '* 3'))
             self.assertTrue(await async_setup_component(hass, 'template', cfg))
-            self.consumer_key, self.entry_id = 'scope-value', None
+            self.consumer_key, self.entry_id = (None if uidless else 'scope-value'), None
         else:
             from homeassistant.components.template.config_flow import TemplateConfigFlowHandler
             # A real changed YAML source gives the existing checker an operation;
@@ -92,8 +106,10 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.helpers.entity_platform import async_get_platforms
         self.consumer = next(e for p in async_get_platforms(hass, 'template') if p.domain == self.consumer_domain
             for e in p.entities.values() if e.unique_id == self.consumer_key)
-        self.consumer_uuid = self.f.entity.async_get(self.consumer.entity_id).id
-        self.consumer_identities = {(p.domain, e.unique_id): (e.entity_id, self.f.entity.async_get(e.entity_id).id)
+        registry_row = self.f.entity.async_get(self.consumer.entity_id)
+        self.consumer_uuid = None if registry_row is None else registry_row.id
+        self.consumer_identities = {(p.domain, e.unique_id): (e.entity_id,
+            None if (r := self.f.entity.async_get(e.entity_id)) is None else r.id)
             for p in async_get_platforms(hass, 'template') for e in p.entities.values()}
         await self._flush_documents(initialize=True)
         if not validate:
@@ -105,6 +121,16 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.plan.ready, self.plan.issues)
         self.receipt, self.evidence = await validation.async_validate_proposed_with_sources(
             hass, self.plan, root.parent)
+        if uidless and not duplicate_uidless:
+            native = importlib.import_module(fixture.fixtures.PACKAGE + '.native_template_consumers')
+            actual = await native.async_observe_template_consumers(hass, self.receipt,
+                self.evidence, guard=lambda: None)
+            entities = [row for row in actual.rows if row.kind == 'entity']
+            self.assertTrue(all(row.consumer_verified and row.source_verified for row in entities))
+            self.consumer_identities = {(row.platform, row.key): (row.entity_id, row.registry_id)
+                                        for row in entities}
+            self.physical_consumers = tuple(sorted((row.platform, row.key, row.entity_id)
+                                                    for row in entities))
 
     async def observe(self):
         try:
@@ -134,6 +160,20 @@ class NativeTemplateConsumerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.f.hass.states.get(binary.entity_id).state, 'on' if value == 5 else 'off')
             self.assertEqual((binary.entity_id, self.f.entity.async_get(binary.entity_id).id),
                              self.consumer_identities['binary_sensor', self.consumer_key])
+
+    async def test_identical_uidless_definitions_refuse_whole_population_bijection(self):
+        await self.prepare('yaml', uidless=True, duplicate_uidless=True)
+        self.assertFalse(self.receipt.ready_for_apply)
+        self.assertIn('template', self.receipt.unsupported_domains)
+        observed = await self.observe()
+        entities = [row for row in observed.rows if row.kind == 'entity']
+        self.assertEqual(len(entities), 2)
+        self.assertTrue(all(not row.source_verified for row in entities))
+        sources = [row for row in self.evidence.template_sources.ledger.definitions
+                   if row.domain == 'template.sensor']
+        self.assertEqual(len(sources), 2)
+        self.assertNotEqual(sources[0].origin, sources[1].origin)
+        self.assertEqual(sources[0].source_ast_sha256, sources[1].source_ast_sha256)
 
     async def test_binary_same_native_key_with_foreign_body_does_not_match_original(self):
         await self.prepare('yaml', variant='binary_sensor', foreign_runtime=True)

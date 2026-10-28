@@ -30,13 +30,13 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
     def module(self, name):
         return importlib.import_module(fixture.fixtures.PACKAGE + '.' + name)
 
-    async def transaction(self, *, fault=None, variant='sensor'):
+    async def transaction(self, *, fault=None, variant='sensor', uidless=False):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_platform import async_get_platforms
         unknown_errors = []
-        await self.prepare('yaml', variant=variant)
+        await self.prepare('yaml', variant=variant, uidless=uidless)
         binary_prerequisites = None
-        if variant == 'binary_sensor':
+        if variant == 'binary_sensor' and not uidless:
             binary_prerequisites = await self.assert_binary_native_prerequisites()
         # Reuse the native source-clock fixture's retained descriptor method.
         # VirtioFS can recycle a closed replacement inode between two reads.
@@ -62,7 +62,6 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
         prep, tx = self.module('prepared'), self.module('transaction')
         preparations = prep.native_prepared_store(hass)
         await preparations.initialize()
-        inputs = await preparations.create_native_inputs('template-yaml-inputs', original)
         recorder = self.module('recorder_guard').NativeRecorderGuard(hass)
         history = self.module('history_guard').NativeHistoryGuard(recorder)
         helper_history = await history.capture({entity_id: entity_id
@@ -81,6 +80,14 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
             digests[ref] = await preparations.create(ref, prep.encode_change(item))
             steps.append(tx.Step(ref, scope, item.identity, item.before_revision,
                                  item.after_revision, ref))
+        composition = None
+        if uidless:
+            source_history = await history.capture({self.source_id: 'sensor.accepted_next'})
+            composition = self.module('native_template_composition').TemplateComposition(
+                self.evidence, tuple(sorted(digests.items())), source_history, helper_history,
+                self.evidence.sha256, self.physical_consumers)
+        inputs = await preparations.create_native_inputs('template-yaml-inputs', original,
+                                                         composition=composition)
         plan = tx.Plan('template-yaml-apply', scopes, scopes, tuple(steps),
                        ('exact-modern-yaml-state-sensors' if variant == 'sensor'
                         else 'exact-modern-yaml-state-entities-v2'), scopes, inputs)
@@ -481,6 +488,15 @@ class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
                 'core': __version__, 'class': class_name,
                 'source_ledger': 'template.binary_sensor/scope-value',
                 'source_and_consumer_uuid': 'preserved'}
+
+    async def test_uidless_numeric_actual_forward_fresh_reverse_same_original_and_history(self):
+        await self.transaction(uidless=True)
+
+    async def test_uidless_binary_actual_forward_fresh_reverse_same_original_and_history(self):
+        await self.transaction(variant='binary_sensor', uidless=True)
+
+    async def test_uidless_native_detach_never_promotes_stale_bijection(self):
+        await self.transaction(uidless=True, fault='adapter_detach')
 
     async def test_actual_binary_state_product_forward_and_fresh_reverse_preserve_source_and_uuid(self):
         await self.transaction(variant='binary_sensor')

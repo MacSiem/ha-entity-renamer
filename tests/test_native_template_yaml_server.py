@@ -27,13 +27,15 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
     def module(self, name):
         return importlib.import_module(activation.fixture.fixtures.PACKAGE + '.' + name)
 
-    async def data(self, *, multiple=False, variant='mixed', binary_extra=None):
+    async def data(self, *, multiple=False, variant='mixed', binary_extra=None,
+                   uidless=False, duplicate_uidless=False, uidless_alias=False):
         from homeassistant.const import __version__
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         from homeassistant.helpers.entity_platform import async_get_platforms
         self.assertIn(__version__, ('2025.6.0', '2026.10.4'))
-        await self.prepare('yaml', variant=variant, binary_extra=binary_extra, validate=False)
+        await self.prepare('yaml', variant=variant, binary_extra=binary_extra, validate=False,
+                           uidless=uidless, duplicate_uidless=duplicate_uidless, uidless_alias=uidless_alias)
         self.assertFalse(hasattr(self, 'plan'))
         self.assertFalse(hasattr(self, 'receipt'))
         self.assertFalse(hasattr(self, 'evidence'))
@@ -54,7 +56,7 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
             await hass.services.async_call('template', 'reload', {}, blocking=True, context=Context())
             await hass.async_block_till_done()
             await self._flush_documents()
-        self.identities = {(p.domain, e.unique_id): (e.entity_id, self.f.entity.async_get(e.entity_id).id)
+        self.identities = {(p.domain, e.unique_id): (e.entity_id, None if (r := self.f.entity.async_get(e.entity_id)) is None else r.id)
             for p in async_get_platforms(hass, 'template') for e in p.entities.values()}
         source_uuids = {old: self.f.entity.async_get(old).id for old in mapping}
         before = (root / 'template.yaml').read_bytes()
@@ -82,11 +84,12 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
             consumer = next(e for p in async_get_platforms(self.f.hass, 'template')
                             for e in p.entities.values() if e.unique_id == 'second-value')
             self.assertEqual(self.f.hass.states.get(consumer.entity_id).state, str(value * 3))
-        self.assertEqual({(p.domain, e.unique_id): (e.entity_id, self.f.entity.async_get(e.entity_id).id)
+        self.assertEqual({(p.domain, e.unique_id): (e.entity_id, None if (r := self.f.entity.async_get(e.entity_id)) is None else r.id)
             for p in async_get_platforms(self.f.hass, 'template') for e in p.entities.values()}, self.identities)
 
-    async def flow(self, *, multiple=False, variant='mixed'):
-        runtime, mapping, uuids, original = await self.data(multiple=multiple, variant=variant)
+    async def flow(self, *, multiple=False, variant='mixed', uidless=False):
+        runtime, mapping, uuids, original = await self.data(
+            multiple=multiple, variant=variant, uidless=uidless)
         hass = self.f.hass
         for value in (5, 7):
             await self.stimulus(value)
@@ -116,6 +119,19 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
                              ('registry',) * len(mapping) + ('yaml',))
             baseline, composition = runtime.preparations.resolve_composition(record.plan.native_inputs)
             original_ref, original_json = record.plan.native_inputs, baseline.receipt_json
+            if uidless:
+                self.assertTrue(composition.physical_consumers)
+                for domain, key, entity_id in composition.physical_consumers:
+                    self.assertEqual(domain, variant)
+                    self.assertIn((entity_id, None), self.identities.values())
+                    self.assertIsNone(self.f.entity.async_get(entity_id))
+                    self.assertTrue(key.startswith('@physical-template-v1:'))
+                encoded = self.module('native_template_composition').encode_composition(composition, baseline)
+                self.assertEqual(encoded['schema'], 2)
+            else:
+                encoded = self.module('native_template_composition').encode_composition(composition, baseline)
+                self.assertEqual(encoded['schema'], 1)
+                self.assertNotIn('physical_consumers', encoded)
             self.assertEqual(baseline.receipt.changed_domains, ('template',))
             for old, new in mapping.items():
                 self.assertIsNone(self.f.entity.async_get(old))
@@ -161,6 +177,67 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
             if caller is not None and not caller.done():
                 caller.cancel()
                 await asyncio.gather(caller, return_exceptions=True)
+
+    async def test_uidless_numeric_server_owned_forward_and_fresh_reverse_history(self):
+        await self.flow(variant='sensor', uidless=True)
+
+    async def test_uidless_binary_server_owned_forward_and_fresh_reverse_history(self):
+        await self.flow(variant='binary_sensor', uidless=True)
+
+    async def test_uidless_ambiguous_source_refuses_before_registry_or_yaml_effect(self):
+        runtime, mapping, uuids, original = await self.data(
+            variant='sensor', uidless=True, duplicate_uidless=True)
+        async def refresh():
+            return None
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_forward(self.f.hass, mapping, guard=lambda: None, refresh=refresh)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        for old in mapping:
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertFalse(await runtime.journal.active())
+
+    async def test_uidless_aliased_source_refuses_server_before_any_effect(self):
+        runtime, mapping, uuids, original = await self.data(
+            variant='sensor', uidless=True, uidless_alias=True)
+        async def refresh():
+            return None
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_forward(self.f.hass, mapping, guard=lambda: None, refresh=refresh)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        for old in mapping:
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertFalse(await runtime.journal.active())
+
+    async def test_uidless_delay_refuses_server_before_effect_and_keeps_original(self):
+        runtime, mapping, uuids, original = await self.data(
+            variant='binary_sensor', uidless=True, binary_extra='delay_on')
+        async def refresh():
+            return None
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_forward(self.f.hass, mapping, guard=lambda: None, refresh=refresh)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        for old in mapping:
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertFalse(await runtime.journal.active())
+
+    async def test_uidless_source_drift_refuses_fresh_reverse_without_rollback_effect(self):
+        runtime, mapping, uuids, _ = await self.data(variant='sensor', uidless=True)
+        async def refresh():
+            return None
+        result = await runtime.native_forward(self.f.hass, mapping, guard=lambda: None, refresh=refresh)
+        self.assertEqual(result['state'], 'applied')
+        path = self.f.root / 'template.yaml'
+        with path.open('ab') as handle:
+            handle.write(b'\n# external source edit after UIDless forward\n')
+        edited = path.read_bytes()
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_yaml_reverse(self.f.hass, result['operation_id'], result['fingerprint'],
+                guard=lambda: None, refresh=refresh)
+        self.assertEqual(path.read_bytes(), edited)
+        for old, new in mapping.items():
+            self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+        record = await runtime.journal.load(result['operation_id'])
+        self.assertEqual((record.status, record.direction), ('applied', 'forward'))
 
     async def test_foreground_mixed_one_plan_same_original_fresh_reverse(self):
         await self.flow()
