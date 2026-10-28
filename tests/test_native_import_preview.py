@@ -57,3 +57,36 @@ class NativeImportPreviewTests(unittest.IsolatedAsyncioTestCase):
         result = await self.request('{}', extra={'prepared_ref': 'untrusted'})
         self.assertFalse(result['success'])
         self.assertEqual(result['error']['code'], 'invalid_format')
+
+    async def test_actual_network_import_accepts_full_inventory_sized_json(self):
+        from aiohttp import ClientSession
+        hass = self.f.hass
+        connection, user, _ = await self._connection(admin=True)
+        token = await hass.auth.async_create_refresh_token(user,
+            client_id='https://renamer.invalid/import-network-qa')
+        self.addCleanup(hass.auth.async_remove_refresh_token, token)
+        access = hass.auth.async_create_access_token(token, remote_ip='127.0.0.1')
+        row = self.f.entity.async_get_or_create('sensor', 'demo', 'network_import_preview')
+        await self._flush_documents(initialize=True)
+        paths = [self.f.root / '.storage' / key for key in
+                 ('core.entity_registry', 'core.device_registry', 'core.config_entries')]
+        original = {p: p.read_bytes() for p in paths}
+        document = {'entities': [{'entity_id': row.entity_id,
+            'proposed_entity_id': 'sensor.network_import_target', 'device_id': row.device_id}]}
+        # The actual approved inventory is 2.8 MB before normalization. Keep
+        # this payload synthetic; no private manifest or access token is logged.
+        content = ' ' * 2_817_819 + json.dumps(document)
+        async with ClientSession() as client:
+            async with client.ws_connect('http://127.0.0.1:' + str(hass.http.server_port)
+                                         + '/api/websocket') as ws:
+                self.assertEqual((await ws.receive_json(timeout=10))['type'], 'auth_required')
+                await ws.send_json({'type': 'auth', 'access_token': access})
+                self.assertEqual((await ws.receive_json(timeout=10))['type'], 'auth_ok')
+                await ws.send_json({'id': 1, 'type': 'ha_entity_renamer/import/preview',
+                                    'manifest': content})
+                response = await ws.receive_json(timeout=30)
+                self.assertTrue(response.get('success'), response)
+                self.assertEqual(response['result']['changes']['entities'], 1)
+                self.assertFalse(response['result']['migration_ready'])
+        for path, raw in original.items():
+            self.assertEqual(path.read_bytes(), raw)
