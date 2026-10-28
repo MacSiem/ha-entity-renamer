@@ -223,8 +223,73 @@ def _fingerprint(value):
     return hashlib.sha256(payload).hexdigest()
 
 
+def _qualified_metadata_expression(text):
+    """Pure output expressions with finite literal entity dependencies; never render.
+
+    No globals, attribute access, variables, statements, time or arbitrary calls.
+    Conditional branches may observe a subset of these literal dependencies.
+    """
+    from jinja2 import Environment, nodes
+    tree = Environment().parse(text)
+    allowed = (nodes.Output, nodes.TemplateData, nodes.Const, nodes.Name,
+        nodes.Call, nodes.Filter, nodes.Add, nodes.Sub, nodes.Mul, nodes.Div,
+        nodes.FloorDiv, nodes.Mod, nodes.Neg, nodes.Pos, nodes.Concat,
+        nodes.And, nodes.Or, nodes.Not, nodes.Compare, nodes.Operand,
+        nodes.CondExpr, nodes.List, nodes.Tuple, nodes.Dict, nodes.Pair)
+    dependencies = set()
+    callees = {id(call.node) for call in tree.find_all(nodes.Call)}
+    for node in tree.find_all(nodes.Node):
+        if not isinstance(node, allowed):
+            raise ValueError('template_metadata_expression_unverified')
+        if isinstance(node, nodes.Name) and (id(node) not in callees
+                or node.name not in ('states', 'is_state', 'state_attr')):
+            raise ValueError('template_metadata_expression_unverified')
+        if isinstance(node, nodes.Call):
+            if (not isinstance(node.node, nodes.Name)
+                    or node.node.name not in ('states', 'is_state', 'state_attr')
+                    or len(node.args) != (1 if node.node.name == 'states' else 2)
+                    or any(not isinstance(arg, nodes.Const) or type(arg.value) is not str
+                           for arg in node.args)
+                    or not re.fullmatch(r'[a-z_][a-z0-9_]*\.[a-z0-9_]+', node.args[0].value)
+                    or node.kwargs or node.dyn_args is not None or node.dyn_kwargs is not None):
+                raise ValueError('template_metadata_expression_unverified')
+            dependencies.add(node.args[0].value)
+        if isinstance(node, nodes.Filter) and (node.name not in ('int', 'float', 'round', 'string', 'lower', 'upper')
+                or node.kwargs or node.dyn_args is not None or node.dyn_kwargs is not None
+                or any(not isinstance(arg, nodes.Const) for arg in node.args)):
+            raise ValueError('template_metadata_expression_unverified')
+    return tuple(sorted(dependencies))
+
+
+def _pure_template_metadata(cfg):
+    """Exact original bodies and attribute keys, shared by checker and live proof."""
+    from collections.abc import Mapping
+    from homeassistant.helpers.template import Template
+    result = []
+    for key in ('availability', 'icon', 'picture'):
+        value = cfg.get(key)
+        if value is not None and type(value) is not Template:
+            raise ValueError('template_metadata_type_unverified')
+        if value is not None:
+            _qualified_metadata_expression(value.template)
+        result.append(None if value is None else value.template)
+    attributes = cfg.get('attributes')
+    if attributes is not None and not isinstance(attributes, Mapping):
+        raise ValueError('template_metadata_attributes_unverified')
+    values = []
+    for key, value in (attributes or {}).items():
+        if (type(key) is not str or not key or key in ('friendly_name', 'icon', 'entity_picture',
+                'unit_of_measurement', 'device_class', 'state_class', 'assumed_state', 'supported_features')
+                or type(value) is not Template):
+            raise ValueError('template_metadata_attributes_unverified')
+        _qualified_metadata_expression(value.template)
+        values.append([key, value.template])
+    result.append(sorted(values))
+    return result
+
+
 def simple_template_sensor_semantics(cfg):
-    """One explicit state-only native sensor subset; no render or conversion.
+    """Explicit state/pure metadata semantics; preserve old state-only v1 bytes.
 
     Used by the SAME original checker and the actual runtime consumer adapter.
     Other native configs keep their existing full source projection + UNKNOWN.
@@ -234,35 +299,46 @@ def simple_template_sensor_semantics(cfg):
         'state_class', 'availability', 'attributes', 'icon', 'picture', 'variables',
         'last_reset', 'device_id', 'default_entity_id', 'object_id',
         'raw_configs', 'raw_blueprint_inputs'}
-    if set(cfg) - allowed or any(cfg.get(key) for key in ('availability',
-            'attributes', 'icon', 'picture', 'variables', 'last_reset',
+    if set(cfg) - allowed or any(cfg.get(key) for key in ('variables', 'last_reset',
             'device_id', 'raw_blueprint_inputs')):
         raise ValueError('sensor_semantics_subset_unverified')
     state, name = cfg.get('state'), cfg.get('name')
     if type(state) is not Template or type(name) is not Template or not name.is_static:
         raise ValueError('sensor_semantics_subset_unverified')
-    return ['state_sensor_v1', state.template, name.template,
+    result = ['state_sensor_v1', state.template, name.template,
         cfg.get('unit_of_measurement'), cfg.get('device_class'), cfg.get('state_class')]
+    metadata = _pure_template_metadata(cfg)
+    if any(value is not None for value in metadata[:3]) or metadata[3]:
+        result[0] = 'state_sensor_metadata_v2'
+        result.append([cfg.get('default_entity_id'), cfg.get('object_id')])
+        result.append(metadata)
+    return result
 
 
 def simple_template_binary_semantics(cfg):
-    """Named boolean state only, with no availability/delays or extra effects."""
+    """Named literal boolean state, optional pure metadata, no delays/effects."""
     from homeassistant.helpers.template import Template
     allowed = {'state', 'name', 'unique_id', 'device_class', 'availability',
         'attributes', 'icon', 'picture', 'variables', 'device_id',
         'default_entity_id', 'object_id', 'raw_configs', 'raw_blueprint_inputs',
         'delay_on', 'delay_off', 'auto_off', 'unit_of_measurement'}
     if (set(cfg) - allowed or any(cfg.get(key) is not None for key in
-            ('availability', 'delay_on', 'delay_off', 'auto_off', 'device_id',
+            ('delay_on', 'delay_off', 'auto_off', 'device_id',
              'unit_of_measurement', 'raw_blueprint_inputs'))
-            or any(cfg.get(key) for key in ('attributes', 'icon', 'picture', 'variables'))):
+            or cfg.get('variables')):
         raise ValueError('binary_semantics_subset_unverified')
     state, name, device_class = cfg.get('state'), cfg.get('name'), cfg.get('device_class')
     if (type(state) is not Template or type(name) is not Template or not name.is_static
             or (device_class is not None and not isinstance(device_class, str))):
         raise ValueError('binary_semantics_subset_unverified')
     _qualified_binary_expression(state.template)
-    return ['state_binary_v1', state.template, name.template, device_class]
+    result = ['state_binary_v1', state.template, name.template, device_class]
+    metadata = _pure_template_metadata(cfg)
+    if any(value is not None for value in metadata[:3]) or metadata[3]:
+        result[0] = 'state_binary_metadata_v2'
+        result.append([cfg.get('default_entity_id'), cfg.get('object_id')])
+        result.append(metadata)
+    return result
 
 
 def _qualified_binary_expression(text):

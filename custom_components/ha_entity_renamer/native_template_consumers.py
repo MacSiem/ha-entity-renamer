@@ -156,6 +156,17 @@ class _Native:
             (te.TemplateEntity, '_handle_results'),
             (te.TemplateEntity, 'add_template_attribute'),
             (te._TemplateAttribute, '__init__'),
+            (te._TemplateAttribute, 'async_setup'),
+            (te._TemplateAttribute, '_default_update'),
+            (te._TemplateAttribute, 'handle_result'),
+            (te.TemplateEntity, '_update_available'),
+            (te.TemplateEntity, '_add_attribute_template'),
+            (event.TrackTemplateResultInfo, '_render_template_if_ready'),
+            (event.TrackTemplateResultInfo, '_apply_update'),
+            (event.TrackTemplateResultInfo, '_super_template_as_boolean'),
+            (event, '_render_infos_to_track_states'),
+            (event, '_entities_domains_from_render_infos'),
+            (event, '_render_infos_needs_all_listener'),
             (event.TrackTemplateResultInfo, '__init__'),
             (event.TrackTemplateResultInfo, 'async_setup'),
             (event.TrackTemplateResultInfo, '_refresh'),
@@ -186,13 +197,19 @@ class _Native:
                           (AbstractTemplateEntity, 'add_template'),
                           (te.TemplateEntity, 'setup_template')]
         self.refs += [(RenderInfo, '_filter_entities'), (RenderInfo, '_freeze'),
-                      (self.render_module, '_false')]
+                      (RenderInfo, '_freeze_static'), (RenderInfo, '_freeze_sets'),
+                      (self.render_module, '_true'), (self.render_module, '_false'),
+                      (cv, 'string'), (cv, 'icon'), (cv, 'whitespace')]
+        from .native_template_metadata import IconValidatorProof
+        self.icon_proof = IconValidatorProof(self)
         self.methods, self.codes = prove_methods(self.root, self.pins, self.refs)
 
     def bindings(self):
         unchanged(self.refs, self.methods, self.codes)
+        self.icon_proof.bindings()
 
     def sources(self):
+        self.icon_proof.sources()
         for name, digest in self.pins.items():
             path = self.root / name
             _need(path.resolve() == path and hashlib.sha256(path.read_bytes()).hexdigest()
@@ -219,22 +236,26 @@ def _live_sensor(native, entity):
         state_template = entity._template
     else:
         cfg = entity._config
-        _need(set(entity._templates) == {'state'} and not entity._attribute_templates
+        _need(set(entity._templates) == {'state'} | {name for name in ('availability', 'icon', 'picture')
+                  if cfg.get(name) is not None}
+              and entity._attribute_templates == (cfg.get('attributes') or None)
               and entity._attributes_template is None, 'sensor_semantics_subset_unverified')
         value = entity._templates['state']
         _need(value.attribute == '_attr_native_value'
-              and value.template is cfg['state'], 'native_template_slot_changed')
+              and value.template is cfg['state'] and value.validator is None
+              and value.none_on_template_error is False, 'native_template_slot_changed')
         state_template = value.template
     semantic = simple_template_sensor_semantics(cfg)
     _need(type(state_template) is Template and state_template.hass is native.hass
           and entity._attr_name == semantic[2]
           and [entity._attr_native_unit_of_measurement, entity._attr_device_class,
-               entity._attr_state_class] == semantic[3:], 'native_semantic_field_changed')
+               entity._attr_state_class] == semantic[3:6], 'native_semantic_field_changed')
     attrs = entity._template_attrs
-    _need(type(attrs) is dict and len(attrs) == 1 and state_template in attrs
-          and type(attrs[state_template]) is list and len(attrs[state_template]) == 1,
+    _need(type(attrs) is dict and state_template in attrs
+          and type(attrs[state_template]) is list
+          and sum(slot._attribute == '_attr_native_value' for slot in attrs[state_template]) == 1,
           'native_template_slots_changed')
-    slot = attrs[state_template][0]
+    slot = next(slot for slot in attrs[state_template] if slot._attribute == '_attr_native_value')
     _need(type(slot) is te._TemplateAttribute and slot._entity is entity
           and slot._attribute == '_attr_native_value' and slot.template is state_template
           and slot.validator is None and slot.none_on_template_error is False,
@@ -246,7 +267,10 @@ def _live_sensor(native, entity):
         parent = te.TemplateEntity.setup_state_template.__code__
         _need(type(callback) is FunctionType and any(callback.__code__ is code
               for code in _codes(parent)) and callback.__qualname__ ==
-              'TemplateEntity.setup_state_template.<locals>._update_state',
+              'TemplateEntity.setup_state_template.<locals>._update_state'
+              and callback.__globals__ is vars(te)
+              and callback.__defaults__ is None and callback.__kwdefaults__ is None
+              and entity._templates['state'].on_update is callback,
               'native_update_owner_changed')
         cells = dict(zip(callback.__code__.co_freevars,
                          (cell.cell_contents for cell in callback.__closure__ or ())))
@@ -255,6 +279,8 @@ def _live_sensor(native, entity):
               and cells['on_update'] is None
               and _bound(cells['validator'], entity, type(entity)._validate_state),
               'native_update_owner_changed')
+    from .native_template_metadata import metadata_slots
+    metadata_slots(native, entity, cfg, state_template, slot)
     return semantic, state_template, slot
 
 
@@ -266,7 +292,7 @@ def _live_binary(native, entity):
           and not entity._action_scripts and type(entity._run_variables) is dict
           and not entity._run_variables and entity._blueprint_inputs is None,
           'native_state_binary_required')
-    _need(entity._availability_template is None and entity._attr_device_info is None
+    _need(entity._attr_device_info is None
           and all(getattr(entity, name) is None for name in
                   ('_delay_on', '_delay_off', '_delay_cancel')),
           'binary_semantics_subset_unverified')
@@ -280,7 +306,9 @@ def _live_binary(native, entity):
         attribute = '_state'
     else:
         cfg, attribute = entity._config, '_attr_is_on'
-        _need(set(entity._templates) == {'state'} and not entity._attribute_templates
+        _need(set(entity._templates) == {'state'} | {name for name in ('availability', 'icon', 'picture')
+                  if cfg.get(name) is not None}
+              and entity._attribute_templates == (cfg.get('attributes') or None)
               and entity._attributes_template is None,
               'binary_semantics_subset_unverified')
         value = entity._templates['state']
@@ -291,16 +319,19 @@ def _live_binary(native, entity):
     template = entity._template
     _need(type(template) is Template and template is cfg['state'] and template.hass is native.hass
           and entity._attr_name == semantic[2] and entity._attr_device_class == semantic[3]
-          and type(entity._attr_is_on) is bool,
+          and (type(entity._attr_is_on) is bool or (entity._attr_available is False
+                                                    and entity._attr_is_on is None)),
           'native_binary_semantics_changed')
     state = native.hass.states.get(entity.entity_id)
-    _need(state is not None and state.state == ('on' if entity._attr_is_on else 'off'),
+    _need(state is not None and state.state == ('unavailable' if not entity.available else
+                                    ('on' if entity._attr_is_on else 'off')),
           'native_binary_state_changed')
     attrs = entity._template_attrs
-    _need(type(attrs) is dict and set(attrs) == {template}
-          and type(attrs[template]) is list and len(attrs[template]) == 1,
+    _need(type(attrs) is dict and template in attrs
+          and type(attrs[template]) is list
+          and sum(slot._attribute == attribute for slot in attrs[template]) == 1,
           'native_binary_slots_changed')
-    slot = attrs[template][0]
+    slot = next(slot for slot in attrs[template] if slot._attribute == attribute)
     _need(type(slot) is te._TemplateAttribute and slot._entity is entity
           and slot._attribute == attribute and slot.template is template
           and slot.validator is None and slot.none_on_template_error is False,
@@ -344,11 +375,17 @@ def _live_binary(native, entity):
               and vars(helpers).get('config_validation') is native.cv
               and sys.modules.get('homeassistant.helpers.config_validation') is native.cv,
               'native_binary_boolean_binding_changed')
+    from .native_template_metadata import metadata_slots
+    metadata_slots(native, entity, cfg, template, slot)
     return semantic, template, slot
 
 
 def _registration(native, entity, template):
     """Actual detach -> keyed callbacks -> shared bus dispatcher/filter graph."""
+    if (len(entity._template_attrs) != 1 or entity._availability_template is not None
+            or sum(len(slots) for slots in entity._template_attrs.values()) != 1):
+        from .native_template_metadata import registration
+        return registration(native, entity, template)
     from homeassistant.core import HassJob
     from homeassistant.helpers import event
     from homeassistant.helpers.template import TemplateStateFromEntityId, RenderInfo
@@ -479,6 +516,9 @@ def _source_semantics(native, entity, registry_row, semantic, evidence, document
 
 def _physical_native_metadata(native, entity, semantic, platform):
     """Complete exposed metadata for this UIDless stateless schema slice."""
+    if semantic[0] in ('state_sensor_metadata_v2', 'state_binary_metadata_v2'):
+        from .native_template_metadata import physical_metadata
+        return physical_metadata(native, entity, semantic, platform)
     attributes = {'friendly_name': semantic[2]}
     fields = (('unit_of_measurement', 3), ('device_class', 4), ('state_class', 5))
     if platform == 'binary_sensor':
@@ -583,7 +623,7 @@ def _sample(native, evidence, observed, *, physical_identities=()):
                     dependencies, token = _registration(native, entity, template)
                     if platform.domain == 'binary_sensor':
                         _need(entry is None, 'binary_config_entry_unverified')
-                        _need(dependencies == _qualified_binary_expression(template.template),
+                        _need(set(_qualified_binary_expression(template.template)) <= set(dependencies),
                               'native_binary_dependencies_changed')
                     token += (id(slot), id(slot.on_update), id(entity._template_attrs),
                               id(entity._template_attrs[template]))
@@ -592,7 +632,8 @@ def _sample(native, evidence, observed, *, physical_identities=()):
                         {key: key for key in dependencies},
                         Context(Consumer.TEMPLATE, (Scope((), Syntax.JINJA),)))
                     _need(not static.markers, 'template_dependency_scope_unverified')
-                    if entity.unique_id is None:
+                    if entity.unique_id is None or semantic[0] in (
+                            'state_sensor_metadata_v2', 'state_binary_metadata_v2'):
                         _physical_native_metadata(native, entity, semantic, platform.domain)
                     consumer = True
                     if entity.unique_id is None:
