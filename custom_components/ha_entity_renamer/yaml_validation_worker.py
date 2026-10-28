@@ -294,7 +294,69 @@ def template_state_runtime_projection(rows):
     return ['template_state_entities_v2', sorted(rows)]
 
 
-def _template_source_projection(checked):
+def _template_entity_keys(block, platform, root=None):
+    """Same native schema: complete raw/checked bijection, physical coordinates.
+
+    A raw occurrence supplies the key; full normalized schema output supplies
+    its unique association with checked data. List order/name alone never do.
+    """
+    from pathlib import Path
+    from homeassistant.const import __version__
+    from homeassistant.components.template import sensor, binary_sensor
+    from homeassistant.util.yaml.objects import NodeDictClass
+    if __package__:
+        from .template_physical_identity import physical_template_key
+    else:
+        # The existing checker is also launched directly as a script.
+        from template_physical_identity import physical_template_key
+    entities = list(block.get(platform, ()))
+    if all(type(entity.get('unique_id')) is str and entity['unique_id'] for entity in entities):
+        prefix = block.get('unique_id')
+        return [(prefix + '-' if prefix else '') + entity['unique_id'] for entity in entities]
+    if root is None or block.raw_config is None:
+        raise ValueError('template_physical_origin_unverified')
+    raw = block.raw_config.get(platform, ())
+    raw = [raw] if isinstance(raw, dict) else list(raw)
+    module = sensor if platform == 'sensor' else binary_sensor
+    schema = getattr(module, ('SENSOR_' if platform == 'sensor' else 'BINARY_SENSOR_')
+                     + ('SCHEMA' if __version__ == '2025.6.0' else 'YAML_SCHEMA'))
+    candidates = []
+    for item in raw:
+        if item.get('unique_id') is not None:
+            continue
+        if type(item) is not NodeDictClass or any(item.get(k) is not None for k in
+                ('object_id', 'default_entity_id')):
+            raise ValueError('template_physical_shape_unverified')
+        filename, line = getattr(item, '__config_file__', None), getattr(item, '__line__', None)
+        if type(filename) is not str or type(line) is not int:
+            raise ValueError('template_physical_annotation_unverified')
+        path, base = Path(filename), Path(root)
+        if not path.is_absolute() or not path.is_relative_to(base):
+            raise ValueError('template_physical_path_unverified')
+        checked = schema(item)
+        semantic = (simple_template_sensor_semantics(checked) if platform == 'sensor'
+                    else simple_template_binary_semantics(checked))
+        if platform == 'sensor':
+            _qualified_state_expression(semantic[1])
+        candidates.append((_fingerprint(checked), physical_template_key(
+            'template.' + platform, path.relative_to(base).as_posix(), line)))
+    result = []
+    for entity in entities:
+        unique = entity.get('unique_id')
+        if type(unique) is str and unique:
+            prefix = block.get('unique_id')
+            result.append((prefix + '-' if prefix else '') + unique)
+            continue
+        matches = [key for digest, key in candidates if digest == _fingerprint(entity)]
+        if len(matches) != 1 or matches[0] in result:
+            raise ValueError('template_physical_bijection_ambiguous')
+        result.append(matches[0])
+    if len(candidates) != sum(entity.get('unique_id') is None for entity in entities):
+        raise ValueError('template_physical_inventory_changed')
+    return result
+
+
+def _template_source_projection(checked, root=None):
     """Native validated ORIGINAL blocks + every platform entity, no rendering.
 
     Distinct from _expected_runtime: a source row alone grants no activation.
@@ -309,13 +371,8 @@ def _template_source_projection(checked):
         mode = 'trigger' if 'triggers' in cfg else 'state'
         entities = []
         for platform in PLATFORMS:
-            for entity in cfg.get(platform, ()):
-                key = entity.get('unique_id')
-                if type(key) is not str or not key:
-                    raise ValueError('template_stable_id_unverified')
-                prefix = cfg.get('unique_id')
-                if prefix:
-                    key = prefix + '-' + key
+            for entity, key in zip(cfg.get(platform, ()),
+                    _template_entity_keys(cfg, platform, root), strict=True):
                 # Include parent trigger/variables/action context in the entity
                 # digest; a matching entity body alone is insufficient later.
                 entities.append(['template.' + platform, key, entity])
@@ -383,13 +440,13 @@ def _qualified_state_expression(text):
         raise ValueError('template_expression_subset_unverified')
 
 
-def qualified_template_state_projection(checked):
+def qualified_template_state_projection(checked, root=None):
     """Whole modern YAML inventory restricted to the two explicit state subsets.
 
     Other platforms/coordinators/config shapes never qualify an activation.
     Source inventories remain available through the independent full projection.
     """
-    rows = []
+    rows, physical = [], []
     for block in checked.get('template', ()):
         if (block.raw_config is None or block.raw_blueprint_inputs is not None
                 or set(block) - {'unique_id', 'sensor', 'binary_sensor', 'variables', 'actions', 'conditions'}
@@ -397,18 +454,21 @@ def qualified_template_state_projection(checked):
                 or not (block.get('sensor') or block.get('binary_sensor'))):
             raise ValueError('template_activation_subset_unverified')
         for platform in ('sensor', 'binary_sensor'):
-            for entity in block.get(platform, ()):
-                key = entity.get('unique_id')
-                if type(key) is not str or not key:
-                    raise ValueError('template_activation_identity_unverified')
-                if block.get('unique_id'):
-                    key = block['unique_id'] + '-' + key
+            for entity, key in zip(block.get(platform, ()),
+                    _template_entity_keys(block, platform, root), strict=True):
                 if platform == 'sensor':
                     semantic = simple_template_sensor_semantics(entity)
                     _qualified_state_expression(semantic[1])
                 else:
                     semantic = simple_template_binary_semantics(entity)
-                rows.append(['template.' + platform, key, _fingerprint(semantic)])
+                digest = _fingerprint(semantic)
+                rows.append(['template.' + platform, key, digest])
+                if entity.get('unique_id') is None:
+                    physical.append(('template.' + platform, digest))
+    # Across blocks too: indistinguishable live stateless consumers cannot be
+    # assigned a physical source by counts, suffix IDs or iteration order.
+    if len(set(physical)) != len(physical):
+        raise ValueError('template_physical_semantics_ambiguous')
     return template_state_runtime_projection(rows)
 
 
@@ -423,7 +483,7 @@ async def _expected_template_sources(hass, config):
             checked = await async_process_component_and_handle_errors(hass, config, integration)
             if checked is None:
                 raise ValueError('template_native_source_unverified')
-            projection = _template_source_projection(checked)
+            projection = _template_source_projection(checked, hass.config.config_dir)
         else:
             projection = []  # exact absent modern YAML; legacy stays ledger UNKNOWN
         return {'version': __version__, 'projection': _fingerprint(projection),
@@ -488,7 +548,7 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
                         raise ValueError('native_projection_rejected')
                     projection = []
                     if domain == 'template':
-                        projection = qualified_template_state_projection(checked)
+                        projection = qualified_template_state_projection(checked, hass.config.config_dir)
                     elif domain == 'script':
                         for key, cfg in checked[domain].items():
                             if cfg.raw_config is None or cfg.raw_blueprint_inputs is not None:

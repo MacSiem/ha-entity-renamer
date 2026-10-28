@@ -373,13 +373,30 @@ class NativeTemplateYAMLRuntimeReadback:
               'template_config_entry_lifecycle_unverified')
         registry = [row for row in documents['core.entity_registry']['data']['entities']
                     if row['platform'] == 'template']
-        _need(len(registry) == len(self.keys)
-              and {(row['entity_id'].split('.')[0], row['unique_id']) for row in registry} == set(self.keys)
+        from .template_physical_identity import is_physical_definition
+        physical_keys = {(row.domain.removeprefix('template.'), row.native_key)
+                         for row in original.ledger.definitions if is_physical_definition(row)}
+        named_keys = set(self.keys) - physical_keys
+        physical_consumers = ()
+        if physical_keys:
+            baseline, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
+            _need(baseline == chain.baseline and composition.evidence == evidence,
+                  'template_physical_original_preparation_required')
+            physical_consumers = composition.physical_consumers
+        _need(type(physical_consumers) is tuple and len(physical_consumers) == len(physical_keys)
+              and {(domain, key) for domain, key, _ in physical_consumers} == physical_keys
+              and len({entity_id for _, _, entity_id in physical_consumers}) == len(physical_keys),
+              'template_physical_original_ids_required')
+        self.physical_consumers = physical_consumers
+        _need(len(registry) == len(named_keys)
+              and {(row['entity_id'].split('.')[0], row['unique_id']) for row in registry} == named_keys
               and all(row['config_entry_id'] is None and row['disabled_by'] is None
                       and row['entity_id'].split('.')[0] in ('sensor', 'binary_sensor') for row in registry),
               'template_scoped_registry_inventory_required')
         self.identities = {(row['entity_id'].split('.')[0], row['unique_id']):
                            (row['entity_id'], row['id']) for row in registry}
+        self.identities.update({(domain, key): (entity_id, None)
+                                for domain, key, entity_id in physical_consumers})
         native = self.native = _Native(hass)
         _need(native.version == self.receipt.version, 'native_version_changed')
         from homeassistant.components import template
@@ -439,9 +456,9 @@ class NativeTemplateYAMLRuntimeReadback:
 
     def _sample(self, observed):
         native, original = self.native, self.evidence
-        before, tokens = _sample(native, original, observed)
+        before, tokens = _sample(native, original, observed, physical_identities=self.physical_consumers)
         candidate = replace(original, template_sources=original.template_candidate_sources.sources)
-        after, after_tokens = _sample(native, candidate, observed)
+        after, after_tokens = _sample(native, candidate, observed, physical_identities=self.physical_consumers)
         _need(tokens == after_tokens, 'template_scoped_runtime_changed')
         for rows in (before, after):
             _need(not any(row.kind in ('registry', 'entry', 'coordinator') for row in rows),

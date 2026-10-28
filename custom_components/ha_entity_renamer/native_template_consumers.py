@@ -8,7 +8,7 @@ Product apply, source-ID window/recovery and full family acceptance are outside.
 from __future__ import annotations
 import asyncio
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 import hashlib
 from importlib import import_module
@@ -477,7 +477,49 @@ def _source_semantics(native, entity, registry_row, semantic, evidence, document
     return expected == actual
 
 
-def _sample(native, evidence, observed):
+def _physical_native_metadata(native, entity, semantic, platform):
+    """Complete exposed metadata for this UIDless stateless schema slice."""
+    attributes = {'friendly_name': semantic[2]}
+    fields = (('unit_of_measurement', 3), ('device_class', 4), ('state_class', 5))
+    if platform == 'binary_sensor':
+        fields = (('device_class', 3),)
+    for name, index in fields:
+        if semantic[index] is not None:
+            attributes[name] = semantic[index]
+    state = native.hass.states.get(entity.entity_id)
+    _need(state is not None and dict(state.attributes) == attributes
+          and entity.should_poll is False and entity.icon is None
+          and entity.entity_picture is None and entity._attr_device_info is None
+          and not entity._attr_extra_state_attributes,
+          'yaml_physical_metadata_unverified')
+
+
+def _physical_source_key(semantic, evidence, platform, *, key=None):
+    """One sealed ORIGINAL/current-image signature, no live source adoption."""
+    from .template_physical_identity import is_physical_definition
+    source = evidence.template_sources
+    _need(source is not None and source.source_matched and source.rows is not None,
+          'yaml_source_inventory_unverified')
+    domain = 'template.' + platform
+    matches = []
+    for definition in source.ledger.definitions:
+        if (definition.domain != domain or not is_physical_definition(definition)
+                or (key is not None and definition.native_key != key)):
+            continue
+        blocks = [row for row in source.ledger.definitions if row.domain == 'template.state'
+                  and _under(definition.origin, row.origin)]
+        _need(len(blocks) == 1 and blocks[0].native_key is not None,
+              'yaml_source_block_unverified')
+        expected = next((row[2] for row in source.rows
+                         if row[:2] == (domain, definition.native_key)), None)
+        actual = _fingerprint([domain, definition.native_key, [blocks[0].native_key, semantic]])
+        if expected == actual:
+            matches.append(definition.native_key)
+    _need(len(matches) == 1, 'yaml_physical_semantic_bijection_unverified')
+    return matches[0]
+
+
+def _sample(native, evidence, observed, *, physical_identities=()):
     from homeassistant.config_entries import ConfigEntry, ConfigEntries
     from homeassistant.helpers import entity_platform as ep, entity_registry as er
     from homeassistant.components import template as template_component
@@ -516,12 +558,21 @@ def _sample(native, evidence, observed):
             if ((platform.domain == 'sensor' and type(entity) is native.sensor)
                     or (platform.domain == 'binary_sensor' and type(entity) is native.binary)):
                 try:
-                    _need(stored is not None and type(row) is er.RegistryEntry
-                          and _row(row) == stored and row.platform == 'template'
-                          and row.disabled_by is None and row.config_entry_id == entry_id
-                          and row.unique_id == entity.unique_id
-                          and entity.registry_entry is row and hass.states.get(key) is not None,
-                          'native_registry_identity_unverified')
+                    if entity.unique_id is None:
+                        _need(entry is None and stored is None and row is None
+                              and entity.registry_entry is None and hass.states.get(key) is not None,
+                              'native_registryless_identity_unverified')
+                        fixed = [source_key for domain, source_key, entity_id in physical_identities
+                                 if domain == platform.domain and entity_id == key]
+                        _need(len(fixed) <= 1, 'yaml_physical_identity_ambiguous')
+                        unique = fixed[0] if fixed else None
+                    else:
+                        _need(stored is not None and type(row) is er.RegistryEntry
+                              and _row(row) == stored and row.platform == 'template'
+                              and row.disabled_by is None and row.config_entry_id == entry_id
+                              and row.unique_id == entity.unique_id
+                              and entity.registry_entry is row and hass.states.get(key) is not None,
+                              'native_registry_identity_unverified')
                     if entry is not None:
                         _need(type(entry) is ConfigEntry and entry.domain == 'template'
                               and entry.state.value == 'loaded' and entry.disabled_by is None
@@ -541,9 +592,15 @@ def _sample(native, evidence, observed):
                         {key: key for key in dependencies},
                         Context(Consumer.TEMPLATE, (Scope((), Syntax.JINJA),)))
                     _need(not static.markers, 'template_dependency_scope_unverified')
+                    if entity.unique_id is None:
+                        _physical_native_metadata(native, entity, semantic, platform.domain)
                     consumer = True
-                    source_verified = _source_semantics(native, entity, stored,
-                        semantic, evidence, documents, platform=platform.domain)
+                    if entity.unique_id is None:
+                        unique = _physical_source_key(semantic, evidence, platform.domain, key=unique)
+                        source_verified = True
+                    else:
+                        source_verified = _source_semantics(native, entity, stored,
+                            semantic, evidence, documents, platform=platform.domain)
                     reason = 'verified' if source_verified else 'source_semantics_mismatch'
                 except TemplateConsumerError as error:
                     reason = str(error)
@@ -580,6 +637,26 @@ def _sample(native, evidence, observed):
         for source in evidence.template_sources.ledger.definitions:
             rows.append(TemplateConsumerRow('source', source.domain, source.native_key,
                                            reason='physical_source_inventory_only'))
+    # A physical signature is authoritative only as a bijection over the WHOLE
+    # actual stateless population. A partial match never promotes UNKNOWN.
+    from .template_physical_identity import is_physical_definition
+    physical_rows = [r for r in rows if r.kind == 'entity' and r.registry_id is None]
+    if physical_rows:
+        source = evidence.template_sources
+        expected = {(d.domain.removeprefix('template.'), d.native_key)
+                    for d in source.ledger.definitions
+                    if d.domain in ('template.sensor', 'template.binary_sensor')} if source else set()
+        expected_physical = {(d.domain.removeprefix('template.'), d.native_key)
+                             for d in source.ledger.definitions if is_physical_definition(d)} if source else set()
+        entities = [r for r in rows if r.kind == 'entity']
+        complete = (bool(expected) and len(entities) == len(expected)
+            and {(r.platform, r.key) for r in entities} == expected
+            and all(r.consumer_verified for r in entities)
+            and not any(r.kind in ('registry', 'entry', 'coordinator') for r in rows)
+            and all((r.platform, r.key) in expected_physical for r in physical_rows))
+        if not complete:
+            rows = [replace(r, source_verified=False, reason='yaml_physical_population_unverified')
+                    if r in physical_rows else r for r in rows]
     return tuple(rows), tuple(tokens)
 
 

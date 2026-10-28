@@ -152,13 +152,31 @@ class NativeTemplateYAMLServer:
             self.digests[ref] = await self.preparations.create(ref, encode_change(item))
             self._scope()
             steps.append(Step(ref, adapter, item.identity, item.before_revision, item.after_revision, ref))
-        consumer_ids = {row['entity_id']: row['entity_id'] for row in rows if row['platform'] == 'template'}
+        from .native_template_consumers import async_observe_template_consumers
+        from .template_physical_identity import is_physical_definition
+        observed = await async_observe_template_consumers(self.hass, self.receipt,
+            self.evidence, guard=self._scope)
+        self._scope()
+        consumers = [row for row in observed.rows if row.kind == 'entity']
+        expected_keys = {(row.domain.removeprefix('template.'), row.native_key)
+                         for row in self.evidence.template_sources.ledger.definitions
+                         if row.domain in ('template.sensor', 'template.binary_sensor')}
+        _need(len(consumers) == len(expected_keys)
+              and {(row.platform, row.key) for row in consumers} == expected_keys
+              and all(row.consumer_verified and row.source_verified for row in consumers),
+              'complete_original_consumer_bijection_required')
+        physical_keys = {(row.domain.removeprefix('template.'), row.native_key)
+                         for row in self.evidence.template_sources.ledger.definitions
+                         if is_physical_definition(row)}
+        physical = tuple(sorted((row.platform, row.key, row.entity_id) for row in consumers
+                                 if (row.platform, row.key) in physical_keys))
+        consumer_ids = {row.entity_id: row.entity_id for row in consumers}
         source_history = await self.history.capture(self.mapping)
         self._scope()
         consumer_history = await self.history.capture(consumer_ids)
         self._scope()
         self.composition = TemplateComposition(self.evidence, tuple(sorted(self.digests.items())),
-            source_history, consumer_history, self.evidence.sha256)
+            source_history, consumer_history, self.evidence.sha256, physical)
         inputs = await self.preparations.create_native_inputs(own + '-original', baseline,
                                                              composition=self.composition)
         self._scope()

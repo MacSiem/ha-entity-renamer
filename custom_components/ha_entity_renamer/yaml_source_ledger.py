@@ -388,6 +388,25 @@ def _extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
                         and prefix_text is not None):
                     native_key = (prefix_text + '-' if prefix_text else '') + ids[0][0].node.value
                     keyref = ids[0][1]
+                elif (not ids and mode == 'state' and platform in ('sensor', 'binary_sensor')
+                      and prefix_text is not None):
+                    from .template_physical_identity import physical_template_key
+                    native_key = physical_template_key('template.' + platform,
+                        entity.path, entity.node.start_mark.line + 1)
+                    seen_nodes = set()
+                    def alias_free(node):
+                        charge(0)
+                        if (id(node) in seen_nodes
+                                or node.start_mark.index < entity.node.start_mark.index
+                                or node.end_mark.index > entity.node.end_mark.index):
+                            return False
+                        seen_nodes.add(id(node))
+                        children = ([child for pair in node.value for child in pair]
+                                    if isinstance(node, MappingNode) else
+                                    node.value if isinstance(node, SequenceNode) else ())
+                        return all(alias_free(child) for child in children)
+                    if not alias_free(entity.node):
+                        flag(entity, 'source_template_alias_unverified')
                 else:
                     flag(entity, 'source_template_stable_id_missing')
                 digest = _hash(body(entity))

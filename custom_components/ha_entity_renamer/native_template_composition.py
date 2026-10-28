@@ -144,6 +144,7 @@ class TemplateComposition:
     source_history: dict
     consumer_history: dict
     coverage_sha256: str
+    physical_consumers: tuple[tuple[str, str, str], ...] = ()
 
     def assert_baseline(self, baseline):
         _need(type(baseline) is NativeInputBaseline)
@@ -204,6 +205,21 @@ class TemplateComposition:
         _need(type(self.coverage_sha256) is str and _SHA.fullmatch(self.coverage_sha256))
         _history(self.source_history)
         _history(self.consumer_history)
+        from .template_physical_identity import is_physical_definition, physical_template_key
+        expected = {(row.domain.removeprefix('template.'), row.native_key)
+                    for row in original.ledger.definitions if is_physical_definition(row)}
+        _need(type(self.physical_consumers) is tuple
+              and all(type(row) is tuple and len(row) == 3
+                      and all(type(value) is str for value in row) for row in self.physical_consumers)
+              and len(self.physical_consumers) == len(expected)
+              and {(domain, key) for domain, key, _ in self.physical_consumers} == expected
+              and len({entity_id for _, _, entity_id in self.physical_consumers}) == len(expected))
+        for domain, key, entity_id in self.physical_consumers:
+            _need(type(entity_id) is str and re.fullmatch(domain + r'\.[a-z0-9_]+', entity_id))
+            definition = next(row for row in original.ledger.definitions
+                              if (row.domain, row.native_key) == ('template.' + domain, key))
+            _need(key == physical_template_key(definition.domain, definition.origin.path,
+                                              definition.origin.start_line))
 
 
 def encode_composition(composition, baseline):
@@ -211,21 +227,30 @@ def encode_composition(composition, baseline):
     # Type-check fields before semantic validation, including unsupported families.
     evidence = _typed(composition.evidence, OriginalSourceEvidence, encode=True)
     composition.assert_baseline(baseline)
-    return {'schema': 1, 'profile': _PROFILE, 'evidence': evidence,
+    result = {'schema': 1, 'profile': _PROFILE, 'evidence': evidence,
             'prepared_digests': [list(row) for row in composition.prepared_digests],
             'source_history': _history(composition.source_history),
             'consumer_history': _history(composition.consumer_history),
             'coverage_sha256': composition.coverage_sha256}
+    if composition.physical_consumers:
+        result['schema'] = 2
+        result['physical_consumers'] = [list(row) for row in composition.physical_consumers]
+    return result
 
 
 def decode_composition(payload, baseline):
-    _need(type(payload) is dict and set(payload) == {'schema', 'profile', 'evidence',
-        'prepared_digests', 'source_history', 'consumer_history', 'coverage_sha256'}
-        and type(payload['schema']) is int and payload['schema'] == 1
+    _need(type(payload) is dict and type(payload.get('schema')) is int
+          and payload['schema'] in (1, 2))
+    extra = {'physical_consumers'} if payload['schema'] == 2 else set()
+    _need(set(payload) == {'schema', 'profile', 'evidence', 'prepared_digests',
+        'source_history', 'consumer_history', 'coverage_sha256'} | extra
         and payload['profile'] == _PROFILE)
+    physical = (_typed(payload['physical_consumers'], tuple[tuple[str, str, str], ...], encode=False)
+                if payload['schema'] == 2 else ())
+    _need(payload['schema'] == 1 or bool(physical))
     digests = _typed(payload['prepared_digests'], tuple[tuple[str, str], ...], encode=False)
     value = TemplateComposition(_typed(payload['evidence'], OriginalSourceEvidence, encode=False),
         digests, _history(payload['source_history']), _history(payload['consumer_history']),
-        payload['coverage_sha256'])
+        payload['coverage_sha256'], physical)
     value.assert_baseline(baseline)
     return value
