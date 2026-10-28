@@ -106,6 +106,23 @@ class NativeRegistryScaleFlowTests(unittest.IsolatedAsyncioTestCase):
         instance.queue_task(SynchronizeTask(future))
         await future
         self.metrics['fixture_recorder_drain_seconds'] = perf_counter() - start
+        # Native startup/setup may leave a delayed repairs Store write. Drain
+        # only actual pending data before ORIGINAL, just like the Core Stores.
+        # Creating an empty registry or ignoring later graph drift would hide
+        # the real conflict this qualifier previously detected.
+        from homeassistant.helpers import issue_registry as ir
+        issues = ir.async_get(self.f.hass)
+        issue_store = issues._store
+        self.metrics['fixture_issue_count'] = len(issues.issues)
+        pending = (issue_store._data is not None or issue_store._delay_handle is not None
+                   or issue_store._unsub_final_write_listener is not None)
+        self.metrics['fixture_issue_save_pending'] = pending
+        if pending:
+            await issue_store.async_save(issues._data_to_save())
+        await self.f.hass.async_block_till_done()
+        self.assertIsNone(issue_store._data)
+        self.assertIsNone(issue_store._delay_handle)
+        self.assertIsNone(issue_store._unsub_final_write_listener)
         start = perf_counter()
         self.original_files = await self._flush_documents(initialize=True)
         self.original_managers = self.manager_documents()
