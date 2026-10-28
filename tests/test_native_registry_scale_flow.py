@@ -5,6 +5,9 @@ No positive Plan/receipt/native input/prepared ref is constructed by this test.
 Full real API serializers and files are retained, including tombstones/unknowns.
 """
 import json
+import sys
+import threading
+from collections import Counter
 from pathlib import Path
 from time import perf_counter
 from types import MappingProxyType
@@ -88,6 +91,7 @@ class NativeRegistryScaleFlowTests(unittest.IsolatedAsyncioTestCase):
             else:
                 self.f.entity.async_update_entity(row.entity_id,
                     name='Synthetic retained native preference ' + str(index) + ':' + 'N' * 1024)
+        self.profile_phase = 'fixture_recorder_drain'
         self.metrics['population_seconds'] = perf_counter() - start
         # Construction emitted tens of thousands of genuine registry events.
         # Drain their native Recorder work BEFORE the measured migration.
@@ -121,6 +125,7 @@ class NativeRegistryScaleFlowTests(unittest.IsolatedAsyncioTestCase):
                         'calibrate genuine API UID/name sizes downward')
         self.metrics['initial_flush_and_readback_seconds'] = perf_counter() - start
         self.stimulus_count = 0
+        self.profile_phase = 'forward'
         return result
 
     async def original_from_fresh_stores(self):
@@ -169,10 +174,30 @@ class NativeRegistryScaleFlowTests(unittest.IsolatedAsyncioTestCase):
         await server.NativeTemplateYAMLServerTests.stimulus(self, value)
         self.stimulus_count += 1
         if self.stimulus_count in (2, 4):
+            self.profile_phase = 'forward' if self.stimulus_count == 2 else 'reverse'
             self.phase_start = perf_counter()
 
     async def test_core104_real_37275_deleted_full_original_yaml_forward_fresh_reverse_history(self):
         self.metrics = {}
+        self.profile_phase = 'fixture'
+        samples = Counter()
+        stop = threading.Event()
+        def sample():
+            own = threading.get_ident()
+            while not stop.wait(0.05):
+                for ident, frame in sys._current_frames().items():
+                    if ident == own:
+                        continue
+                    leaf = (Path(frame.f_code.co_filename).name, frame.f_code.co_name)
+                    product = '-'
+                    while frame is not None:
+                        if '/custom_components/ha_entity_renamer/' in frame.f_code.co_filename:
+                            product = Path(frame.f_code.co_filename).name + ':' + frame.f_code.co_name
+                            break
+                        frame = frame.f_back
+                    samples[self.profile_phase, *leaf, product] += 1
+        sampler = threading.Thread(target=sample, name='scale-readonly-stack-sampler', daemon=True)
+        sampler.start()
         start = perf_counter()
         try:
             # Reuses actual server producer, real Recorder, independent 5/7
@@ -207,7 +232,26 @@ class NativeRegistryScaleFlowTests(unittest.IsolatedAsyncioTestCase):
             self.same({k: v for k, v in original_source.items() if k != 'modified_at'},
                       {k: v for k, v in final_source.items() if k != 'modified_at'},
                       'source native row did not return to SAME ORIGINAL')
+        except Exception as error:
+            trace = error.__traceback__
+            while trace is not None:
+                frame = trace.tb_frame
+                if frame.f_code.co_name == 'assert_current' and frame.f_code.co_filename.endswith('accepted_input_state.py'):
+                    values = frame.f_locals
+                    expected, current = values.get('expected'), values.get('current')
+                    if isinstance(expected, tuple) and isinstance(current, tuple):
+                        print('NATIVE_SCALE_GRAPH_DIFF', json.dumps({
+                            'directory': values.get('directory'), 'names': values.get('names'),
+                            'removed': sorted(set(expected) - set(current))[:12],
+                            'added': sorted(set(current) - set(expected))[:12]}))
+                trace = trace.tb_next
+            raise
         finally:
+            stop.set()
+            sampler.join(1)
+            print('NATIVE_SCALE_STACK_SAMPLES', json.dumps([
+                {'phase': key[0], 'file': key[1], 'function': key[2], 'product': key[3], 'samples': count}
+                for key, count in samples.most_common(35)]))
             self.metrics['total_seconds'] = perf_counter() - start
             print('NATIVE_REGISTRY_SCALE_AGGREGATES', json.dumps(self.metrics, sort_keys=True))
 
