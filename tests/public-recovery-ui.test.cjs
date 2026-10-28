@@ -265,7 +265,7 @@ test('late plural authority is discarded after role revocation and preserves que
  const queue=f.card._renameQueue;await click(f,'checkRenamerBackendStatus');button(f,'reviewRenamerRecovery').click();
  f.card.hass={...f.hass,user:{id:'admin-a',is_admin:false}};
  wait.resolve(inspection({change_summary:pluralSummary()}));await flush();
- assert.equal(f.card._recovery,null);assert.equal(f.card._renameQueue,queue);
+ assert.equal(f.card._recovery,null);assert.deepEqual(f.card._renameQueue,queue);
  assert.doesNotMatch(f.card.shadowRoot.innerHTML,/sensor.changed_second/);assert.equal(restores(f).length,0);
  }finally{close(f);}
 });
