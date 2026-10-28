@@ -55,8 +55,63 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
     async def test_setup_receipt_ack_loss_reopens_without_replay(self):
         await self._scope(entry_unique_id=None, full_flow=True, fault='ack')
 
+    async def test_durable_numeric_entry_reverse_has_no_forward_python_evidence(self):
+        await self._durable_scope(entry_unique_id='template-entry-durable')
+
+    async def test_durable_gui_none_reverse_has_no_forward_python_evidence(self):
+        await self._durable_scope(entry_unique_id=None)
+
+    async def test_durable_reverse_wrong_phase_refuses_without_replay(self):
+        await self._durable_scope(entry_unique_id=None, fault='wrong_phase')
+
+    async def test_durable_reverse_wrong_fingerprint_refuses_without_replay(self):
+        await self._durable_scope(entry_unique_id=None, fault='wrong_fingerprint')
+
+    async def test_durable_reverse_wrong_head_refuses_without_replay(self):
+        await self._durable_scope(entry_unique_id=None, fault='wrong_head')
+
+    async def test_durable_reverse_wrong_lease_refuses_without_replay(self):
+        await self._durable_scope(entry_unique_id=None, fault='wrong_lease')
+
+    async def test_durable_reverse_foreign_source_refuses_without_replay(self):
+        await self._durable_scope(entry_unique_id=None, fault='foreign_source')
+
+    async def test_durable_reverse_incomplete_activation_refuses_without_replay(self):
+        await self._durable_scope(entry_unique_id=None, fault='incomplete_activation')
+
+    async def test_durable_reverse_pending_intent_refuses_without_replay(self):
+        await self._durable_scope(entry_unique_id=None, fault='pending_intent')
+
+    async def test_durable_reverse_missing_composition_refuses_without_replay(self):
+        await self._durable_scope(entry_unique_id=None, fault='missing_composition')
+
+    async def test_durable_reverse_tampered_composition_refuses_without_replay(self):
+        await self._durable_scope(entry_unique_id=None, fault='tampered_composition')
+
+    async def test_durable_reverse_reverse_ack_refuses_without_replay(self):
+        await self._durable_scope(entry_unique_id=None, fault='reverse_ack')
+
+    async def test_durable_reverse_reverse_replay_refuses_without_replay(self):
+        await self._durable_scope(entry_unique_id=None, fault='reverse_replay')
+
+    async def test_durable_reverse_revoked_refuses_without_replay(self):
+        await self._durable_scope(entry_unique_id=None, fault='revoked')
+
+    async def _durable_scope(self, *, entry_unique_id, fault=None):
+        # Complete the forward caller frames before invoking ANY fresh bind.
+        # Weak witnesses cannot lend the reverse path live forward authority.
+        detached = await self._scope(entry_unique_id=entry_unique_id, full_flow=True,
+                                     fault=fault, fresh_reverse=True)
+        import gc
+        gc.collect()
+        values, old_refs = detached
+        self.assertTrue(all(ref() is None for ref in old_refs),
+                        'old forward proof object remains live after its frames returned')
+        from native_template_composition_scenario import fresh_reverse_scenario
+        await fresh_reverse_scenario(self, *values)
+
     async def _scope(self, *, entry_unique_id, validate_entry_proposal=False,
-                     full_flow=False, fault=None):
+                     full_flow=False, fault=None, fresh_reverse=False):
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.components.template.config_flow import TemplateConfigFlowHandler
         from homeassistant.config_entries import ConfigEntry, ConfigEntryState
@@ -211,7 +266,7 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
         if full_flow:
             return await self._full_flow(module, receipt, evidence, preparations, digests,
                 entry, helper_change, registry_change, recorder, history, consumer_history,
-                consumer_identity, original, mapping, fault)
+                consumer_identity, original, mapping, fault, fresh_reverse=fresh_reverse)
 
         # This already qualified native lease prerequisite remains independent
         # of the full Coordinator/lifecycle flow above.
@@ -225,7 +280,7 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
 
     async def _full_flow(self, module, receipt, evidence, preparations, digests,
                          entry, helper_change, registry_change, recorder, history,
-                         consumer_history, consumer_identity, original, mapping, fault):
+                         consumer_history, consumer_identity, original, mapping, fault, *, fresh_reverse=False):
         from homeassistant.config_entries import ConfigEntryState
         from homeassistant.helpers import entity_platform as ep
         from unittest.mock import patch
@@ -235,14 +290,28 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
         template = module('native_template_entry_lifecycle')
         original_inputs = await module('native_input_baseline').async_capture_native_input_baseline(
             hass, receipt, guard=lambda: None)
-        inputs = await preparations.create_native_inputs('template-flow-original', original_inputs)
+        source_history = await history.capture(mapping)
+        composition = None
+        coverage = 'actual-template-numeric-entry'
+        if fresh_reverse and fault != 'missing_composition':
+            try:
+                codec = module('native_template_composition')
+            except ModuleNotFoundError as error:
+                if error.name != fixtures.PACKAGE + '.native_template_composition':
+                    raise
+                self.fail('durable composition missing after genuine native ORIGINAL validation')
+            coverage = evidence.sha256  # Narrow entry proof, never all-family readiness.
+            composition = codec.TemplateComposition(evidence,
+                tuple(sorted(digests.items())), source_history, consumer_history, coverage)
+        inputs = await preparations.create_native_inputs('template-flow-original', original_inputs,
+                                                          composition=composition)
         scopes = ('registry', 'helpers')
         steps = tuple(tx.Step(ref, scope, change.identity, change.before_revision,
                               change.after_revision, ref)
             for ref, scope, change in (('template-entry-source', 'registry', registry_change),
                                       ('template-entry-options', 'helpers', helper_change)))
         plan = tx.Plan('template-numeric-entry-flow', scopes, scopes, steps,
-                       'actual-template-numeric-entry', scopes, inputs)
+                       coverage, scopes, inputs)
         operation = 'template-numeric-entry-operation'
         journal = module('journal').native_journal(hass)
         await journal.initialize()
@@ -252,7 +321,6 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
         observation_state = chain.reconstruct_inputs()
         lease = None
         lifecycle = None
-        source_history = await history.capture(mapping)
         current_config = original
 
         def outer_guard():
@@ -444,6 +512,15 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
                 await self.emit(value)
             self.assertEqual(self.producer.entity_id, next(iter(mapping.values())))
             self.assertEqual(self.f.entity.async_get(self.producer.entity_id).id, registry_change.identity)
+            if fresh_reverse:
+                import weakref
+                values = (module, operation, plan.fingerprint, plan.native_inputs[2],
+                    original_inputs.receipt_json, consumer_identity, original, mapping, fault)
+                # No old chain/store/observer/evidence is returned, only weak
+                # references that the completed caller verifies are dead.
+                old_refs = tuple(weakref.ref(value) for value in
+                    (chain, observer, preparations, journal, receipt, evidence, original_inputs))
+                return values, old_refs
             fresh_preps = prep.native_prepared_store(hass)
             await fresh_preps.initialize()
             fresh_store = rr.native_registry_receipt_store(hass, fresh_preps)
