@@ -375,10 +375,13 @@ class NativeTemplateConfigEntryActivationTests(unittest.IsolatedAsyncioTestCase)
                 from homeassistant.config_entries import SIGNAL_CONFIG_ENTRY_CHANGED
                 from homeassistant.helpers.dispatcher import async_dispatcher_connect
                 updates = []
+                attempted_update = False
                 @callback
                 def foreign_update(change, changed_entry):
+                    nonlocal attempted_update
                     if (changed_entry is entry and entry.state.value == 'setup_in_progress'
-                            and not updates):
+                            and not attempted_update):
+                        attempted_update = True
                         options = dict(entry.options)
                         options['state'] = options['state'].replace('* 2', '* 3')
                         updates.append(hass.config_entries.async_update_entry(entry, options=options))
