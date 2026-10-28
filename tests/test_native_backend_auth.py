@@ -29,7 +29,8 @@ class NativeBackendAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(type(hass.auth), AuthManager)
         # The first native user can become owner. Revoke only a later ordinary
         # administrator; owner authority must never be fabricated or altered.
-        if not await hass.auth.async_get_users():
+        if not any(not existing.system_generated
+                   for existing in await hass.auth.async_get_users()):
             await hass.auth.async_create_user('Native QA owner', group_ids=[GROUP_ID_ADMIN])
         user = await hass.auth.async_create_user('Native QA reader',
                          group_ids=[GROUP_ID_ADMIN if admin else GROUP_ID_USER])
