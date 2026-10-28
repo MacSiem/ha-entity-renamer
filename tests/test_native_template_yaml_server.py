@@ -325,12 +325,22 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
             store = self.module('native_registry_receipts').native_registry_receipt_store(hass, preps)
             await store.initialize()
             baseline, composition = preps.resolve_composition(pending.plan.native_inputs)
-            with self.assertRaises(ValueError):
-                self.module('native_registry_receipts').RegistryReceiptChain.reopen(store,
-                    pending.operation_id, pending.plan, baseline.receipt, dict(composition.prepared_digests))
+            reader = self.module('native_registry_receipts').RegistryReceiptChain.reopen(store,
+                pending.operation_id, pending.plan, baseline.receipt, dict(composition.prepared_digests))
+            self.assertFalse(reader.writable)
+            # A valid pending graph can reopen for inspection. It cannot supply
+            # an accepted input state or a replay capability.
+            with self.assertRaisesRegex(ValueError, 'unknown_unresolved_intent'):
+                reader.reconstruct_inputs()
+            paths = [self.f.root / '.storage' / key for key in
+                ('core.config_entries', 'core.entity_registry', 'core.device_registry')]
+            paths.append(self.f.root / 'template.yaml')
+            before = {path: path.read_bytes() for path in paths}
             with self.assertRaises(self.module('transaction').Refused):
                 await runtime.native_yaml_reverse(hass, pending.operation_id, pending.plan.fingerprint,
                     guard=lambda: None, refresh=refresh)
+            self.assertEqual({path: path.read_bytes() for path in paths}, before)
+            self.assertEqual(await runtime.journal.load(pending.operation_id), pending)
         finally:
             for code in (install_code, discovery_code):
                 sys.monitoring.set_local_events(tool, code, 0)
