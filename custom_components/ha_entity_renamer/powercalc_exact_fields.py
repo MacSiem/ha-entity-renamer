@@ -210,15 +210,16 @@ class _ExactFieldsOwner:
         _need(type(entity) is self.cls and entity.hass is scope.hass, 'foreign_replacement_type')
         self.check()
         _need(self.bound is not None and scope.started == 1
-              and scope.causal.get(None) is scope.marker
-              and type(asyncio.current_task()) is asyncio.Task, 'foreign_schedule_provenance')
+              and scope.causal.get(None) is scope.marker, 'foreign_schedule_provenance')
         parent = frame.f_back
         if tag == 'exact_vendor_schedule':
             # Ordinary later schedules may occur after setup; never transfer twice.
             setup = parent is not None and parent.f_code is self.hc[0]
             if not setup:
-                _need(name in self.complete, 'first_schedule_outside_added')
+                _need(name in self.complete and self.targets.get(name) is entity,
+                      'first_schedule_outside_added')
                 return
+            _need(type(asyncio.current_task()) is asyncio.Task, 'foreign_schedule_provenance')
             _need(parent.f_locals.get('self') is entity, 'added_instance')
             if phase == 'start':
                 self._transfer(entity, frame)
@@ -232,7 +233,9 @@ class _ExactFieldsOwner:
                 self.complete.add(name)
             return
         if name in self.complete:
-            return  # Later ordinary native clocks have no transfer authority.
+            _need(self.targets.get(name) is entity, 'foreign_replacement_type')
+            return  # Native timer callbacks may run without a Task; no transfer authority.
+        _need(type(asyncio.current_task()) is asyncio.Task, 'foreign_schedule_provenance')
         _need(parent is not None and parent.f_code is self.vc[0]
               and parent.f_locals.get('self') is entity
               and parent.f_back is not None and parent.f_back.f_code is self.hc[0]
