@@ -13,6 +13,7 @@ class NativeImportPreviewTests(unittest.IsolatedAsyncioTestCase):
     _before_start = auth.NativeBackendAuthTests._before_start
     _loaded_backend = auth.NativeBackendAuthTests._loaded_backend
     _connection = auth.NativeBackendAuthTests._connection
+    _flush_documents = auth.backend_fixture.NativeBackendLifecycleTests._flush_documents
     with_yaml = True
 
     async def request(self, content, *, admin=True, extra=None):
@@ -25,6 +26,8 @@ class NativeImportPreviewTests(unittest.IsolatedAsyncioTestCase):
     async def test_registered_import_preview_uses_actual_discovery_without_writes(self):
         backend = self._loaded_backend()
         runtime = self.f.hass.data[backend.DATA_RUNTIME]
+        self.source_id = self.f.entity.async_get_or_create('sensor', 'demo', 'import_preview_native').entity_id
+        await self._flush_documents(initialize=True)
         paths = [self.f.root / '.storage' / key for key in
                  ('core.entity_registry', 'core.device_registry', 'core.config_entries',
                   'ha_entity_renamer.prepared', 'ha_entity_renamer.migrations')]
