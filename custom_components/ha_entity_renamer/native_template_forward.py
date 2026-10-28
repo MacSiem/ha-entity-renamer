@@ -127,10 +127,8 @@ class NativeTemplateForward:
     # implementations. These functions consume this object's own graph; no
     # reverse binding, readonly promotion or second ORIGINAL is involved.
     async def _observe(self):
-        observed = await NativeTemplateReverse._observe(self)
-        await _drained(self.hass.async_add_executor_job, self._unchanged_consumers.physical)
-        self._scope()
-        return observed
+        return await NativeTemplateReverse._observe(self,
+            physical_check=self._unchanged_consumers.physical)
 
     _history_current = NativeTemplateReverse._history_current
     _final_loaded_history = NativeTemplateReverse._final_loaded_history
@@ -357,9 +355,8 @@ class NativeTemplateForward:
         from .yaml_validation import assert_validation_current
         await _drained(self.hass.async_add_executor_job, lambda: assert_validation_current(receipt))
         self._scope()
-        observed = await async_observe_native_inputs(self.hass, receipt, guard=self._scope)
-        self._scope()
-        await _drained(self.hass.async_add_executor_job, self._unchanged_consumers.physical)
+        observed = await async_observe_native_inputs(self.hass, receipt, guard=self._scope,
+            physical_check=self._unchanged_consumers.physical)
         self._scope()
         baseline = self.chain.baseline
         _need(observed.original_receipt_json == baseline.receipt_json and observed.files == baseline.files,

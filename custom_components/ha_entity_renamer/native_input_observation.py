@@ -69,7 +69,8 @@ def _observation_fence(original):
         os.close(reader.root)
 
 
-async def async_observe_native_inputs(hass, original_receipt, *, guard, input_state=None):
+async def async_observe_native_inputs(hass, original_receipt, *, guard, input_state=None,
+                                      physical_check=None):
     """Observe only; caller holds coordinator and external native-editor lease.
 
     All awaits drain safely and are bracketed by guard/manager checks. Held
@@ -100,7 +101,15 @@ async def async_observe_native_inputs(hass, original_receipt, *, guard, input_st
         observation = await _drained(hass.async_add_executor_job, pinned.capture)
         guard()
         managers.check()
-        await _drained(hass.async_add_executor_job, pinned.verify)
+        def final_physical():
+            pinned.verify()
+            if physical_check is not None:
+                # Trusted read-only consumer check shares the pinned source
+                # worker. Recheck the source after it, then managers on-loop;
+                # no additional await may return an older native observation.
+                physical_check()
+                pinned.verify()
+        await _drained(hass.async_add_executor_job, final_physical)
         guard()
         managers.check()
         if _receipt_bytes(original_receipt) != original:

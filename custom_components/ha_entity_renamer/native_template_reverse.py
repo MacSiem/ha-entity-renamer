@@ -377,7 +377,7 @@ class NativeTemplateReverse:
         _need(self.observer.loaded_sample(snapshot) == first, 'consumer_changed')
         self.loaded_admission_sample = first
 
-    async def _observe(self):
+    async def _observe(self, *, physical_check=None):
         self._scope()
         # The previous accepted head may remain usable while OUR native intent
         # is live; the same chain checks live object identity, never a saved ref.
@@ -389,7 +389,7 @@ class NativeTemplateReverse:
             _need(pending is not None and pending['payload'].get('kind') in
                   ('registry_intent', 'helper_setup_intent'), 'unresolved_intent')
         value = await async_observe_native_inputs(self.hass, self.receipt,
-            guard=self._scope, input_state=self.observation_state)
+            guard=self._scope, input_state=self.observation_state, physical_check=physical_check)
         self._scope()
         return value
 
