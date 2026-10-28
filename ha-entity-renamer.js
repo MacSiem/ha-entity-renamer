@@ -1390,11 +1390,6 @@ class HAEntityRenamer extends HTMLElement {
     if (signature !== this._navigationConfig) this._activeTab = _defaultTab(next);
     this._navigationConfig = signature;
     this._config = next;
-    if (next.show_help === false) {
-      this._backendStatusEpoch++;
-      this._backendStatus = null;
-      this._clearRecovery();
-    }
     if (this._hass) this.render();
   }
   _visibleTabs() {
@@ -1419,13 +1414,13 @@ class HAEntityRenamer extends HTMLElement {
     const label = this._lang === 'pl' ? 'Jak to działa?' : 'How does it work?';
     return `<details class="renamer-help" ${state.open ? 'open' : ''}><summary>ⓘ ${label}</summary>
       <p>${_esc(intro.headline)}</p><ol>${intro.steps.map(step => `<li>${_esc(step)}</li>`).join('')}</ol>
-      ${this._renderBackendStatus()}</details>`;
+      </details>`;
   }
   _renderBackendStatus() {
     // Status is read-only; recovery needs its own inspect and explicit consent.
     // Never render raw journal identifiers, versions or private errors.
     const user = this._hass?.user;
-    if (this._config?.show_help === false || user?.is_admin !== true || typeof user.id !== 'string' || !user.id.trim()) return '';
+    if (!this._renameAuthorityAvailable() || user?.is_admin !== true || typeof user.id !== 'string' || !user.id.trim()) return '';
     const code = this._backendStatus?.code || 'not_checked';
     const labels = this._lang === 'pl' ? {
       not_checked: 'Nie sprawdzono backendu migracji',
@@ -1703,7 +1698,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _recoveryAvailable() {
-    return this._config?.show_help !== false && this._renameAuthorityAvailable();
+    return this._renameAuthorityAvailable();
   }
 
   _recoveryBusy() {
@@ -3604,6 +3599,9 @@ class HAEntityRenamer extends HTMLElement {
         .renamer-migration {margin:12px 0;padding:12px;border:1px solid var(--divider-color);border-radius:14px;font-size:14px;overflow-wrap:anywhere;}
         .renamer-migration h3 {margin:0 0 8px;font-size:16px;}
         .renamer-migration input {display:block;max-width:100%;min-height:44px;margin:8px 0;}
+        .renamer-migration input[type="checkbox"] {display:inline-block;min-height:24px;width:24px;height:24px;vertical-align:middle;margin:8px;}
+        .renamer-migration label {min-height:44px;overflow-wrap:anywhere;}
+        .renamer-migration fieldset {min-width:0;max-height:24rem;overflow:auto;}
         .renamer-migration button {min-height:44px;}
         .renamer-migration ul {padding-inline-start:24px;}
         .renamer-help { margin:8px 0 12px;font-size:14px; }
@@ -3622,6 +3620,7 @@ class HAEntityRenamer extends HTMLElement {
         </div>
 
       ${this._renderHelp()}
+      ${this._renameAuthorityAvailable() ? `<section class="renamer-backend">${this._renderBackendStatus()}</section>` : ''}
       ${this._renameAuthorityAvailable() ? `<section class="renamer-migration" id="renamerMigrationPanel">${this._renderMigration()}</section>` : ''}
       ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${this._message.outcome ? createUiV3({language:this._lang}).statusHtml(this._message.outcome) : ''} ${_esc(this._message.text || '')}</div>` : ''}
       ${this._renderApplyResult()}
