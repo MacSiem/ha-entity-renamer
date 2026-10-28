@@ -27,7 +27,7 @@ class NativeTemplateForwardConsumerTests(forward.NativeTemplateForwardTests):
         hass, root = self.f.hass, self.f.root
         # Concrete actual native boundary, as in test_native_discovery_consumers.
         self.dashboard = LovelaceStorage(hass, None)
-        kwargs = {'resource_mode' if __version__ == '2026.10.2' else 'mode': 'storage'}
+        kwargs = {'resource_mode' if __version__ in ('2026.10.2', '2026.10.4') else 'mode': 'storage'}
         hass.data[LOVELACE_DATA] = LovelaceData(**kwargs,
             dashboards={None: self.dashboard}, resources=None, yaml_dashboards={})
         self.energy = await async_get_manager(hass)

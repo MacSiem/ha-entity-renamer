@@ -22,7 +22,7 @@ parser.add_argument('--powercalc-profile-dir', type=Path, help='Exact public bin
 parser.add_argument('--owned-ha-sources', action='store_true',
                     help='Copy installed public HA package before imports for isolated source-mutation negatives')
 args = parser.parse_args()
-if args.owned_ha_sources and args.container != 'ha-renamer-qa222':
+if args.owned_ha_sources and args.container not in ('ha-renamer-qa222', 'ha-renamer-core104222'):
     parser.error('owned HA public-source fixture is current-only')
 assert args.repeat >= 1 and args.timeout > 0 and '/' not in args.pattern and '\\' not in args.pattern
 if not any(path.is_file() for path in (ROOT/'tests').glob(args.pattern)):

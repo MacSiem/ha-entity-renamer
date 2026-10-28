@@ -87,6 +87,8 @@ def synthetic_documents():
 
 
 class BaselineFileTests(unittest.TestCase):
+    version = '2026.10.2'
+
     def setUp(self):
         self.directory = scratch()
         self.addCleanup(self.directory.cleanup)
@@ -96,10 +98,10 @@ class BaselineFileTests(unittest.TestCase):
         self.documents = synthetic_documents()
         for key, document in zip(KEYS, self.documents):
             p = self.root / '.storage' / key
-            p.write_bytes(envelope(key, document))
+            p.write_bytes(envelope(key, document, self.version))
             p.chmod(0o640)
         (self.root / '.storage/core.area_registry').write_bytes(b'{"areas": []}')
-        self.receipt = receipt_for(self.root)
+        self.receipt = receipt_for(self.root, self.version)
 
     def capture(self, receipt=None):
         pinned = baseline._Pinned(receipt or self.receipt, tuple(map(baseline._json, self.documents)))
@@ -235,12 +237,12 @@ class BaselineFileTests(unittest.TestCase):
         empty = ({'entities': [], 'deleted_entities': [], 'settings': {'entity_id_parts': []}},
                  {'devices': [], 'child_devices': [], 'deleted_devices': []}, {'entries': []})
         self.documents = empty
-        self.receipt = receipt_for(self.root)
+        self.receipt = receipt_for(self.root, self.version)
         captured = self.capture()
         self.assertTrue(all(f.raw is None and f.identity is None for f in captured.files))
         self.assertEqual(baseline.decode_baseline(baseline.encode_baseline(captured)), captured)
         path = self.root / '.storage' / KEYS[2]
-        path.write_bytes(envelope(KEYS[2], empty[2]))
+        path.write_bytes(envelope(KEYS[2], empty[2], self.version))
         with self.assertRaises(validation.YAMLValidationError):
             self.capture()  # absent original receipt still cannot accept creation
         invalid = replace(self.receipt, source_directories=tuple(
@@ -622,6 +624,12 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError('synthetic lease loss')
         with self.assertRaises(baseline.NativeInputBaselineError):
             await baseline.async_capture_native_input_baseline(self.hass, self.receipt, guard=guard)
+
+
+class Core104BaselineFileTests(BaselineFileTests):
+    """Identical native 1/23, 3/4, 1/5 layouts; exact version-4 receipts."""
+
+    version = '2026.10.4'
 
 
 if __name__ == '__main__':

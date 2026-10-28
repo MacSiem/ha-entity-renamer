@@ -24,7 +24,7 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
 
     async def _before_start(self, hass, root):
         from homeassistant.const import __version__
-        if __version__ not in ('2025.6.0', '2026.10.2'):
+        if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4'):
             self.skipTest('native helper callbacks require an exact pinned Core')
         from homeassistant.helpers.recorder import async_initialize_recorder
         from homeassistant.setup import async_setup_component
