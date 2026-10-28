@@ -89,6 +89,18 @@ class NativeRegistryScaleFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.f.entity.async_update_entity(row.entity_id,
                     name='Synthetic retained native preference ' + str(index) + ':' + 'N' * 1024)
         self.metrics['population_seconds'] = perf_counter() - start
+        # Construction emitted tens of thousands of genuine registry events.
+        # Drain their native Recorder work BEFORE the measured migration.
+        # Keep the product's synchronization limit and all safety fences intact.
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.tasks import SynchronizeTask
+        await self.f.hass.async_block_till_done()
+        instance = get_instance(self.f.hass)
+        start = perf_counter()
+        future = self.f.hass.loop.create_future()
+        instance.queue_task(SynchronizeTask(future))
+        await future
+        self.metrics['fixture_recorder_drain_seconds'] = perf_counter() - start
         start = perf_counter()
         self.original_files = await self._flush_documents(initialize=True)
         self.original_managers = self.manager_documents()
