@@ -1514,6 +1514,129 @@ class HAEntityRenamer extends HTMLElement {
     }
   }
 
+  _clearMigration() {
+    this._migrationEpoch++;
+    this._migration = null;
+    this.shadowRoot?.getElementById('renamerMigrationPanel')?.replaceChildren();
+  }
+
+  _migrationLabels() {
+    return this._lang === 'pl' ? {
+      title:'Migracja zależności', file:'Plan zmian (JSON)', analyze:'Przeanalizuj plan', clear:'Wyczyść plan',
+      idle:'Wybierz przygotowany plan zmian, aby sprawdzić zależności i konflikty.',
+      reading:'Wczytywanie planu…', loaded:'Plan wczytany. Rozpocznij analizę na serwerze HA.',
+      analyzing:'Sprawdzanie aktualnych zależności i konfliktów…',
+      reviewed:'Analiza zakończona. Wykonanie migracji pozostaje niedostępne.',
+      invalid:'Nieprawidłowy plan. Wybierz plik JSON o wielkości do 4 MB.',
+      unavailable:'Nie udało się potwierdzić analizy. Sprawdź dostępność backendu i wybierz ponowną analizę.',
+      unauthorized:'Analiza wymaga konta administratora HA.',
+      entities:'Encje', devices:'Urządzenia', statistics:'Statystyki', conflicts:'Konflikty',
+      complete:'Rozpoznano', unknown:'Niepotwierdzone', blocked:'Wymaga obsługi', denied:'Brak dostępu',
+      families:{entity_registry:'Rejestr encji',device_registry:'Rejestr urządzeń',automation:'Automatyzacje',
+        script:'Skrypty',dashboard:'Dashboardy',template:'Szablony',energy:'Energy',powercalc:'Powercalc',
+        history:'Historia',statistics:'Statystyki',external:'Zewnętrzni konsumenci',config_entries:'Integracje',yaml_sources:'Źródła YAML'}
+    } : {
+      title:'Dependency migration', file:'Change plan (JSON)', analyze:'Analyze plan', clear:'Clear plan',
+      idle:'Choose a prepared change plan to check dependencies and conflicts.',
+      reading:'Reading plan…', loaded:'Plan loaded. Start analysis on the HA server.',
+      analyzing:'Checking current dependencies and conflicts…',
+      reviewed:'Analysis complete. Applying the migration remains unavailable.',
+      invalid:'Invalid plan. Choose a JSON file up to 4 MB.',
+      unavailable:'Analysis could not be verified. Check the backend and explicitly analyze again.',
+      unauthorized:'Analysis requires a Home Assistant administrator.',
+      entities:'Entities',devices:'Devices',statistics:'Statistics',conflicts:'Conflicts',
+      complete:'Identified',unknown:'Unverified',blocked:'Requires support',denied:'Access denied',
+      families:{entity_registry:'Entity registry',device_registry:'Device registry',automation:'Automations',
+        script:'Scripts',dashboard:'Dashboards',template:'Templates',energy:'Energy',powercalc:'Powercalc',
+        history:'History',statistics:'Statistics',external:'External consumers',config_entries:'Integrations',yaml_sources:'YAML sources'}
+    };
+  }
+
+  _renderMigration() {
+    if (!this._renameAuthorityAvailable()) return '';
+    const state = this._migration;
+    const t = this._migrationLabels();
+    const busy = ['reading','analyzing'].includes(state?.phase);
+    const result = state?.summary;
+    const details = result ? `<p>${t.entities}: ${result.changes.entities} · ${t.devices}: ${result.changes.devices} · ${t.statistics}: ${result.changes.statistics} · ${t.conflicts}: ${result.conflicts}</p>
+      <ul>${result.families.map(row => `<li>${t.families[row.family]}: ${row.blocked ? t.blocked : row.status === 'COMPLETE' ? t.complete : row.status === 'DENIED' ? t.denied : t.unknown}</li>`).join('')}</ul>` : '';
+    return `<h3>${t.title}</h3><label for="renamerImportFile">${t.file}</label>
+      <input type="file" accept=".json,application/json" id="renamerImportFile">
+      <p role="status" aria-live="polite" ${busy ? 'aria-busy="true"' : ''}>${t[state?.phase || 'idle'] || t.unavailable}</p>
+      <div class="renamer-backend-row"><button type="button" class="btn btn-outline" id="analyzeRenamerImport" ${!state?.content || busy ? 'disabled' : ''}>${t.analyze}</button>
+      <button type="button" class="btn btn-outline" id="clearRenamerImport" ${!state ? 'disabled' : ''}>${t.clear}</button></div>${details}`;
+  }
+
+  _updateMigrationPanel() {
+    const panel = this.shadowRoot?.getElementById('renamerMigrationPanel');
+    if (!panel) return;
+    panel.innerHTML = this._renderMigration();
+    this._bindMigrationPanel();
+  }
+
+  _bindMigrationPanel() {
+    this.shadowRoot.getElementById('renamerImportFile')?.addEventListener('change', event => {
+      const file = event.target.files?.[0];
+      if (file) this._readMigrationFile(file);
+    });
+    this.shadowRoot.getElementById('analyzeRenamerImport')?.addEventListener('click', () => this._previewMigration());
+    this.shadowRoot.getElementById('clearRenamerImport')?.addEventListener('click', () => {
+      this._clearMigration(); this._updateMigrationPanel();
+      this.shadowRoot.getElementById('renamerImportFile')?.focus();
+    });
+  }
+
+  async _readMigrationFile(file) {
+    if (!this._renameAuthorityAvailable()) return;
+    const read = this._captureRead();
+    const epoch = ++this._migrationEpoch;
+    const current = () => epoch === this._migrationEpoch && read.current() && this._renameAuthorityAvailable();
+    this._migration = {phase:'reading',content:null,summary:null};
+    this._updateMigrationPanel();
+    try {
+      if (!Number.isInteger(file.size) || file.size < 1 || file.size > 4_000_000 || typeof file.text !== 'function') throw Error();
+      const content = await file.text();
+      if (!current()) return;
+      if (typeof content !== 'string' || !content.trim() || new TextEncoder().encode(content).length > 4_000_000) throw Error();
+      this._migration = {phase:'loaded',content,summary:null};
+    } catch (_) {
+      if (!current()) return;
+      this._migration = {phase:'invalid',content:null,summary:null};
+    }
+    if (current()) this._updateMigrationPanel();
+  }
+
+  async _previewMigration() {
+    const state = this._migration;
+    if (!this._renameAuthorityAvailable() || !state?.content || ['reading','analyzing'].includes(state.phase)) return;
+    const read = this._captureRead();
+    const epoch = ++this._migrationEpoch;
+    const current = () => epoch === this._migrationEpoch && read.current() && this._renameAuthorityAvailable();
+    state.phase = 'analyzing'; state.summary = null;
+    this._updateMigrationPanel();
+    try {
+      const result = await read.hass.callWS({type:'ha_entity_renamer/import/preview',manifest:state.content});
+      if (!current()) return;
+      const count = n => Number.isInteger(n) && n >= 0 && n <= 10000;
+      const labels = this._migrationLabels().families;
+      const families = result?.families;
+      if (result?.migration_ready !== false || !/^[a-f0-9]{64}$/.test(result.digest)
+        || !result.changes || !['entities','devices','statistics'].every(key => count(result.changes[key]))
+        || !Array.isArray(result.conflicts) || result.conflicts.length > 10000
+        || !Array.isArray(families) || families.length > 13
+        || new Set(families.map(row => row?.family)).size !== families.length
+        || !families.every(row => Object.hasOwn(labels,row?.family) && ['COMPLETE','UNKNOWN','DENIED'].includes(row.status)
+          && Array.isArray(row.blockers))) throw Error();
+      state.summary = {changes:{entities:result.changes.entities,devices:result.changes.devices,statistics:result.changes.statistics},
+        conflicts:result.conflicts.length,families:families.map(row=>({family:row.family,status:row.status,blocked:row.blockers.length>0}))};
+      state.phase = 'reviewed';
+    } catch (error) {
+      if (!current()) return;
+      state.phase = error?.code === 'unauthorized' ? 'unauthorized' : error?.code === 'invalid_proposal' ? 'invalid' : 'unavailable';
+    }
+    if (current()) this._updateMigrationPanel();
+  }
+
   _recoveryAvailable() {
     return this._config?.show_help !== false && this._renameAuthorityAvailable();
   }
@@ -1720,6 +1843,8 @@ class HAEntityRenamer extends HTMLElement {
     this._backendStatusEpoch = 0;
     this._recovery = null;
     this._recoveryEpoch = 0;
+    this._migration = null;
+    this._migrationEpoch = 0;
     this._devices = [];
     this._entities = [];
     this._selectedDevice = null;
@@ -1800,6 +1925,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _cancelRenameAuthority() {
+    this._clearMigration();
     this._clearQueueUndo();
     if (this._loading && !this._applyOperation) this._registryRefreshPending = true;
     this._legacyReviewLog = [];
@@ -3410,6 +3536,11 @@ class HAEntityRenamer extends HTMLElement {
         #renamerRecoveryConfirm {border:1px solid var(--bento-primary,#3B82F6);border-radius:14px;padding:16px;margin:12px 0;}
         .renamer-backend-row button:focus-visible {outline:3px solid var(--primary-color);outline-offset:2px;}
         .renamer-backend-row [role=status] {flex:1 1 180px;min-width:0;overflow-wrap:anywhere;font-size:13px;}
+        .renamer-migration {margin:12px 0;padding:12px;border:1px solid var(--divider-color);border-radius:14px;font-size:14px;overflow-wrap:anywhere;}
+        .renamer-migration h3 {margin:0 0 8px;font-size:16px;}
+        .renamer-migration input {display:block;max-width:100%;min-height:44px;margin:8px 0;}
+        .renamer-migration button {min-height:44px;}
+        .renamer-migration ul {padding-inline-start:24px;}
         .renamer-help { margin:8px 0 12px;font-size:14px; }
         .renamer-help summary { cursor:pointer;min-height:44px;align-content:center; }
         .renamer-help summary:focus-visible { outline:3px solid var(--primary-color);outline-offset:2px; }
@@ -3426,6 +3557,7 @@ class HAEntityRenamer extends HTMLElement {
         </div>
 
       ${this._renderHelp()}
+      ${this._renameAuthorityAvailable() ? `<section class="renamer-migration" id="renamerMigrationPanel">${this._renderMigration()}</section>` : ''}
       ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${this._message.outcome ? createUiV3({language:this._lang}).statusHtml(this._message.outcome) : ''} ${_esc(this._message.text || '')}</div>` : ''}
       ${this._renderApplyResult()}
       ${this._confirmDialogOpen ? this._renderRenameConfirmation() : ''}
@@ -3445,6 +3577,7 @@ class HAEntityRenamer extends HTMLElement {
     ${this._hass?.user?.is_admin && this._config?.show_support !== false && !_localSupportDismissed() ? _LOCAL_DONATE_HTML : ''}`;
 
     this._bindHelp();
+    this._bindMigrationPanel();
     _bindLocalSupportDismiss(this.shadowRoot);
     this._attachEvents();
     for (const group of this.shadowRoot.querySelectorAll('[data-auto-group]')) group.open = openAutomaticDevices.has(group.dataset.autoGroup);
