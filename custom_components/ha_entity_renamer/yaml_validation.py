@@ -356,7 +356,7 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 helper_args = ('--native-helpers',str(request))
             worker = str(Path(__file__).with_name('yaml_validation_worker.py'))
             process = await asyncio.create_subprocess_exec(
-                sys.executable, '-I', worker, str(before), str(after),
+                sys.executable, '-I', '-B', worker, str(before), str(after),
                 *helper_args,
                 *(('--source-evidence',) if with_sources else ()),
                 *(('--powercalc-profile-inputs',) if plan.powercalc_inputs is not None else ()),
