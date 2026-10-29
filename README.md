@@ -50,8 +50,9 @@ references visible through Home Assistant's APIs.
    regenerated IDs again immediately before applying. Stale proposals fail
    without a registry write and remain in the queue for review.
 
-#Before confirming a rename, review the queued entity IDs, friendly names and
-device names. The confirmation also shows **Templates, Powercalc, Automations,
+Before confirming a rename, review the queued entity IDs, friendly names and
+device names. For larger queues, expand **Review remaining changes** to inspect
+every entity and device before applying. The confirmation also shows **Templates, Powercalc, Automations,
 Scripts and Integrations** as disabled, unchecked **Coming soon** options.
 Dependency updates are not available; review affected references separately.
 There is no change-plan file import or companion integration.
