@@ -78,6 +78,13 @@ class NativeTemplateBindingTransportTests(unittest.IsolatedAsyncioTestCase):
             source._attr_native_value = value
             source.async_write_ha_state()
             await hass.async_block_till_done()
+            # Minimum Core's task drain yields once but does not track native
+            # synchronous call_soon callbacks. Let the genuine finite self-loop
+            # settle (native limiter is len(_template_attrs)), without invoking
+            # a handler, changing a clock, cache, State or limiter field.
+            for _ in range(2 * max(len(e._template_attrs) for e in (consumer, control)) + 2):
+                await asyncio.sleep(0)
+            await hass.async_block_till_done()
 
         # Establish both histories through real source events, never fields/seeds.
         await emit(self.producer, 3)
