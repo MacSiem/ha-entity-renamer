@@ -76,10 +76,10 @@ def capture_template_state_yaml(bundle, plan, mapping):
 
 def assert_state_yaml_composition(chain, change):
     """Every root/reopen binds the exact new preparation to retained sources."""
-    from .native_template_state_composition import TemplateStateComposition
+    from .native_template_state_composition import TemplateStateComposition, retain_state_composition
     if type(change) is not PreparedTemplateStateYAML:
         raise Refused('template_state_yaml_preparation_required')
-    from .native_template_composition import decode_composition, encode_composition
+    from .native_template_composition import decode_composition
     from .native_template_yaml_server import _baseline_stamp
     from .prepared import canonical
     reference = chain.plan.native_inputs
@@ -92,20 +92,21 @@ def assert_state_yaml_composition(chain, change):
         if baseline.digest != reference[2]:
             raise Refused('template_state_yaml_original_baseline_changed')
         composition = decode_composition(payload.get('composition'), baseline)
-        binding = (reference, _baseline_stamp(baseline), composition)
+        wire, check = retain_state_composition(composition, baseline)
+        binding = (reference, _baseline_stamp(baseline), composition, wire, check)
         chain._template_state_original_binding = binding
     else:
-        if (type(binding) is not tuple or len(binding) != 3 or binding[0] != reference
+        if (type(binding) is not tuple or len(binding) != 5 or binding[0] != reference
                 or binding[1] != _baseline_stamp(baseline)):
             raise Refused('template_state_yaml_original_baseline_changed')
         composition = binding[2]
-    if encode_composition(composition, baseline) != payload.get('composition'):
+    binding[4]()
+    if binding[3] != payload.get('composition'):
         raise Refused('template_state_yaml_original_composition_changed')
     if (type(composition) is not TemplateStateComposition or baseline != chain.baseline
             or change.receipt != chain.original_receipt or baseline.receipt != change.receipt
             or change.source_program_sha256 != composition.state_config_program.sha256):
         raise Refused('template_state_yaml_original_composition_mismatch')
-    composition.assert_baseline(baseline)
     patches = composition.yaml_plan.patches
     if (tuple((row.path, _hash(row.before), row.after) for row in change.files)
             != tuple((row.path, row.expected_sha256, row.proposed_bytes) for row in patches)):

@@ -230,7 +230,7 @@ class NativeTemplateYAMLServer:
                   and _baseline_stamp(self.chain.baseline) == original_stamp,
                   'original_binding_changed')
             _need(self.chain.baseline.receipt == self.receipt
-                  and payload.get('composition') == encode_composition(self.composition, self.chain.baseline),
+                  and self._composition_current(payload.get('composition')),
                   'composition_changed')
         self._preparation_current = preparation_current
         preparation_current()
@@ -243,6 +243,9 @@ class NativeTemplateYAMLServer:
     def _new_observer(self):
         return NativeTemplateYAMLRuntimeReadback(self.hass, self.chain, self.evidence,
                                                 guard=self._scope)
+
+    def _composition_current(self, payload):
+        return payload == encode_composition(self.composition, self.chain.baseline)
 
     async def _observe(self, state=None):
         self._scope()

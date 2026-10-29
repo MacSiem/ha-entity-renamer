@@ -113,6 +113,17 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
 
 
+    def _composition_current(self, payload):
+        from .native_template_state_composition import retain_state_composition
+        binding = getattr(self, '_retained_state_composition', None)
+        if binding is None:
+            wire, check = retain_state_composition(self.composition, self.chain.baseline)
+            binding = (self.composition, wire, check)
+            self._retained_state_composition = binding
+        _need(self.composition is binding[0], 'original_composition_replaced')
+        binding[2]()
+        return payload == binding[1]
+
     def _new_observer(self):
         from .native_template_state_yaml import NativeTemplateStateYAMLRuntimeReadback
         _need(type(self.composition) is TemplateStateComposition, 'state_composition_required')

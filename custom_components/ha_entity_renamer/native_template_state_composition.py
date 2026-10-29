@@ -6,7 +6,7 @@ source seals; it does not authorize selective effects or qualify consumers.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import json
 import re
 
@@ -156,3 +156,41 @@ def decode_state_composition(payload, baseline):
         _typed(payload['physical_consumers'], tuple[tuple[str, str, str], ...], encode=False))
     value.assert_baseline(baseline)
     return value
+
+
+def _retained_fields(value):
+    """Detach every accepted field, retaining exact types and immutable bytes.
+
+    No hash-only shortcut, shared mutable list/dict or executable property is
+    retained. The ordinary typed codec authenticates the initial structure.
+    """
+    kind = type(value)
+    if value is None or kind in (str, bytes, int, bool):
+        return (kind, value)
+    if kind in (tuple, list):
+        return (kind, tuple(_retained_fields(item) for item in value))
+    if kind is dict:
+        return (kind, frozenset((_retained_fields(key), _retained_fields(item))
+                                for key, item in value.items()))
+    if kind is TemplateStateComposition or kind in _TYPES.values():
+        return (kind, tuple((field.name, _retained_fields(getattr(value, field.name)))
+                             for field in fields(kind)))
+    from .transaction import Refused
+    raise Refused('template_state_retained_type_changed')
+
+
+def retain_state_composition(value, baseline):
+    """Validate once, then compare ALL original fields at each live fence.
+
+    Only immutable source evidence is retained. Authorization, live HA graphs,
+    accepted receipt prefixes and disk observations are never cached here.
+    """
+    from .native_template_yaml_server import _baseline_stamp
+    from .transaction import Refused
+    wire = encode_state_composition(value, baseline)
+    original, original_baseline = _retained_fields(value), _baseline_stamp(baseline)
+    def check():
+        if (_retained_fields(value) != original
+                or _baseline_stamp(baseline) != original_baseline):
+            raise Refused('template_state_retained_original_changed')
+    return wire, check
