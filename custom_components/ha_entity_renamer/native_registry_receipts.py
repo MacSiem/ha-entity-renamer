@@ -956,8 +956,9 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                                   operations, partial=True)
         for key, value in states.items():
             sources['.storage/' + key][:4] = [value['sha256'], *value['identity']]
+        # The constructor owns the detached copy, including nested values.
         return AcceptedInputState(self.baseline.receipt_json, head, sources,
-            {key: deepcopy(value['document']) for key, value in states.items()},
+            {key: value['document'] for key, value in states.items()},
             live_check=lambda: self._check_live_yaml(intent, context))
 
     def _check_live_yaml(self, intent, context):

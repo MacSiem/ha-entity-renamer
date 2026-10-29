@@ -460,6 +460,21 @@ class _ObservedNativeFiles:
     files: tuple[NativeInputFile, ...]
 
 
+def _assert_accepted_native_file(item, source, expected_document, version):
+    """Compare one freshly read image, decoding its immutable bytes once.
+
+    This pure codec check grants no freshness: _Pinned retains every physical,
+    manager, named-path and accepted-head fence around this comparison.
+    """
+    if (item.raw is None or source is None
+            or (_sha(item.raw), *item.identity[:2]) != source):
+        _fail('native_input_accepted_state_mismatch')
+    document = _envelope(item.raw, item.key, version)
+    if (_json(document['data']) != item.manager_json
+            or _json(document) != _json(expected_document)):
+        _fail('native_input_accepted_state_mismatch')
+
+
 class _Pinned:
     """Own descriptors until final named-path checks, including across awaits.
 
@@ -563,12 +578,8 @@ class _Pinned:
                         _fail('native_input_limit')
                     path = '.storage/' + item.key
                     source = dict((row[0], row[1:]) for row in self.input_state.source_files).get(path)
-                    if (item.raw is None or source is None
-                            or (_sha(item.raw), *item.identity[:2]) != source
-                            or _json(_envelope(item.raw, item.key, self.receipt.version)['data']) != item.manager_json
-                            or _json(_envelope(item.raw, item.key, self.receipt.version)) !=
-                               _json(expected_documents[item.key])):
-                        _fail('native_input_accepted_state_mismatch')
+                    _assert_accepted_native_file(item, source,
+                        expected_documents[item.key], self.receipt.version)
             self.verify()
             return baseline
         except BaseException:
