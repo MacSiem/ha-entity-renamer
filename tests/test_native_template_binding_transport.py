@@ -62,6 +62,17 @@ class NativeTemplateBindingTransportTests(unittest.IsolatedAsyncioTestCase):
                     '      count: "{{ this.attributes.get(\'count\', 0) + 1 }}"\n')
 
         yaml_path = root / 'template.yaml'
+        # Both histories must start from the same genuine native predecessor.
+        # prepare() already installed the migrated stateless consumer; create
+        # the control's stateless predecessor before adding memory to either.
+        predecessor = '- unique_id: scope\n  sensor:\n'
+        for uid, name, source in (('value', 'Runtime consumer', old),
+                ('control', 'This rebind control', control_source.entity_id)):
+            predecessor += ('  - unique_id: ' + uid + '\n    name: ' + name + '\n'
+                '    state: "{{ states(\'' + source + '\') | int(0) * 2 }}"\n')
+        yaml_path.write_text(predecessor)
+        await hass.services.async_call('template', 'reload', {}, blocking=True, context=Context())
+        await hass.async_block_till_done()
         original = ('- unique_id: scope\n  sensor:\n'
                     + definition('value', 'Runtime consumer', old)
                     + definition('control', 'This rebind control', control_source.entity_id)).encode()
