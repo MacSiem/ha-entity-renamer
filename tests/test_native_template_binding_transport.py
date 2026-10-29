@@ -457,6 +457,7 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hass.states.get(entity.entity_id).state, hass.states.get(control.entity_id).state)
 
     async def test_natural_minute_tick_matches_independent_native_control(self):
+        from homeassistant.core import callback
         await self.pair(time=True)
         hass, entity, control = self.f.hass, self.consumer, self.control
         before = hass.states.get(entity.entity_id).attributes['minute']
@@ -476,6 +477,7 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(handle.cancelled())
         ready = asyncio.Event()
         changed_ids = set()
+        @callback
         def changed(event):
             state = event.data.get('new_state')
             if (event.data.get('entity_id') in (entity.entity_id, control.entity_id) and state is not None
