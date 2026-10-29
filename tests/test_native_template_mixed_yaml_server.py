@@ -193,6 +193,72 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_staging_preserves_disabled_with_yaml_initial_true(self):
         await self._native_staging_case(False)
 
+    async def test_real_source_change_in_detached_interval_never_succeeds(self):
+        from attr import asdict
+        runtime, mapping, _, _, original = await self.data()
+        hass, root = self.f.hass, self.f.root
+        entity, = hass.data['automation'].entities
+        before = {key: asdict(row) for key, row in self.f.entity.entities.items()}
+        changed = False
+        def guard():
+            nonlocal changed
+            if not changed and entity._is_enabled is False:
+                changed = True
+                # Real source event, no replacement observer/baseline or fake ACK.
+                self.producer._attr_native_value = 17
+                self.producer.async_write_ha_state()
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        with self.assertRaises(self.module('transaction').Refused):
+            await runtime.native_forward(hass, mapping, guard=guard, refresh=refresh)
+        self.assertTrue(changed)
+        self.assertEqual({key: asdict(row) for key, row in self.f.entity.entities.items()}, before)
+        for path, raw in original.items():
+            self.assertEqual((root / path).read_bytes(), raw)
+        records = await runtime.journal.active()
+        self.assertEqual(len(records), 1)
+        self.assertNotEqual(records[0].status, 'applied')
+        store = self.module('native_registry_receipts').native_registry_receipt_store(hass, runtime.preparations)
+        await store.initialize()
+        key = self.module('native_automation_lifecycle')._key(
+            records[0].operation_id, records[0].plan.fingerprint, 'forward', 'completed')
+        self.assertIsNone(store.read(key))
+        self.assertFalse(runtime.operation_lock.locked())
+
+    async def test_running_automation_action_refuses_before_effects(self):
+        from attr import asdict
+        from homeassistant.core import Context
+        runtime, mapping, _, _, _ = await self.data()
+        hass, root = self.f.hass, self.f.root
+        path = root / 'mixed_automations.yaml'
+        path.write_text(path.read_text() + '  - delay: 60\n')
+        await hass.services.async_call('automation', 'reload', {}, blocking=True, context=Context())
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        entity, = hass.data['automation'].entities
+        self.producer._attr_native_value = 5
+        self.producer.async_write_ha_state()
+        for _ in range(100):
+            if entity.action_script.is_running:
+                break
+            await asyncio.sleep(0.001)
+        self.assertTrue(entity.action_script.is_running)
+        before = {key: asdict(row) for key, row in self.f.entity.entities.items()}
+        files = {name: (root / name).read_bytes() for name in (
+            'configuration.yaml', 'template.yaml', 'mixed_automations.yaml', 'mixed_scripts.yaml')}
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        try:
+            with self.assertRaises((ValueError, self.module('transaction').Refused)):
+                await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+            self.assertEqual({key: asdict(row) for key, row in self.f.entity.entities.items()}, before)
+            for name, raw in files.items():
+                self.assertEqual((root / name).read_bytes(), raw)
+            self.assertTrue(entity.action_script.is_running, 'admission must not cancel user actions')
+            self.assertFalse(runtime.operation_lock.locked())
+        finally:
+            await entity.async_turn_off()
+
     async def test_dependent_source_identity_refuses_before_effects(self):
         from attr import asdict
         runtime, mapping, _, dependents, original = await self.data()
