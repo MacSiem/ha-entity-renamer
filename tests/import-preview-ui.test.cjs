@@ -33,6 +33,7 @@ test('release A uses fresh native registries, shows actual and proposed names, n
  assert.equal(f.card._renameQueue,queue);assert.equal(f.dom.window.localStorage.length,0);assert.equal(node(f,'applyRenamerImport'),null);
  await analyze(f);assert.equal(f.messages.length,4,'every explicit preview fetches current registries');
  assert.equal(node(f,'checkRenamerBackendStatus'),null,'unpublished companion is not an active prerequisite');
+ const beforeRecovery=f.messages.length;await f.card._checkBackendStatus();await f.card._inspectRecovery();await f.card._restoreRecovery();assert.equal(f.messages.length,beforeRecovery,'direct new recovery methods are disabled for admins too');
  const coming=f.card.shadowRoot.querySelectorAll('[data-coming-soon]');assert.ok(coming.length);for(const item of coming){assert.equal(item.disabled,true);assert.equal(item.checked,false);}
  }finally{f.dom.window.close();}
 });
@@ -57,7 +58,7 @@ test('explicit selection compares only selected changes and never infers device 
  }finally{f.dom.window.close();}
 });
 test('strict decoding rejects duplicates, cross-domain, overlapping, unlinked statistics and unknown instructions before IO',async()=>{
- const bad=['{"entities":[],"entities":[]}', '{"entities":[{"entity_id":"sensor.old","proposed_entity_id":"switch.new"}]}',
+ const bad=['{"entities":null}', '{"entities":[],"entities":[]}', '{"entities":[{"entity_id":"sensor.old","proposed_entity_id":"switch.new"}]}',
  JSON.stringify({entities:[{entity_id:'sensor.old',proposed_entity_id:'sensor.new'},{entity_id:'sensor.new',proposed_entity_id:'sensor.third'}]}),
  JSON.stringify({entities:[{entity_id:'sensor.old',proposed_entity_id:'sensor.new'}],statistics:[{statistic_id:'sensor.other',proposed_statistic_id:'sensor.next'}]}),
  JSON.stringify({entities:[{entity_id:'sensor.old',proposed_entity_id:'sensor.new',execute:'yes'}]}),

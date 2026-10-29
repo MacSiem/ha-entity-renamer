@@ -215,7 +215,9 @@ async def ws_recovery_inspect(hass, connection, message):
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_recovery_restore(hass, connection, message):
-    await _read_recovery(hass, connection, message, action='restore')
+    # Release A exposes recovery inventory, but admits no public restore IO.
+    connection.send_error(message['id'], 'feature_unavailable',
+                          'Migration restore is unavailable in this release')
 
 
 @websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/import/preview',

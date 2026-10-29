@@ -1076,7 +1076,7 @@ function _decodeRegistryImport(content) {
   };
   const rows = {};
   for (const [family, allowed] of Object.entries(fields)) {
-    const list = doc[family] ?? [];
+    const list = Object.hasOwn(doc,family) ? doc[family] : [];
     if (!Array.isArray(list)) throw Error();
     for (const row of list) {
       if (!object(row)) throw Error();
