@@ -383,7 +383,10 @@ script:
         self.assertEqual({(r.name, r.before) for r in plan.template_variable_bindings},
                          {('source', 'sensor.foo'), ('alias', 'sensor.foo'), ('source', 'light.old')})
         unsafe = source.replace("state: '{{ is_state(source, \"on\") }}'", "state: '{{ source }}'")
-        self.assert_blocked(unsafe)
+        blocked = self.plan(unsafe)
+        self.assertFalse(blocked.ready)
+        self.assertIn('ambiguous_reference_context', {i.code for i in blocked.issues})
+        self.assertFalse(any(r.approved for r in blocked.template_variable_bindings))
 
     def test_unmapped_scalar_variable_has_no_transport_locator(self):
         source = """template:
