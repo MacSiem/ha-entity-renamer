@@ -383,6 +383,33 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(baseline.NativeInputBaselineError):
             observed.check()
 
+    async def test_unchanged_manager_checks_compare_fresh_native_bytes_without_decoding_again(self):
+        observed = baseline._Managers(self.hass, self.receipt)
+        with (patch.object(observed, 'encoder', wraps=observed.encoder) as encoded,
+              patch.object(baseline, '_loads', side_effect=AssertionError(
+                  'unchanged native bytes must not be decoded again'))):
+            observed.check()
+            observed.check()
+        self.assertEqual(encoded.call_count, 6, 'all three native managers are freshly encoded on each check')
+        self.entity.async_update_entity(self.other.entity_id, name='Foreign actual change')
+        await self.entity._store.async_save(self.entity._data_to_save())
+        await self.hass.async_block_till_done()
+        with self.assertRaisesRegex(baseline.NativeInputBaselineError, 'native_input_manager_changed'):
+            observed.check()
+
+    async def test_manager_check_preserves_canonical_fallback_and_strict_native_bytes_type(self):
+        observed = baseline._Managers(self.hass, self.receipt)
+        actual = observed.encoder
+        # Only reformat the genuine native serialization in this codec test.
+        # It must keep the existing canonical comparison's whitespace tolerance.
+        with (patch.object(observed, 'encoder', side_effect=lambda value: actual(value) + b' '),
+              patch.object(baseline, '_loads', wraps=baseline._loads) as decoded):
+            observed.check()
+        self.assertEqual(decoded.call_count, 3)
+        with patch.object(observed, 'encoder', side_effect=lambda value: bytearray(actual(value))):
+            with self.assertRaises(baseline.NativeInputBaselineError):
+                observed.check()
+
     async def test_no_native_load_save_or_flush_during_capture(self):
         async def forbidden(*args, **kwargs):
             raise AssertionError('native effect during read-only capture')
