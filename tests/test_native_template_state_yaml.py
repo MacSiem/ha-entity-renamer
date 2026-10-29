@@ -168,6 +168,32 @@ class SelectiveYAMLNativeRootTests(unittest.IsolatedAsyncioTestCase):
                 module.assert_state_yaml_composition(readonly, change)
         finally:
             reopened_store.plans[native_ref[0]] = saved
+        retain = self.module('native_template_state_composition').retain_state_composition
+        wire, check_retained = retain(composition, baseline)
+        self.assertEqual(wire, self.module('native_template_composition').encode_composition(composition, baseline))
+        check_retained()
+        count = composition.consumer_history['content']['states']['count']
+        try:
+            composition.consumer_history['content']['states']['count'] = count + 1
+            with self.assertRaises(self.module('transaction').Refused):
+                check_retained()
+        finally:
+            composition.consumer_history['content']['states']['count'] = count
+        original_program = composition.state_config_program.original_json
+        try:
+            object.__setattr__(composition.state_config_program, 'original_json', original_program + b' ')
+            with self.assertRaises(self.module('transaction').Refused):
+                check_retained()
+        finally:
+            object.__setattr__(composition.state_config_program, 'original_json', original_program)
+        original_plan = composition.yaml_plan.patches
+        try:
+            object.__setattr__(composition.yaml_plan, 'patches', ())
+            with self.assertRaises(self.module('transaction').Refused):
+                check_retained()
+        finally:
+            object.__setattr__(composition.yaml_plan, 'patches', original_plan)
+        check_retained()
         original_manager = readonly.baseline.files[0].manager_json
         try:
             object.__setattr__(readonly.baseline.files[0], 'manager_json', original_manager + b' ')
