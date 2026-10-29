@@ -15,8 +15,13 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+from typing import TYPE_CHECKING
 
 from .yaml_plan import Limits, _Reader, _relative
+
+if TYPE_CHECKING:
+    from .yaml_source_binding import OriginalSourceEvidence
+    from .template_source_evidence import OriginalTemplateStateSources, CandidateTemplateStateSources
 
 
 class YAMLValidationError(ValueError):
@@ -38,6 +43,23 @@ class ValidationReceipt:
     @property
     def ready_for_apply(self):
         return not self.unsupported_domains
+
+
+@dataclass(frozen=True)
+class TemplateStateSourceValidation:
+    """Same ORIGINAL checker/source scope, never runtime or writer authority.
+
+    The legacy receipt retains its own reload admission/unsupported flags.
+    Selective activation requires the separate actual runtime/root contract.
+    """
+    receipt: ValidationReceipt
+    evidence: OriginalSourceEvidence
+    original_sources: OriginalTemplateStateSources
+    candidate_sources: CandidateTemplateStateSources
+
+    @property
+    def migration_ready(self):
+        return False
 
 
 # Ancillary runtime inputs used by the native checker (including blueprint refs).
@@ -299,13 +321,20 @@ async def _settled_executor(hass, function, *args):
 
 
 async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, with_sources=False,
-                                   powercalc_bundle=None, powercalc_candidate_documents=None, native_helpers=()):
+                                   powercalc_bundle=None, powercalc_candidate_documents=None, native_helpers=(),
+                                   template_reference_mapping=None):
     """Return only after native validation of the entire proposed graph succeeds.
 
     scratch_parent must be private local storage OUTSIDE config_root. It contains
     temporary secret material with mode 0700 and is erased on every normal exit.
     A failure never invokes file_mutations or a live reload service.
     """
+    if template_reference_mapping is not None:
+        from .yaml_plan import _mapping
+        if not with_sources or native_helpers or powercalc_bundle is not None:
+            raise YAMLValidationError('template_state_source_profile_scope_required')
+        # Detach mutable caller data before the first staging/executor await.
+        template_reference_mapping = _mapping(template_reference_mapping)
     if powercalc_candidate_documents is not None:
         from .powercalc_candidate_sources import PlannedPowercalcDocuments
         if (not with_sources or powercalc_bundle is None or plan.powercalc_inputs is None
@@ -354,10 +383,19 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 request.write_text(encoded)
                 request.chmod(0o600)
                 helper_args = ('--native-helpers',str(request))
+            state_source_args = ()
+            if template_reference_mapping is not None:
+                request = Path(stage) / 'template-reference-mapping.json'
+                request.write_text(json.dumps(template_reference_mapping,
+                    sort_keys=True, separators=(',', ':'), allow_nan=False))
+                request.chmod(0o600)
+                state_source_args = ('--template-state-source-v3',
+                                     '--template-reference-mapping', str(request))
             worker = str(Path(__file__).with_name('yaml_validation_worker.py'))
             process = await asyncio.create_subprocess_exec(
                 sys.executable, '-I', '-B', worker, str(before), str(after),
                 *helper_args,
+                *state_source_args,
                 *(('--source-evidence',) if with_sources else ()),
                 *(('--powercalc-profile-inputs',) if plan.powercalc_inputs is not None else ()),
                 *(('--powercalc-candidate-inputs',) if powercalc_candidate_documents is not None else ()),
@@ -413,6 +451,17 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                             powercalc_candidate_documents, result['powercalc_candidate_sources'],
                             result['powercalc_candidate_documents'])
                         evidence = replace(evidence, powercalc_candidate_sources=candidate)
+                if template_reference_mapping is not None:
+                    from .template_source_evidence import (seal_template_state_sources,
+                        seal_template_state_candidate)
+                    original = seal_template_state_sources(receipt, staged[3],
+                        result['template_state_source_profile'], plan=plan,
+                        mapping=template_reference_mapping)
+                    candidate = seal_template_state_candidate(receipt, original,
+                        result['template_candidate_state_source_profile'], plan=plan,
+                        mapping=template_reference_mapping)
+                    candidate.assert_original(receipt, original)
+                    return TemplateStateSourceValidation(receipt, evidence, original, candidate)
                 return receipt, evidence
             return receipt
     except (OSError, TimeoutError):
@@ -432,6 +481,17 @@ async def async_validate_proposed_with_sources(hass, plan, scratch_parent, *, ti
     """
     return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
                                          with_sources=True, native_helpers=native_helpers)
+
+
+async def async_validate_proposed_with_template_state_sources(
+        hass, plan, mapping, scratch_parent, *, timeout=120):
+    """Explicit internal full-state source preflight; no readiness/activation.
+
+    Same staging, isolated native checker, receipt and source/directory fences.
+    This opt-in does not replace the legacy receipt or its old reload semantics.
+    """
+    return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
+        with_sources=True, template_reference_mapping=mapping)
 
 
 def assert_proposal_matches(receipt, plan):
