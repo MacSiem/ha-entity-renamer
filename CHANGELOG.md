@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.6.1 (2026-10-29)
+
+- Remove change-plan import and its registry-preview panel. Keep the existing device/entity browsing, editable names/IDs, queue, impact review, confirmation and history workflows.
+- Show unavailable Template, Powercalc, automation, script and integration dependency updates as disabled, unchecked Coming soon options in the rename confirmation.
+- Preserve the existing rename transaction and authorization behavior; no migration backend is included.
+
 ## 4.6.0 (2026-10-29)
 
 - Import a JSON change plan, explicitly choose entity/device rows and preview the current Home Assistant registries without applying or queuing changes. No companion integration is required.

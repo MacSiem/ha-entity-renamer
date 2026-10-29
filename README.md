@@ -8,32 +8,6 @@ references visible through Home Assistant's APIs.
 
 [![Version](https://img.shields.io/github/v/release/MacSiem/ha-entity-renamer)](https://github.com/MacSiem/ha-entity-renamer/releases) [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-## Import and registry preview
-
-An administrator can import a JSON change plan, choose entity and device rows
-separately, and compare them with the current Home Assistant registries. Choosing
-an entity does not select its device. Each explicit preview reads the registries
-again and shows missing sources, occupied destination IDs, changed device
-associations and other registry conflicts. The preview shows the current and
-proposed IDs/names; it never queues or applies imported changes.
-
-This is a **read-only registry preview**. It does not check or migrate YAML,
-templates, integrations, dashboards, history, statistics or other dependencies.
-Automatic dependency migration, Powercalc, Template migration and migration
-recovery are disabled as **Coming soon** for a future release. No companion
-integration is needed for this frontend release.
-
-The JSON file must use the proposal format (`entities`, `devices`, optional
-`statistics`, `checks` and `at`); unknown instruction fields, duplicate rows/keys,
-cross-domain changes, overlapping targets and unlinked statistic mappings are
-rejected. Files may be up to 4 MB. The imported file, selection and preview stay
-in browser memory and are cleared after account, role, connection or card changes.
-They are not saved to browser storage or uploaded to an external service.
-
-The manual and Automatic IDs queue workflows below continue to require separate
-review of affected references. Registry renames do not provide automatic
-migration of those references.
-
 ## How it works
 
 1. **Devices and entities from the registries.** On load, the card fetches
@@ -76,7 +50,13 @@ migration of those references.
    regenerated IDs again immediately before applying. Stale proposals fail
    without a registry write and remain in the queue for review.
 
-### What is automatic vs. manual
+#Before confirming a rename, review the queued entity IDs, friendly names and
+device names. The confirmation also shows **Templates, Powercalc, Automations,
+Scripts and Integrations** as disabled, unchecked **Coming soon** options.
+Dependency updates are not available; review affected references separately.
+There is no change-plan file import or companion integration.
+
+## What is automatic vs. manual
 
 | Automatic | Manual (optional) |
 |---|---|
@@ -88,8 +68,8 @@ migration of those references.
 
 ## Screenshots
 
-These images show the unchanged queue workflow from 4.5.0. In 4.6.0, the
-read-only registry preview appears above these controls.
+These images show the unchanged queue workflow from 4.5.0. The rename
+confirmation now also shows unavailable dependency options as Coming soon.
 
 | Light | Dark |
 |---|---|
