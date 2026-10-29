@@ -205,11 +205,16 @@ def _decode_yaml(data, *, state_mode=False):
         raise ValueError('invalid_prepared_yaml_runtime')
     if state_mode and domains != ('template',):
         raise ValueError('template_state_only_preparation_required')
-    if not state_mode and 'template' in domains and (domains != ('template',)
-            or len(runtime_expected) != 1 or runtime_expected[0][0] != 'template'
-            or None in runtime_expected[0][1:]
-            or runtime_expected[0][1] == runtime_expected[0][2]):
-        raise ValueError('template_prepared_runtime_subset_required')
+    if not state_mode and 'template' in domains:
+        # Parsing one aggregate ordinary YAML change does not grant activation.
+        # The receipted adapter still requires its exact typed composite observer
+        # and ORIGINAL composition. Every changed domain needs checker seals;
+        # missing/ambiguous runtime coverage remains rejected before any effect.
+        if (set(domains) - {'automation', 'script', 'template'}
+                or domains != tuple(sorted(domains))
+                or tuple(row[0] for row in runtime_expected) != domains
+                or any(None in row[1:] or row[1] == row[2] for row in runtime_expected)):
+            raise ValueError('template_prepared_runtime_subset_required')
     receipt = ValidationReceipt(root, tuple(sources), tuple(directories), tuple(proposed),
                                 domains, tuple(raw['unsupported_domains']), _text(raw['version']), tuple(runtime_expected))
     return PreparedYAML(receipt, tuple(files))
