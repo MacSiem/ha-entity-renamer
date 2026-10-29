@@ -8,20 +8,31 @@ references visible through Home Assistant's APIs.
 
 [![Version](https://img.shields.io/github/v/release/MacSiem/ha-entity-renamer)](https://github.com/MacSiem/ha-entity-renamer/releases) [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-## Development branch
+## Import and registry preview
 
-The unreleased migration panel lets an administrator import a JSON change plan,
-choose entity and device rows separately, and explicitly request dependency and
-conflict analysis from the optional backend. Choosing an entity does not select
-its device. The imported file and selection stay in memory and are cleared when
-the account, permissions or connection changes.
+An administrator can import a JSON change plan, choose entity and device rows
+separately, and compare them with the current Home Assistant registries. Choosing
+an entity does not select its device. Each explicit preview reads the registries
+again and shows missing sources, occupied destination IDs, changed device
+associations and other registry conflicts. The preview shows the current and
+proposed IDs/names; it never queues or applies imported changes.
 
-Backend status and recovery are available in the active card, including when
-help is hidden. Checking status does not apply a change. Recovery requires a
-separate inspection and confirmation; an uncertain result requires another
-status check. Full automatic dependency migration is still under development
-and the import panel does not offer Apply. The released queue workflow described
-below continues to require separate review of affected references.
+This is a **read-only registry preview**. It does not check or migrate YAML,
+templates, integrations, dashboards, history, statistics or other dependencies.
+Automatic dependency migration, Powercalc, Template migration and migration
+recovery are disabled as **Coming soon** for a future release. No companion
+integration is needed for this frontend release.
+
+The JSON file must use the proposal format (`entities`, `devices`, optional
+`statistics`, `checks` and `at`); unknown instruction fields, duplicate rows/keys,
+cross-domain changes, overlapping targets and unlinked statistic mappings are
+rejected. Files may be up to 4 MB. The imported file, selection and preview stay
+in browser memory and are cleared after account, role, connection or card changes.
+They are not saved to browser storage or uploaded to an external service.
+
+The manual and Automatic IDs queue workflows below continue to require separate
+review of affected references. Registry renames do not provide automatic
+migration of those references.
 
 ## How it works
 

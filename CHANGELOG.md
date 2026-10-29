@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## 4.6.0 (2026-10-29)
 
-- Import JSON change plans for explicit backend dependency/conflict analysis, with separate entity/device selection and a reason for each rejected registry row.
-- Keep migration status and explicit inspect/confirm recovery in the active card when optional help is hidden.
-- Clear imported plans after authority or connection changes and discard analysis results for an older selection. Automatic dependency application remains under development.
+- Import a JSON change plan, explicitly choose entity/device rows and preview the current Home Assistant registries without applying or queuing changes. No companion integration is required.
+- Show current/proposed IDs and names, missing sources, occupied targets and changed device associations. Reject malformed or ambiguous input instead of inferring an already-applied rename.
+- Clear imported plans after account, role or connection changes and discard results for an older file or selection. Keep input in memory only.
+- Mark automatic dependency migration (including Template and Powercalc) as Coming soon. New migration recovery is disabled in the frontend and its direct restore API refuses before Runtime or storage IO. Existing registry queue/history/export behavior remains available.
 
 ## 4.5.0 (2026-10-22)
 
