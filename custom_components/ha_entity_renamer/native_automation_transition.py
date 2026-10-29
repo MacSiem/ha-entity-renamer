@@ -8,6 +8,7 @@ This is not a continuation mechanism for running actions or pending triggers.
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import replace
 from pathlib import Path
 from types import CodeType
@@ -38,7 +39,7 @@ class NativeAutomationTransition:
         component = hass.data.get('automation')
         _need(type(component) is EntityComponent and component.hass is hass)
         self.hass, self.native, self.component = hass, native, component
-        self.task = asyncio.current_task()
+        self.task, self.thread = asyncio.current_task(), threading.get_ident()
         self.original = self._entities()
         self.enabled = tuple((key, entity._is_enabled) for key, entity in self.original)
         _need(all(type(value) is bool for _, value in self.enabled))
@@ -60,7 +61,7 @@ class NativeAutomationTransition:
         self.check_native()
 
     def check_native(self):
-        _need(asyncio.current_task() is self.task and self.path.read_bytes() == self.source
+        _need(threading.get_ident() == self.thread and self.path.read_bytes() == self.source
               and self.hass.data.get('automation') is self.component)
         _need(all(path.read_bytes() == source for path, source in self.other_sources))
         for owner, name, function in self.functions:
@@ -88,6 +89,7 @@ class NativeAutomationTransition:
         return rows
 
     async def quiesce(self):
+        _need(asyncio.current_task() is self.task)
         self.check_native()
         _need(self._entities() == self.original)
         # No stop/cancel of running or queued actions is admitted. Native disable
@@ -105,6 +107,7 @@ class NativeAutomationTransition:
         confined to a fresh prepared config_block; raw_config remains native and
         unchanged for the independent source/projection observer.
         """
+        _need(asyncio.current_task() is self.task)
         self.assert_disabled()
         config = await self.component.async_prepare_reload(skip_reset=True)
         self.assert_disabled()
@@ -131,6 +134,7 @@ class NativeAutomationTransition:
         self.assert_disabled()
 
     async def restore(self):
+        _need(asyncio.current_task() is self.task)
         rows = dict(self.assert_disabled())
         for key, enabled in self.enabled:
             self.check_native()

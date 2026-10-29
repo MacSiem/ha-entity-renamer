@@ -85,6 +85,8 @@ class NativeTemplateYAMLServer:
                        & set(hass.config.components)), 'other_consumer_scope_unsupported')
             if hasattr(obj, 'consumers'):
                 obj.consumers.check()
+            if hasattr(obj, 'automation_lifecycle'):
+                obj.automation_lifecycle.check_live()
             if obj.bound:
                 _need(runtime.journal is obj.journal and runtime.preparations is obj.preparations,
                       'runtime_cache_replaced')

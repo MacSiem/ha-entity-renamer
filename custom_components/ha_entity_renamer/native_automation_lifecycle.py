@@ -7,6 +7,7 @@ is not a general action/timer/event continuation or crash recovery mechanism.
 from __future__ import annotations
 
 from copy import deepcopy
+import threading
 
 from .native_automation_transition import NativeAutomationTransition
 from .prepared import canonical
@@ -69,10 +70,17 @@ class NativeAutomationLifecycle:
             expected = (current.state, deepcopy(dict(current.attributes)))
             self.expectations[old] = self.expectations[new] = expected
 
-    def check(self):
-        self.session._scope()
+    def check_live(self):
+        # Physical workers retain their own file guards; HA runtime is sampled
+        # only on its owning loop, including all actual mutation boundaries.
+        if threading.get_ident() != self.native.thread:
+            return
         _need(not self.changed)
         self.native.check_native()
+
+    def check(self):
+        self.session._scope()
+        self.check_live()
 
     def _id(self, stage):
         s = self.session
@@ -131,7 +139,12 @@ class NativeAutomationLifecycle:
 
     async def stage(self):
         _need(not self.stage_done)
-        await self._effect('stage', self.native.stage)
+        # YAML activation is drained in a native child task. Give that exact
+        # task its own staging capability; the parent retains enabled baselines
+        # and its separate restore capability. No shared task pin is reassigned.
+        activation = NativeAutomationTransition(self.session.hass)
+        activation.assert_disabled()
+        await self._effect('stage', activation.stage)
         self.stage_done = True
 
     async def restore(self):
