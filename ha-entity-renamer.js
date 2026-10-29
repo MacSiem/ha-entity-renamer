@@ -1047,6 +1047,118 @@ pre {
 }
 `;
 // Card-owned support footer. Never mutates document or foreign cards.
+// Read-only proposal decoding. Descriptive fields never become instructions.
+// Keep the HACS plugin self-contained; no unpublished companion is required.
+function _decodeRegistryImport(content) {
+  const doc = JSON.parse(content);
+  const stack = [];
+  for (const [token] of content.matchAll(/"(?:[^"\\]|\\.)*"|[{}\[\],:]/g)) {
+    if (token === '{' || token === '[') {
+      stack.push(token === '{' ? {keys:new Set(),key:true} : null);
+      if (stack.length > 64) throw Error();
+    } else if (token === '}' || token === ']') stack.pop();
+    else if (token === ',' && stack.at(-1)) stack.at(-1).key = true;
+    else if (token[0] === '"' && stack.at(-1)?.key) {
+      const key = JSON.parse(token), scope = stack.at(-1);
+      if (scope.keys.has(key)) throw Error();
+      scope.keys.add(key); scope.key = false;
+    }
+  }
+  const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  if (!object(doc) || Object.keys(doc).some(k => !['at','checks','entities','devices','statistics'].includes(k))) throw Error();
+  if ('at' in doc && (typeof doc.at !== 'string' || doc.at.length > 255)) throw Error();
+  const checks = ['registry_entities','additional_live_entities','all_devices','all_statistics','proposed_devices','proposed_entities','mapped_statistics','statistics_without_current_entity','collisions','ha_writes'];
+  if ('checks' in doc && (!object(doc.checks) || Object.entries(doc.checks).some(([k,v]) => !checks.includes(k) || !Number.isSafeInteger(v) || v < 0))) throw Error();
+  const fields = {
+    entities:['entity_id','proposed_entity_id','current_name','proposed_name','device_id','device_current','device_proposed','disabled','platform','statistics','energy_source','energy_breakdown','references','role','scope','action','note'],
+    devices:['device_id','current_name','proposed_name','model','area_current','area_proposed','entities','disabled_entities','scope','action','note'],
+    statistics:['statistic_id','proposed_statistic_id','current_name','proposed_name','source','unit','has_sum','has_mean','entity_exists','action','note']
+  };
+  const rows = {};
+  for (const [family, allowed] of Object.entries(fields)) {
+    const list = doc[family] ?? [];
+    if (!Array.isArray(list)) throw Error();
+    for (const row of list) {
+      if (!object(row)) throw Error();
+      for (const [key,value] of Object.entries(row)) {
+        if (!allowed.includes(key)) throw Error();
+        const valid = family === 'devices' && ['entities','disabled_entities'].includes(key)
+          ? Number.isSafeInteger(value) && value >= 0
+          : family === 'statistics' && ['has_sum','has_mean'].includes(key) ? typeof value === 'boolean'
+          : typeof value === 'string' && value.length <= 16384 || value === null && ['proposed_name','device_id'].includes(key);
+        if (!valid) throw Error();
+      }
+    }
+    rows[family] = list;
+  }
+  const text = v => typeof v === 'string' && v.length > 0 && v.length <= 255 && !/[\x00-\x1f]/.test(v);
+  const entityId = v => text(v) && /^[a-z_][a-z0-9_]*\.[a-z0-9_]+$/.test(v);
+  const entities = [], devices = [], statistics = [];
+  const sources = new Set(), destinations = new Set(), deviceIds = new Set(), statisticIds = new Set();
+  for (const row of rows.entities) {
+    const id = row.entity_id, target = row.proposed_entity_id ?? id, name = row.proposed_name ?? null;
+    if (!entityId(id) || !entityId(target) || sources.has(id) || name !== null && !text(name)) throw Error();
+    sources.add(id);
+    if (id === target && (name === null || name === row.current_name)) continue;
+    if (id.split('.')[0] !== target.split('.')[0] || destinations.has(target)) throw Error();
+    destinations.add(target);
+    const device_id = row.device_id || null;
+    if (device_id !== null && !text(device_id)) throw Error();
+    entities.push({id,target,name,device_id});
+  }
+  const changed = new Map(entities.filter(row => row.id !== row.target).map(row => [row.id,row.target]));
+  if (entities.some(row => row.id !== row.target && changed.has(row.target))) throw Error();
+  for (const row of rows.devices) {
+    if (!text(row.device_id) || deviceIds.has(row.device_id)) throw Error();
+    deviceIds.add(row.device_id);
+    const name = row.proposed_name ?? null;
+    if (name !== null && !text(name)) throw Error();
+    if (name !== null && name !== row.current_name) devices.push({id:row.device_id,name});
+  }
+  for (const row of rows.statistics) {
+    const id = row.statistic_id, target = row.proposed_statistic_id ?? id;
+    if (!text(id) || !text(target) || statisticIds.has(id)) throw Error();
+    statisticIds.add(id);
+    if (id !== target) {
+      if (changed.get(id) !== target) throw Error();
+      statistics.push({id,target});
+    }
+  }
+  if (!entities.length && !devices.length) throw Error();
+  return {entities,devices,statistics};
+}
+
+function _registryImportPreview(plan, entities, devices) {
+  if (!Array.isArray(entities) || !Array.isArray(devices)) throw Error();
+  const index = (rows,field) => {
+    const result = new Map();
+    for (const row of rows) {
+      if (!row || typeof row[field] !== 'string' || !row[field] || result.has(row[field])) return null;
+      result.set(row[field],row);
+    }
+    return result;
+  };
+  const byId = index(entities,'entity_id'), byDevice = index(devices,'id');
+  const rejected = [], preview = [];
+  if (!byId || !byDevice) rejected.push({kind:'registry',index:null,reason:'ambiguous_registry'});
+  else {
+    plan.entities.forEach((row,index) => {
+      const current = byId.get(row.id);
+      const reason = !current ? 'source_missing' : row.id !== row.target && byId.has(row.target) ? 'destination_occupied'
+        : (current.device_id ?? null) !== row.device_id ? 'device_changed'
+        : !['id','unique_id','platform'].every(k => typeof current[k] === 'string' && current[k].length > 0) ? 'identity_unverified' : null;
+      if (reason) rejected.push({kind:'entity',index,entity_id:row.id,reason});
+      preview.push({kind:'entity',id:row.id,target:row.target,current:current?.name ?? current?.original_name ?? '',name:row.name,reason});
+    });
+    plan.devices.forEach((row,index) => {
+      const current = byDevice.get(row.id), reason = current ? null : 'device_missing';
+      if (reason) rejected.push({kind:'device',index,reason});
+      preview.push({kind:'device',index,current:current?.name_by_user ?? current?.name ?? '',name:row.name,reason});
+    });
+  }
+  return {changes:{entities:plan.entities.length,devices:plan.devices.length,statistics:plan.statistics.length},conflicts:rejected.length,registry_conflicts:rejected,rows:preview};
+}
+
 const _LOCAL_INTRO_KEY = 'ha-intro-dismissed-ha-entity-renamer';
 const _LOCAL_INTRO = {
   headline: "Bulk-rename HA entities + friendly names.",
@@ -1420,7 +1532,7 @@ class HAEntityRenamer extends HTMLElement {
     // Status is read-only; recovery needs its own inspect and explicit consent.
     // Never render raw journal identifiers, versions or private errors.
     const user = this._hass?.user;
-    if (!this._renameAuthorityAvailable() || user?.is_admin !== true || typeof user.id !== 'string' || !user.id.trim()) return '';
+    if (!this._recoveryAvailable() || user?.is_admin !== true || typeof user.id !== 'string' || !user.id.trim()) return '';
     const code = this._backendStatus?.code || 'not_checked';
     const labels = this._lang === 'pl' ? {
       not_checked: 'Nie sprawdzono backendu migracji',
@@ -1517,13 +1629,13 @@ class HAEntityRenamer extends HTMLElement {
 
   _migrationLabels() {
     return this._lang === 'pl' ? {
-      title:'Migracja zależności', file:'Plan zmian (JSON)', analyze:'Przeanalizuj plan', clear:'Wyczyść plan',
-      idle:'Wybierz przygotowany plan zmian, aby sprawdzić zależności i konflikty.',
-      reading:'Wczytywanie planu…', loaded:'Plan wczytany. Rozpocznij analizę na serwerze HA.',
-      analyzing:'Sprawdzanie aktualnych zależności i konfliktów…',
-      reviewed:'Analiza zakończona. Wykonanie migracji pozostaje niedostępne.',
+      title:'Import i podgląd rejestru (tylko odczyt)', file:'Plan zmian (JSON)', analyze:'Przeanalizuj plan', clear:'Wyczyść plan',
+      idle:'Wybierz plan zmian. Podgląd porównuje wybrane pozycje z rejestrem HA; nie zmienia konfiguracji.',
+      reading:'Wczytywanie planu…', loaded:'Plan wczytany. Sprawdź wybrane pozycje w aktualnym rejestrze HA.',
+      analyzing:'Odczytywanie aktualnych rejestrów HA i sprawdzanie konfliktów…',
+      reviewed:'Podgląd rejestru gotowy (tylko odczyt). Zależności, pliki i statystyki nie zostały sprawdzone ani zmienione.',
       invalid:'Nieprawidłowy plan. Wybierz plik JSON o wielkości do 4 MB.',
-      unavailable:'Nie udało się potwierdzić analizy. Sprawdź dostępność backendu i wybierz ponowną analizę.',
+      unavailable:'Nie udało się odczytać rejestrów HA. Uruchom podgląd ponownie.',
       unauthorized:'Analiza wymaga konta administratora HA.',
       entities:'Encje', devices:'Urządzenia', statistics:'Statystyki', conflicts:'Konflikty',
       rejected:'Pozycje wymagające rozliczenia',entity:'Encja',device:'Urządzenie',registry:'Rejestr',
@@ -1536,13 +1648,13 @@ class HAEntityRenamer extends HTMLElement {
         script:'Skrypty',dashboard:'Dashboardy',template:'Szablony',energy:'Energy',powercalc:'Powercalc',
         history:'Historia',statistics:'Statystyki',external:'Zewnętrzni konsumenci',config_entries:'Integracje',yaml_sources:'Źródła YAML'}
     } : {
-      title:'Dependency migration', file:'Change plan (JSON)', analyze:'Analyze plan', clear:'Clear plan',
-      idle:'Choose a prepared change plan to check dependencies and conflicts.',
-      reading:'Reading plan…', loaded:'Plan loaded. Start analysis on the HA server.',
-      analyzing:'Checking current dependencies and conflicts…',
-      reviewed:'Analysis complete. Applying the migration remains unavailable.',
+      title:'Import and registry preview (read-only)', file:'Change plan (JSON)', analyze:'Analyze plan', clear:'Clear plan',
+      idle:'Choose a change plan. Preview compares selected rows with the HA registry without changing configuration.',
+      reading:'Reading plan…', loaded:'Plan loaded. Compare selected rows with the current HA registry.',
+      analyzing:'Reading current HA registries and checking conflicts…',
+      reviewed:'Registry preview ready (read-only). Dependencies, files and statistics have not been checked or changed.',
       invalid:'Invalid plan. Choose a JSON file up to 4 MB.',
-      unavailable:'Analysis could not be verified. Check the backend and explicitly analyze again.',
+      unavailable:'HA registries could not be read. Explicitly preview again.',
       unauthorized:'Analysis requires a Home Assistant administrator.',
       entities:'Entities',devices:'Devices',statistics:'Statistics',conflicts:'Conflicts',
       rejected:'Rows that need reconciliation',entity:'Entity',device:'Device',registry:'Registry',
@@ -1564,7 +1676,8 @@ class HAEntityRenamer extends HTMLElement {
     const busy = ['reading','analyzing'].includes(state?.phase);
     const result = state?.summary;
     const details = result ? `<p>${t.entities}: ${result.changes.entities} · ${t.devices}: ${result.changes.devices} · ${t.statistics}: ${result.changes.statistics} · ${t.conflicts}: ${result.conflicts}</p>
-      <ul>${result.families.map(row => `<li>${t.families[row.family]}: ${row.blocked ? t.blocked : row.status === 'COMPLETE' ? t.complete : row.status === 'DENIED' ? t.denied : t.unknown}</li>`).join('')}</ul>` : '';
+      <ul>${result.rows.map(row => '<li>'+(row.kind === 'entity' ? _entityIdHtml(row.id)+' → '+_entityIdHtml(row.target) : t.device+' '+(row.index+1))
+        +': '+_esc(row.current)+' → '+_esc(row.name ?? row.current)+'</li>').join('')}</ul>` : '';
     const rejected = result?.registry_conflicts?.length ? '<p>'+t.rejected+'</p><ul>'+result.registry_conflicts.map(row =>
       '<li>'+(row.kind === 'entity' ? _entityIdHtml(row.entity_id) : t[row.kind]+(Number.isInteger(row.index) ? ' '+(row.index+1) : ''))+': '+t.reasons[row.reason]+'</li>').join('')+'</ul>' : '';
     const choices = state?.choices;
@@ -1577,7 +1690,9 @@ class HAEntityRenamer extends HTMLElement {
       <input type="file" accept=".json,application/json" id="renamerImportFile">
       <p role="status" aria-live="polite" ${busy ? 'aria-busy="true"' : ''}>${t[state?.phase || 'idle'] || t.unavailable}</p>
       ${selection}<div class="renamer-backend-row"><button type="button" class="btn btn-outline" id="analyzeRenamerImport" ${!state?.content || busy || empty ? 'disabled' : ''}>${t.analyze}</button>
-      <button type="button" class="btn btn-outline" id="clearRenamerImport" ${!state ? 'disabled' : ''}>${t.clear}</button></div>${details}${rejected}`;
+      <button type="button" class="btn btn-outline" id="clearRenamerImport" ${!state ? 'disabled' : ''}>${t.clear}</button></div>${details}${rejected}
+      <fieldset><legend>${this._lang === 'pl' ? 'Automatyczna migracja zależności — Coming soon' : 'Automatic dependency migration — Coming soon'}</legend>
+      ${['template','powercalc','automation','script','config_entries'].map(family => '<label style="display:block"><input type="checkbox" disabled data-coming-soon="'+family+'">'+t.families[family]+' — Coming soon</label>').join('')}</fieldset>`;
   }
 
   _updateMigrationPanel() {
@@ -1629,21 +1744,8 @@ class HAEntityRenamer extends HTMLElement {
       const content = await file.text();
       if (!current()) return;
       if (typeof content !== 'string' || !content.trim() || new TextEncoder().encode(content).length > 4_000_000) throw Error();
-      // This list is for selection only. The server still strictly decodes the
-      // ORIGINAL file and validates the selected scope on every request.
-      const document = JSON.parse(content);
-      const rows = key => Array.isArray(document?.[key]) && document[key].length <= 10000 ? document[key] : [];
-      const entityId = id => typeof id === 'string' && /^[a-z_][a-z0-9_]*\.[a-z0-9_]+$/.test(id);
-      const entities = rows('entities').filter(row => row && entityId(row.entity_id)
-        && entityId(row.proposed_entity_id ?? row.entity_id)
-        && (row.entity_id !== (row.proposed_entity_id ?? row.entity_id)
-          || typeof row.proposed_name === 'string' && row.proposed_name.trim() && row.proposed_name !== row.current_name))
-        .map(row => ({id:row.entity_id,target:row.proposed_entity_id ?? row.entity_id}));
-      const devices = rows('devices').filter(row => row && typeof row.device_id === 'string'
-        && row.device_id.length > 0 && row.device_id.length <= 16384
-        && typeof row.proposed_name === 'string' && row.proposed_name.trim() && row.proposed_name !== row.current_name)
-        .map(row => ({id:row.device_id,name:row.proposed_name}));
-      this._migration = {phase:'loaded',content,summary:null,choices:{entities,devices},subset:false,
+      const plan = _decodeRegistryImport(content);
+      this._migration = {phase:'loaded',content,plan,summary:null,choices:plan,subset:false,
         entity_ids:new Set(),device_ids:new Set()};
     } catch (_) {
       if (!current()) return;
@@ -1662,33 +1764,16 @@ class HAEntityRenamer extends HTMLElement {
     state.phase = 'analyzing'; state.summary = null;
     this._updateMigrationPanel();
     try {
-      const result = await read.hass.callWS({type:'ha_entity_renamer/import/preview',manifest:state.content,
-        ...(state.subset ? {entity_ids:[...state.entity_ids],device_ids:[...state.device_ids]} : {})});
+      const plan = state.subset ? {
+        entities:state.plan.entities.filter(row => state.entity_ids.has(row.id)),
+        devices:state.plan.devices.filter(row => state.device_ids.has(row.id)),
+        statistics:state.plan.statistics.filter(row => state.entity_ids.has(row.id))
+      } : state.plan;
+      const entities = await read.hass.callWS({type:'config/entity_registry/list'});
       if (!current()) return;
-      const count = n => Number.isInteger(n) && n >= 0 && n <= 10000;
-      const labels = this._migrationLabels().families;
-      const families = result?.families;
-      const rejected = result?.registry_conflicts ?? [];
-      const imported = JSON.parse(state.content);
-      const sourceIds = state.subset ? state.entity_ids : new Set((imported.entities || []).map(row => row.entity_id));
-      const reasons = this._migrationLabels().reasons;
-      if (result?.migration_ready !== false || !/^[a-f0-9]{64}$/.test(result.digest)
-        || !result.changes || !['entities','devices','statistics'].every(key => count(result.changes[key]))
-        || !Array.isArray(result.conflicts) || result.conflicts.length > 10000
-        || !Array.isArray(rejected) || rejected.length > 10000
-        || !rejected.every(row => row && ['entity','device','registry'].includes(row.kind)
-          && Object.hasOwn(reasons,row.reason)
-          && (row.kind === 'registry' ? row.index === null : count(row.index))
-          && (row.kind !== 'entity' || typeof row.entity_id === 'string' && sourceIds.has(row.entity_id)
-            && /^[a-z_][a-z0-9_]*\.[a-z0-9_]+$/.test(row.entity_id)))
-        || !Array.isArray(families) || families.length > 13
-        || new Set(families.map(row => row?.family)).size !== families.length
-        || !families.every(row => Object.hasOwn(labels,row?.family) && ['COMPLETE','UNKNOWN','DENIED'].includes(row.status)
-          && Array.isArray(row.blockers))) throw Error();
-      state.summary = {changes:{entities:result.changes.entities,devices:result.changes.devices,statistics:result.changes.statistics},
-        conflicts:result.conflicts.length,families:families.map(row=>({family:row.family,status:row.status,blocked:row.blockers.length>0})),
-        registry_conflicts:rejected.map(row=>({kind:row.kind,index:row.index,reason:row.reason,
-          ...(row.kind === 'entity' ? {entity_id:row.entity_id} : {})}))};
+      const devices = await read.hass.callWS({type:'config/device_registry/list'});
+      if (!current()) return;
+      state.summary = _registryImportPreview(plan,entities,devices);
       state.phase = 'reviewed';
     } catch (error) {
       if (!current()) return;
@@ -1698,7 +1783,8 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _recoveryAvailable() {
-    return this._renameAuthorityAvailable();
+    // New dependency migration/recovery is Coming soon in release A.
+    return false;
   }
 
   _recoveryBusy() {

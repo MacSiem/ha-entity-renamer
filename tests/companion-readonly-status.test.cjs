@@ -20,6 +20,8 @@ async function fixture({admin = true, language = 'en', showHelp = true} = {}) {
   const dom = new JSDOM('', {url: 'http://localhost/', runScripts: 'dangerously', pretendToBeVisual: true});
   dom.window.eval(readFileSync('ha-entity-renamer.js', 'utf8'));
   const card = dom.window.document.createElement('ha-entity-renamer');
+  // Internal V2 component qualification only: production A keeps this unavailable.
+  card._recoveryAvailable = () => card._renameAuthorityAvailable();
   card.setConfig({show_support: false, show_help: showHelp});
   dom.window.document.body.append(card);
   const messages = [];
