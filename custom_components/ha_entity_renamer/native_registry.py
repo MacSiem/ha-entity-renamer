@@ -453,7 +453,8 @@ class NativeRegistryBridge:
             stamp = self.io.mutate(change, target)
         else:
             from .native_helper_placeholder_effect import OwnHelperPlaceholder
-            if (type(node) is not OwnHelperPlaceholder or node.io is not self.io
+            from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
+            if (type(node) not in (OwnHelperPlaceholder, NativeTemplateStateRegistryEffect) or node.io is not self.io
                     or node.change != change or node.source != source['entity_id']
                     or node.target != target['entity_id']):
                 raise RegistryConflict('own_helper_effect_binding_mismatch')

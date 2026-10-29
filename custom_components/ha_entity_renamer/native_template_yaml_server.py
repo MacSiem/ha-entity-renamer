@@ -66,7 +66,8 @@ class NativeTemplateYAMLServer:
     async def _open(cls, hass, *, guard, refresh):
         from . import Runtime
         from homeassistant.core import HomeAssistant
-        _need(cls is NativeTemplateYAMLServer and type(hass) is HomeAssistant
+        from .native_template_state_server import NativeTemplateStateServer
+        _need(cls in (NativeTemplateYAMLServer, NativeTemplateStateServer) and type(hass) is HomeAssistant
               and callable(guard) and callable(refresh), 'installed_scope_required')
         runtime = hass.data.get(DATA_RUNTIME)
         _need(type(runtime) is Runtime, 'runtime_required')
@@ -234,11 +235,14 @@ class NativeTemplateYAMLServer:
         self._preparation_current = preparation_current
         preparation_current()
         self.observation_state = self.chain.reconstruct_inputs()
-        self.observer = NativeTemplateYAMLRuntimeReadback(self.hass, self.chain, self.evidence,
-                                                        guard=self._scope)
+        self.observer = self._new_observer()
         self.observer.assert_change(self.change)
         self.runtime.journal, self.runtime.preparations = self.journal, self.preparations
         self.bound = True
+
+    def _new_observer(self):
+        return NativeTemplateYAMLRuntimeReadback(self.hass, self.chain, self.evidence,
+                                                guard=self._scope)
 
     async def _observe(self, state=None):
         self._scope()

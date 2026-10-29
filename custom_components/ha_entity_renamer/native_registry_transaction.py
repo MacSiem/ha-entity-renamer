@@ -26,6 +26,15 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         self.phase_loader, self.guard = phase_loader, guard
         self.context = None
         self._own_escrows = {}
+        self._template_state_root = None
+
+    def bind_template_state_root(self, root):
+        from .native_template_state_server import NativeTemplateStateServer
+        if (type(root) is not NativeTemplateStateServer or root.chain is not self.chain
+                or root.hass is not self.bridge.io.hass or self.chain.active is not None):
+            raise Refused('template_state_root_binding_required')
+        root._scope()
+        self._template_state_root = root
 
     def bind_own_helper_escrow(self, escrow, token, *, source_fence):
         """Trusted ephemeral composition; saved escrow data cannot bind a writer.
@@ -196,6 +205,18 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
             before = await self._read(guard)
             self.chain.verify_intent_source(intent, context, before)
             guard()
+            if self._template_state_root is not None:
+                if binding is not None:
+                    raise Refused('template_state_helper_effect_composition_unqualified')
+                from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
+                node = await NativeTemplateStateRegistryEffect.capture(self._template_state_root,
+                    self.bridge.io, change, context, intent, before,
+                    self._template_state_root.observation_state, guard)
+                await self._durable_context(guard, context)
+                before = await self._read(guard)
+                self.chain.verify_intent_source(intent, context, before)
+                guard()
+                return node
             if binding is not None:
                 node = self._own_node(binding, own, change, context, intent, before, guard)
                 return node
@@ -225,11 +246,19 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         source_raw = next(item.raw for item in before if item.key == key)
         result_raw = next(item.raw for item in after if item.key == key)
         audit = self._effect_audit(change, direction, source_raw, result_raw, mutation)
-        if node is not None:
+        if node is not None and self._template_state_root is None:
             extra['placeholder_stamp'] = node.finish()
+        if self._template_state_root is not None:
+            if node is None:
+                raise Refused('template_state_registry_effect_required')
+            await node.verify_effect(mutation, after)
+            await self._durable_context(guard, context)
         await self.chain.complete(intent, context, before, after,
                                   mutation=mutation, audit=audit, **extra)
         guard()
+        if self._template_state_root is not None:
+            await node.accepted()
+            guard()
         return mutation
 
     async def apply(self, step, guard):
