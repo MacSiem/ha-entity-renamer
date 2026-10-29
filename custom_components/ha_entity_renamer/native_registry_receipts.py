@@ -889,11 +889,28 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         return initial_sources(self.original_receipt,
                                self.root.get('yaml_original_metadata', {}))
 
-    def reconstruct_inputs(self):
-        """Original graph plus accepted durable deltas; pending is UNKNOWN."""
+    def matches_input_state(self, state, *, documents_only=False):
+        """Compare all accepted evidence without allocating detached images.
+
+        This is an internal comparison, never admission of client evidence or a
+        live observation. Reconstruct validates preparations and receipts each
+        time. Public getters and newly created states remain detached.
+        """
+        if (type(state) is not AcceptedInputState
+                or state.original_json != self.baseline.receipt_json):
+            return False
         states, head, _, _, pending = self._reconstruct()
+        documents = {key: value['document'] for key, value in states.items()}
+        if state._documents != documents:
+            return False
+        if documents_only:
+            return True
         if pending is not None:
             _fail('unknown_unresolved_intent')
+        return (state._live_check is None and state.head == head
+                and state._sources == self._input_sources(states))
+
+    def _input_sources(self, states):
         sources = self._initial_sources()
         # Follow the same validated sequence, never dict insertion order.
         rows = sorted((row['payload'] for row in self.store.rows.values()
@@ -907,6 +924,14 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         for key, value in states.items():
             path = '.storage/' + key
             sources[path][:4] = [value['sha256'], *value['identity']]
+        return sources
+
+    def reconstruct_inputs(self):
+        """Original graph plus accepted durable deltas; pending is UNKNOWN."""
+        states, head, _, _, pending = self._reconstruct()
+        if pending is not None:
+            _fail('unknown_unresolved_intent')
+        sources = self._input_sources(states)
         # AcceptedInputState makes the single detached copy of these documents.
         return AcceptedInputState(self.baseline.receipt_json, head, sources,
             {key: value['document'] for key, value in states.items()},
