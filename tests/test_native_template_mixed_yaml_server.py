@@ -174,6 +174,8 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
 
+        events['automation'].clear()
+        events['script'].clear()
         # The ONLY caller input is the ordinary source mapping. In particular,
         # do not supply a fixture Plan, receipt, callback or alternate baseline.
         with native_diagnostics(self.module):
@@ -181,6 +183,8 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
                 runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh),
                 'actual mixed YAML forward', eager_start=False), 180)
         self.assertEqual(result['state'], 'applied')
+        self.assertEqual(events['automation'], [], 'ID rename must not fire actions without a real source-value change')
+        self.assertEqual(events['script'], [], 'migration must not invoke the user script')
         record = await runtime.journal.load(result['operation_id'])
         self.assertEqual(record.phases, ('verified',) * len(record.plan.steps))
         self.assertEqual(tuple(row.adapter for row in record.plan.steps),
@@ -210,6 +214,8 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(new.encode(), (root / path).read_bytes())
         for value in (11, 13):
             await stimulus(value)
+        events['automation'].clear()
+        events['script'].clear()
         prior_stores = runtime.preparations, runtime.journal
         # Fresh native factory receives only opid/fingerprint; none of the live
         # forward session's objects or effects are handed into reverse.
@@ -218,6 +224,8 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
                 guard=lambda: None, refresh=refresh),
             'actual fresh mixed YAML reverse', eager_start=False), 180)
         self.assertEqual(reverse['state'], 'rolled_back')
+        self.assertEqual(events['automation'], [], 'reverse ID rename must not fire actions without a real source-value change')
+        self.assertEqual(events['script'], [], 'reverse must not invoke the user script')
         self.assertIsNot(runtime.preparations, prior_stores[0])
         self.assertIsNot(runtime.journal, prior_stores[1])
         final = await runtime.journal.load(result['operation_id'])
