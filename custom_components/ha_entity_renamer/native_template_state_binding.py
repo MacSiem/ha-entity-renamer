@@ -350,6 +350,32 @@ def _configuration(runtime, entity, expected):
     return actual
 
 
+def _configured_variables_binding(runtime, entity, expected):
+    """Bind actual constructor variables, separately from rendered snapshots."""
+    configured = entity._run_variables
+    actual = configured.as_dict() if type(configured) is runtime.ScriptVariables else configured
+    _need(type(configured) in (dict, runtime.ScriptVariables) and isinstance(actual, dict),
+          'template_state_configured_variables_owner_changed')
+    source = _get(expected, 'variables')
+    if source is None:
+        source = {'$map': []}
+    elif type(source) is dict and set(source) == {'$variables'}:
+        source = source['$variables']
+    _need(_normal(actual) == source, 'template_state_configured_variables_source_changed')
+    def owners(value):
+        if type(value) is runtime.ScriptVariables:
+            return (type(value), id(value), owners(value.as_dict()))
+        if type(value) is runtime.template.Template:
+            return (type(value), id(value))
+        if isinstance(value, dict):
+            return (type(value), id(value), tuple((key, owners(child))
+                                                 for key, child in value.items()))
+        if type(value) in (list, tuple):
+            return (type(value), id(value), tuple(owners(child) for child in value))
+        return None  # Scalar values are compared above, never rendered here.
+    return owners(configured)
+
+
 def _keyed(runtime, remove, tracker, keys, callback):
     """Authenticate exact keyed callback membership and shared bus dispatcher."""
     from .yaml_runtime_observer import _registered_bus_remove
@@ -505,6 +531,7 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents):
             key, semantic, static, cfg = candidates[0]
             _need((domain, key) not in matched, 'template_state_full_native_bijection_ambiguous')
             matched.add((domain, key))
+            configured_owner = _configured_variables_binding(runtime, entity, _effective_config(semantic))
             entry = registry.async_get(entity_id)
             stored = registry_rows.get(entity_id)
             if entity.unique_id is None:
@@ -538,7 +565,7 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents):
                 (id(entity), id(entry), graph_token, _fingerprint(cfg)),
                 (id(entity), id(entry), graph_token[:2],
                  tuple(track[:3] for track in graph_token[3]), graph_token[4],
-                 _fingerprint(cfg))))
+                 _fingerprint(cfg), configured_owner)))
     _need(set(registry_rows) <= live, 'template_state_missing_registry_consumer')
     expected_unsupported = {(r[0], r[1]) for r in unsupported if r[0] != 'template.trigger'}
     _need(matched == set(expected) | expected_unsupported,

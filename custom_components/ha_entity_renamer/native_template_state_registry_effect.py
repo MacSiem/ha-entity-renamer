@@ -75,9 +75,7 @@ class NativeTemplateStateRegistryEffect:
         self.runtime.sources()
         fresh = sample_state_bindings(self.runtime, self.root.program, self.snapshot.prefix,
             self.snapshot.yaml_position, self.root.chain.accepted_documents())
-        identities = lambda sample: tuple((r.domain, r.source_key, id(r.entity), r.registry_id)
-                                           for r in sample.rows)
-        _need(identities(fresh) == identities(self.snapshot), 'source_identity_changed')
+        _need(self.snapshot.same_bindings(fresh), 'source_identity_changed')
         self.snapshot = fresh
         self.transition = fresh.transition_pairs(self.root.program, self.expected.active)
         if self.transition.entities:
