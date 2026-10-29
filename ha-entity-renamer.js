@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v4.5.0 (2026-10-22) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v4.6.0 (2026-10-29) — single-tool standalone repo */
 (function() {
 'use strict';
 
@@ -1047,6 +1047,118 @@ pre {
 }
 `;
 // Card-owned support footer. Never mutates document or foreign cards.
+// Read-only proposal decoding. Descriptive fields never become instructions.
+// Keep the HACS plugin self-contained; no unpublished companion is required.
+function _decodeRegistryImport(content) {
+  const doc = JSON.parse(content);
+  const stack = [];
+  for (const [token] of content.matchAll(/"(?:[^"\\]|\\.)*"|[{}\[\],:]/g)) {
+    if (token === '{' || token === '[') {
+      stack.push(token === '{' ? {keys:new Set(),key:true} : null);
+      if (stack.length > 64) throw Error();
+    } else if (token === '}' || token === ']') stack.pop();
+    else if (token === ',' && stack.at(-1)) stack.at(-1).key = true;
+    else if (token[0] === '"' && stack.at(-1)?.key) {
+      const key = JSON.parse(token), scope = stack.at(-1);
+      if (scope.keys.has(key)) throw Error();
+      scope.keys.add(key); scope.key = false;
+    }
+  }
+  const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  if (!object(doc) || Object.keys(doc).some(k => !['at','checks','entities','devices','statistics'].includes(k))) throw Error();
+  if ('at' in doc && (typeof doc.at !== 'string' || doc.at.length > 255)) throw Error();
+  const checks = ['registry_entities','additional_live_entities','all_devices','all_statistics','proposed_devices','proposed_entities','mapped_statistics','statistics_without_current_entity','collisions','ha_writes'];
+  if ('checks' in doc && (!object(doc.checks) || Object.entries(doc.checks).some(([k,v]) => !checks.includes(k) || !Number.isSafeInteger(v) || v < 0))) throw Error();
+  const fields = {
+    entities:['entity_id','proposed_entity_id','current_name','proposed_name','device_id','device_current','device_proposed','disabled','platform','statistics','energy_source','energy_breakdown','references','role','scope','action','note'],
+    devices:['device_id','current_name','proposed_name','model','area_current','area_proposed','entities','disabled_entities','scope','action','note'],
+    statistics:['statistic_id','proposed_statistic_id','current_name','proposed_name','source','unit','has_sum','has_mean','entity_exists','action','note']
+  };
+  const rows = {};
+  for (const [family, allowed] of Object.entries(fields)) {
+    const list = Object.hasOwn(doc,family) ? doc[family] : [];
+    if (!Array.isArray(list)) throw Error();
+    for (const row of list) {
+      if (!object(row)) throw Error();
+      for (const [key,value] of Object.entries(row)) {
+        if (!allowed.includes(key)) throw Error();
+        const valid = family === 'devices' && ['entities','disabled_entities'].includes(key)
+          ? Number.isSafeInteger(value) && value >= 0
+          : family === 'statistics' && ['has_sum','has_mean'].includes(key) ? typeof value === 'boolean'
+          : typeof value === 'string' && value.length <= 16384 || value === null && ['proposed_name','device_id'].includes(key);
+        if (!valid) throw Error();
+      }
+    }
+    rows[family] = list;
+  }
+  const text = v => typeof v === 'string' && v.length > 0 && v.length <= 255 && !/[\x00-\x1f]/.test(v);
+  const entityId = v => text(v) && /^[a-z_][a-z0-9_]*\.[a-z0-9_]+$/.test(v);
+  const entities = [], devices = [], statistics = [];
+  const sources = new Set(), destinations = new Set(), deviceIds = new Set(), statisticIds = new Set();
+  for (const row of rows.entities) {
+    const id = row.entity_id, target = row.proposed_entity_id ?? id, name = row.proposed_name ?? null;
+    if (!entityId(id) || !entityId(target) || sources.has(id) || name !== null && !text(name)) throw Error();
+    sources.add(id);
+    if (id === target && (name === null || name === row.current_name)) continue;
+    if (id.split('.')[0] !== target.split('.')[0] || destinations.has(target)) throw Error();
+    destinations.add(target);
+    const device_id = row.device_id || null;
+    if (device_id !== null && !text(device_id)) throw Error();
+    entities.push({id,target,name,device_id});
+  }
+  const changed = new Map(entities.filter(row => row.id !== row.target).map(row => [row.id,row.target]));
+  if (entities.some(row => row.id !== row.target && changed.has(row.target))) throw Error();
+  for (const row of rows.devices) {
+    if (!text(row.device_id) || deviceIds.has(row.device_id)) throw Error();
+    deviceIds.add(row.device_id);
+    const name = row.proposed_name ?? null;
+    if (name !== null && !text(name)) throw Error();
+    if (name !== null && name !== row.current_name) devices.push({id:row.device_id,name});
+  }
+  for (const row of rows.statistics) {
+    const id = row.statistic_id, target = row.proposed_statistic_id ?? id;
+    if (!text(id) || !text(target) || statisticIds.has(id)) throw Error();
+    statisticIds.add(id);
+    if (id !== target) {
+      if (changed.get(id) !== target) throw Error();
+      statistics.push({id,target});
+    }
+  }
+  if (!entities.length && !devices.length) throw Error();
+  return {entities,devices,statistics};
+}
+
+function _registryImportPreview(plan, entities, devices) {
+  if (!Array.isArray(entities) || !Array.isArray(devices)) throw Error();
+  const index = (rows,field) => {
+    const result = new Map();
+    for (const row of rows) {
+      if (!row || typeof row[field] !== 'string' || !row[field] || result.has(row[field])) return null;
+      result.set(row[field],row);
+    }
+    return result;
+  };
+  const byId = index(entities,'entity_id'), byDevice = index(devices,'id');
+  const rejected = [], preview = [];
+  if (!byId || !byDevice) rejected.push({kind:'registry',index:null,reason:'ambiguous_registry'});
+  else {
+    plan.entities.forEach((row,index) => {
+      const current = byId.get(row.id);
+      const reason = !current ? 'source_missing' : row.id !== row.target && byId.has(row.target) ? 'destination_occupied'
+        : (current.device_id ?? null) !== row.device_id ? 'device_changed'
+        : !['id','unique_id','platform'].every(k => typeof current[k] === 'string' && current[k].length > 0) ? 'identity_unverified' : null;
+      if (reason) rejected.push({kind:'entity',index,entity_id:row.id,reason});
+      preview.push({kind:'entity',id:row.id,target:row.target,current:current?.name ?? current?.original_name ?? '',name:row.name,reason});
+    });
+    plan.devices.forEach((row,index) => {
+      const current = byDevice.get(row.id), reason = current ? null : 'device_missing';
+      if (reason) rejected.push({kind:'device',index,reason});
+      preview.push({kind:'device',index,current:current?.name_by_user ?? current?.name ?? '',name:row.name,reason});
+    });
+  }
+  return {changes:{entities:plan.entities.length,devices:plan.devices.length,statistics:plan.statistics.length},conflicts:rejected.length,registry_conflicts:rejected,rows:preview};
+}
+
 const _LOCAL_INTRO_KEY = 'ha-intro-dismissed-ha-entity-renamer';
 const _LOCAL_INTRO = {
   headline: "Bulk-rename HA entities + friendly names.",
@@ -1415,6 +1527,167 @@ class HAEntityRenamer extends HTMLElement {
     return `<details class="renamer-help" ${state.open ? 'open' : ''}><summary>ⓘ ${label}</summary>
       <p>${_esc(intro.headline)}</p><ol>${intro.steps.map(step => `<li>${_esc(step)}</li>`).join('')}</ol></details>`;
   }
+  _clearMigration() {
+    this._migrationEpoch++;
+    this._migration = null;
+    this.shadowRoot?.getElementById('renamerMigrationPanel')?.replaceChildren();
+  }
+
+  _migrationLabels() {
+    return this._lang === 'pl' ? {
+      title:'Import i podgląd rejestru (tylko odczyt)', file:'Plan zmian (JSON)', analyze:'Przeanalizuj plan', clear:'Wyczyść plan',
+      idle:'Wybierz plan zmian. Podgląd porównuje wybrane pozycje z rejestrem HA; nie zmienia konfiguracji.',
+      reading:'Wczytywanie planu…', loaded:'Plan wczytany. Sprawdź wybrane pozycje w aktualnym rejestrze HA.',
+      analyzing:'Odczytywanie aktualnych rejestrów HA i sprawdzanie konfliktów…',
+      reviewed:'Podgląd rejestru gotowy (tylko odczyt). Zależności, pliki i statystyki nie zostały sprawdzone ani zmienione.',
+      invalid:'Nieprawidłowy plan. Wybierz plik JSON o wielkości do 4 MB.',
+      unavailable:'Nie udało się odczytać rejestrów HA. Uruchom podgląd ponownie.',
+      unauthorized:'Analiza wymaga konta administratora HA.',
+      entities:'Encje', devices:'Urządzenia', statistics:'Statystyki', conflicts:'Konflikty',
+      rejected:'Pozycje wymagające rozliczenia',entity:'Encja',device:'Urządzenie',registry:'Rejestr',
+      subset:'Wybierz część planu',selection:'Pozycje do analizy',selected:'Wybrano',
+      reasons:{source_missing:'Nie znaleziono źródła',destination_occupied:'Docelowy identyfikator jest zajęty',
+        device_changed:'Powiązanie urządzenia zmieniło się',identity_unverified:'Niepotwierdzona tożsamość',
+        device_missing:'Nie znaleziono urządzenia',ambiguous_registry:'Niejednoznaczny rejestr'},
+      complete:'Rozpoznano', unknown:'Niepotwierdzone', blocked:'Wymaga obsługi', denied:'Brak dostępu',
+      families:{entity_registry:'Rejestr encji',device_registry:'Rejestr urządzeń',automation:'Automatyzacje',
+        script:'Skrypty',dashboard:'Dashboardy',template:'Szablony',energy:'Energy',powercalc:'Powercalc',
+        history:'Historia',statistics:'Statystyki',external:'Zewnętrzni konsumenci',config_entries:'Integracje',yaml_sources:'Źródła YAML'}
+    } : {
+      title:'Import and registry preview (read-only)', file:'Change plan (JSON)', analyze:'Analyze plan', clear:'Clear plan',
+      idle:'Choose a change plan. Preview compares selected rows with the HA registry without changing configuration.',
+      reading:'Reading plan…', loaded:'Plan loaded. Compare selected rows with the current HA registry.',
+      analyzing:'Reading current HA registries and checking conflicts…',
+      reviewed:'Registry preview ready (read-only). Dependencies, files and statistics have not been checked or changed.',
+      invalid:'Invalid plan. Choose a JSON file up to 4 MB.',
+      unavailable:'HA registries could not be read. Explicitly preview again.',
+      unauthorized:'Analysis requires a Home Assistant administrator.',
+      entities:'Entities',devices:'Devices',statistics:'Statistics',conflicts:'Conflicts',
+      rejected:'Rows that need reconciliation',entity:'Entity',device:'Device',registry:'Registry',
+      subset:'Choose a subset of the plan',selection:'Rows to analyze',selected:'Selected',
+      reasons:{source_missing:'Rename source not found',destination_occupied:'Destination identifier is occupied',
+        device_changed:'Device association changed',identity_unverified:'Identity is unverified',
+        device_missing:'Device not found',ambiguous_registry:'Ambiguous registry'},
+      complete:'Identified',unknown:'Unverified',blocked:'Requires support',denied:'Access denied',
+      families:{entity_registry:'Entity registry',device_registry:'Device registry',automation:'Automations',
+        script:'Scripts',dashboard:'Dashboards',template:'Templates',energy:'Energy',powercalc:'Powercalc',
+        history:'History',statistics:'Statistics',external:'External consumers',config_entries:'Integrations',yaml_sources:'YAML sources'}
+    };
+  }
+
+  _renderMigration() {
+    if (!this._renameAuthorityAvailable()) return '';
+    const state = this._migration;
+    const t = this._migrationLabels();
+    const busy = ['reading','analyzing'].includes(state?.phase);
+    const result = state?.summary;
+    const details = result ? `<p>${t.entities}: ${result.changes.entities} · ${t.devices}: ${result.changes.devices} · ${t.statistics}: ${result.changes.statistics} · ${t.conflicts}: ${result.conflicts}</p>
+      <ul>${result.rows.map(row => '<li>'+(row.kind === 'entity' ? _entityIdHtml(row.id)+' → '+_entityIdHtml(row.target) : t.device+' '+(row.index+1))
+        +': '+_esc(row.current)+' → '+_esc(row.name ?? row.current)+'</li>').join('')}</ul>` : '';
+    const rejected = result?.registry_conflicts?.length ? '<p>'+t.rejected+'</p><ul>'+result.registry_conflicts.map(row =>
+      '<li>'+(row.kind === 'entity' ? _entityIdHtml(row.entity_id) : t[row.kind]+(Number.isInteger(row.index) ? ' '+(row.index+1) : ''))+': '+t.reasons[row.reason]+'</li>').join('')+'</ul>' : '';
+    const choices = state?.choices;
+    const empty = state?.subset && !state.entity_ids.size && !state.device_ids.size;
+    const selection = choices ? '<label><input type="checkbox" id="renamerImportSubset" '+(state.subset ? 'checked' : '')+'>'+t.subset+'</label>'
+      +(state.subset ? '<fieldset><legend>'+t.selection+'</legend><p>'+t.selected+': '+(state.entity_ids.size+state.device_ids.size)+'</p>'
+      +choices.entities.map((row,i)=>'<label style="display:block"><input type="checkbox" data-import-entity="'+i+'" '+(state.entity_ids.has(row.id) ? 'checked' : '')+'>'+_entityIdHtml(row.id)+' → '+_entityIdHtml(row.target)+'</label>').join('')
+      +choices.devices.map((row,i)=>'<label style="display:block"><input type="checkbox" data-import-device="'+i+'" '+(state.device_ids.has(row.id) ? 'checked' : '')+'>'+t.device+' '+(i+1)+': '+_esc(row.name)+'</label>').join('')+'</fieldset>' : '') : '';
+    return `<h3>${t.title}</h3><label for="renamerImportFile">${t.file}</label>
+      <input type="file" accept=".json,application/json" id="renamerImportFile">
+      <p role="status" aria-live="polite" ${busy ? 'aria-busy="true"' : ''}>${t[state?.phase || 'idle'] || t.unavailable}</p>
+      ${selection}<div class="renamer-backend-row"><button type="button" class="btn btn-outline" id="analyzeRenamerImport" ${!state?.content || busy || empty ? 'disabled' : ''}>${t.analyze}</button>
+      <button type="button" class="btn btn-outline" id="clearRenamerImport" ${!state ? 'disabled' : ''}>${t.clear}</button></div>${details}${rejected}
+      <fieldset><legend>${this._lang === 'pl' ? 'Automatyczna migracja zależności — Coming soon' : 'Automatic dependency migration — Coming soon'}</legend>
+      ${['template','powercalc','automation','script','config_entries'].map(family => '<label style="display:block"><input type="checkbox" disabled data-coming-soon="'+family+'">'+t.families[family]+' — Coming soon</label>').join('')}</fieldset>`;
+  }
+
+  _updateMigrationPanel() {
+    const panel = this.shadowRoot?.getElementById('renamerMigrationPanel');
+    if (!panel) return;
+    panel.innerHTML = this._renderMigration();
+    this._bindMigrationPanel();
+  }
+
+  _bindMigrationPanel() {
+    const changed = (update,focus) => {
+      if (!this._renameAuthorityAvailable() || !this._migration?.choices) return;
+      update(this._migration);
+      this._migrationEpoch++;
+      this._migration.phase = 'loaded'; this._migration.summary = null;
+      this._updateMigrationPanel();
+      this.shadowRoot.querySelector(focus)?.focus();
+    };
+    this.shadowRoot.getElementById('renamerImportSubset')?.addEventListener('change', event =>
+      changed(state => { state.subset = event.target.checked; }, '#renamerImportSubset'));
+    for (const family of ['entity','device']) this.shadowRoot.querySelectorAll('[data-import-'+family+']').forEach(input => {
+      input.addEventListener('change', () => changed(state => {
+        const rows = state.choices[family === 'entity' ? 'entities' : 'devices'];
+        const row = rows[Number(input.getAttribute('data-import-'+family))];
+        const ids = state[family+'_ids'];
+        if (row) { if (input.checked) ids.add(row.id); else ids.delete(row.id); }
+      }, '[data-import-'+family+'="'+input.getAttribute('data-import-'+family)+'"]'));
+    });
+    this.shadowRoot.getElementById('renamerImportFile')?.addEventListener('change', event => {
+      const file = event.target.files?.[0];
+      if (file) this._readMigrationFile(file);
+    });
+    this.shadowRoot.getElementById('analyzeRenamerImport')?.addEventListener('click', () => this._previewMigration());
+    this.shadowRoot.getElementById('clearRenamerImport')?.addEventListener('click', () => {
+      this._clearMigration(); this._updateMigrationPanel();
+      this.shadowRoot.getElementById('renamerImportFile')?.focus();
+    });
+  }
+
+  async _readMigrationFile(file) {
+    if (!this._renameAuthorityAvailable()) return;
+    const read = this._captureRead();
+    const epoch = ++this._migrationEpoch;
+    const current = () => epoch === this._migrationEpoch && read.current() && this._renameAuthorityAvailable();
+    this._migration = {phase:'reading',content:null,summary:null};
+    this._updateMigrationPanel();
+    try {
+      if (!Number.isInteger(file.size) || file.size < 1 || file.size > 4_000_000 || typeof file.text !== 'function') throw Error();
+      const content = await file.text();
+      if (!current()) return;
+      if (typeof content !== 'string' || !content.trim() || new TextEncoder().encode(content).length > 4_000_000) throw Error();
+      const plan = _decodeRegistryImport(content);
+      this._migration = {phase:'loaded',content,plan,summary:null,choices:plan,subset:false,
+        entity_ids:new Set(),device_ids:new Set()};
+    } catch (_) {
+      if (!current()) return;
+      this._migration = {phase:'invalid',content:null,summary:null};
+    }
+    if (current()) this._updateMigrationPanel();
+  }
+
+  async _previewMigration() {
+    const state = this._migration;
+    if (!this._renameAuthorityAvailable() || !state?.content || ['reading','analyzing'].includes(state.phase)
+      || state.subset && !state.entity_ids.size && !state.device_ids.size) return;
+    const read = this._captureRead();
+    const epoch = ++this._migrationEpoch;
+    const current = () => epoch === this._migrationEpoch && read.current() && this._renameAuthorityAvailable();
+    state.phase = 'analyzing'; state.summary = null;
+    this._updateMigrationPanel();
+    try {
+      const plan = state.subset ? {
+        entities:state.plan.entities.filter(row => state.entity_ids.has(row.id)),
+        devices:state.plan.devices.filter(row => state.device_ids.has(row.id)),
+        statistics:state.plan.statistics.filter(row => state.entity_ids.has(row.id))
+      } : state.plan;
+      const entities = await read.hass.callWS({type:'config/entity_registry/list'});
+      if (!current()) return;
+      const devices = await read.hass.callWS({type:'config/device_registry/list'});
+      if (!current()) return;
+      state.summary = _registryImportPreview(plan,entities,devices);
+      state.phase = 'reviewed';
+    } catch (error) {
+      if (!current()) return;
+      state.phase = error?.code === 'unauthorized' ? 'unauthorized' : error?.code === 'invalid_proposal' ? 'invalid' : 'unavailable';
+    }
+    if (current()) this._updateMigrationPanel();
+  }
+
   _syncHelpWidth(width) {
     const help = this.shadowRoot.querySelector('details.renamer-help');
     if (!help || !(width > 0)) return;
@@ -1445,6 +1718,8 @@ class HAEntityRenamer extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this._lang = 'en';
     this._hass = null;
+    this._migration = null;
+    this._migrationEpoch = 0;
     this._devices = [];
     this._entities = [];
     this._selectedDevice = null;
@@ -1525,6 +1800,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _cancelRenameAuthority() {
+    this._clearMigration();
     this._clearQueueUndo();
     if (this._loading && !this._applyOperation) this._registryRefreshPending = true;
     this._legacyReviewLog = [];
@@ -3124,6 +3400,17 @@ class HAEntityRenamer extends HTMLElement {
         :host input[type=checkbox] { accent-color:var(--_hat-primary-fill); }
         :host .btn-primary:disabled { opacity:1;background:var(--_hat-chip);color:var(--_hat-text-2);box-shadow:none; }
 
+        .renamer-backend-row {display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:12px 0 4px;min-width:0;}
+        .renamer-backend-row button {min-height:44px;white-space:normal;}
+        .renamer-backend-row button:focus-visible {outline:3px solid var(--primary-color);outline-offset:2px;}
+        .renamer-migration {margin:12px 0;padding:12px;border:1px solid var(--divider-color);border-radius:14px;font-size:14px;overflow-wrap:anywhere;}
+        .renamer-migration h3 {margin:0 0 8px;font-size:16px;}
+        .renamer-migration input {display:block;max-width:100%;min-height:44px;margin:8px 0;}
+        .renamer-migration input[type="checkbox"] {display:inline-block;min-height:24px;width:24px;height:24px;vertical-align:middle;margin:8px;}
+        .renamer-migration label {min-height:44px;overflow-wrap:anywhere;}
+        .renamer-migration fieldset {min-width:0;max-height:24rem;overflow:auto;}
+        .renamer-migration button {min-height:44px;}
+        .renamer-migration ul {padding-inline-start:24px;}
         .renamer-help { margin:8px 0 12px;font-size:14px; }
         .renamer-help summary { cursor:pointer;min-height:44px;align-content:center; }
         .renamer-help summary:focus-visible { outline:3px solid var(--primary-color);outline-offset:2px; }
@@ -3140,6 +3427,7 @@ class HAEntityRenamer extends HTMLElement {
         </div>
 
       ${this._renderHelp()}
+      ${this._renameAuthorityAvailable() ? `<section class="renamer-migration" id="renamerMigrationPanel">${this._renderMigration()}</section>` : ''}
       ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${this._message.outcome ? createUiV3({language:this._lang}).statusHtml(this._message.outcome) : ''} ${_esc(this._message.text || '')}</div>` : ''}
       ${this._renderApplyResult()}
       ${this._confirmDialogOpen ? this._renderRenameConfirmation() : ''}
@@ -3159,6 +3447,7 @@ class HAEntityRenamer extends HTMLElement {
     ${this._hass?.user?.is_admin && this._config?.show_support !== false && !_localSupportDismissed() ? _LOCAL_DONATE_HTML : ''}`;
 
     this._bindHelp();
+    this._bindMigrationPanel();
     _bindLocalSupportDismiss(this.shadowRoot);
     this._attachEvents();
     for (const group of this.shadowRoot.querySelectorAll('[data-auto-group]')) group.open = openAutomaticDevices.has(group.dataset.autoGroup);
