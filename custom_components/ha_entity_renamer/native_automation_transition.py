@@ -45,7 +45,7 @@ class NativeAutomationTransition:
         path = Path(native.__file__)
         self.source = path.read_bytes()
         self.path = path
-        self.code = tuple(_codes(compile(self.source, str(path), 'exec')))
+        self.code = tuple(_codes(compile(self.source, str(path), 'exec', dont_inherit=True)))
         self.functions = tuple((owner, name, getattr(owner, name)) for owner, name in (
             (native, '_prepare_automation_config'), (native, '_create_automation_entities'),
             (native.AutomationEntity, '__init__'), (native.AutomationEntity, '_async_disable'),
