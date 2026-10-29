@@ -48,17 +48,26 @@ class NativeAutomationTransition:
         self.code = tuple(_codes(compile(self.source, str(path), 'exec', dont_inherit=True)))
         self.functions = tuple((owner, name, getattr(owner, name)) for owner, name in (
             (native, '_prepare_automation_config'), (native, '_create_automation_entities'),
+            (EntityComponent, 'async_prepare_reload'),
             (native.AutomationEntity, '__init__'), (native.AutomationEntity, '_async_disable'),
             (native.AutomationEntity, '_async_enable'), (native.AutomationEntity, 'async_added_to_hass'),
             (native.AutomationEntity, 'async_will_remove_from_hass')))
+        self.other_sources = tuple((path, path.read_bytes()) for path in sorted({
+            Path(function.__code__.co_filename) for _, _, function in self.functions
+        }) if path != self.path)
+        self.other_code = tuple(code for path, source in self.other_sources
+                                for code in _codes(compile(source, str(path), 'exec', dont_inherit=True)))
         self.check_native()
 
     def check_native(self):
         _need(asyncio.current_task() is self.task and self.path.read_bytes() == self.source
               and self.hass.data.get('automation') is self.component)
+        _need(all(path.read_bytes() == source for path, source in self.other_sources))
         for owner, name, function in self.functions:
             _need(getattr(owner, name) is function and type(function.__code__) is CodeType)
-            matches = [code for code in self.code if code.co_qualname == function.__qualname__]
+            matches = [code for code in self.code + self.other_code
+                       if code.co_filename == function.__code__.co_filename
+                       and code.co_qualname == function.__qualname__]
             _need(len(matches) == 1 and function.__code__ == matches[0])
 
     def _entities(self):
@@ -96,9 +105,8 @@ class NativeAutomationTransition:
         confined to a fresh prepared config_block; raw_config remains native and
         unchanged for the independent source/projection observer.
         """
-        from homeassistant.config import async_hass_config_yaml
         self.assert_disabled()
-        config = await async_hass_config_yaml(self.hass)
+        config = await self.component.async_prepare_reload(skip_reset=True)
         self.assert_disabled()
         configs = await self.native._prepare_automation_config(self.hass, config, None)
         current = dict(self.assert_disabled())
