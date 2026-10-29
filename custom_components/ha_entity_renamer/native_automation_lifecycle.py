@@ -120,7 +120,8 @@ class NativeAutomationLifecycle:
             else:
                 self.phases.complete_automation_transition(ticket)
         except BaseException:
-            self.phases.abandon_reload(ticket)
+            if self.phases.active is not None:
+                self.phases.abandon_reload(ticket)
             raise
         self.check()
         await s.receipt_store.create(self._id(stage + '_receipt'),

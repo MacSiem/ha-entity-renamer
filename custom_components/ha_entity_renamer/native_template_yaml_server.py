@@ -413,10 +413,32 @@ class NativeTemplateYAMLServer:
         self._scope()
         await self._fresh_stores(None)
         await self._common(False, initial=True)
-        result = await self._coordinator().apply(self.plan, self.plan.fingerprint, self.operation_id)
+        if type(self.composition) is MixedTemplateComposition:
+            from .journal import Record
+            from .native_automation_lifecycle import NativeAutomationLifecycle
+            # Persist the ordinary operation BEFORE any native detach, as in
+            # the already qualified ConfigEntry lifecycle. Never replay apply.
+            self.plan.validate()
+            await self.journal.create(Record(self.operation_id, self.plan,
+                phases=('pending',) * len(self.plan.steps)))
+            self._scope()
+            self.automation_lifecycle = NativeAutomationLifecycle(self, 'forward')
+            self.observer.automation_lifecycle = self.automation_lifecycle
+            await self.automation_lifecycle.start()
+            coordinator = self._coordinator()
+            ready = await coordinator.reconcile(self.operation_id)
+            _need(ready.status == 'ready' and ready.direction == 'forward'
+                  and ready.phases == ('pending',) * len(self.plan.steps), 'initial_effects_not_pristine')
+            result = await coordinator.resume(self.operation_id)
+        else:
+            result = await self._coordinator().apply(self.plan, self.plan.fingerprint, self.operation_id)
         self._scope()
         _need(result.status == 'applied', 'apply_unresolved')
+        if hasattr(self, 'automation_lifecycle'):
+            await self.automation_lifecycle.restore()
         await self._terminal(result, rollback=False)
+        if hasattr(self, 'automation_lifecycle'):
+            await self.automation_lifecycle.complete(result)
         return result
 
     @classmethod
@@ -597,12 +619,23 @@ class NativeTemplateYAMLServer:
         self._scope()
         await self._fresh_stores(self.record)
         await self._terminal(self.record, rollback=False)
+        if type(self.composition) is MixedTemplateComposition:
+            from .native_automation_lifecycle import NativeAutomationLifecycle
+            self.automation_lifecycle = NativeAutomationLifecycle(self, 'rollback')
+            self.observer.automation_lifecycle = self.automation_lifecycle
+            await self.automation_lifecycle.start()
         result = await self._coordinator().rollback(self.operation_id)
         self._scope()
         _need(result.status == 'rolled_back', 'rollback_unresolved')
+        if hasattr(self, 'automation_lifecycle'):
+            await self.automation_lifecycle.restore()
         await self._terminal(result, rollback=True)
+        if hasattr(self, 'automation_lifecycle'):
+            await self.automation_lifecycle.complete(result)
         return result
 
     def close(self):
         _need(asyncio.current_task() is self.task, 'owner_task_required')
+        if hasattr(self, 'automation_lifecycle'):
+            self.automation_lifecycle.close()
         self.bound, self.closed = False, True

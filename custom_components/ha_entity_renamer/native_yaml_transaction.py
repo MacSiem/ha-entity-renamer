@@ -65,15 +65,22 @@ class _YAMLHooks:
                 mixed = type(hooks.adapter.observer) is MixedTemplateYAMLRuntimeReadback
                 if 'template' in hooks.change.receipt.changed_domains:
                     hooks.adapter.observer.assert_reload_current()
+                automation = mixed and args[0] == 'automation'
                 ticket = (hooks.adapter.observer.begin_domain_reload(
-                    args[0], hooks.context.record.direction) if mixed else None)
+                    args[0], hooks.context.record.direction) if mixed and not automation else None)
                 hooks.reload_started = True
                 try:
-                    result = await services.async_call(*args, **kwargs)
-                    if mixed:
+                    if automation:
+                        # This is a distinct native staged setup under its own
+                        # durable intent; it does not dispatch automation.reload.
+                        await hooks.adapter.observer.automation_lifecycle.stage()
+                        result = None
+                    else:
+                        result = await services.async_call(*args, **kwargs)
+                    if mixed and not automation:
                         hooks.adapter.observer.complete_domain_reload(ticket)
                 except BaseException:
-                    if mixed:
+                    if mixed and not automation:
                         hooks.adapter.observer.abandon_domain_reload(ticket)
                     raise
                 if 'template' in hooks.change.receipt.changed_domains:
@@ -82,8 +89,18 @@ class _YAMLHooks:
                 return result
         # Reuse native activation with the ORIGINAL receipt; wrap only the IO
         # boundary so every service await gets journal and whole-source checks.
-        await async_activate_yaml(SimpleNamespace(services=CheckedServices()),
-            self.change.receipt, context=self.adapter.context, guard=self.assert_sources)
+        from .mixed_yaml_runtime import MixedTemplateYAMLRuntimeReadback
+        if type(self.adapter.observer) is MixedTemplateYAMLRuntimeReadback:
+            # Producer-first while automation registrations are detached. All
+            # domains still come from the same ORIGINAL aggregate receipt.
+            checked = CheckedServices()
+            for domain in ('template', 'script', 'automation'):
+                if domain in self.change.receipt.changed_domains:
+                    await checked.async_call(domain, 'reload', {}, blocking=True,
+                                             context=self.adapter.context)
+        else:
+            await async_activate_yaml(SimpleNamespace(services=CheckedServices()),
+                self.change.receipt, context=self.adapter.context, guard=self.assert_sources)
         await self.checkpoint()
 
 
