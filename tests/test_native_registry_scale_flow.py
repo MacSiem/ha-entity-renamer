@@ -195,6 +195,75 @@ class NativeRegistryScaleFlowTests(unittest.IsolatedAsyncioTestCase):
             self.profile_phase = 'forward' if self.stimulus_count == 2 else 'reverse'
             self.phase_start = perf_counter()
 
+    async def test_accepted_native_file_decodes_once_and_rejects_drift(self):
+        # Tiny mechanism test: no scale population, operation or Recorder work.
+        from dataclasses import replace
+        from unittest.mock import patch
+        codec = self.module('native_input_baseline')
+        key = 'core.config_entries'
+        document = {'version': 1, 'minor_version': 5, 'key': key,
+                    'data': {'entries': [{'entry_id': 'entry', 'data': {'kept': [1, True, None]}}]}}
+        raw = codec._json(document)
+        item = codec.NativeInputFile(key, raw, (1, 2, 0o100600), codec._json(document['data']))
+        source = (codec._sha(raw), 1, 2)
+        with patch.object(codec, '_envelope', wraps=codec._envelope) as decode:
+            codec._assert_accepted_native_file(item, source, document, '2026.10.4')
+            self.assertEqual(decode.call_count, 1)
+        changed = json.loads(raw)
+        changed['data']['entries'][0]['data']['kept'].append('foreign')
+        for candidate, binding, expected in (
+                (replace(item, raw=codec._json(changed)), source, document),
+                (replace(item, identity=(1, 3, 0o100600)), source, document),
+                (replace(item, manager_json=codec._json(changed['data'])), source, document),
+                (item, source, changed)):
+            with self.assertRaises(codec.NativeInputBaselineError):
+                codec._assert_accepted_native_file(candidate, binding, expected, '2026.10.4')
+        duplicate = raw.replace(b'{', b'{"version":1,', 1)
+        with self.assertRaises(codec.NativeInputBaselineError):
+            codec._assert_accepted_native_file(replace(item, raw=duplicate),
+                (codec._sha(duplicate), 1, 2), document, '2026.10.4')
+
+    async def test_live_yaml_document_detachment_has_one_owner(self):
+        from copy import deepcopy
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        rr = self.module('native_registry_receipts')
+        accepted = self.module('accepted_input_state')
+        shared = {'opaque': [1, {'nested': True}]}
+        document = {'data': {'first': shared, 'alias': shared}}
+        states = {'core.entity_registry': {'document': document,
+                    'sha256': 'a' * 64, 'identity': [1, 2, 0o100600]}}
+        intent = rr.RegistryIntent(('slot', 'digest'))
+        binding = {'direction': 'forward'}
+        context = SimpleNamespace(index=0, step=SimpleNamespace(adapter='yaml'))
+        chain = rr.RegistryReceiptChain.__new__(rr.RegistryReceiptChain)
+        chain.writable, chain.active = True, intent
+        chain.baseline = SimpleNamespace(receipt_json=b'original')
+        chain.store = SimpleNamespace(read=lambda key: {'digest': 'digest',
+                    'payload': {'binding': binding, 'input_source': {
+                        '.storage/core.entity_registry': ['a' * 64, 1, 2, 0o100600, None, None]}}})
+        chain._context = lambda value: binding
+        chain._reconstruct = lambda: (states, 'head', 0, {}, intent.reference)
+        chain._original_change = lambda index: SimpleNamespace(files=(), identity='yaml')
+        chain._yaml_operations = lambda change, reverse: []
+        with patch.object(rr, 'deepcopy', wraps=deepcopy) as outer_copy, \
+                patch.object(accepted, 'deepcopy', wraps=deepcopy) as retained_copy:
+            state = chain.live_yaml_inputs(intent, context)
+            self.assertFalse(any(call.args[0] is document for call in outer_copy.call_args_list))
+            document_copies = [call for call in retained_copy.call_args_list
+                if type(call.args[0]) is dict and 'core.entity_registry' in call.args[0]]
+            self.assertEqual(len(document_copies), 1)  # constructor owns document copy
+        shared['opaque'].append('external')
+        first = state.documents()
+        self.assertEqual(first['core.entity_registry']['data']['first']['opaque'], [1, {'nested': True}])
+        first['core.entity_registry']['data']['alias']['opaque'][1]['nested'] = False
+        self.assertTrue(state.documents()['core.entity_registry']['data']['first']['opaque'][1]['nested'])
+        # No cached expectation can suppress the live hook after completion.
+        chain.active = None
+        with patch.object(accepted, '_receipt_bytes', return_value=b'original'):
+            with self.assertRaises(rr.RegistryReceiptError):
+                state._bound(object())
+
     async def test_core104_real_37275_deleted_full_original_yaml_forward_fresh_reverse_history(self):
         await self._execute(readonly=False)
 
