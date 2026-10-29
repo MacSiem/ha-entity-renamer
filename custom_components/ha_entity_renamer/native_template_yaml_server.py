@@ -102,6 +102,9 @@ class NativeTemplateYAMLServer:
         scope()
         _need(not await obj.journal.active(), 'other_operation_unresolved')
         scope()
+        from .native_automation_lifecycle import async_assert_no_pending_automation_lifecycle
+        await async_assert_no_pending_automation_lifecycle(hass, obj.preparations, obj.journal)
+        scope()
         from .recorder_guard import NativeRecorderGuard
         from .history_guard import NativeHistoryGuard
         from .yaml_editor_locks import NativeYAMLEditorLocks
@@ -421,11 +424,13 @@ class NativeTemplateYAMLServer:
             # Persist the ordinary operation BEFORE any native detach, as in
             # the already qualified ConfigEntry lifecycle. Never replay apply.
             self.plan.validate()
+            # Native type/idle admission is read-only and precedes even the
+            # operation record; no rejected busy source creates a pending job.
+            self.automation_lifecycle = NativeAutomationLifecycle(self, 'forward')
+            self.observer.automation_lifecycle = self.automation_lifecycle
             await self.journal.create(Record(self.operation_id, self.plan,
                 phases=('pending',) * len(self.plan.steps)))
             self._scope()
-            self.automation_lifecycle = NativeAutomationLifecycle(self, 'forward')
-            self.observer.automation_lifecycle = self.automation_lifecycle
             await self.automation_lifecycle.start()
             coordinator = self._coordinator()
             ready = await coordinator.reconcile(self.operation_id)

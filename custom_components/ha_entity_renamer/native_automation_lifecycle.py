@@ -23,29 +23,30 @@ def _key(operation, fingerprint, direction, stage):
     return 'rr-' + canonical(['automation_lifecycle', operation, fingerprint, direction, stage])[1]
 
 
-def assert_forward_completed(session):
-    store, operation, plan = session.receipt_store, session.operation_id, session.plan
-    key = _key(operation, plan.fingerprint, 'forward', 'completed')
-    row = store.read(key)
+def _completed(store, operation, plan, digests, direction, status, head):
+    row = store.read(_key(operation, plan.fingerprint, direction, 'completed'))
     _need(row is not None and row['digest'] == canonical(row['payload'])[1])
-    payload = row['payload']
-    _need(payload == {'kind': 'automation_lifecycle_completed', 'schema': 1,
+    _need(row['payload'] == {'kind': 'automation_lifecycle_completed', 'schema': 1,
         'operation_id': operation, 'fingerprint': plan.fingerprint,
-        'direction': 'forward', 'status': 'applied',
-        'native_inputs': list(plan.native_inputs),
-        'head': session.chain.reconstruct_inputs().head})
-    # Completion is accepted only with the exact original root and all native
-    # effect intent/receipt pairs. A completion-shaped row alone proves nothing.
-    root = store.read(_key(operation, plan.fingerprint, 'forward', 'root'))
+        'direction': direction, 'status': status,
+        'native_inputs': list(plan.native_inputs), 'head': head})
+    root = store.read(_key(operation, plan.fingerprint, direction, 'root'))
     _need(root is not None and root['digest'] == canonical(root['payload'])[1])
     binding = root['payload']
-    _need(binding['kind'] == 'automation_lifecycle_root' and binding['schema'] == 1
-          and binding['operation_id'] == operation and binding['fingerprint'] == plan.fingerprint
-          and binding['direction'] == 'forward' and binding['native_inputs'] == list(plan.native_inputs)
-          and binding['preparations'] == session.digests)
+    _need(type(binding) is dict and set(binding) == {'kind', 'schema', 'operation_id',
+        'fingerprint', 'direction', 'native_inputs', 'preparations', 'enabled', 'head'}
+        and binding['kind'] == 'automation_lifecycle_root' and type(binding['schema']) is int
+        and binding['schema'] == 1 and binding['operation_id'] == operation
+        and binding['fingerprint'] == plan.fingerprint and binding['direction'] == direction
+        and binding['native_inputs'] == list(plan.native_inputs) and binding['preparations'] == digests
+        and type(binding['head']) is str and len(binding['head']) == 64
+        and type(binding['enabled']) is list and all(
+            type(row) is list and len(row) == 2 and type(row[0]) is str and bool(row[0])
+            and type(row[1]) is bool for row in binding['enabled'])
+        and len({row[0] for row in binding['enabled']}) == len(binding['enabled']))
     for stage in ('quiesce', 'stage', 'restore'):
-        intent = store.read(_key(operation, plan.fingerprint, 'forward', stage + '_intent'))
-        receipt = store.read(_key(operation, plan.fingerprint, 'forward', stage + '_receipt'))
+        intent = store.read(_key(operation, plan.fingerprint, direction, stage + '_intent'))
+        receipt = store.read(_key(operation, plan.fingerprint, direction, stage + '_receipt'))
         _need(intent is not None and receipt is not None
               and intent['digest'] == canonical(intent['payload'])[1]
               and receipt['digest'] == canonical(receipt['payload'])[1]
@@ -53,6 +54,57 @@ def assert_forward_completed(session):
                   'root': root['digest'], 'stage': stage}
               and receipt['payload'] == {'kind': 'automation_lifecycle_receipt',
                   'root': root['digest'], 'stage': stage, 'intent': intent['digest']})
+    return binding
+
+
+def assert_forward_completed(session):
+    root = _completed(session.receipt_store, session.operation_id, session.plan,
+        session.digests, 'forward', 'applied', session.chain.reconstruct_inputs().head)
+    _need(root['head'] == session.chain.root_digest)
+
+
+async def async_assert_no_pending_automation_lifecycle(hass, preparations, journal):
+    """Read-only admission, including terminal inner records with pending outer IO.
+
+    The already authenticated preparation row selects this profile without
+    decoding/copying old Template-only full-cardinality baselines again. Actual
+    mixed records still get their full original composition and chain checked.
+    """
+    from .native_template_composition import MixedTemplateComposition
+    from .native_registry_receipts import RegistryReceiptChain, native_registry_receipt_store
+    candidates = []
+    for record in await journal.all():
+        if record.plan.required_scopes != ('registry', 'yaml'):
+            continue
+        reference = record.plan.native_inputs
+        _need(type(reference) is tuple and len(reference) == 3)
+        row = preparations.plans.get(reference[0])
+        _need(row is not None and row['digest'] == reference[1])
+        composition = row['payload'].get('composition')
+        if type(composition) is dict and composition.get('profile') == 'template_dependent_yaml_v1':
+            candidates.append(record)
+    if not candidates:
+        return
+    store = native_registry_receipt_store(hass, preparations)
+    await store.initialize()
+    for record in candidates:
+        baseline, composition = preparations.resolve_composition(record.plan.native_inputs)
+        _need(type(composition) is MixedTemplateComposition)
+        digests = dict(composition.prepared_digests)
+        chain = RegistryReceiptChain.reopen(store, record.operation_id, record.plan, baseline.receipt, digests)
+        _need(not chain.writable and chain.active is None)
+        head = chain.reconstruct_inputs().head
+        if record.status == 'applied' and record.direction == 'forward':
+            _need(record.phases == ('verified',) * len(record.plan.steps))
+            root = _completed(store, record.operation_id, record.plan, digests, 'forward', 'applied', head)
+            _need(root['head'] == chain.root_digest)
+        elif record.status == 'rolled_back' and record.direction == 'rollback':
+            _need(record.phases == ('undone',) * len(record.plan.steps))
+            reverse = _completed(store, record.operation_id, record.plan, digests, 'rollback', 'rolled_back', head)
+            root = _completed(store, record.operation_id, record.plan, digests, 'forward', 'applied', reverse['head'])
+            _need(root['head'] == chain.root_digest)
+        else:
+            _need(False)
 
 
 class NativeAutomationLifecycle:
