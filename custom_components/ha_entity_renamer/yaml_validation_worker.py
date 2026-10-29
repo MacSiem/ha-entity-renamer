@@ -1050,7 +1050,10 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
         template_sources=candidate_templates, template_state_profile=new_state_profile,
         template_state_program=template_state_program,
         template_program_sources=tuple(row[0] for row in reference_proof['files']) if template_state_program else ())
-    if (with_sources and changed == ['template']
+    if (with_sources and 'template' in changed
+            and set(changed) <= {'automation', 'script', 'template'}
+            and all(old_runtime.get(domain) is not None and new_runtime.get(domain) is not None
+                    and old_runtime[domain] != new_runtime[domain] for domain in changed)
             and old_runtime.get('template') is not None
             and new_runtime.get('template') is not None
             and old_runtime['template'] != new_runtime['template']):

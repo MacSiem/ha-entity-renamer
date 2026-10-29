@@ -28,6 +28,7 @@ _TYPES = {t.__name__: t for t in (OriginalSourceEvidence, NativeSourceDomain,
     SourceLedger, Definition, Finding, Origin, IncludeHop, OriginalTemplateSources,
     CandidateTemplateSources)}
 _PROFILE = 'template_numeric_entry_reverse_v1'
+_MIXED_PROFILE = 'template_dependent_yaml_v1'
 
 
 def _need(value):
@@ -146,6 +147,13 @@ class TemplateComposition:
     coverage_sha256: str
     physical_consumers: tuple[tuple[str, str, str], ...] = ()
 
+    def _assert_changed_scope(self, receipt):
+        _need(receipt.changed_domains == ('template',)
+              and len(receipt.runtime_expected) == 1
+              and receipt.runtime_expected[0][0] == 'template'
+              and None not in receipt.runtime_expected[0][1:]
+              and receipt.runtime_expected[0][1] != receipt.runtime_expected[0][2])
+
     def assert_baseline(self, baseline):
         _need(type(baseline) is NativeInputBaseline)
         receipt = baseline.receipt
@@ -157,12 +165,8 @@ class TemplateComposition:
         # The YAML server may persist the SAME ORIGINAL plus its sealed
         # candidate for the qualified modern Template graph only.
         if receipt.proposed_files or receipt.changed_domains:
-            _need(bool(receipt.proposed_files) and receipt.changed_domains == ('template',)
-                  and evidence.template_candidate_sources is not None
-                  and len(receipt.runtime_expected) == 1
-                  and receipt.runtime_expected[0][0] == 'template'
-                  and None not in receipt.runtime_expected[0][1:]
-                  and receipt.runtime_expected[0][1] != receipt.runtime_expected[0][2])
+            _need(bool(receipt.proposed_files) and evidence.template_candidate_sources is not None)
+            self._assert_changed_scope(receipt)
         evidence.assert_receipt(receipt)
         _ledger(evidence.ledger, 1)
         _need(tuple(row.domain for row in evidence.domains) == ('automation', 'script'))
@@ -222,15 +226,31 @@ class TemplateComposition:
                                               definition.origin.start_line))
 
 
+@dataclass(frozen=True)
+class MixedTemplateComposition(TemplateComposition):
+    """Separate durable profile; historical entry/YAML bytes remain unchanged."""
+
+    def _assert_changed_scope(self, receipt):
+        domains = receipt.changed_domains
+        _need(type(domains) is tuple and 'template' in domains
+              and set(domains) <= {'automation', 'script', 'template'}
+              and len(domains) in (2, 3)
+              and tuple(sorted(set(domains))) == domains
+              and tuple(row[0] for row in receipt.runtime_expected) == domains
+              and all(None not in row[1:] and row[1] != row[2]
+                      for row in receipt.runtime_expected))
+
+
 def encode_composition(composition, baseline):
     from .native_template_state_composition import TemplateStateComposition, encode_state_composition
     if type(composition) is TemplateStateComposition:
         return encode_state_composition(composition, baseline)
-    _need(type(composition) is TemplateComposition)
+    _need(type(composition) in (TemplateComposition, MixedTemplateComposition))
     # Type-check fields before semantic validation, including unsupported families.
     evidence = _typed(composition.evidence, OriginalSourceEvidence, encode=True)
     composition.assert_baseline(baseline)
-    result = {'schema': 1, 'profile': _PROFILE, 'evidence': evidence,
+    profile = _MIXED_PROFILE if type(composition) is MixedTemplateComposition else _PROFILE
+    result = {'schema': 1, 'profile': profile, 'evidence': evidence,
             'prepared_digests': [list(row) for row in composition.prepared_digests],
             'source_history': _history(composition.source_history),
             'consumer_history': _history(composition.consumer_history),
@@ -250,12 +270,13 @@ def decode_composition(payload, baseline):
     extra = {'physical_consumers'} if payload['schema'] == 2 else set()
     _need(set(payload) == {'schema', 'profile', 'evidence', 'prepared_digests',
         'source_history', 'consumer_history', 'coverage_sha256'} | extra
-        and payload['profile'] == _PROFILE)
+        and payload['profile'] in (_PROFILE, _MIXED_PROFILE))
     physical = (_typed(payload['physical_consumers'], tuple[tuple[str, str, str], ...], encode=False)
                 if payload['schema'] == 2 else ())
     _need(payload['schema'] == 1 or bool(physical))
     digests = _typed(payload['prepared_digests'], tuple[tuple[str, str], ...], encode=False)
-    value = TemplateComposition(_typed(payload['evidence'], OriginalSourceEvidence, encode=False),
+    cls = MixedTemplateComposition if payload['profile'] == _MIXED_PROFILE else TemplateComposition
+    value = cls(_typed(payload['evidence'], OriginalSourceEvidence, encode=False),
         digests, _history(payload['source_history']), _history(payload['consumer_history']),
         payload['coverage_sha256'], physical)
     value.assert_baseline(baseline)

@@ -22,7 +22,7 @@ from .native_registry_receipts import (RegistryReceiptChain, RegistryReceiptErro
     RegistryRawObservation, native_registry_receipt_store)
 from .native_template_yaml import (NativeTemplateYAMLRuntimeReadback,
     compose_template_yaml_coordinator)
-from .native_template_composition import TemplateComposition, encode_composition
+from .native_template_composition import TemplateComposition, MixedTemplateComposition, encode_composition
 from .prepared import native_prepared_store, encode_change, decode_change, canonical
 from .journal import native_journal
 
@@ -144,8 +144,15 @@ class NativeTemplateYAMLServer:
         self.receipt, self.evidence = await async_validate_proposed_with_sources(
             self.hass, yaml, root.parent)
         self._scope()
-        _need(self.receipt.ready_for_apply and self.receipt.changed_domains == ('template',),
+        domains = self.receipt.changed_domains
+        mixed = domains != ('template',)
+        _need(self.receipt.ready_for_apply and 'template' in domains
+              and set(domains) <= {'automation', 'script', 'template'},
               'modern_template_only_required')
+        if mixed:
+            from .mixed_yaml_runtime import MixedYAMLConsumers
+            self.consumers = await MixedYAMLConsumers.capture(self.hass, self.mapping, guard=self._scope)
+            self._scope()
         await self.consumers.bind_sources(self.receipt, self.evidence, guard=self._scope)
         self._scope()
         baseline = await async_capture_native_input_baseline(self.hass, self.receipt, guard=self._scope)
@@ -195,11 +202,15 @@ class NativeTemplateYAMLServer:
         physical = tuple(sorted((row.platform, row.key, row.entity_id) for row in consumers
                                  if (row.platform, row.key) in physical_keys))
         consumer_ids = {row.entity_id: row.entity_id for row in consumers}
+        if mixed:
+            consumer_ids.update({row.entity_id: row.entity_id
+                                 for row in self.consumers.phases.sample[0]})
         source_history = await self.history.capture(self.mapping)
         self._scope()
         consumer_history = await self.history.capture(consumer_ids)
         self._scope()
-        self.composition = TemplateComposition(self.evidence, tuple(sorted(self.digests.items())),
+        composition_type = MixedTemplateComposition if mixed else TemplateComposition
+        self.composition = composition_type(self.evidence, tuple(sorted(self.digests.items())),
             source_history, consumer_history, self.evidence.sha256, physical)
         inputs = await self.preparations.create_native_inputs(own + '-original', baseline,
                                                              composition=self.composition)
@@ -241,6 +252,10 @@ class NativeTemplateYAMLServer:
         self.bound = True
 
     def _new_observer(self):
+        if type(self.composition) is MixedTemplateComposition:
+            from .mixed_yaml_runtime import MixedTemplateYAMLRuntimeReadback
+            return MixedTemplateYAMLRuntimeReadback(self.hass, self.chain, self.evidence,
+                                                     self.consumers, guard=self._scope)
         return NativeTemplateYAMLRuntimeReadback(self.hass, self.chain, self.evidence,
                                                 guard=self._scope)
 
@@ -322,7 +337,10 @@ class NativeTemplateYAMLServer:
         managers = _Managers(self.hass, self.receipt)
         instance = self.recorder.instance
         _need(get_instance(self.hass) is instance, 'recorder_replaced')
-        consumers = tuple(sorted(v[0] for v in self.observer.identities.values()))
+        if type(self.composition) is MixedTemplateComposition:
+            consumers = self.observer.history_consumers
+        else:
+            consumers = tuple(sorted(v[0] for v in self.observer.identities.values()))
         source_ids = tuple(sorted(set(self.mapping) | set(self.mapping.values())))
         def physical():
             self.consumers.physical()
@@ -429,7 +447,11 @@ class NativeTemplateYAMLServer:
                 obj.mapping.update(change.mapping)
             _need(len(set(obj.mapping.values())) == len(obj.mapping)
                   and not set(obj.mapping) & set(obj.mapping.values()), 'independent_mapping_required')
-            obj.consumers = await _UnchangedConsumers.capture(hass, obj.mapping, guard=obj._scope)
+            consumer_type = _UnchangedConsumers
+            if type(obj.composition) is MixedTemplateComposition:
+                from .mixed_yaml_runtime import MixedYAMLConsumers
+                consumer_type = MixedYAMLConsumers
+            obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope)
             obj._scope()
             obj.receipt_store = native_registry_receipt_store(hass, obj.preparations)
             await obj.receipt_store.initialize()
@@ -536,6 +558,10 @@ class NativeTemplateYAMLServer:
         observed = await async_observe_discovery_inputs(self.hass, guard=self._scope)
         self._scope()
         sampler = _RuntimeSourceSampler.bind(self.evidence, observed)
+        if type(self.composition) is MixedTemplateComposition:
+            self.consumers.bind_phases(self.receipt, self.evidence, observed, Position.AFTER)
+            self._scope()
+            return
         sample = sampler.sample(self.hass, self.evidence, observed)
         _need(not sample[1], 'source_runtime_unqualified')
         # One synchronous replacement: guards never see a corpus from a

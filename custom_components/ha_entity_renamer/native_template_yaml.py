@@ -473,7 +473,7 @@ class NativeTemplateYAMLRuntimeReadback:
         entities = [row for row in before if row.kind == 'entity']
         actual = _fingerprint(template_state_runtime_projection([
             ['template.' + row.platform, row.key, row.semantic_sha256] for row in entities]))
-        _, old, new = self.receipt.runtime_expected[0]
+        _, old, new = next(row for row in self.receipt.runtime_expected if row[0] == 'template')
         position = (Position.BEFORE if actual == old else
                     Position.AFTER if actual == new else Position.UNKNOWN)
         chosen = before if position is Position.BEFORE else after
@@ -605,10 +605,11 @@ def compose_template_yaml_coordinator(adapters, journal, guard, *, required_scop
     The generic Coordinator and all other families retain their existing code.
     """
     from .native_yaml_transaction import ReceiptedYAMLTransactionAdapter
+    from .mixed_yaml_runtime import MixedTemplateYAMLRuntimeReadback
     from .transaction import Coordinator
     adapter = adapters.get('yaml')
     _need(type(adapter) is ReceiptedYAMLTransactionAdapter
-          and type(adapter.observer) is NativeTemplateYAMLRuntimeReadback,
+          and type(adapter.observer) in (NativeTemplateYAMLRuntimeReadback, MixedTemplateYAMLRuntimeReadback),
           'template_scoped_composition_required')
     completion = _TemplateCompletionGuard(guard)
     adapter._template_completion = completion

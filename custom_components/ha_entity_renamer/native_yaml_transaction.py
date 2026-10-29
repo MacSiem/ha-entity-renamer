@@ -61,10 +61,21 @@ class _YAMLHooks:
 
             async def async_call(self, *args, **kwargs):
                 await hooks.checkpoint()
+                from .mixed_yaml_runtime import MixedTemplateYAMLRuntimeReadback
+                mixed = type(hooks.adapter.observer) is MixedTemplateYAMLRuntimeReadback
                 if 'template' in hooks.change.receipt.changed_domains:
                     hooks.adapter.observer.assert_reload_current()
+                ticket = (hooks.adapter.observer.begin_domain_reload(
+                    args[0], hooks.context.record.direction) if mixed else None)
                 hooks.reload_started = True
-                result = await services.async_call(*args, **kwargs)
+                try:
+                    result = await services.async_call(*args, **kwargs)
+                    if mixed:
+                        hooks.adapter.observer.complete_domain_reload(ticket)
+                except BaseException:
+                    if mixed:
+                        hooks.adapter.observer.abandon_domain_reload(ticket)
+                    raise
                 if 'template' in hooks.change.receipt.changed_domains:
                     hooks.adapter.observer.assert_reload_current()
                 await hooks.checkpoint()
@@ -115,7 +126,8 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
     async def _runtime_position(self, change, state):
         if 'template' in change.receipt.changed_domains:
             from .native_template_yaml import NativeTemplateYAMLRuntimeReadback
-            if type(self.observer) is not NativeTemplateYAMLRuntimeReadback:
+            from .mixed_yaml_runtime import MixedTemplateYAMLRuntimeReadback
+            if type(self.observer) not in (NativeTemplateYAMLRuntimeReadback, MixedTemplateYAMLRuntimeReadback):
                 raise Refused('template_scoped_runtime_observer_required')
             return await self.observer.position_at_inputs(change, state)
         return await self.observer.position(change)
