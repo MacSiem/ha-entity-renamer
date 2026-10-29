@@ -179,6 +179,69 @@ class NativeYAMLSourceBindingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('runtime_source_projection_mismatch', after[1])
         self.assertNotEqual(after[2], before[2])
 
+    async def test_same_original_sampler_can_verify_sealed_script_after_and_reverse(self):
+        from homeassistant.core import Context
+        from importlib import import_module
+        receipt, evidence = await self.prepare()
+        binding = import_module(fixture.fixtures.PACKAGE + '.yaml_source_binding')
+        discovery = import_module(fixture.fixtures.PACKAGE + '.native_discovery_inputs')
+        tx = import_module(fixture.fixtures.PACKAGE + '.transaction')
+        observed = await discovery.async_observe_discovery_inputs(self.f.hass, guard=lambda: None)
+        sampler = binding._RuntimeSourceSampler.bind(evidence, observed)
+        before = (('automation', tx.Position.BEFORE), ('script', tx.Position.BEFORE))
+        after = (('automation', tx.Position.BEFORE), ('script', tx.Position.AFTER))
+        original = sampler.sample_at_positions(self.f.hass, evidence, observed, receipt, before)
+        self.assertFalse(original[1])
+        self.assertIn('runtime_source_projection_mismatch',
+            sampler.sample_at_positions(self.f.hass, evidence, observed, receipt, after)[1])
+        planner = import_module(fixture.fixtures.PACKAGE + '.yaml_plan')
+        plan = planner.plan_yaml(self.f.root, {'sensor.original': 'sensor.changed'})
+        original_bytes = {p.path: (self.f.root / p.path).read_bytes() for p in plan.patches}
+        original_uuid = self.f.entity.async_get('script.source_probe').id
+        for patch in plan.patches:
+            (self.f.root / patch.path).write_bytes(patch.proposed_bytes)
+        # These are owned fixture edits/reloads to qualify the read-only sampler,
+        # not a server-owned migration or a fixture-created mutation permission.
+        await self.f.hass.services.async_call('script', 'reload', {}, blocking=True, context=Context())
+        await self.f.hass.async_block_till_done()
+        proposed = sampler.sample_at_positions(self.f.hass, evidence, observed, receipt, after)
+        self.assertFalse(proposed[1], proposed[1])
+        self.assertEqual(proposed[0], original[0])
+        self.assertNotEqual(proposed[2], original[2])
+        self.assertEqual(self.f.entity.async_get('script.source_probe').id, original_uuid)
+        self.assertIn('runtime_source_projection_mismatch',
+                      sampler.sample(self.f.hass, evidence, observed)[1])
+        self.assertIn('runtime_source_projection_mismatch',
+            sampler.sample_at_positions(self.f.hass, evidence, observed, receipt, before)[1])
+        for path, raw in original_bytes.items():
+            (self.f.root / path).write_bytes(raw)
+        await self.f.hass.services.async_call('script', 'reload', {}, blocking=True, context=Context())
+        await self.f.hass.async_block_till_done()
+        restored = sampler.sample_at_positions(self.f.hass, evidence, observed, receipt, before)
+        self.assertFalse(restored[1], restored[1])
+        self.assertEqual(restored[0], original[0])
+        self.assertEqual(self.f.entity.async_get('script.source_probe').id, original_uuid)
+
+    async def test_phase_sampler_cannot_adopt_unplanned_script_body_or_registry_id(self):
+        from homeassistant.core import Context
+        from importlib import import_module
+        receipt, evidence = await self.prepare()
+        binding = import_module(fixture.fixtures.PACKAGE + '.yaml_source_binding')
+        discovery = import_module(fixture.fixtures.PACKAGE + '.native_discovery_inputs')
+        tx = import_module(fixture.fixtures.PACKAGE + '.transaction')
+        observed = await discovery.async_observe_discovery_inputs(self.f.hass, guard=lambda: None)
+        sampler = binding._RuntimeSourceSampler.bind(evidence, observed)
+        after = (('automation', tx.Position.BEFORE), ('script', tx.Position.AFTER))
+        path = self.f.root / 'scripts/one.yaml'
+        path.write_text('source_probe:\n  sequence:\n    - variables: {sample: unplanned}\n')
+        await self.f.hass.services.async_call('script', 'reload', {}, blocking=True, context=Context())
+        await self.f.hass.async_block_till_done()
+        result = sampler.sample_at_positions(self.f.hass, evidence, observed, receipt, after)
+        self.assertIn('runtime_source_projection_mismatch', result[1])
+        self.f.entity.async_update_entity('script.source_probe', new_entity_id='script.foreign_source')
+        with self.assertRaises(binding.SourceBindingError):
+            sampler.sample_at_positions(self.f.hass, evidence, observed, receipt, after)
+
     async def test_compiled_sample_still_observes_actual_entity_component_removal(self):
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         binding, evidence, observed, sampler, before = await self.compiled_sample()

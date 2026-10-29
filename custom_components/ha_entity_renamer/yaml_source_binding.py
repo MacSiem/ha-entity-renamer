@@ -215,6 +215,46 @@ class _RuntimeSourceSampler:
         return _runtime_rows_sample(hass, evidence,
                                     (json.loads(row) for row in self._rows))
 
+    def sample_at_positions(self, hass, evidence, observed, receipt, positions):
+        """Read dependent runtimes against ORIGINAL checker seals at each phase.
+
+        This is a synchronous semantic/UUID sample, not an effect or source
+        admission. The owning accepted-input observer must separately validate
+        its chain, physical source image, authorization and reload context.
+        In particular, a caller choosing AFTER cannot manufacture its digest
+        from the live projection: it comes only from the same sealed receipt.
+        The ordinary ORIGINAL sampler above keeps its exact existing behavior.
+        """
+        import json
+        import re
+        from .transaction import Position
+        _need(type(self) is _RuntimeSourceSampler and evidence is self._evidence
+              and observed is self._observed and observed.files is self._files
+              and self._native.manager_json is self._manager_json
+              and type(positions) is tuple and len(positions) == len(_DOMAINS)
+              and all(type(row) is tuple and len(row) == 2 for row in positions)
+              and tuple(row[0] for row in positions) == _DOMAINS
+              and all(row[1] in (Position.BEFORE, Position.AFTER)
+                      and type(row[1]) is Position for row in positions))
+        evidence.assert_receipt(receipt)
+        expected = {domain: (before, after)
+                    for domain, before, after in receipt.runtime_expected}
+        overrides = []
+        for domain, position in positions:
+            if domain not in receipt.changed_domains:
+                _need(domain not in expected)
+                continue
+            _need(domain in expected)
+            before, after = expected[domain]
+            _need(all(type(value) is str and re.fullmatch(r'[0-9a-f]{64}', value)
+                      for value in (before, after))
+                  and before == evidence.domain_projection(domain))
+            if position is Position.AFTER:
+                overrides.append((domain, after))
+        return _runtime_rows_sample(hass, evidence,
+            (json.loads(row) for row in self._rows),
+            expected_projections=tuple(overrides))
+
 
 def _runtime_sample(hass, evidence, observed):
     """Default full-document path, with the same live verifier as bound samples."""
@@ -225,7 +265,7 @@ def _runtime_sample(hass, evidence, observed):
     return _runtime_rows_sample(hass, evidence, rows())
 
 
-def _runtime_rows_sample(hass, evidence, registry_rows):
+def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=()):
     """Same native projections, plus full ORIGINAL registry/object bijection."""
     import hashlib
     import json
@@ -259,9 +299,14 @@ def _runtime_rows_sample(hass, evidence, registry_rows):
         tokens.append((domain, id(component), identity))
         actual_rows = tuple((row[0], _fingerprint(row[1]), _fingerprint(row))
                             for row in projection)
+        # AFTER projections are sealed by sample_at_positions using this SAME
+        # ORIGINAL receipt. Their whole-projection hash covers every row/body;
+        # the complete ledger/registry/live bijection below remains mandatory.
+        override = dict(expected_projections).get(domain)
         if (expected.projection is None or expected.rows is None):
             blockers.add('runtime_source_native_projection_unavailable')
-        elif (_fingerprint(projection) != expected.projection or actual_rows != expected.rows):
+        elif (_fingerprint(projection) != (override or expected.projection)
+              or override is None and actual_rows != expected.rows):
             blockers.add('runtime_source_projection_mismatch')
         live = {entity.unique_id: entity for entity in entities}
         if len(live) != len(entities):
