@@ -380,3 +380,24 @@ test('confirmation renders the frozen reviewed scope and handles name-only chang
   assert.doesNotMatch(dialog.textContent,/undefined/);
   assert.equal(writes.length,0);
 });
+
+test('bulk confirmation keyboard reaches both reviews and wraps without applying', t => {
+  const {card,dom,writes}=fixture(t);
+  card._renameQueue=Array.from({length:9},(_,i)=>({oldId:`sensor.old_${i}`,newId:`sensor.new_${i}`}));
+  card._devices=Array.from({length:9},(_,i)=>({id:`device_${i}`,name:`Original ${i}`}));
+  card._deviceRenameQueue=Object.fromEntries(card._devices.map((d,i)=>[d.id,`New device ${i}`]));
+  card._showRenameConfirmation();
+  const root=card.shadowRoot;
+  const reviews=root.querySelectorAll('.confirm-dialog summary');
+  assert.equal(reviews.length,2);
+  const tab=shiftKey=>root.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Tab',shiftKey,bubbles:true,cancelable:true}));
+  assert.equal(root.activeElement.id,'cancelRenameDialog');
+  tab(true);assert.equal(root.activeElement,reviews[1]);
+  tab(true);assert.equal(root.activeElement,reviews[0]);
+  tab(true);assert.equal(root.activeElement.id,'confirmRenameApply');
+  tab(false);assert.equal(root.activeElement,reviews[0]);
+  tab(false);assert.equal(root.activeElement,reviews[1]);
+  tab(false);assert.equal(root.activeElement.id,'cancelRenameDialog');
+  assert.equal(writes.length,0);
+  assert.equal(card._renameQueue.length,9);
+});
