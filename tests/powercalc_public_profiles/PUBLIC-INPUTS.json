@@ -1,0 +1,333 @@
+{
+  "repository": "https://github.com/bramstroker/homeassistant-powercalc",
+  "tag": "v1.26.1",
+  "commit": "fcb7736b2cbf64649487c1708d10093f25ec1b21",
+  "tree": "fbd63627338bf468a550304360bc581c8b9af1f6",
+  "vendor_pair": "Powercalc v1.26.1 + HA2026.10.2 only",
+  "selected_profiles": [
+    "signify/LWA001",
+    "lifx/LHB30E27UC10P"
+  ],
+  "blobs": [
+    {
+      "path": "profile_library/aqara/CL-L02D/model.json",
+      "bytes": 1373,
+      "sha256": "5fd42311b0ee7ed484e82dfb2aea7f1e3385c13524737c76f7dc5373eda53748",
+      "git_blob": "d2f5d7203a4246ef9dee359ded9a1ce6d0f1d6b1",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/aqara/CL-L02D/model.json",
+      "selected": false
+    },
+    {
+      "path": "profile_library/aqara/CL-L02D/rgb/model.json",
+      "bytes": 64,
+      "sha256": "76de8f8d956b492948bcba90f4870e6258ca359df006252f7ec549a82647753b",
+      "git_blob": "0ace1909e858232026802eea367e74a87bab0c17",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/aqara/CL-L02D/rgb/model.json",
+      "selected": false
+    },
+    {
+      "path": "profile_library/aqara/CL-L02D/white/model.json",
+      "bytes": 68,
+      "sha256": "9c83dbce6fc2c585aa5f562cfbb4fd01b2c4eb407a27e15d6f3e8f2ba1c35f35",
+      "git_blob": "2d52435a79a5d676ca9f8af6fcaf06c360dc7e76",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/aqara/CL-L02D/white/model.json",
+      "selected": false
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_100/color_temp.csv",
+      "bytes": 36990,
+      "sha256": "ed7682b7b43c9c79121d8ac3fb628868231a164636f9a941bc90255c2ded1a04",
+      "git_blob": "e3829ceccd6a3aa0dad5cb7e0fac57f21afbd11f",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_100/color_temp.csv",
+      "selected": true
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_100/color_temp.csv.gz",
+      "bytes": 8399,
+      "sha256": "b659f7e61967d5f3e6144e18d2dc422d8d8f37d7e9aa6d9ac4974b7aadd98f74",
+      "git_blob": "8129dc09765d24b076e29a57bc95751d3dc2c17d",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_100/color_temp.csv.gz",
+      "selected": true,
+      "decompressed_sha256": "0a974abe89261aa9df2e61ad67459fe7ad2a1b4357e10d1faf51ea700914ea05",
+      "decompressed_bytes": 39953,
+      "plain_csv_same_rows": true,
+      "plain_csv_same_bytes": false
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_100/hs.csv",
+      "bytes": 62492,
+      "sha256": "0eb144f72ee48a9985ed29b1e1c04eb32bb55779e823e7d27c0c2c9601fdd86d",
+      "git_blob": "d698ff13492651b8daf5fa27664d6f685efd9b47",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_100/hs.csv",
+      "selected": true
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_100/hs.csv.gz",
+      "bytes": 10964,
+      "sha256": "9786c22d7c1afe52009bd94e739ec5acdddbe30e0911976da2e0a64eaf4ef677",
+      "git_blob": "8c41d2ddbfea34af9c48221ebf59234a40e03834",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_100/hs.csv.gz",
+      "selected": true,
+      "decompressed_sha256": "42608ccb3ae3a1c610b9c3c38542f9039ea0ee66f7e5d852e89cd304e7617cf6",
+      "decompressed_bytes": 66019,
+      "plain_csv_same_rows": true,
+      "plain_csv_same_bytes": false
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_100/model.json",
+      "bytes": 68,
+      "sha256": "2603fefb9084f673857d4a131f903534f40b3693b61b1675bc8b82fc26e5637c",
+      "git_blob": "4032b7116cc8ddebc36dd71db452fe92f3e695bf",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_100/model.json",
+      "selected": true
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_25/color_temp.csv",
+      "bytes": 37341,
+      "sha256": "8ed4d01c0cfbc68fed56ca1326db9feb205e904f71749537e2ee8061ce2baf93",
+      "git_blob": "b621942af2e875291c5ec2c4816c16d2844eccef",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_25/color_temp.csv",
+      "selected": true
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_25/color_temp.csv.gz",
+      "bytes": 9409,
+      "sha256": "a4459f86e7d3afb5ce87f64c73fe44106d2e887e836515ecf84ffbd9b26ea2d3",
+      "git_blob": "bc6b769ddfffc1b7625e03c7adde9ca22a10db4d",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_25/color_temp.csv.gz",
+      "selected": true,
+      "decompressed_sha256": "e6320ac834b90c5c1434a01ddcbfe0be2b16da18724a31c03e77316ddf110da6",
+      "decompressed_bytes": 40304,
+      "plain_csv_same_rows": true,
+      "plain_csv_same_bytes": false
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_25/hs.csv",
+      "bytes": 62903,
+      "sha256": "52721f0f0e701e86ae1fb76fb519f9c641e92a8b2ea4957516927e60e38839a8",
+      "git_blob": "b250fae573a6aa13ac92eaaa684f5ca697395cb5",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_25/hs.csv",
+      "selected": true
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_25/hs.csv.gz",
+      "bytes": 12154,
+      "sha256": "82b0e8b5c2767b6f6b7703794dbb2ae72d28accdc554cd3ea80c07e291c0bec0",
+      "git_blob": "a18eec8e17715e5497ff703a15c8c3d165b1d691",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_25/hs.csv.gz",
+      "selected": true,
+      "decompressed_sha256": "dfc49e54d0e563c626edced601ca40675ad16bc3edd16f1b3ad0ed5a9c128117",
+      "decompressed_bytes": 66430,
+      "plain_csv_same_rows": true,
+      "plain_csv_same_bytes": false
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_25/model.json",
+      "bytes": 68,
+      "sha256": "ef918821da714487cac4fa23c8a331aed2cbe891d78332c47d18cba00ea885fa",
+      "git_blob": "3e9de179d5aa41b82df232e33fde437227832860",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_25/model.json",
+      "selected": true
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_50/color_temp.csv",
+      "bytes": 37347,
+      "sha256": "f962234242791339b426fce5405041f653cb33a81a6806066efdecf975c6da31",
+      "git_blob": "b52b1a778d50d17e7d955edd9c615bfedb73a063",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_50/color_temp.csv",
+      "selected": true
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_50/color_temp.csv.gz",
+      "bytes": 9510,
+      "sha256": "43c8279b1844151808977ef3be46b4d07576511a54f4e63cf357ef658d30bc5b",
+      "git_blob": "edc3e574409582ed4271b7d6ad7a9a05f6a0b568",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_50/color_temp.csv.gz",
+      "selected": true,
+      "decompressed_sha256": "a3a3b41b8cac9c54f5858edb7bdf279ef2cb91aced55a89024d722207a30fa2e",
+      "decompressed_bytes": 40310,
+      "plain_csv_same_rows": true,
+      "plain_csv_same_bytes": false
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_50/hs.csv",
+      "bytes": 62901,
+      "sha256": "58d6287c24d9a61bdc3548fa492f23359f8f995fe75070b7957b90230dbb477d",
+      "git_blob": "2f854b4ac87e3a142394041ae41c45c172c78a23",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_50/hs.csv",
+      "selected": true
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_50/hs.csv.gz",
+      "bytes": 12160,
+      "sha256": "381f6eb9b3efe774d395ddf29526832ed0bbcee57f17920b3b63b8b6cb0781c8",
+      "git_blob": "4486353b3681e17ee877cdc7034304776e4deb99",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_50/hs.csv.gz",
+      "selected": true,
+      "decompressed_sha256": "9ea5439f73a7c28c38b2768a36052eea760642119f80db69bc2afc9dd3b00574",
+      "decompressed_bytes": 66428,
+      "plain_csv_same_rows": true,
+      "plain_csv_same_bytes": false
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_50/model.json",
+      "bytes": 68,
+      "sha256": "3251b80caa14224690db45234294f2a7f48dadfa036f7141c8e8009e1546284d",
+      "git_blob": "a6f65c1c8e3de9322eec11c52d8dea5c9a4668ba",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_50/model.json",
+      "selected": true
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_off/color_temp.csv",
+      "bytes": 37037,
+      "sha256": "296192042c1d1eb1716d676be0fbfc96cf6b253cfe8ec1387731241d889cb70a",
+      "git_blob": "e491f48b8c8e072043beda7a3b09fdec19379555",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_off/color_temp.csv",
+      "selected": true
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_off/color_temp.csv.gz",
+      "bytes": 8099,
+      "sha256": "729cf6a2e06b7799d21416801d1a62770180ed81ca76e6dea6b9d570eff09c54",
+      "git_blob": "19afd97de7efbfa3f9b2f513ebe5a7db0fbbb8ce",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_off/color_temp.csv.gz",
+      "selected": true,
+      "decompressed_sha256": "bde29ab1243d1bc68776e05a8f135906ddc38621779f4cbfc95f70f79e2f9550",
+      "decompressed_bytes": 40000,
+      "plain_csv_same_rows": true,
+      "plain_csv_same_bytes": false
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_off/hs.csv",
+      "bytes": 62444,
+      "sha256": "f766277565a87c7ec4c1e7557f8cfa3996fb35c3aba609c64e4bf10232655ecb",
+      "git_blob": "b0e8aff4c680a29b5b259dd904de93cc1a8c1354",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_off/hs.csv",
+      "selected": true
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_off/hs.csv.gz",
+      "bytes": 10890,
+      "sha256": "e85808d2872b36d9078789a662ac9375bbcab46968a3eb23644847220162c4c7",
+      "git_blob": "87556f147871b927e747f82bc8065aae49264e77",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_off/hs.csv.gz",
+      "selected": true,
+      "decompressed_sha256": "586b598f826aa2c5965fa7d1b10fa3f2144f6691e8520806bea395736df86bae",
+      "decompressed_bytes": 65971,
+      "plain_csv_same_rows": true,
+      "plain_csv_same_bytes": false
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/infrared_off/model.json",
+      "bytes": 68,
+      "sha256": "dbbc9466672ebb9f6f2284b9e2a56f599a375687643b9f3d471096254917aff6",
+      "git_blob": "1168f7e9bf102708e4ecac2e18eb42c001697097",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/infrared_off/model.json",
+      "selected": true
+    },
+    {
+      "path": "profile_library/lifx/LHB30E27UC10P/model.json",
+      "bytes": 1213,
+      "sha256": "3d3c335eea12243ec57f5882beb84a5654eb314e48154d8367e565c293b597a0",
+      "git_blob": "e4d699db897a7480b21d53921a27f8c432bf9e4c",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/lifx/LHB30E27UC10P/model.json",
+      "selected": true
+    },
+    {
+      "path": "profile_library/signify/LWA001/brightness.csv",
+      "bytes": 2168,
+      "sha256": "3e230eaad8da7b4ddf1204ef4817a00bcbba80de8e7116b22a98030f8639a826",
+      "git_blob": "fc5380435f7052aadc7422be6fab54f2ea41fe47",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/signify/LWA001/brightness.csv",
+      "selected": true
+    },
+    {
+      "path": "profile_library/signify/LWA001/brightness.csv.gz",
+      "bytes": 859,
+      "sha256": "2d21c56e251ee8b23c7a6a26610fd615f02936b13182563df9db51ef6b250fdd",
+      "git_blob": "df616500fbc7e0a42f35c31a183c84d6819eaf5f",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/signify/LWA001/brightness.csv.gz",
+      "selected": true,
+      "decompressed_sha256": "36862acb268647807efafd8ae339060e12417b8149da4c471de8ea1123f3aa82",
+      "decompressed_bytes": 2424,
+      "plain_csv_same_rows": true,
+      "plain_csv_same_bytes": false
+    },
+    {
+      "path": "profile_library/signify/LWA001/model.json",
+      "bytes": 785,
+      "sha256": "b1e738a09b525db6d331a9fdb44e289eb31d73e270c82db097f6bc8b266baafb",
+      "git_blob": "45ffea53a5921b76f071894fcc5e1ba74b5ebcb5",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/signify/LWA001/model.json",
+      "selected": true
+    },
+    {
+      "path": "profile_library/yeelight/YLXD01YL/default/model.json",
+      "bytes": 67,
+      "sha256": "85c8ee031a4fe0905414ba461dc2b686317c33f0fada1e9930950adc24d4afbd",
+      "git_blob": "0d58cac88c386450e91cd99b64f5a23e6f29b6a0",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/yeelight/YLXD01YL/default/model.json",
+      "selected": false
+    },
+    {
+      "path": "profile_library/yeelight/YLXD01YL/model.json",
+      "bytes": 1022,
+      "sha256": "e1113ccdc62e41c34a165bb4c5f1057d60d38e7447e16947dcdd621e79219cd4",
+      "git_blob": "5bcb64be02b872803bc035a62d91a00dc4d9d93d",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/yeelight/YLXD01YL/model.json",
+      "selected": false
+    },
+    {
+      "path": "profile_library/yeelight/YLXD01YL/nightlight/model.json",
+      "bytes": 67,
+      "sha256": "f289579c7e96323dd604d33f4768deb4d3c8920a6e25accfd32ae8d9708df401",
+      "git_blob": "ed53e5ca582646637743ed930530ee9cdbb860f4",
+      "url": "https://raw.githubusercontent.com/bramstroker/homeassistant-powercalc/fcb7736b2cbf64649487c1708d10093f25ec1b21/profile_library/yeelight/YLXD01YL/nightlight/model.json",
+      "selected": false
+    }
+  ],
+  "fixture_oracles": {
+    "signify/LWA001": {
+      "mode": "brightness",
+      "rows": [
+        {
+          "brightness": 1,
+          "watt_text": "1.31"
+        },
+        {
+          "brightness": 255,
+          "watt_text": "8.51"
+        }
+      ]
+    },
+    "lifx/LHB30E27UC10P": {
+      "mode": "color_temp",
+      "brightness": 1,
+      "nearest_mired": 111,
+      "source_kelvin": 9000,
+      "selectors": {
+        "Disabled": {
+          "sub_profile": "infrared_off",
+          "watt_text": "0.73"
+        },
+        "25%": {
+          "sub_profile": "infrared_25",
+          "watt_text": "2.71"
+        },
+        "50%": {
+          "sub_profile": "infrared_50",
+          "watt_text": "4.72"
+        },
+        "100%": {
+          "sub_profile": "infrared_100",
+          "watt_text": "8.52"
+        }
+      }
+    }
+  },
+  "notes": [
+    "Measurement constants are public CSV assertion inputs; never write these into native calculated fields/cache or expected counters.",
+    "Vendor prefers .csv.gz over plain .csv. Unpacked gzip and plain CSV differ in byte line endings; parsed rows match. Preserve original compressed bytes and separate hashes.",
+    "Non-selected Aqara/Yeelight metadata are research candidates only; not part of selected native fixture."
+  ]
+}

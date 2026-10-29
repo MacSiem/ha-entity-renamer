@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.6.0 (2026-10-29)
+
+- Import a JSON change plan, explicitly choose entity/device rows and preview the current Home Assistant registries without applying or queuing changes. No companion integration is required.
+- Show current/proposed IDs and names, missing sources, occupied targets and changed device associations. Reject malformed or ambiguous input instead of inferring an already-applied rename.
+- Clear imported plans after account, role or connection changes and discard results for an older file or selection. Keep input in memory only.
+- Mark automatic dependency migration (including Template and Powercalc) as Coming soon. New migration recovery is disabled in the frontend and its direct restore API refuses before Runtime or storage IO. Existing registry queue/history/export behavior remains available.
+
 ## 4.5.0 (2026-10-22)
 
 - Keep confirmation button labels whole at narrow widths (GitHub #9), use theme-aware primary contrast and neutral removal actions.

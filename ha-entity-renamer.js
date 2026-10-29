@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v4.5.0 (2026-10-22) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v4.6.0 (2026-10-29) — single-tool standalone repo */
 (function() {
 'use strict';
 
@@ -1047,6 +1047,118 @@ pre {
 }
 `;
 // Card-owned support footer. Never mutates document or foreign cards.
+// Read-only proposal decoding. Descriptive fields never become instructions.
+// Keep the HACS plugin self-contained; no unpublished companion is required.
+function _decodeRegistryImport(content) {
+  const doc = JSON.parse(content);
+  const stack = [];
+  for (const [token] of content.matchAll(/"(?:[^"\\]|\\.)*"|[{}\[\],:]/g)) {
+    if (token === '{' || token === '[') {
+      stack.push(token === '{' ? {keys:new Set(),key:true} : null);
+      if (stack.length > 64) throw Error();
+    } else if (token === '}' || token === ']') stack.pop();
+    else if (token === ',' && stack.at(-1)) stack.at(-1).key = true;
+    else if (token[0] === '"' && stack.at(-1)?.key) {
+      const key = JSON.parse(token), scope = stack.at(-1);
+      if (scope.keys.has(key)) throw Error();
+      scope.keys.add(key); scope.key = false;
+    }
+  }
+  const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  if (!object(doc) || Object.keys(doc).some(k => !['at','checks','entities','devices','statistics'].includes(k))) throw Error();
+  if ('at' in doc && (typeof doc.at !== 'string' || doc.at.length > 255)) throw Error();
+  const checks = ['registry_entities','additional_live_entities','all_devices','all_statistics','proposed_devices','proposed_entities','mapped_statistics','statistics_without_current_entity','collisions','ha_writes'];
+  if ('checks' in doc && (!object(doc.checks) || Object.entries(doc.checks).some(([k,v]) => !checks.includes(k) || !Number.isSafeInteger(v) || v < 0))) throw Error();
+  const fields = {
+    entities:['entity_id','proposed_entity_id','current_name','proposed_name','device_id','device_current','device_proposed','disabled','platform','statistics','energy_source','energy_breakdown','references','role','scope','action','note'],
+    devices:['device_id','current_name','proposed_name','model','area_current','area_proposed','entities','disabled_entities','scope','action','note'],
+    statistics:['statistic_id','proposed_statistic_id','current_name','proposed_name','source','unit','has_sum','has_mean','entity_exists','action','note']
+  };
+  const rows = {};
+  for (const [family, allowed] of Object.entries(fields)) {
+    const list = Object.hasOwn(doc,family) ? doc[family] : [];
+    if (!Array.isArray(list)) throw Error();
+    for (const row of list) {
+      if (!object(row)) throw Error();
+      for (const [key,value] of Object.entries(row)) {
+        if (!allowed.includes(key)) throw Error();
+        const valid = family === 'devices' && ['entities','disabled_entities'].includes(key)
+          ? Number.isSafeInteger(value) && value >= 0
+          : family === 'statistics' && ['has_sum','has_mean'].includes(key) ? typeof value === 'boolean'
+          : typeof value === 'string' && value.length <= 16384 || value === null && ['proposed_name','device_id'].includes(key);
+        if (!valid) throw Error();
+      }
+    }
+    rows[family] = list;
+  }
+  const text = v => typeof v === 'string' && v.length > 0 && v.length <= 255 && !/[\x00-\x1f]/.test(v);
+  const entityId = v => text(v) && /^[a-z_][a-z0-9_]*\.[a-z0-9_]+$/.test(v);
+  const entities = [], devices = [], statistics = [];
+  const sources = new Set(), destinations = new Set(), deviceIds = new Set(), statisticIds = new Set();
+  for (const row of rows.entities) {
+    const id = row.entity_id, target = row.proposed_entity_id ?? id, name = row.proposed_name ?? null;
+    if (!entityId(id) || !entityId(target) || sources.has(id) || name !== null && !text(name)) throw Error();
+    sources.add(id);
+    if (id === target && (name === null || name === row.current_name)) continue;
+    if (id.split('.')[0] !== target.split('.')[0] || destinations.has(target)) throw Error();
+    destinations.add(target);
+    const device_id = row.device_id || null;
+    if (device_id !== null && !text(device_id)) throw Error();
+    entities.push({id,target,name,device_id});
+  }
+  const changed = new Map(entities.filter(row => row.id !== row.target).map(row => [row.id,row.target]));
+  if (entities.some(row => row.id !== row.target && changed.has(row.target))) throw Error();
+  for (const row of rows.devices) {
+    if (!text(row.device_id) || deviceIds.has(row.device_id)) throw Error();
+    deviceIds.add(row.device_id);
+    const name = row.proposed_name ?? null;
+    if (name !== null && !text(name)) throw Error();
+    if (name !== null && name !== row.current_name) devices.push({id:row.device_id,name});
+  }
+  for (const row of rows.statistics) {
+    const id = row.statistic_id, target = row.proposed_statistic_id ?? id;
+    if (!text(id) || !text(target) || statisticIds.has(id)) throw Error();
+    statisticIds.add(id);
+    if (id !== target) {
+      if (changed.get(id) !== target) throw Error();
+      statistics.push({id,target});
+    }
+  }
+  if (!entities.length && !devices.length) throw Error();
+  return {entities,devices,statistics};
+}
+
+function _registryImportPreview(plan, entities, devices) {
+  if (!Array.isArray(entities) || !Array.isArray(devices)) throw Error();
+  const index = (rows,field) => {
+    const result = new Map();
+    for (const row of rows) {
+      if (!row || typeof row[field] !== 'string' || !row[field] || result.has(row[field])) return null;
+      result.set(row[field],row);
+    }
+    return result;
+  };
+  const byId = index(entities,'entity_id'), byDevice = index(devices,'id');
+  const rejected = [], preview = [];
+  if (!byId || !byDevice) rejected.push({kind:'registry',index:null,reason:'ambiguous_registry'});
+  else {
+    plan.entities.forEach((row,index) => {
+      const current = byId.get(row.id);
+      const reason = !current ? 'source_missing' : row.id !== row.target && byId.has(row.target) ? 'destination_occupied'
+        : (current.device_id ?? null) !== row.device_id ? 'device_changed'
+        : !['id','unique_id','platform'].every(k => typeof current[k] === 'string' && current[k].length > 0) ? 'identity_unverified' : null;
+      if (reason) rejected.push({kind:'entity',index,entity_id:row.id,reason});
+      preview.push({kind:'entity',id:row.id,target:row.target,current:current?.name ?? current?.original_name ?? '',name:row.name,reason});
+    });
+    plan.devices.forEach((row,index) => {
+      const current = byDevice.get(row.id), reason = current ? null : 'device_missing';
+      if (reason) rejected.push({kind:'device',index,reason});
+      preview.push({kind:'device',index,current:current?.name_by_user ?? current?.name ?? '',name:row.name,reason});
+    });
+  }
+  return {changes:{entities:plan.entities.length,devices:plan.devices.length,statistics:plan.statistics.length},conflicts:rejected.length,registry_conflicts:rejected,rows:preview};
+}
+
 const _LOCAL_INTRO_KEY = 'ha-intro-dismissed-ha-entity-renamer';
 const _LOCAL_INTRO = {
   headline: "Bulk-rename HA entities + friendly names.",
@@ -1413,8 +1525,464 @@ class HAEntityRenamer extends HTMLElement {
     const intro = this._lang === 'pl' ? _LOCAL_INTRO_PL : _LOCAL_INTRO;
     const label = this._lang === 'pl' ? 'Jak to działa?' : 'How does it work?';
     return `<details class="renamer-help" ${state.open ? 'open' : ''}><summary>ⓘ ${label}</summary>
-      <p>${_esc(intro.headline)}</p><ol>${intro.steps.map(step => `<li>${_esc(step)}</li>`).join('')}</ol></details>`;
+      <p>${_esc(intro.headline)}</p><ol>${intro.steps.map(step => `<li>${_esc(step)}</li>`).join('')}</ol>
+      </details>`;
   }
+  _renderBackendStatus() {
+    // Status is read-only; recovery needs its own inspect and explicit consent.
+    // Never render raw journal identifiers, versions or private errors.
+    const user = this._hass?.user;
+    if (!this._recoveryAvailable() || user?.is_admin !== true || typeof user.id !== 'string' || !user.id.trim()) return '';
+    const code = this._backendStatus?.code || 'not_checked';
+    const labels = this._lang === 'pl' ? {
+      not_checked: 'Nie sprawdzono backendu migracji',
+      checking: 'Sprawdzanie stanu backendu',
+      blocked: 'Backend działa, migracja zależności niegotowa',
+      recovery_required: 'Backend wymaga weryfikacji odzyskiwania, migracja zablokowana',
+      unavailable: 'Backend migracji niedostępny',
+      unauthorized: 'Brak uprawnień administratora do backendu',
+      unverified: 'Nie udało się potwierdzić bezpiecznego stanu backendu'
+    } : {
+      not_checked: 'Migration backend not checked',
+      checking: 'Checking migration backend status',
+      blocked: 'Backend online, dependency migration not ready',
+      recovery_required: 'Backend requires recovery review, migration blocked',
+      unavailable: 'Migration backend unavailable',
+      unauthorized: 'Backend administrator permissions required',
+      unverified: 'Unable to verify migration backend status'
+    };
+    const label = labels[code] || labels.unverified;
+    const button = this._lang === 'pl' ? 'Sprawdź backend (tylko odczyt)' : 'Check backend (read-only)';
+    return `<div class="renamer-backend-row">
+      <button id="checkRenamerBackendStatus" class="btn btn-outline" type="button" ${code === 'checking' || this._recoveryBusy() ? 'disabled aria-busy="true"' : ''}>${button}</button>
+      <span id="renamerBackendStatus" role="status" aria-live="polite" data-backend-state="${code}">${_esc(label)}</span>
+      <div id="renamerRecoveryPanel">${this._renderRecovery()}</div>
+    </div>`;
+  }
+
+  _updateBackendStatusRow() {
+    // Preserve the existing controls, focus and independent export dialog.
+    // Reuse the sanitized presentation without replacing the card or row.
+    const button = this.shadowRoot.getElementById('checkRenamerBackendStatus');
+    const status = this.shadowRoot.getElementById('renamerBackendStatus');
+    if (!button || !status) return;
+    const template = this.ownerDocument.createElement('template');
+    template.innerHTML = this._renderBackendStatus();
+    const nextButton = template.content.querySelector('#checkRenamerBackendStatus');
+    const nextStatus = template.content.querySelector('#renamerBackendStatus');
+    if (!nextButton || !nextStatus) return;
+    button.disabled = nextButton.disabled;
+    if (nextButton.hasAttribute('aria-busy')) button.setAttribute('aria-busy', 'true');
+    else button.removeAttribute('aria-busy');
+    status.dataset.backendState = nextStatus.dataset.backendState;
+    status.textContent = nextStatus.textContent;
+    this._updateRecoveryPanel();
+  }
+
+  async _checkBackendStatus() {
+    // A deliberate administrator gesture is required. No automatic polling,
+    // retries or fallback to legacy registry updates.
+    if (!this._recoveryAvailable() || this._recoveryBusy() || this._backendStatus?.code === 'checking') return;
+    const read = this._captureRead();
+    const epoch = ++this._backendStatusEpoch;
+    const current = () => epoch === this._backendStatusEpoch && read.current()
+      && this._recoveryAvailable();
+    this._clearRecovery();
+    this._backendStatus = {code:'checking'};
+    this._updateBackendStatusRow();
+    try {
+      const status = await read.hass.callWS({type:'ha_entity_renamer/status'});
+      if (!current()) return;
+      // Even migration_ready=true is not owner qualification of M1.c/M2.a.
+      const devBlocked = status && status.migration_ready === false
+        && status.reason === 'dependency_coverage_incomplete'
+        && typeof status.recovery_required === 'boolean'
+        && typeof status.version === 'string'
+        && Array.isArray(status.operations);
+      this._backendStatus = {code: devBlocked
+        ? (status.recovery_required ? 'recovery_required' : 'blocked')
+        : 'unverified'};
+      if (devBlocked) {
+        const operations = status.operations.filter(row => row && typeof row.operation_id === 'string'
+          && /^[A-Za-z0-9_-]{1,80}$/.test(row.operation_id)
+          && typeof row.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(row.fingerprint))
+          .map(({operation_id, fingerprint}) => ({operation_id, fingerprint}));
+        if (operations.length) this._recovery = {operations, selected:0, phase:'available'};
+      }
+    } catch (error) {
+      if (!current()) return;
+      const reason = error && typeof error === 'object' ? error.code : null;
+      // Core returns unknown_command when the optional integration has not
+      // registered its WS command at all (separate from configured-but-offline).
+      this._backendStatus = {code: reason === 'unavailable' || reason === 'unknown_command' ? 'unavailable'
+        : reason === 'unauthorized' ? 'unauthorized' : 'unverified'};
+    } finally {
+      if (current()) this._updateBackendStatusRow();
+    }
+  }
+
+  _clearMigration() {
+    this._migrationEpoch++;
+    this._migration = null;
+    this.shadowRoot?.getElementById('renamerMigrationPanel')?.replaceChildren();
+  }
+
+  _migrationLabels() {
+    return this._lang === 'pl' ? {
+      title:'Import i podgląd rejestru (tylko odczyt)', file:'Plan zmian (JSON)', analyze:'Przeanalizuj plan', clear:'Wyczyść plan',
+      idle:'Wybierz plan zmian. Podgląd porównuje wybrane pozycje z rejestrem HA; nie zmienia konfiguracji.',
+      reading:'Wczytywanie planu…', loaded:'Plan wczytany. Sprawdź wybrane pozycje w aktualnym rejestrze HA.',
+      analyzing:'Odczytywanie aktualnych rejestrów HA i sprawdzanie konfliktów…',
+      reviewed:'Podgląd rejestru gotowy (tylko odczyt). Zależności, pliki i statystyki nie zostały sprawdzone ani zmienione.',
+      invalid:'Nieprawidłowy plan. Wybierz plik JSON o wielkości do 4 MB.',
+      unavailable:'Nie udało się odczytać rejestrów HA. Uruchom podgląd ponownie.',
+      unauthorized:'Analiza wymaga konta administratora HA.',
+      entities:'Encje', devices:'Urządzenia', statistics:'Statystyki', conflicts:'Konflikty',
+      rejected:'Pozycje wymagające rozliczenia',entity:'Encja',device:'Urządzenie',registry:'Rejestr',
+      subset:'Wybierz część planu',selection:'Pozycje do analizy',selected:'Wybrano',
+      reasons:{source_missing:'Nie znaleziono źródła',destination_occupied:'Docelowy identyfikator jest zajęty',
+        device_changed:'Powiązanie urządzenia zmieniło się',identity_unverified:'Niepotwierdzona tożsamość',
+        device_missing:'Nie znaleziono urządzenia',ambiguous_registry:'Niejednoznaczny rejestr'},
+      complete:'Rozpoznano', unknown:'Niepotwierdzone', blocked:'Wymaga obsługi', denied:'Brak dostępu',
+      families:{entity_registry:'Rejestr encji',device_registry:'Rejestr urządzeń',automation:'Automatyzacje',
+        script:'Skrypty',dashboard:'Dashboardy',template:'Szablony',energy:'Energy',powercalc:'Powercalc',
+        history:'Historia',statistics:'Statystyki',external:'Zewnętrzni konsumenci',config_entries:'Integracje',yaml_sources:'Źródła YAML'}
+    } : {
+      title:'Import and registry preview (read-only)', file:'Change plan (JSON)', analyze:'Analyze plan', clear:'Clear plan',
+      idle:'Choose a change plan. Preview compares selected rows with the HA registry without changing configuration.',
+      reading:'Reading plan…', loaded:'Plan loaded. Compare selected rows with the current HA registry.',
+      analyzing:'Reading current HA registries and checking conflicts…',
+      reviewed:'Registry preview ready (read-only). Dependencies, files and statistics have not been checked or changed.',
+      invalid:'Invalid plan. Choose a JSON file up to 4 MB.',
+      unavailable:'HA registries could not be read. Explicitly preview again.',
+      unauthorized:'Analysis requires a Home Assistant administrator.',
+      entities:'Entities',devices:'Devices',statistics:'Statistics',conflicts:'Conflicts',
+      rejected:'Rows that need reconciliation',entity:'Entity',device:'Device',registry:'Registry',
+      subset:'Choose a subset of the plan',selection:'Rows to analyze',selected:'Selected',
+      reasons:{source_missing:'Rename source not found',destination_occupied:'Destination identifier is occupied',
+        device_changed:'Device association changed',identity_unverified:'Identity is unverified',
+        device_missing:'Device not found',ambiguous_registry:'Ambiguous registry'},
+      complete:'Identified',unknown:'Unverified',blocked:'Requires support',denied:'Access denied',
+      families:{entity_registry:'Entity registry',device_registry:'Device registry',automation:'Automations',
+        script:'Scripts',dashboard:'Dashboards',template:'Templates',energy:'Energy',powercalc:'Powercalc',
+        history:'History',statistics:'Statistics',external:'External consumers',config_entries:'Integrations',yaml_sources:'YAML sources'}
+    };
+  }
+
+  _renderMigration() {
+    if (!this._renameAuthorityAvailable()) return '';
+    const state = this._migration;
+    const t = this._migrationLabels();
+    const busy = ['reading','analyzing'].includes(state?.phase);
+    const result = state?.summary;
+    const details = result ? `<p>${t.entities}: ${result.changes.entities} · ${t.devices}: ${result.changes.devices} · ${t.statistics}: ${result.changes.statistics} · ${t.conflicts}: ${result.conflicts}</p>
+      <ul>${result.rows.map(row => '<li>'+(row.kind === 'entity' ? _entityIdHtml(row.id)+' → '+_entityIdHtml(row.target) : t.device+' '+(row.index+1))
+        +': '+_esc(row.current)+' → '+_esc(row.name ?? row.current)+'</li>').join('')}</ul>` : '';
+    const rejected = result?.registry_conflicts?.length ? '<p>'+t.rejected+'</p><ul>'+result.registry_conflicts.map(row =>
+      '<li>'+(row.kind === 'entity' ? _entityIdHtml(row.entity_id) : t[row.kind]+(Number.isInteger(row.index) ? ' '+(row.index+1) : ''))+': '+t.reasons[row.reason]+'</li>').join('')+'</ul>' : '';
+    const choices = state?.choices;
+    const empty = state?.subset && !state.entity_ids.size && !state.device_ids.size;
+    const selection = choices ? '<label><input type="checkbox" id="renamerImportSubset" '+(state.subset ? 'checked' : '')+'>'+t.subset+'</label>'
+      +(state.subset ? '<fieldset><legend>'+t.selection+'</legend><p>'+t.selected+': '+(state.entity_ids.size+state.device_ids.size)+'</p>'
+      +choices.entities.map((row,i)=>'<label style="display:block"><input type="checkbox" data-import-entity="'+i+'" '+(state.entity_ids.has(row.id) ? 'checked' : '')+'>'+_entityIdHtml(row.id)+' → '+_entityIdHtml(row.target)+'</label>').join('')
+      +choices.devices.map((row,i)=>'<label style="display:block"><input type="checkbox" data-import-device="'+i+'" '+(state.device_ids.has(row.id) ? 'checked' : '')+'>'+t.device+' '+(i+1)+': '+_esc(row.name)+'</label>').join('')+'</fieldset>' : '') : '';
+    return `<h3>${t.title}</h3><label for="renamerImportFile">${t.file}</label>
+      <input type="file" accept=".json,application/json" id="renamerImportFile">
+      <p role="status" aria-live="polite" ${busy ? 'aria-busy="true"' : ''}>${t[state?.phase || 'idle'] || t.unavailable}</p>
+      ${selection}<div class="renamer-backend-row"><button type="button" class="btn btn-outline" id="analyzeRenamerImport" ${!state?.content || busy || empty ? 'disabled' : ''}>${t.analyze}</button>
+      <button type="button" class="btn btn-outline" id="clearRenamerImport" ${!state ? 'disabled' : ''}>${t.clear}</button></div>${details}${rejected}
+      <fieldset><legend>${this._lang === 'pl' ? 'Automatyczna migracja zależności — Coming soon' : 'Automatic dependency migration — Coming soon'}</legend>
+      ${['template','powercalc','automation','script','config_entries'].map(family => '<label style="display:block"><input type="checkbox" disabled data-coming-soon="'+family+'">'+t.families[family]+' — Coming soon</label>').join('')}</fieldset>`;
+  }
+
+  _updateMigrationPanel() {
+    const panel = this.shadowRoot?.getElementById('renamerMigrationPanel');
+    if (!panel) return;
+    panel.innerHTML = this._renderMigration();
+    this._bindMigrationPanel();
+  }
+
+  _bindMigrationPanel() {
+    const changed = (update,focus) => {
+      if (!this._renameAuthorityAvailable() || !this._migration?.choices) return;
+      update(this._migration);
+      this._migrationEpoch++;
+      this._migration.phase = 'loaded'; this._migration.summary = null;
+      this._updateMigrationPanel();
+      this.shadowRoot.querySelector(focus)?.focus();
+    };
+    this.shadowRoot.getElementById('renamerImportSubset')?.addEventListener('change', event =>
+      changed(state => { state.subset = event.target.checked; }, '#renamerImportSubset'));
+    for (const family of ['entity','device']) this.shadowRoot.querySelectorAll('[data-import-'+family+']').forEach(input => {
+      input.addEventListener('change', () => changed(state => {
+        const rows = state.choices[family === 'entity' ? 'entities' : 'devices'];
+        const row = rows[Number(input.getAttribute('data-import-'+family))];
+        const ids = state[family+'_ids'];
+        if (row) { if (input.checked) ids.add(row.id); else ids.delete(row.id); }
+      }, '[data-import-'+family+'="'+input.getAttribute('data-import-'+family)+'"]'));
+    });
+    this.shadowRoot.getElementById('renamerImportFile')?.addEventListener('change', event => {
+      const file = event.target.files?.[0];
+      if (file) this._readMigrationFile(file);
+    });
+    this.shadowRoot.getElementById('analyzeRenamerImport')?.addEventListener('click', () => this._previewMigration());
+    this.shadowRoot.getElementById('clearRenamerImport')?.addEventListener('click', () => {
+      this._clearMigration(); this._updateMigrationPanel();
+      this.shadowRoot.getElementById('renamerImportFile')?.focus();
+    });
+  }
+
+  async _readMigrationFile(file) {
+    if (!this._renameAuthorityAvailable()) return;
+    const read = this._captureRead();
+    const epoch = ++this._migrationEpoch;
+    const current = () => epoch === this._migrationEpoch && read.current() && this._renameAuthorityAvailable();
+    this._migration = {phase:'reading',content:null,summary:null};
+    this._updateMigrationPanel();
+    try {
+      if (!Number.isInteger(file.size) || file.size < 1 || file.size > 4_000_000 || typeof file.text !== 'function') throw Error();
+      const content = await file.text();
+      if (!current()) return;
+      if (typeof content !== 'string' || !content.trim() || new TextEncoder().encode(content).length > 4_000_000) throw Error();
+      const plan = _decodeRegistryImport(content);
+      this._migration = {phase:'loaded',content,plan,summary:null,choices:plan,subset:false,
+        entity_ids:new Set(),device_ids:new Set()};
+    } catch (_) {
+      if (!current()) return;
+      this._migration = {phase:'invalid',content:null,summary:null};
+    }
+    if (current()) this._updateMigrationPanel();
+  }
+
+  async _previewMigration() {
+    const state = this._migration;
+    if (!this._renameAuthorityAvailable() || !state?.content || ['reading','analyzing'].includes(state.phase)
+      || state.subset && !state.entity_ids.size && !state.device_ids.size) return;
+    const read = this._captureRead();
+    const epoch = ++this._migrationEpoch;
+    const current = () => epoch === this._migrationEpoch && read.current() && this._renameAuthorityAvailable();
+    state.phase = 'analyzing'; state.summary = null;
+    this._updateMigrationPanel();
+    try {
+      const plan = state.subset ? {
+        entities:state.plan.entities.filter(row => state.entity_ids.has(row.id)),
+        devices:state.plan.devices.filter(row => state.device_ids.has(row.id)),
+        statistics:state.plan.statistics.filter(row => state.entity_ids.has(row.id))
+      } : state.plan;
+      const entities = await read.hass.callWS({type:'config/entity_registry/list'});
+      if (!current()) return;
+      const devices = await read.hass.callWS({type:'config/device_registry/list'});
+      if (!current()) return;
+      state.summary = _registryImportPreview(plan,entities,devices);
+      state.phase = 'reviewed';
+    } catch (error) {
+      if (!current()) return;
+      state.phase = error?.code === 'unauthorized' ? 'unauthorized' : error?.code === 'invalid_proposal' ? 'invalid' : 'unavailable';
+    }
+    if (current()) this._updateMigrationPanel();
+  }
+
+  _recoveryAvailable() {
+    // New dependency migration/recovery is Coming soon in release A.
+    return false;
+  }
+
+  _recoveryBusy() {
+    return ['inspecting', 'confirming', 'restoring'].includes(this._recovery?.phase);
+  }
+
+  _clearRecovery() {
+    this._recoveryEpoch++;
+    this._recovery = null;
+    const panel = this.shadowRoot?.getElementById('renamerRecoveryPanel');
+    if (panel) panel.replaceChildren();
+  }
+
+  _recoveryLabels() {
+    return this._lang === 'pl' ? {
+      operation:'Operacja', select:'Operacja do przeglądu', review:'Przejrzyj odzyskiwanie (tylko odczyt)',
+      available:'Możesz przejrzeć zapisane operacje. Migracja zależności pozostaje niegotowa.',
+      confirming:'Sprawdź zakres i potwierdź wycofanie.', inspecting:'Sprawdzanie możliwości wycofania…', inspected:'Przejrzano zmianę. Serwer ponownie sprawdzi warunki przy wycofaniu.',
+      consumers:'Liczba powiązanych encji', ask:'Wycofaj tę zmianę…', title:'Potwierdź przywrócenie oryginału',
+      consent:'Przywrócić oryginalne identyfikatory i powiązane encje pokazane poniżej?',
+      cancel:'Anuluj', restore:'Wycofaj zmianę', restoring:'Trwa przywracanie…',
+      restored:'Przywrócono oryginalne identyfikatory i powiązane encje. Migracja zależności pozostaje niegotowa.',
+      refused:'Serwer odmówił wycofania. Sprawdź ponownie stan przed dalszą decyzją.',
+      unknown:'Nie udało się potwierdzić możliwości wycofania. Brak zgody na przywrócenie.',
+      uncertain:'Wynik przywracania jest nieznany. Zmiany mogły zostać zapisane. Sprawdź ponownie stan przed dalszą decyzją.',
+      unauthorized:'Brak uprawnień administratora do odzyskiwania.',
+      unavailable:'Odzyskiwanie niedostępne. Sprawdź ponownie stan przed dalszą decyzją.'
+    } : {
+      operation:'Operation', select:'Operation to review', review:'Review recovery (read-only)',
+      available:'You can review recorded operations. Dependency migration remains not ready.',
+      confirming:'Review the scope and confirm restoration.', inspecting:'Checking whether this change can be restored…', inspected:'Change reviewed. The server will check conditions again when restoring.',
+      consumers:'Linked entities', ask:'Undo this change…', title:'Confirm original restoration',
+      consent:'Restore the original identifiers and linked entities shown below?',
+      cancel:'Cancel', restore:'Undo change', restoring:'Restoring…',
+      restored:'Original identifiers and linked entities restored. Dependency migration remains not ready.',
+      refused:'The server refused restoration. Check status again before deciding what to do next.',
+      unknown:'Unable to confirm restoration eligibility. Restoration is not authorized.',
+      uncertain:'Restoration outcome is unknown. Changes may have been written. Check status again before deciding what to do next.',
+      unauthorized:'Administrator permissions required for recovery.',
+      unavailable:'Recovery unavailable. Check status again before deciding what to do next.'
+    };
+  }
+
+  _renderRecovery() {
+    const state = this._recovery;
+    if (!state || !this._recoveryAvailable()) return '';
+    const t = this._recoveryLabels();
+    const phase = state.phase;
+    const choices = state.operations.length > 1 && phase === 'available'
+      ? `<label for="selectRenamerRecovery">${t.select}</label><select id="selectRenamerRecovery">${state.operations.map((_, i) => `<option value="${i}" ${i === state.selected ? 'selected' : ''}>${t.operation} ${i + 1}</option>`).join('')}</select>` : '';
+    const summary = state.summary ? state.summary.sources.map(source => `<p><code>${_entityIdHtml(source.current)}</code> → <code>${_entityIdHtml(source.original)}</code></p>`).join('') + `<p>${t.consumers}: ${state.summary.count}</p>` : '';
+    const review = phase === 'available' ? `<button id="reviewRenamerRecovery" type="button" class="btn btn-outline">${t.review}</button>` : '';
+    const ask = phase === 'inspected' ? `<button id="askRenamerRecovery" type="button" class="btn btn-outline" ${this._loading || this._applyOperation || this._confirmDialogOpen ? 'disabled' : ''}>${t.ask}</button>` : '';
+    const confirm = ['confirming','restoring'].includes(phase) ? `<div id="renamerRecoveryConfirm" role="dialog" aria-labelledby="renamerRecoveryTitle" ${phase === 'restoring' ? 'aria-busy="true"' : ''} tabindex="-1">
+      <h4 id="renamerRecoveryTitle">${t.title}</h4><p>${t.consent}</p>${summary}
+      <div class="rename-confirm-actions"><button id="cancelRenamerRecovery" type="button" class="btn btn-outline" ${phase === 'restoring' ? 'disabled' : ''}>${t.cancel}</button>
+      <button id="confirmRenamerRecovery" type="button" class="btn btn-primary" ${phase === 'restoring' ? 'disabled' : ''}>${t.restore}</button></div></div>` : '';
+    return `<p role="status" aria-live="polite">${_esc(t[phase] || t.unknown)}</p>${choices}${review}${confirm || summary}${ask}`;
+  }
+
+  _updateRecoveryPanel(focusId) {
+    const panel = this.shadowRoot.getElementById('renamerRecoveryPanel');
+    if (!panel) return;
+    panel.innerHTML = this._renderRecovery();
+    this._bindRecoveryPanel();
+    if (focusId) this.shadowRoot.getElementById(focusId)?.focus();
+  }
+
+  _bindRecoveryPanel() {
+    const root = this.shadowRoot;
+    root.getElementById('selectRenamerRecovery')?.addEventListener('change', event => {
+      const selected = Number(event.target.value);
+      if (this._recovery?.phase === 'available' && Number.isInteger(selected)
+        && selected >= 0 && selected < this._recovery.operations.length) this._recovery.selected = selected;
+    });
+    root.getElementById('reviewRenamerRecovery')?.addEventListener('click', () => this._inspectRecovery());
+    root.getElementById('askRenamerRecovery')?.addEventListener('click', () => {
+      if (!this._recoveryAvailable() || this._recovery?.phase !== 'inspected'
+        || this._loading || this._applyOperation || this._confirmDialogOpen) return;
+      this._recovery.phase = 'confirming';
+      this._updateBackendStatusRow();
+      root.getElementById('cancelRenamerRecovery')?.focus();
+    });
+    const cancel = () => {
+      if (this._recovery?.phase !== 'confirming') return;
+      this._recovery.phase = 'inspected';
+      this._updateBackendStatusRow();
+      root.getElementById('askRenamerRecovery')?.focus();
+    };
+    root.getElementById('cancelRenamerRecovery')?.addEventListener('click', cancel);
+    root.getElementById('confirmRenamerRecovery')?.addEventListener('click', () => this._restoreRecovery());
+    root.getElementById('renamerRecoveryConfirm')?.addEventListener('keydown', event => {
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancel(); }
+      else if (event.key === 'Tab') {
+        event.preventDefault();
+        if (this._recovery?.phase === 'restoring') event.currentTarget.focus();
+        else (root.activeElement === root.getElementById('cancelRenamerRecovery')
+          ? root.getElementById('confirmRenamerRecovery') : root.getElementById('cancelRenamerRecovery'))?.focus();
+      }
+    });
+  }
+
+  _recoveryReplyMatches(reply, operation) {
+    return reply && reply.operation_id === operation.operation_id && reply.fingerprint === operation.fingerprint
+      && reply.migration_ready === false && reply.family_complete === false;
+  }
+
+  _sanitizeRecoverySummary(summary) {
+    const keys = (value, expected) => value && typeof value === 'object' && !Array.isArray(value)
+      && Object.keys(value).sort().join(',') === expected.slice().sort().join(',');
+    // Legacy singular replies remain accepted, but an ambiguous mixed shape does not.
+    let sources;
+    if (keys(summary, ['sources','consumers'])) sources = summary.sources;
+    else if (keys(summary, ['source','consumers'])) sources = [summary.source];
+    else return null;
+    if (!Array.isArray(sources) || sources.length < 1 || sources.length > 10000
+      || !keys(summary.consumers, ['count','domains'])) return null;
+    const {count, domains} = summary.consumers;
+    if (!Number.isSafeInteger(count) || count < 1 || count > 10000
+      || !Array.isArray(domains) || domains.length < 1 || domains.length > 2
+      || new Set(domains).size !== domains.length
+      || count < domains.length
+      || domains.some(domain => !['sensor','binary_sensor'].includes(domain))) return null;
+    const validId = value => typeof value === 'string' && value.length <= 255
+      && /^[a-z_][a-z0-9_]*\.[a-z0-9_]+$/.test(value);
+    const originals = new Set(), currents = new Set(), clean = [];
+    for (const source of sources) {
+      if (!keys(source, ['current_entity_id','original_entity_id'])
+        || !validId(source.current_entity_id) || !validId(source.original_entity_id)
+        || source.current_entity_id.split('.')[0] !== source.original_entity_id.split('.')[0]
+        || originals.has(source.original_entity_id) || currents.has(source.current_entity_id)) return null;
+      originals.add(source.original_entity_id); currents.add(source.current_entity_id);
+      clean.push({current:source.current_entity_id, original:source.original_entity_id});
+    }
+    if ([...originals].some(id => currents.has(id))) return null;
+    return {sources:clean, count};
+  }
+
+  async _inspectRecovery() {
+    const state = this._recovery;
+    if (!this._recoveryAvailable() || state?.phase !== 'available') return;
+    const operation = state.operations[state.selected];
+    if (!operation) return;
+    const read = this._captureRead();
+    const epoch = ++this._recoveryEpoch;
+    const current = () => epoch === this._recoveryEpoch && read.current() && this._recoveryAvailable();
+    state.phase = 'inspecting';
+    this._updateBackendStatusRow();
+    try {
+      const reply = await read.hass.callWS({type:'ha_entity_renamer/recovery/inspect', ...operation});
+      if (!current()) return;
+      const summary = this._sanitizeRecoverySummary(reply?.change_summary);
+      if (this._recoveryReplyMatches(reply, operation) && reply.state === 'applied' && reply.eligible === true
+        && summary) {
+        state.summary = summary;
+        state.phase = 'inspected';
+      } else state.phase = reply?.state === 'refused' ? 'refused' : 'unknown';
+    } catch (error) {
+      if (!current()) return;
+      state.phase = error?.code === 'unauthorized' ? 'unauthorized' : 'unavailable';
+    } finally { if (current()) this._updateBackendStatusRow(); }
+  }
+
+  async _restoreRecovery() {
+    const state = this._recovery;
+    if (!this._recoveryAvailable() || state?.phase !== 'confirming' || !state.summary
+      || this._loading || this._applyOperation || this._confirmDialogOpen) return;
+    const operation = state.operations[state.selected];
+    const read = this._captureRead();
+    const epoch = ++this._recoveryEpoch;
+    const current = () => epoch === this._recoveryEpoch && read.current() && this._recoveryAvailable();
+    state.phase = 'restoring';
+    // Disable the existing controls synchronously: repeated clicks share no write.
+    const panel = this.shadowRoot.getElementById('renamerRecoveryPanel');
+    panel?.querySelectorAll('button').forEach(button => { button.disabled = true; });
+    panel?.querySelector('[role="dialog"]')?.setAttribute('aria-busy','true');
+    const progress = panel?.querySelector('[role="status"]');
+    if (progress) progress.textContent = this._recoveryLabels().restoring;
+    this.shadowRoot.getElementById('checkRenamerBackendStatus')?.setAttribute('disabled','');
+    try {
+      const reply = await read.hass.callWS({type:'ha_entity_renamer/recovery/restore', ...operation});
+      if (!current()) return;
+      state.phase = this._recoveryReplyMatches(reply, operation)
+        ? (reply.state === 'rolled_back' && reply.reason === 'restored' ? 'restored'
+          : reply.state === 'refused' ? 'refused' : 'uncertain') : 'uncertain';
+    } catch (_) {
+      if (!current()) return;
+      // A lost reply, including sanitized auth/transport failure, can follow a write.
+      state.phase = 'uncertain';
+    } finally {
+      if (current()) {
+        delete state.summary;
+        this._backendStatus = {code:'not_checked'};
+        this._updateBackendStatusRow();
+      }
+    }
+  }
+
   _syncHelpWidth(width) {
     const help = this.shadowRoot.querySelector('details.renamer-help');
     if (!help || !(width > 0)) return;
@@ -1445,6 +2013,12 @@ class HAEntityRenamer extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this._lang = 'en';
     this._hass = null;
+    this._backendStatus = null;
+    this._backendStatusEpoch = 0;
+    this._recovery = null;
+    this._recoveryEpoch = 0;
+    this._migration = null;
+    this._migrationEpoch = 0;
     this._devices = [];
     this._entities = [];
     this._selectedDevice = null;
@@ -1525,11 +2099,15 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _cancelRenameAuthority() {
+    this._clearMigration();
     this._clearQueueUndo();
     if (this._loading && !this._applyOperation) this._registryRefreshPending = true;
     this._legacyReviewLog = [];
     this._authorityEpoch++;
     this._readEpoch++;
+    this._backendStatusEpoch++;
+    this._backendStatus = null;
+    this._clearRecovery();
     if (this._applyOperation) this._applyOperation.cancelled = true;
     else this._loading = false;
     this._confirmation = null;
@@ -2467,6 +3045,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _showRenameConfirmation() {
+    if (this._recovery?.phase === 'restoring') return;
     this._clearQueueUndo();
     if (!this._renameAuthorityAvailable()) {
       this._confirmDialogOpen = false;
@@ -2497,7 +3076,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   async _executeRenames(confirmed = false) {
-    if (this._loading || this._applyOperation) return;
+    if (this._loading || this._applyOperation || this._recovery?.phase === 'restoring') return;
     if (!this._renameQueue.length && !Object.keys(this._deviceRenameQueue).length) return;
     if (!this._renameAuthorityAvailable()) {
       this._confirmDialogOpen = false;
@@ -3124,6 +3703,21 @@ class HAEntityRenamer extends HTMLElement {
         :host input[type=checkbox] { accent-color:var(--_hat-primary-fill); }
         :host .btn-primary:disabled { opacity:1;background:var(--_hat-chip);color:var(--_hat-text-2);box-shadow:none; }
 
+        .renamer-backend-row {display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:12px 0 4px;min-width:0;}
+        .renamer-backend-row button {min-height:44px;white-space:normal;}
+        #renamerRecoveryPanel {flex-basis:100%;min-width:0;overflow-wrap:anywhere;}
+        #renamerRecoveryPanel select {min-height:44px;max-width:100%;}
+        #renamerRecoveryConfirm {border:1px solid var(--bento-primary,#3B82F6);border-radius:14px;padding:16px;margin:12px 0;}
+        .renamer-backend-row button:focus-visible {outline:3px solid var(--primary-color);outline-offset:2px;}
+        .renamer-backend-row [role=status] {flex:1 1 180px;min-width:0;overflow-wrap:anywhere;font-size:13px;}
+        .renamer-migration {margin:12px 0;padding:12px;border:1px solid var(--divider-color);border-radius:14px;font-size:14px;overflow-wrap:anywhere;}
+        .renamer-migration h3 {margin:0 0 8px;font-size:16px;}
+        .renamer-migration input {display:block;max-width:100%;min-height:44px;margin:8px 0;}
+        .renamer-migration input[type="checkbox"] {display:inline-block;min-height:24px;width:24px;height:24px;vertical-align:middle;margin:8px;}
+        .renamer-migration label {min-height:44px;overflow-wrap:anywhere;}
+        .renamer-migration fieldset {min-width:0;max-height:24rem;overflow:auto;}
+        .renamer-migration button {min-height:44px;}
+        .renamer-migration ul {padding-inline-start:24px;}
         .renamer-help { margin:8px 0 12px;font-size:14px; }
         .renamer-help summary { cursor:pointer;min-height:44px;align-content:center; }
         .renamer-help summary:focus-visible { outline:3px solid var(--primary-color);outline-offset:2px; }
@@ -3140,6 +3734,8 @@ class HAEntityRenamer extends HTMLElement {
         </div>
 
       ${this._renderHelp()}
+      ${this._renameAuthorityAvailable() ? `<section class="renamer-backend">${this._renderBackendStatus()}</section>` : ''}
+      ${this._renameAuthorityAvailable() ? `<section class="renamer-migration" id="renamerMigrationPanel">${this._renderMigration()}</section>` : ''}
       ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${this._message.outcome ? createUiV3({language:this._lang}).statusHtml(this._message.outcome) : ''} ${_esc(this._message.text || '')}</div>` : ''}
       ${this._renderApplyResult()}
       ${this._confirmDialogOpen ? this._renderRenameConfirmation() : ''}
@@ -3159,6 +3755,7 @@ class HAEntityRenamer extends HTMLElement {
     ${this._hass?.user?.is_admin && this._config?.show_support !== false && !_localSupportDismissed() ? _LOCAL_DONATE_HTML : ''}`;
 
     this._bindHelp();
+    this._bindMigrationPanel();
     _bindLocalSupportDismiss(this.shadowRoot);
     this._attachEvents();
     for (const group of this.shadowRoot.querySelectorAll('[data-auto-group]')) group.open = openAutomaticDevices.has(group.dataset.autoGroup);
@@ -3437,6 +4034,8 @@ class HAEntityRenamer extends HTMLElement {
     const t = this._t;
     root.getElementById('exportRenameLog')?.addEventListener('click', e => this._openRenameExport(e.currentTarget));
     root.getElementById('reviewLegacyHistory')?.addEventListener('click', () => this._reviewLegacyHistory());
+    root.getElementById('checkRenamerBackendStatus')?.addEventListener('click', () => this._checkBackendStatus());
+    this._bindRecoveryPanel();
 
     // Tab switching
     root.querySelectorAll('.tab-button').forEach(btn => {

@@ -1,0 +1,107 @@
+"""Registered import preview, real AuthManager and read-only actual discovery."""
+import asyncio
+import json
+import unittest
+
+import test_native_backend_auth as auth
+
+
+@unittest.skipUnless(auth.backend_fixture.activation.fixtures.HAS_HA, 'actual HA required')
+class NativeImportPreviewTests(unittest.IsolatedAsyncioTestCase):
+    asyncSetUp = auth.NativeBackendAuthTests.asyncSetUp
+    _before_loader = auth.NativeBackendAuthTests._before_loader
+    _before_start = auth.NativeBackendAuthTests._before_start
+    _loaded_backend = auth.NativeBackendAuthTests._loaded_backend
+    _connection = auth.NativeBackendAuthTests._connection
+    _flush_documents = auth.backend_fixture.NativeBackendLifecycleTests._flush_documents
+    with_yaml = True
+
+    async def request(self, content, *, admin=True, extra=None):
+        connection, user, output = await self._connection(admin=admin)
+        command = 'ha_entity_renamer/import/preview'
+        self.assertTrue(command in connection.handlers, "registered import preview command missing")
+        connection.async_handle({'id': 1, 'type': command, 'manifest': content, **(extra or {})})
+        return await asyncio.wait_for(output, 30)
+
+    async def test_registered_import_preview_uses_actual_discovery_without_writes(self):
+        backend = self._loaded_backend()
+        runtime = self.f.hass.data[backend.DATA_RUNTIME]
+        self.source_id = self.f.entity.async_get_or_create('sensor', 'demo', 'import_preview_native').entity_id
+        await self._flush_documents(initialize=True)
+        paths = [self.f.root / '.storage' / key for key in
+                 ('core.entity_registry', 'core.device_registry', 'core.config_entries',
+                  'ha_entity_renamer.prepared', 'ha_entity_renamer.migrations')]
+        original = {p: p.read_bytes() if p.exists() else None for p in paths}
+        document = {'at': '2026-10-20', 'checks': {'ha_writes': 0}, 'entities': [
+            {'entity_id': self.source_id, 'proposed_entity_id': 'sensor.import_preview_target',
+             'device_id': self.f.entity.async_get(self.source_id).device_id,
+             'action': 'Zmiana ID i nazwy'}]}
+        result = await self.request(json.dumps(document))
+        self.assertTrue(result['success'], result)
+        summary = result['result']
+        self.assertEqual(summary['changes']['entities'], 1)
+        self.assertFalse(summary['migration_ready'])
+        self.assertEqual(len(summary['families']), 13)
+        self.assertNotIn(self.source_id, json.dumps(summary))
+        self.assertFalse(runtime.operation_lock.locked())
+        for p, raw in original.items():
+            self.assertEqual(p.read_bytes() if p.exists() else None, raw)
+
+    async def test_invalid_import_household_and_client_roots_never_enter_discovery(self):
+        result = await self.request('{"entities":[],"root":"/private"}')
+        self.assertFalse(result['success'])
+        self.assertEqual(result['error']['code'], 'invalid_proposal')
+        result = await self.request('{}', admin=False)
+        self.assertFalse(result['success'])
+        self.assertEqual(result['error']['code'], 'unauthorized')
+        result = await self.request('{}', extra={'prepared_ref': 'untrusted'})
+        self.assertFalse(result['success'])
+        self.assertEqual(result['error']['code'], 'invalid_format')
+
+    async def test_actual_network_import_accepts_full_inventory_sized_json(self):
+        from aiohttp import ClientSession
+        hass = self.f.hass
+        connection, user, _ = await self._connection(admin=True)
+        token = await hass.auth.async_create_refresh_token(user,
+            client_id='https://renamer.invalid/import-network-qa')
+        self.addCleanup(hass.auth.async_remove_refresh_token, token)
+        access = hass.auth.async_create_access_token(token, remote_ip='127.0.0.1')
+        row = self.f.entity.async_get_or_create('sensor', 'demo', 'network_import_preview')
+        await self._flush_documents(initialize=True)
+        paths = [self.f.root / '.storage' / key for key in
+                 ('core.entity_registry', 'core.device_registry', 'core.config_entries')]
+        original = {p: p.read_bytes() for p in paths}
+        document = {'entities': [{'entity_id': row.entity_id,
+            'proposed_entity_id': 'sensor.network_import_target', 'device_id': row.device_id}]}
+        # The actual approved inventory is 2.8 MB before normalization. Keep
+        # this payload synthetic; no private manifest or access token is logged.
+        content = ' ' * 2_817_819 + json.dumps(document)
+        async with ClientSession() as client:
+            async with client.ws_connect('http://127.0.0.1:' + str(hass.http.server_port)
+                                         + '/api/websocket') as ws:
+                self.assertEqual((await ws.receive_json(timeout=10))['type'], 'auth_required')
+                await ws.send_json({'type': 'auth', 'access_token': access})
+                self.assertEqual((await ws.receive_json(timeout=10))['type'], 'auth_ok')
+                await ws.send_json({'id': 1, 'type': 'ha_entity_renamer/import/preview',
+                                    'manifest': content})
+                response = await ws.receive_json(timeout=30)
+                self.assertTrue(response.get('success'), response)
+                self.assertEqual(response['result']['changes']['entities'], 1)
+                self.assertFalse(response['result']['migration_ready'])
+        for path, raw in original.items():
+            self.assertEqual(path.read_bytes(), raw)
+
+    async def test_registered_preview_reports_all_missing_sources_without_registry_disclosure(self):
+        await self._flush_documents(initialize=True)
+        document = {'entities': [
+            {'entity_id': 'sensor.missing_a', 'proposed_entity_id': 'sensor.destination_a'},
+            {'entity_id': 'sensor.missing_b', 'proposed_entity_id': 'sensor.destination_b'}]}
+        response = await self.request(json.dumps(document))
+        self.assertTrue(response['success'], response)
+        result = response['result']
+        self.assertFalse(result['migration_ready'])
+        self.assertEqual(result['registry_conflicts'], [
+            {'kind': 'entity', 'index': 0, 'reason': 'source_missing', 'entity_id': 'sensor.missing_a'},
+            {'kind': 'entity', 'index': 1, 'reason': 'source_missing', 'entity_id': 'sensor.missing_b'}])
+        self.assertNotIn(self.backend_entry_id, json.dumps(result))
+        self.assertEqual(result['conflicts'], ['registry_mapping_conflict'])
