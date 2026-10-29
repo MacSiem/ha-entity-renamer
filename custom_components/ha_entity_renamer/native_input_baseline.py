@@ -96,8 +96,11 @@ def _bounded_json(value, depth=0, budget=None):
 
 
 def _json(value):
-    _bounded_json(value)
-    return _encode_validated_json(value)
+    try:
+        _bounded_json(value)
+        return _encode_validated_json(value)
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        _fail()
 
 
 def _encode_validated_json(value):
