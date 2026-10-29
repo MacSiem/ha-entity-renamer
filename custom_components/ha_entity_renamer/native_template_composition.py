@@ -223,6 +223,9 @@ class TemplateComposition:
 
 
 def encode_composition(composition, baseline):
+    from .native_template_state_composition import TemplateStateComposition, encode_state_composition
+    if type(composition) is TemplateStateComposition:
+        return encode_state_composition(composition, baseline)
     _need(type(composition) is TemplateComposition)
     # Type-check fields before semantic validation, including unsupported families.
     evidence = _typed(composition.evidence, OriginalSourceEvidence, encode=True)
@@ -239,6 +242,9 @@ def encode_composition(composition, baseline):
 
 
 def decode_composition(payload, baseline):
+    if type(payload) is dict and payload.get('profile') == 'template_state_binding_v3':
+        from .native_template_state_composition import decode_state_composition
+        return decode_state_composition(payload, baseline)
     _need(type(payload) is dict and type(payload.get('schema')) is int
           and payload['schema'] in (1, 2))
     extra = {'physical_consumers'} if payload['schema'] == 2 else set()
