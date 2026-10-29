@@ -165,6 +165,41 @@ async def reopened(f):
 
 
 class RegistryReceiptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_input_comparison_preserves_evidence_without_detached_copies(self):
+        from unittest.mock import patch
+        f = await fixture(padding=25)
+        chain = f['chain']
+        state = chain.reconstruct_inputs()
+        with patch.object(receipts.AcceptedInputState, '__init__', side_effect=AssertionError('no comparison copy')), \
+             patch.object(receipts.AcceptedInputState, 'documents', side_effect=AssertionError('no getter copy')), \
+             patch.object(chain, 'accepted_documents', side_effect=AssertionError('no chain copy')):
+            self.assertTrue(chain.matches_input_state(state))
+            self.assertTrue(chain.matches_input_state(state, documents_only=True))
+        state._documents['core.entity_registry']['data']['entities'][0]['opaque']['keep'].append('drift')
+        self.assertFalse(chain.matches_input_state(state))
+        self.assertFalse(chain.matches_input_state(state, documents_only=True))
+
+    async def test_input_comparison_rejects_head_source_and_original_drift(self):
+        f = await fixture()
+        chain = f['chain']
+        for field in ('head', 'source', 'original'):
+            state = chain.reconstruct_inputs()
+            if field == 'head':
+                state.head = '0' * 64
+            elif field == 'source':
+                state._sources['.storage/core.entity_registry'][0] = '0' * 64
+            else:
+                state.original_json = '{}'
+            self.assertFalse(chain.matches_input_state(state), field)
+        state = chain.reconstruct_inputs()
+        documents = state.documents()
+        documents['core.entity_registry']['data']['entities'].clear()
+        self.assertTrue(chain.matches_input_state(state))
+        self.assertFalse(chain.matches_input_state(object()))
+        state._live_check = lambda: None
+        self.assertFalse(chain.matches_input_state(state))
+        self.assertTrue(chain.matches_input_state(state, documents_only=True))
+
     async def test_reconstructed_inputs_detach_all_cached_native_documents(self):
         f = await fixture()
         chain = f['chain']
