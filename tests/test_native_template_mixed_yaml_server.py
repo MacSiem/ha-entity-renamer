@@ -129,6 +129,24 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         original = {path: (root / path).read_bytes() for path in paths}
         return runtime, mapping, uuids, dependents, original
 
+    async def test_dependent_source_identity_refuses_before_effects(self):
+        from dataclasses import asdict
+        runtime, mapping, _, dependents, original = await self.data()
+        hass, root = self.f.hass, self.f.root
+        script_id = next(row[2] for row in dependents if row[0] == 'script')
+        mapping[script_id] = 'script.mixed_source_renamed'
+        before = {key: asdict(row) for key, row in self.f.entity.entities.items()}
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        with self.assertRaisesRegex(self.module('transaction').Refused,
+                                    'dependent_source_identity_unsupported'):
+            await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+        self.assertEqual({key: asdict(row) for key, row in self.f.entity.entities.items()}, before)
+        for path, raw in original.items():
+            self.assertEqual((root / path).read_bytes(), raw)
+        self.assertFalse(await runtime.journal.active())
+        self.assertFalse(runtime.operation_lock.locked())
+
     async def test_one_mapping_actual_dependents_forward_and_fresh_reverse(self):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_platform import async_get_platforms
