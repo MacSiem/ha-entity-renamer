@@ -213,6 +213,8 @@ class NativeTemplateBindingTransportTests(unittest.IsolatedAsyncioTestCase):
             replacements = {id(p.template): next(t for t in consumer._template_attrs
                 if t.template == p.after) for p in pairs}
             current = consumer._template_result_info
+            expected_history = {replacements[id(t)]: value for t, value in carried_results.items()}
+            self.assertEqual(current._last_result, expected_history)
             transport.mark_registry_attempt(context)
             # The actual registry mutation is IMMEDIATELY after the data-plane
             # seam; no await/source drain/YAML IO while trackers are detached.
@@ -231,6 +233,15 @@ class NativeTemplateBindingTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(hass.data[DATA_INSTANCES]['sensor'].get_entity(new), self.producer)
             self.assertIsNot(tracker, old_tracker)
             expected_history = {replacements[id(t)]: value for t, value in carried_results.items()}
+            if tracker._last_result != expected_history:
+                import json
+                print(json.dumps({'binding_after_registry': {
+                    'before_count': before_count, 'control_before_count': control_before_count,
+                    'current_count': hass.states.get(cid).attributes['count'],
+                    'old_results': [[t.template, v] for t, v in carried_results.items()],
+                    'new_results': [[t.template, v] for t, v in tracker._last_result.items()],
+                    'native_rows': rows, 'self_ref_count': consumer._self_ref_update_count}},
+                    default=str), flush=True)
             self.assertEqual(tracker._last_result, expected_history)
             self.assertEqual(tracker.listeners['entities'], {new, cid})
             self.assertTrue(all(not info.exception for info in tracker._info.values()))
