@@ -8,7 +8,7 @@ proof must additionally come from the owner's real runtime observer scenarios.
 import asyncio
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import importlib
 import os
@@ -138,6 +138,39 @@ class Regressions(unittest.IsolatedAsyncioTestCase):
             mutate(malformed)
             with self.assertRaises(ValueError):
                 prepared.decode_change(malformed)
+
+    async def test_mixed_template_codec_requires_complete_distinct_native_seals(self):
+        domains = ('automation', 'script', 'template')
+        seals = tuple((domain, hashlib.sha256((domain + ':before').encode()).hexdigest(),
+                      hashlib.sha256((domain + ':after').encode()).hexdigest()) for domain in domains)
+        change = replace(self.change, receipt=replace(self.change.receipt,
+            changed_domains=domains, runtime_expected=seals)).checked()
+        encoded = prepared.encode_change(change)
+        self.assertEqual(prepared.decode_change(encoded), change)
+        for seal in seals:
+            self.assertNotEqual(seal[1], seal[2])
+        for label, mutate in (
+            ('missing', lambda r: r['runtime_expected'].pop()),
+            ('duplicate', lambda r: r['runtime_expected'].append(r['runtime_expected'][0])),
+            ('equal', lambda r: r['runtime_expected'][0].__setitem__(2, r['runtime_expected'][0][1])),
+            ('null', lambda r: r['runtime_expected'][0].__setitem__(1, None)),
+            ('extra', lambda r: r['runtime_expected'].append(['scene', 'a' * 64, 'b' * 64])),
+            ('unordered', lambda r: r['runtime_expected'].reverse()),
+            ('unsupported', lambda r: r['changed_domains'].append('scene')),
+            ('duplicate_domain', lambda r: r['changed_domains'].append('template')),
+        ):
+            with self.subTest(label=label):
+                malformed = deepcopy(encoded)
+                mutate(malformed['data']['receipt'])
+                with self.assertRaises(ValueError):
+                    prepared.decode_change(malformed)
+        # Existing ordinary and Template-only envelopes remain their same payloads.
+        old = prepared.encode_change(self.change)
+        self.assertEqual(prepared.encode_change(prepared.decode_change(old)), old)
+        template = replace(self.change, receipt=replace(self.change.receipt,
+            changed_domains=('template',), runtime_expected=(seals[-1],))).checked()
+        old_template = prepared.encode_change(template)
+        self.assertEqual(prepared.encode_change(prepared.decode_change(old_template)), old_template)
 
     async def test_runtime_upgrade_invalidates_old_native_validation(self):
         self.adapter.runtime_version = 'different-native-runtime'
