@@ -409,6 +409,11 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(observed, 'encoder', side_effect=lambda value: bytearray(actual(value))):
             with self.assertRaises(baseline.NativeInputBaselineError):
                 observed.check()
+        with (patch.object(baseline, 'MAX_FILE_BYTES', 1),
+              patch.object(observed, 'encoder', wraps=actual) as encoded):
+            with self.assertRaisesRegex(baseline.NativeInputBaselineError, 'native_input_limit'):
+                observed.check()
+        self.assertEqual(encoded.call_count, 1, 'reject an oversized first manager before serializing the others')
 
     async def test_no_native_load_save_or_flush_during_capture(self):
         async def forbidden(*args, **kwargs):
