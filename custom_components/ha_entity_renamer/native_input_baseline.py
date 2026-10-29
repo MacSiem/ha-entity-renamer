@@ -439,8 +439,8 @@ class _Managers:
                     _fail('native_input_manager_not_loaded')
             # Native fragments, datetime, sets and subentries use HA's actual encoder.
             raw = self.encoder(manager._data_to_save())
-            if type(raw) is not bytes:
-                _fail('native_input_limit')  # Same strict input type as _loads.
+            if type(raw) is not bytes or len(raw) > MAX_FILE_BYTES:
+                _fail('native_input_limit')  # Same strict input boundary as _loads.
             documents.append(raw)
         return tuple(documents)
 
