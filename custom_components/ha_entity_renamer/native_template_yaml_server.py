@@ -551,7 +551,13 @@ class NativeTemplateYAMLServer:
                 obj.mapping.update(change.mapping)
             _need(len(set(obj.mapping.values())) == len(obj.mapping)
                   and not set(obj.mapping) & set(obj.mapping.values()), 'independent_mapping_required')
-            obj.consumers = await _UnchangedConsumers.capture(hass, obj.mapping, guard=obj._scope)
+            _need(all(change.before['platform'] not in ('automation', 'script')
+                      for change in obj.registry_changes), 'dependent_source_identity_unsupported')
+            consumer_type = _UnchangedConsumers
+            if type(obj.composition) is MixedTemplateComposition:
+                from .mixed_yaml_runtime import MixedYAMLConsumers
+                consumer_type = MixedYAMLConsumers
+            obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope)
             obj._scope()
             await obj.consumers.bind_sources(obj.receipt, obj.evidence, guard=obj._scope)
             obj._scope()

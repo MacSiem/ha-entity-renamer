@@ -13,6 +13,14 @@ def CONFIG_SCHEMA(config):
     return config_entry_only_config_schema(DOMAIN)(config)
 
 
+@dataclass(frozen=True)
+class _PreparedReview:
+    """Server-retained immutable Plan; no live session, callback or HA tokens."""
+    actor_id: str
+    plan: object
+    entity_count: int
+
+
 @dataclass
 class Runtime:
     entry_id: str
@@ -21,6 +29,7 @@ class Runtime:
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     loaded: bool = True
     unloading: bool = False
+    reviews: dict = field(default_factory=dict, repr=False)
 
     async def _recovery(self, hass, action, operation_id=None, fingerprint=None, *, guard, refresh):
         from .recovery_controller import RecoveryController
@@ -61,6 +70,71 @@ class Runtime:
 
     async def recovery_restore(self, hass, operation_id, fingerprint, *, guard, refresh):
         return await self._recovery(hass, 'restore', operation_id, fingerprint, guard=guard, refresh=refresh)
+
+    async def native_yaml_prepare(self, hass, mapping, *, actor_id, guard, refresh):
+        """Private ordinary mapping -> server-owned immutable retained review.
+
+        No mutation endpoint or family readiness is granted by this method.
+        The future authenticated transport supplies its own fresh actor identity;
+        neither a Plan nor any original/source document is accepted from clients.
+        """
+        from .native_template_yaml_server import NativeTemplateYAMLServer
+        from .native_template_reverse import _authorize
+        from .transaction import Refused
+        def current():
+            _authorize(guard)
+            if (hass.data.get(DATA_RUNTIME) is not self or not self.loaded or self.unloading
+                    or type(actor_id) is not str or not actor_id):
+                raise Refused('review_runtime_unavailable')
+        current()
+        async with self.operation_lock:
+            await refresh()
+            current()
+            session = await NativeTemplateYAMLServer.prepare(hass, mapping, guard=current, refresh=refresh)
+            try:
+                current()
+                plan, operation = session.plan, session.operation_id
+                self.reviews[operation] = _PreparedReview(actor_id, plan, len(mapping))
+                return {'operation_id': operation, 'fingerprint': plan.fingerprint,
+                    'entity_count': len(mapping), 'migration_ready': False, 'family_complete': False}
+            finally:
+                session.close()
+
+    async def native_yaml_apply(self, hass, operation_id, fingerprint, *, actor_id, guard, refresh):
+        """Consume this actor's retained plan under fresh authorization and fences.
+
+        Review is consumed before binding effects. An uncertain/lost response is
+        resolved by status/inspection, never a second invocation of this method.
+        """
+        from .native_template_yaml_server import NativeTemplateYAMLServer
+        from .native_template_reverse import _authorize
+        from .recovery_controller import _drain_restore as drain_effect
+        from .transaction import Refused
+        def current():
+            _authorize(guard)
+            if (hass.data.get(DATA_RUNTIME) is not self or not self.loaded or self.unloading):
+                raise Refused('review_runtime_unavailable')
+        current()
+        async with self.operation_lock:
+            await refresh()
+            current()
+            review = self.reviews.get(operation_id)
+            if (type(review) is not _PreparedReview or type(actor_id) is not str
+                    or review.actor_id != actor_id or review.plan.fingerprint != fingerprint):
+                raise Refused('review_unavailable_or_mismatched')
+            self.reviews.pop(operation_id)
+            async def operation():
+                session = await NativeTemplateYAMLServer.bind_prepared(hass, operation_id,
+                    review.plan, guard=current, refresh=refresh)
+                try:
+                    return await session.apply()
+                finally:
+                    session.close()
+            record = await drain_effect(operation())
+            current()
+            return {'operation_id': record.operation_id, 'fingerprint': record.plan.fingerprint,
+                'state': record.status, 'reason': record.reason,
+                'migration_ready': False, 'family_complete': False}
 
     async def native_forward(self, hass, mapping, *, guard, refresh):
         """Private qualified component, not a public migration admission route.
