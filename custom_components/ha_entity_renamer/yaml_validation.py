@@ -56,6 +56,7 @@ class TemplateStateSourceValidation:
     evidence: OriginalSourceEvidence
     original_sources: OriginalTemplateStateSources
     candidate_sources: CandidateTemplateStateSources
+    state_config_program: object = None
 
     @property
     def migration_ready(self):
@@ -322,13 +323,15 @@ async def _settled_executor(hass, function, *args):
 
 async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, with_sources=False,
                                    powercalc_bundle=None, powercalc_candidate_documents=None, native_helpers=(),
-                                   template_reference_mapping=None):
+                                   template_reference_mapping=None, template_state_program=False):
     """Return only after native validation of the entire proposed graph succeeds.
 
     scratch_parent must be private local storage OUTSIDE config_root. It contains
     temporary secret material with mode 0700 and is erased on every normal exit.
     A failure never invokes file_mutations or a live reload service.
     """
+    if type(template_state_program) is not bool or template_state_program and template_reference_mapping is None:
+        raise YAMLValidationError('template_state_source_profile_scope_required')
     if template_reference_mapping is not None:
         from .yaml_plan import _mapping
         if not with_sources or native_helpers or powercalc_bundle is not None:
@@ -391,6 +394,8 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 request.chmod(0o600)
                 state_source_args = ('--template-state-source-v3',
                                      '--template-reference-mapping', str(request))
+                if template_state_program:
+                    state_source_args += ('--template-state-config-program',)
             worker = str(Path(__file__).with_name('yaml_validation_worker.py'))
             process = await asyncio.create_subprocess_exec(
                 sys.executable, '-I', '-B', worker, str(before), str(after),
@@ -461,7 +466,14 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                         result['template_candidate_state_source_profile'], plan=plan,
                         mapping=template_reference_mapping)
                     candidate.assert_original(receipt, original)
-                    return TemplateStateSourceValidation(receipt, evidence, original, candidate)
+                    program = None
+                    if template_state_program:
+                        from .template_state_program import seal_state_config_program
+                        program = seal_state_config_program(original, candidate,
+                            result['template_state_config_program'],
+                            result['template_candidate_state_config_program'],
+                            mapping=template_reference_mapping, plan=plan)
+                    return TemplateStateSourceValidation(receipt, evidence, original, candidate, program)
                 return receipt, evidence
             return receipt
     except (OSError, TimeoutError):
@@ -484,14 +496,14 @@ async def async_validate_proposed_with_sources(hass, plan, scratch_parent, *, ti
 
 
 async def async_validate_proposed_with_template_state_sources(
-        hass, plan, mapping, scratch_parent, *, timeout=120):
+        hass, plan, mapping, scratch_parent, *, timeout=120, with_state_program=False):
     """Explicit internal full-state source preflight; no readiness/activation.
 
     Same staging, isolated native checker, receipt and source/directory fences.
     This opt-in does not replace the legacy receipt or its old reload semantics.
     """
     return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
-        with_sources=True, template_reference_mapping=mapping)
+        with_sources=True, template_reference_mapping=mapping, template_state_program=with_state_program)
 
 
 def assert_proposal_matches(receipt, plan):

@@ -711,7 +711,7 @@ def _template_reference_proof(before_root, proposed_root, mapping):
             allow_nan=False).encode()).hexdigest()}
 
 
-async def _expected_template_sources(hass, config, *, state_profile=None):
+async def _expected_template_sources(hass, config, *, state_profile=None, with_state_program=False, program_source_paths=()):
     """Same ORIGINAL checker instance/config; no factory, setup or rendering."""
     from homeassistant.const import __version__
     from homeassistant.config import async_process_component_and_handle_errors
@@ -724,21 +724,27 @@ async def _expected_template_sources(hass, config, *, state_profile=None):
                 raise ValueError('template_native_source_unverified')
             if state_profile is not None:
                 state_profile.update(template_state_source_projection(checked, hass.config.config_dir))
+                if with_state_program:
+                    state_profile['_config_program'] = _source_module('template_state_program').native_state_descriptors(
+                        checked, hass.config.config_dir, source_paths=program_source_paths)
             projection = _template_source_projection(checked, hass.config.config_dir)
         else:
             projection = []  # exact absent modern YAML; legacy stays ledger UNKNOWN
             if state_profile is not None:
                 state_profile.update(template_state_source_projection({}, hass.config.config_dir))
+                if with_state_program:
+                    state_profile['_config_program'] = _source_module('template_state_program').native_state_descriptors(
+                        {}, hass.config.config_dir, source_paths=program_source_paths)
         return {'version': __version__, 'projection': _fingerprint(projection),
                 'rows': [[row[0], row[1], _fingerprint(row)] for row in projection]}
     except Exception:
-        if state_profile is not None and not state_profile:
+        if state_profile is not None and (not state_profile or with_state_program and '_config_program' not in state_profile):
             raise  # explicit v3 failure never silently degrades to legacy UNKNOWN
         return {'version': __version__, 'projection': None, 'rows': None}
 
 
 async def _expected_runtime(root, domains, *, source_rows=None, template_sources=None,
-                            template_state_profile=None):
+                            template_state_profile=None, template_state_program=False, template_program_sources=()):
     """Native schema projections in the isolated validator, without component setup.
 
     No scripts/actions/templates are run and no scene is activated. The trusted
@@ -762,7 +768,7 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
         config = await async_hass_config_yaml(hass)
         if template_sources is not None:
             template_sources.update(await _expected_template_sources(
-                hass, config, state_profile=template_state_profile))
+                hass, config, state_profile=template_state_profile, with_state_program=template_state_program, program_source_paths=template_program_sources))
         for domain in domains:
             try:
                 if domain in ('automation', 'script') and not any(
@@ -1005,7 +1011,7 @@ def _check_template_entries(root, request, version):
 
 async def check(before_root, proposed_root, *, with_sources=False, powercalc_profiles=False,
                 powercalc_candidate=False, native_helpers=(), template_source_profile=None,
-                template_reference_mapping=None):
+                template_reference_mapping=None, template_state_program=False):
     from homeassistant.const import __version__
     from homeassistant.scripts.check_config import async_check_config
     if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4'):
@@ -1015,6 +1021,8 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
             or type(template_reference_mapping) is not dict):
         raise ValueError('template_state_profile_request_invalid')
     if template_source_profile is None and template_reference_mapping is not None:
+        raise ValueError('template_state_profile_request_invalid')
+    if type(template_state_program) is not bool or template_state_program and template_source_profile is None:
         raise ValueError('template_state_profile_request_invalid')
     reference_proof = (_template_reference_proof(before_root, proposed_root, template_reference_mapping)
                        if template_source_profile is not None else None)
@@ -1035,10 +1043,13 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
     new_state_profile = {} if template_source_profile is not None else None
     old_runtime = await _expected_runtime(before_root, original_domains,
         source_rows=source_rows, template_sources=template_sources,
-        template_state_profile=old_state_profile)
+        template_state_profile=old_state_profile, template_state_program=template_state_program,
+        template_program_sources=tuple(row[0] for row in reference_proof['files']) if template_state_program else ())
     candidate_templates = {} if with_sources else None
     new_runtime = await _expected_runtime(proposed_root, changed,
-        template_sources=candidate_templates, template_state_profile=new_state_profile)
+        template_sources=candidate_templates, template_state_profile=new_state_profile,
+        template_state_program=template_state_program,
+        template_program_sources=tuple(row[0] for row in reference_proof['files']) if template_state_program else ())
     if (with_sources and changed == ['template']
             and old_runtime.get('template') is not None
             and new_runtime.get('template') is not None
@@ -1049,6 +1060,9 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
               'runtime_expected': [(domain, old_runtime.get(domain), new_runtime.get(domain))
                                    for domain in changed]}
     if template_source_profile is not None:
+        if template_state_program:
+            result['template_state_config_program'] = old_state_profile.pop('_config_program')
+            result['template_candidate_state_config_program'] = new_state_profile.pop('_config_program')
         for value in (old_state_profile, new_state_profile):
             value.update(version=__version__, reference_proof=reference_proof)
         result['template_state_source_profile'] = old_state_profile
@@ -1121,6 +1135,7 @@ def main():
                                        template_source_profile=(TEMPLATE_STATE_SOURCE_PROFILE
                                            if '--template-state-source-v3' in sys.argv[3:] else None),
                                        template_reference_mapping=_template_mapping_request(sys.argv[3:]),
+                                       template_state_program='--template-state-config-program' in sys.argv[3:],
                                        native_helpers=(json.load(open(sys.argv[sys.argv.index('--native-helpers')+1]))
                                            if '--native-helpers' in sys.argv[3:] else ())),
                                  loop_factory=getattr(runner, 'create_event_loop', None))
