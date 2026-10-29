@@ -379,6 +379,19 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
                 try:
                     # Deliberate owned fixture loss, never a recovery permission.
                     receipts_path.write_text(json.dumps(damaged))
+                    inspected = await runtime.recovery_inspect(hass, result['operation_id'],
+                        result['fingerprint'], guard=lambda: None, refresh=refresh)
+                    self.assertFalse(inspected['eligible'], 'inner applied does not prove completed automation restoration')
+                    self.assertNotEqual(inspected['state'], 'applied')
+                    async with runtime.operation_lock:
+                        opened = None
+                        try:
+                            with self.assertRaises(self.module('transaction').Refused):
+                                opened = await self.module('native_template_yaml_server').NativeTemplateYAMLServer._open(
+                                    hass, guard=lambda: None, refresh=refresh)
+                        finally:
+                            if opened is not None:
+                                opened.close()
                     with self.assertRaises(self.module('transaction').Refused):
                         await runtime.native_yaml_reverse(hass, result['operation_id'],
                             result['fingerprint'], guard=lambda: None, refresh=refresh)
