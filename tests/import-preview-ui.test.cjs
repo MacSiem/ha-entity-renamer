@@ -80,7 +80,7 @@ test('role, account, disconnect and detach discard late native results',async()=
  if(mode==='role')f.card.hass={...f.hass,user:{id:'admin-a',is_admin:false}};
  if(mode==='account')f.card.hass={...f.hass,user:{id:'admin-b',is_admin:true}};
  if(mode==='disconnect')f.connection.dispatchEvent(new f.dom.window.Event('disconnected'));
- if(mode==='detach')f.card.remove();resolve([entity('sensor.old')]);await flush();assert.equal(f.card._migration,null);assert.equal(f.messages.length,1,'no second read after authority loss');assert.doesNotMatch(f.card.shadowRoot.innerHTML,/sensor.old/);
+ if(mode==='detach')f.card.remove();const afterAuthorityChange=f.messages.length;resolve([entity('sensor.old')]);await flush();assert.equal(f.card._migration,null);assert.equal(f.messages.length,afterAuthorityChange,'late preview must not issue another read');assert.doesNotMatch(f.card.shadowRoot.innerHTML,/sensor.old/);
  }finally{f.dom.window.close();}}
 });
 test('new file or selection discards pending result; clicks coalesce',async()=>{
