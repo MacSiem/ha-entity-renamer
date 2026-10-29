@@ -79,7 +79,9 @@ def _callback(native, value, entity, slot=None):
     """Authenticate native code and instance closure, without executing it."""
     if value is None:
         return
+    bound_owner = None
     if type(value) is MethodType:
+        bound_owner = value.__self__
         owner = value.__self__
         _need(owner is entity or owner is slot, 'template_binding_callback_owner')
         value = value.__func__
@@ -95,6 +97,18 @@ def _callback(native, value, entity, slot=None):
             optimize=sys.flags.optimize))), 'template_binding_callback_code')
     cells = dict(zip(value.__code__.co_freevars,
         (cell.cell_contents for cell in value.__closure__ or ()), strict=True))
+    if '__class__' in cells:
+        # Zero-argument super() captures the DEFINING class, not arbitrary
+        # per-instance data. These exact pinned native state callbacks are the
+        # only admitted class-cell profiles. Keep both their original function
+        # identity and the cell value: a source/code-equal clone is insufficient.
+        owners = (native.binary,) + ((native.sensor,) if native.version == '2025.6.0' else ())
+        defining = next((cls for cls in owners if vars(cls).get('_update_state') is value), None)
+        _need(defining is not None and type(entity) is defining
+              and bound_owner is entity and set(cells) == {'__class__'}
+              and cells['__class__'] is defining,
+              'template_binding_callback_class_closure_changed')
+        return
     for key, item in cells.items():
         if key == 'self':
             _need(item is entity or item is slot, 'template_binding_callback_closure')

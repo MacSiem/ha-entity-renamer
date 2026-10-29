@@ -634,5 +634,42 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
             caller_context=self.module._BindingCallerContext(asyncio.current_task(), reverse_fence))
 
 
+    async def test_source_equal_native_state_callback_with_foreign_class_cell_is_refused(self):
+        from types import FunctionType, MethodType
+        await self.pair(variant='binary_sensor')
+        module, entity = self.module, self.consumer
+        runtime = module._Runtime(self.f.hass)
+        runtime.sources()
+        state_slot = next(slot for slots in entity._template_attrs.values() for slot in slots
+            if slot._attribute in ('_state', '_attr_is_on'))
+        actual = entity._update_state
+        function = actual.__func__
+        self.assertEqual(function.__code__.co_freevars, ('__class__',))
+        # Positive native identity/code/globals/class-cell authentication. The
+        # actual binary method is also the recursive on_update in Core4.
+        module._callback(runtime.native, actual, entity, state_slot)
+        def make_cell(value):
+            return (lambda: value).__closure__[0]
+        foreign_class = type('ForeignDefiningClass', (), {})
+        clone = FunctionType(function.__code__, function.__globals__, function.__name__,
+            function.__defaults__, (make_cell(foreign_class),))
+        clone.__kwdefaults__ = function.__kwdefaults__
+        self.assertIs(clone.__code__, function.__code__)
+        self.assertIs(clone.__globals__, function.__globals__)
+        self.assertEqual(clone.__qualname__, function.__qualname__)
+        tracker, attrs = entity._template_result_info, entity._template_attrs
+        physical, cleanup = self.f.hass.states.get(entity.entity_id), tuple(entity._on_remove)
+        # Never install or invoke the forged method, mutate a native class cell,
+        # or change native callbacks. Only the read-only qualifier sees it.
+        with self.assertRaisesRegex(ValueError, 'callback_class_closure_changed'):
+            module._callback(runtime.native, MethodType(clone, entity), entity, state_slot)
+        self.assertIs(entity._update_state.__func__, function)
+        self.assertIs(function.__closure__[0].cell_contents, runtime.native.binary)
+        self.assertIs(entity._template_result_info, tracker)
+        self.assertIs(entity._template_attrs, attrs)
+        self.assertIs(self.f.hass.states.get(entity.entity_id), physical)
+        self.assertEqual(tuple(entity._on_remove), cleanup)
+
+
 if __name__ == '__main__':
     unittest.main()
