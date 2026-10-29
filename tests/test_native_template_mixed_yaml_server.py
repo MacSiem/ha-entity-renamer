@@ -383,15 +383,10 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
                         result['fingerprint'], guard=lambda: None, refresh=refresh)
                     self.assertFalse(inspected['eligible'], 'inner applied does not prove completed automation restoration')
                     self.assertNotEqual(inspected['state'], 'applied')
-                    async with runtime.operation_lock:
-                        opened = None
-                        try:
-                            with self.assertRaises(self.module('transaction').Refused):
-                                opened = await self.module('native_template_yaml_server').NativeTemplateYAMLServer._open(
-                                    hass, guard=lambda: None, refresh=refresh)
-                        finally:
-                            if opened is not None:
-                                opened.close()
+                    second_mapping = {new: new + '_next' for new in mapping.values()}
+                    with self.assertRaises(self.module('transaction').Refused):
+                        await runtime.native_forward(hass, second_mapping,
+                            guard=lambda: None, refresh=refresh)
                     with self.assertRaises(self.module('transaction').Refused):
                         await runtime.native_yaml_reverse(hass, result['operation_id'],
                             result['fingerprint'], guard=lambda: None, refresh=refresh)
@@ -435,3 +430,9 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         for status in (result, reverse):
             self.assertIs(status['migration_ready'], False)
             self.assertIs(status['family_complete'], False)
+        # A fully completed reverse must release new admission. This is a
+        # read-only open; the already accepted mutations are not repeated.
+        async with runtime.operation_lock:
+            opened = await self.module('native_template_yaml_server').NativeTemplateYAMLServer._open(
+                hass, guard=lambda: None, refresh=refresh)
+            opened.close()
