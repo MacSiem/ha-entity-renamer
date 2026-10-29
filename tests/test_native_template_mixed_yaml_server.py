@@ -9,6 +9,20 @@ import unittest
 import test_native_template_yaml_server as server
 
 
+class CompositeGuardThreadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_physical_worker_does_not_read_dependent_ha_runtime(self):
+        import importlib
+        import threading
+        runtime = importlib.import_module(server.activation.fixture.fixtures.PACKAGE + '.mixed_yaml_runtime')
+        consumers = object.__new__(runtime.MixedYAMLConsumers)
+        consumers.thread = threading.get_ident()
+        class LoopOnly:
+            def check(self):
+                raise AssertionError('physical worker read the HA runtime')
+        consumers.phases = LoopOnly()
+        await asyncio.to_thread(consumers.check)
+
+
 @unittest.skipUnless(server.activation.fixture.fixtures.HAS_HA, 'actual pinned HA required')
 class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
     with_yaml = True
