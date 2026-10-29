@@ -88,6 +88,9 @@ migration of those references.
 
 ## Screenshots
 
+These images show the unchanged queue workflow from 4.5.0. In 4.6.0, the
+read-only registry preview appears above these controls.
+
 | Light | Dark |
 |---|---|
 | ![Rename queue, light theme](docs/screenshots/card-queue-light.jpg) | ![Rename queue, dark theme](docs/screenshots/card-queue-dark.jpg) |
