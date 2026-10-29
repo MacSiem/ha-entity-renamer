@@ -755,6 +755,36 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
             return
         values = pairs(node)
         if 'variables' not in values:
+            # Minimum Core supports variables on each state entity, while its
+            # loader does not forward regular block variables. Keep each real
+            # entity's lexical closure separate; never borrow sibling bindings.
+            for platform in ('sensor', 'binary_sensor'):
+                group = values.get(platform)
+                if not isinstance(group, SequenceNode):
+                    continue
+                for entity in group.value:
+                    if not isinstance(entity, MappingNode):
+                        continue
+                    local = pairs(entity)
+                    if 'variables' not in local:
+                        continue
+                    bindings = {}
+                    def capture_local(key, child, bound, kind):
+                        if bound and bound[0] == 'scalar' and len(bound[1]) == 1:
+                            template_variables.append((node, key.value, child, bound[1][0], kind))
+                    define(local['variables'], bindings, on_binding=capture_local)
+                    if set(values) - {'unique_id', 'sensor', 'binary_sensor'}:
+                        issue(node, 'yaml_template_variable_runtime_scope_unsupported')
+                        unsafe.update(origins(bindings))
+                    if set(bindings) & {'states', 'is_state', 'state_attr', 'is_state_attr',
+                            'expand', 'this', 'now', 'utcnow', 'today_at', 'as_timestamp'}:
+                        issue(local['variables'], 'yaml_template_variable_shadow_unsupported')
+                        unsafe.update(origins(bindings))
+                    for key, child in entity.value:
+                        if isinstance(key, ScalarNode) and key.value == 'variables':
+                            continue
+                        scan(key, bindings, reference_fields=False, template_output=True)
+                        scan(child, bindings, reference_fields=False, template_output=True)
             return
         bindings = {}
         def capture(key, child, bound, kind):
@@ -1118,6 +1148,8 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                 and (-identity, 0, node.value) not in variable_unsafe)
             for identity, (node, contexts) in candidates.items()}
         for block, name, source, origin, kind in template_variables:
+            if origin[2] not in mapping:
+                continue
             producer = candidates.get(-origin[0])
             source_token = tokens.get(source.end_mark.index)
             producer_token = tokens.get(producer[0].end_mark.index) if producer else None

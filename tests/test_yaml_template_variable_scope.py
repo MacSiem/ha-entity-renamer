@@ -365,5 +365,39 @@ script:
         self.assertEqual(plan.template_variable_bindings, ())
 
 
+    def test_entity_local_variables_have_separate_complete_native_scopes(self):
+        source = """template:
+- sensor:
+  - unique_id: first
+    variables:
+      source: sensor.foo
+      alias: '{{ source }}'
+    state: '{{ states(alias) }}'
+  - unique_id: second
+    variables:
+      source: light.old
+    state: '{{ is_state(source, "on") }}'
+"""
+        expected = source.replace('sensor.foo', 'sensor.new').replace('light.old', 'light.new')
+        plan = self.assert_proposal(source, expected)
+        self.assertEqual({(r.name, r.before) for r in plan.template_variable_bindings},
+                         {('source', 'sensor.foo'), ('alias', 'sensor.foo'), ('source', 'light.old')})
+        unsafe = source.replace("state: '{{ is_state(source, \"on\") }}'", "state: '{{ source }}'")
+        self.assert_blocked(unsafe)
+
+    def test_unmapped_scalar_variable_has_no_transport_locator(self):
+        source = """template:
+- variables:
+    source: sensor.foo
+    unrelated: sensor.unchanged
+  sensor:
+  - state: '{{ states(source) }}'
+    attributes:
+      unrelated: '{{ states(unrelated) }}'
+"""
+        plan = self.assert_proposal(source, source.replace('sensor.foo', 'sensor.new'))
+        self.assertEqual({r.name for r in plan.template_variable_bindings}, {'source'})
+
+
 if __name__ == '__main__':
     unittest.main()

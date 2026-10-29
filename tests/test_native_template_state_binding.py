@@ -26,13 +26,20 @@ class NativeTemplateStateBindingTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.core import Context
         await self.prepare('yaml', variant='sensor', validate=False, uidless=uidless)
         old = self.source_id
+        from homeassistant.const import __version__
+        minimum_entity_variables = variables and __version__ == '2025.6.0'
         body = '- unique_id: scope\n'
-        if variables:
+        if variables and not minimum_entity_variables:
             body += (f'  variables:\n    source: {old}\n'
                      '    alias: "{{ source }}"\n'
                      '    stamp: "{{ now() }}"\n'
                      '    frozen: "{{ states(source) }}"\n')
         body += '  sensor:\n  - name: Runtime consumer\n'
+        if minimum_entity_variables:
+            body += (f'    variables:\n      source: {old}\n'
+                     '      alias: "{{ source }}"\n'
+                     '      stamp: "{{ now() }}"\n'
+                     '      frozen: "{{ states(source) }}"\n')
         if not uidless:
             body += '    unique_id: value\n'
         source = 'alias' if variables else repr(old)
