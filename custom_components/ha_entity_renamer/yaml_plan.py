@@ -98,6 +98,31 @@ class VariableBindingProof:
 
 
 @dataclass(frozen=True)
+class TemplateVariableBinding:
+    """Source-only scalar projection, never evidence learned from rendered values.
+
+    Byte spans select exact tokens in Plan.files[path], including aliases whose
+    configured expression stays unchanged. before/after are the statically
+    proven scalar result; producer spans select its original literal. approved
+    requires the complete file-local consumer closure and whole Plan readiness.
+    A caller must still authenticate native normalization and live owners.
+    """
+    path: str
+    block_start: int
+    block_line: int
+    name: str
+    kind: str  # literal or alias
+    source_start: int
+    source_end: int
+    source_sha256: str
+    producer_start: int
+    producer_end: int
+    before: str
+    after: str
+    approved: bool
+
+
+@dataclass(frozen=True)
 class PowercalcSourceInputs:
     """Opaque immutable profile/settings inputs, not YAML parser roots."""
     files: tuple[FileSnapshot, ...]
@@ -115,6 +140,7 @@ class Plan:
     coverage: str = "declared_yaml_graph_static_reference_fields_only"
     variable_bindings: tuple[VariableBindingProof, ...] = ()
     powercalc_inputs: PowercalcSourceInputs | None = None
+    template_variable_bindings: tuple[TemplateVariableBinding, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -291,6 +317,8 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
     """
     producers, used, unsafe, templates, observed = {}, set(), set(), {}, {}
     consumers = {}
+    template_variables = []
+    template_outputs = set()
     work = 0
 
     def record(origin, kind):
@@ -358,7 +386,7 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
                 return ('keys', tuple(sorted({o for key in keys for o in key[0][1]}))), [n for key in keys for n in key[1]]
         return None
 
-    def scan(node, bindings, field=False, ancestry=(), reference_fields=True):
+    def scan(node, bindings, field=False, ancestry=(), reference_fields=True, template_output=False):
         charge()
         if node is None:
             return
@@ -366,6 +394,8 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
             raise YAMLPlanError('YAML binding alias cycle')
         ancestry += (id(node),)
         if isinstance(node, ScalarNode):
+            if template_output:
+                template_outputs.add(id(node))
             observed[id(node)] = observed.get(id(node), 0) + 1
             if node.tag == _STR and _ENTITY.fullmatch(node.value):
                 origin = (-id(node), 0, node.value)
@@ -400,15 +430,15 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
             return
         if isinstance(node, SequenceNode):
             for child in node.value:
-                scan(child, bindings, field, ancestry, reference_fields)
+                scan(child, bindings, field, ancestry, reference_fields, template_output)
         elif isinstance(node, MappingNode):
             for key, child in node.value:
                 if key.tag == _STANDARD + 'merge':
                     unsafe.update(origins(bindings))
                     issue(key, 'yaml_variable_merge_scope_unsupported')
-                scan(key, bindings, False, ancestry, reference_fields)
+                scan(key, bindings, False, ancestry, reference_fields, template_output)
                 scan(child, bindings, reference_fields and isinstance(key, ScalarNode) and key.value in _FIELDS,
-                     ancestry, reference_fields)
+                     ancestry, reference_fields, template_output)
 
     def template_alias(node, bindings):
         if not (isinstance(node, ScalarNode) and node.tag == _STR and '{{' in node.value):
@@ -428,7 +458,7 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
             record(origin, 'yaml_template_alias')
         return alias
 
-    def define(node, bindings):
+    def define(node, bindings, *, on_binding=None):
         if not isinstance(node, MappingNode) or node.tag != _STANDARD + 'map':
             scan(node, bindings)
             issue(node, 'yaml_variable_definition_unsupported')
@@ -460,6 +490,8 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
                 if prior:
                     unsafe.update(prior[1])
                 bindings[key.value] = ('unknown', prior[1]) if prior else None
+            if on_binding is not None:
+                on_binding(key, child, bindings[key.value], 'alias' if alias else 'literal')
 
     def write_summary(node):
         """Overapproximate writes, without observing/registering a producer twice.
@@ -712,6 +744,51 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
             elif key.value != 'variables':
                 scan(child, bindings, key.value in _FIELDS)
 
+    def template_scope(node):
+        """Only native state block variables; all siblings share their closure.
+
+        A Template attribute called entity_id is still an output/metadata slot,
+        not an automation entity-reference field. Disable generic field inference
+        throughout this block and authorize only proven Jinja reference sinks.
+        """
+        if not isinstance(node, MappingNode):
+            return
+        values = pairs(node)
+        if 'variables' not in values:
+            return
+        bindings = {}
+        def capture(key, child, bound, kind):
+            if bound and bound[0] == 'scalar' and len(bound[1]) == 1:
+                template_variables.append((node, key.value, child, bound[1][0], kind))
+        define(values['variables'], bindings, on_binding=capture)
+        unsupported = False
+        allowed = {'unique_id', 'variables', 'sensor', 'binary_sensor'}
+        reserved = {'states', 'is_state', 'state_attr', 'is_state_attr', 'expand',
+                    'this', 'now', 'utcnow', 'today_at', 'as_timestamp'}
+        if set(bindings) & reserved:
+            issue(values['variables'], 'yaml_template_variable_shadow_unsupported')
+            unsupported = True
+        for key, child in node.value:
+            if key.tag == _STANDARD + 'merge':
+                issue(key, 'yaml_variable_merge_scope_unsupported')
+                unsupported = True
+            elif not isinstance(key, ScalarNode) or key.tag != _STR or key.value not in allowed:
+                issue(key, 'yaml_template_variable_runtime_scope_unsupported')
+                unsupported = True
+            if isinstance(key, ScalarNode) and key.value == 'variables':
+                continue
+            # Entity-local variables require a separate native source scope.
+            if isinstance(key, ScalarNode) and key.value in ('sensor', 'binary_sensor'):
+                entities = child.value if isinstance(child, SequenceNode) else (child,)
+                for entity in entities:
+                    if isinstance(entity, MappingNode) and 'variables' in pairs(entity):
+                        issue(entity, 'yaml_template_variable_entity_scope_unsupported')
+                        unsupported = True
+            scan(key, bindings, reference_fields=False, template_output=True)
+            scan(child, bindings, reference_fields=False, template_output=True)
+        if unsupported:
+            unsafe.update(origins(bindings))
+
     def discover(node, context='', ancestry=()):
         charge()
         if node is None:
@@ -720,6 +797,13 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
             raise YAMLPlanError('YAML binding alias cycle')
         ancestry += (id(node),)
         context = context.split(' ', 1)[0]
+        if context == 'template':
+            if isinstance(node, SequenceNode):
+                for child in node.value:
+                    template_scope(child)
+            elif isinstance(node, MappingNode):
+                template_scope(node)
+            return
         if context == 'automation':
             if isinstance(node, SequenceNode):
                 for child in node.value:
@@ -743,12 +827,12 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
                     discover(child, '', ancestry)
                 elif context == 'homeassistant' and name == 'packages':
                     discover(child, 'packages', ancestry)
-                elif context == '' and kind in ('automation', 'script', 'homeassistant'):
+                elif context == '' and kind in ('automation', 'script', 'template', 'homeassistant'):
                     discover(child, kind, ancestry)
         # Unknown integration/metadata scopes are deliberately not inferred.
 
     discover(tree, inherited_key)
-    return producers, used, unsafe, templates, observed, consumers
+    return producers, used, unsafe, templates, observed, consumers, template_variables, template_outputs
 
 
 def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limits: Limits) -> Plan:
@@ -761,6 +845,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
     total_bytes = 0
     nodes_count = 0
     binding_proofs = []
+    template_binding_specs = []
 
     def visit(path: str, graph_depth: int = 0, inherited_field=False, inherited_key="",
               inherited_lovelace=False, inherited_variable=False) -> None:
@@ -853,7 +938,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                     elif not node.tag.startswith(_STANDARD):
                         issue(node, "unsupported_yaml_tag")
                     elif node.tag == _STR:
-                        candidates.setdefault(id(node), (node, []))[1].append(field)
+                        candidates.setdefault(id(node), (node, []))[1].append(field and id(node) not in template_outputs)
                     return
                 if not node.tag.startswith(_STANDARD):
                     issue(node, "unsupported_yaml_tag")
@@ -922,10 +1007,11 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
             finally:
                 visiting.remove(id(node))
 
+        (producers, variable_used, variable_unsafe, variable_templates, observed, consumers,
+         template_variables, template_outputs) = _yaml_bindings(
+            tree, inherited_key, mapping, issue, limits.max_nodes)
         walk(tree, field=inherited_field, parent_key=inherited_key, lovelace=inherited_lovelace,
              variable_definition=inherited_variable)
-        producers, variable_used, variable_unsafe, variable_templates, observed, consumers = _yaml_bindings(
-            tree, inherited_key, mapping, issue, limits.max_nodes)
         for identity, (_, _, count, origins) in variable_templates.items():
             if identity in candidates and count != len(candidates[identity][1]):
                 variable_unsafe.update(origins)
@@ -1025,6 +1111,28 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                 start = len(text[:token.start_mark.index].encode('utf-8'))
                 end = len(text[:token.end_mark.index].encode('utf-8'))
                 edits.append(Edit(start, end, raw.encode('utf-8'), replaced.encode('utf-8')))
+        producer_approvals = {(-id(node), 0, node.value): (
+                producers.get(identity, 0) > 0
+                and len(contexts) == producers.get(identity, 0) + observed.get(identity, 0)
+                and (-identity, 0, node.value) in variable_used
+                and (-identity, 0, node.value) not in variable_unsafe)
+            for identity, (node, contexts) in candidates.items()}
+        for block, name, source, origin, kind in template_variables:
+            producer = candidates.get(-origin[0])
+            source_token = tokens.get(source.end_mark.index)
+            producer_token = tokens.get(producer[0].end_mark.index) if producer else None
+            if (source_token is None or producer_token is None
+                    or source_token.value != source.value
+                    or producer_token.value != origin[2]):
+                issue(source, 'yaml_template_variable_locator_unknown')
+                continue
+            byte = lambda index: len(text[:index].encode('utf-8'))
+            a, b = byte(source_token.start_mark.index), byte(source_token.end_mark.index)
+            template_binding_specs.append(TemplateVariableBinding(
+                path, byte(block.start_mark.index), block.start_mark.line + 1,
+                name, kind, a, b, hashlib.sha256(data[a:b]).hexdigest(),
+                byte(producer_token.start_mark.index), byte(producer_token.end_mark.index),
+                origin[2], mapping.get(origin[2], origin[2]), producer_approvals.get(origin, False)))
         edits.sort(key=lambda e: e.start)
         proposed = data
         last = len(data) + 1
@@ -1041,8 +1149,15 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
 
     for root in roots:
         visit(root)
+    # These source-only locators belong to this same whole-input Plan. A partial
+    # proposal with any issue must never expose an approved runtime projection.
+    if issues:
+        from dataclasses import replace
+        template_binding_specs = [replace(row, approved=False) for row in template_binding_specs]
     return Plan(tuple(files[k] for k in sorted(files)),
                 tuple(reader.directories[k] for k in sorted(reader.directories)),
                 tuple(edges), tuple(sorted(patches, key=lambda p: p.path)),
                 tuple(sorted(issues, key=lambda i: (i.path, i.line, i.code))),
-                variable_bindings=tuple(sorted(binding_proofs, key=lambda p: (p.path, p.source_line, p.entity_id))))
+                variable_bindings=tuple(sorted(binding_proofs, key=lambda p: (p.path, p.source_line, p.entity_id))),
+                template_variable_bindings=tuple(sorted(template_binding_specs,
+                    key=lambda p: (p.path, p.block_start, p.source_start, p.name))))
