@@ -50,10 +50,14 @@ class NativeReleaseATests(unittest.IsolatedAsyncioTestCase):
             nonlocal observed_task
             # Capture the actual task created by HA's registered async_response.
             # Every component/native call below is attributed to that task only.
+            try:
+                task = asyncio.current_task()
+            except RuntimeError:  # HA executor threads have no running loop.
+                return
             if code is restore_code:
-                observed_task = asyncio.current_task()
+                observed_task = task
                 handler_calls.append(code.co_name)
-            if observed_task is None or asyncio.current_task() is not observed_task:
+            if observed_task is None or task is not observed_task:
                 return
             filename = code.co_filename
             if ((filename.startswith(component_root) and code is not restore_code)
@@ -77,7 +81,7 @@ class NativeReleaseATests(unittest.IsolatedAsyncioTestCase):
             connection.async_handle({'id': 1, 'type': request_type,
                                      'operation_id': 'release-a-refusal',
                                      'fingerprint': '0' * 64})
-            response = await output
+            response = await asyncio.wait_for(output, 15)
         finally:
             sys.monitoring.set_events(tool, 0)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
