@@ -191,11 +191,14 @@ class NativeTemplateStateBindingTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.helpers.script_variables import ScriptVariables
         entity = next(e for p in async_get_platforms(self.f.hass, 'template') for e in p.entities.values())
         configured = entity._run_variables
-        values = configured.as_dict() if type(configured) is ScriptVariables else configured
-        original = values['unrelated']
+        values = dict(configured.as_dict() if type(configured) is ScriptVariables else configured)
+        values['unrelated'] = 'sensor.unexpected_source'
+        # Keep `_config` and rendered variables untouched: a shared-dictionary
+        # edit would be caught by the existing config seal for another reason.
+        replacement = ScriptVariables(values) if type(configured) is ScriptVariables else values
         try:
-            values['unrelated'] = 'sensor.unexpected_source'
+            entity._run_variables = replacement
             with self.assertRaises(ValueError):
                 await self.sample_original(validation)
         finally:
-            values['unrelated'] = original
+            entity._run_variables = configured
