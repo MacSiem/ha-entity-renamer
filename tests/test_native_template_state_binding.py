@@ -30,13 +30,13 @@ class NativeTemplateStateBindingTests(unittest.IsolatedAsyncioTestCase):
         minimum_entity_variables = variables and __version__ == '2025.6.0'
         body = '- unique_id: scope\n'
         if variables and not minimum_entity_variables:
-            body += (f'  variables:\n    source: {old}\n'
+            body += (f'  variables:\n    source: {old}\n    unrelated: sensor.unchanged\n'
                      '    alias: "{{ source }}"\n'
                      '    stamp: "{{ now() }}"\n'
                      '    frozen: "{{ states(source) }}"\n')
         body += '  sensor:\n  - name: Runtime consumer\n'
         if minimum_entity_variables:
-            body += (f'    variables:\n      source: {old}\n'
+            body += (f'    variables:\n      source: {old}\n      unrelated: sensor.unchanged\n'
                      '      alias: "{{ source }}"\n'
                      '      stamp: "{{ now() }}"\n'
                      '      frozen: "{{ states(source) }}"\n')
@@ -47,6 +47,8 @@ class NativeTemplateStateBindingTests(unittest.IsolatedAsyncioTestCase):
                  f'    availability: "{{{{ not is_state({source}, \'unavailable\') }}}}"\n'
                  '    attributes:\n      identity: "{{ this.entity_id }}"\n'
                  '      tick: "{{ now().minute }}"\n')
+        if variables:
+            body += '      other: "{{ states(unrelated) }}"\n'
         if unrelated_trigger:
             body += ('- unique_id: unrelated\n  triggers:\n'
                      '  - trigger: event\n    event_type: state_binding_unrelated\n'

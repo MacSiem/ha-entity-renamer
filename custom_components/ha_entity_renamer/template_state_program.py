@@ -174,16 +174,18 @@ def _project(semantic, mapping, active):
     complete entity, including context/variables/metadata.
     """
     from .reference_planner import analyze_template_alias, analyze_template_bindings
+    from .yaml_plan import _ENTITY
     result = deepcopy(semantic)
     chosen = {old: new for old, new in mapping.items() if old in active}
     bindings, producers, aliases, layouts, used, unsafe = {}, {}, {}, {}, set(), set()
     counter = 0
     def origin(value):
         nonlocal counter
-        if type(value) is str and value in mapping:
+        if type(value) is str and _ENTITY.fullmatch(value):
             counter += 1
             token = (-counter, -counter, value)
-            producers[token] = value
+            if value in mapping:
+                producers[token] = value
             return ('scalar', frozenset({token}))
         if type(value) is list:
             children = [origin(v) for v in value]
@@ -195,7 +197,7 @@ def _project(semantic, mapping, active):
                 return ('keys', frozenset(t for child in children for t in child[1]))
         return None
     def layout(value):
-        if type(value) is str and value in mapping:
+        if type(value) is str and _ENTITY.fullmatch(value):
             return ('id', value)
         if type(value) is list:
             parts = [layout(child) for child in value]
