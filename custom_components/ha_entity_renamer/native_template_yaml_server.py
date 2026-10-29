@@ -171,6 +171,11 @@ class NativeTemplateYAMLServer:
             source = [row for row in rows if row['entity_id'] == old]
             _need(len(source) == 1 and source[0]['platform'] != 'template'
                   and not any(row['entity_id'] == new for row in rows), 'source_uuid_required')
+            # The dependent observer pins logical automation/script identities.
+            # Renaming one of those sources needs its own accepted identity
+            # handoff; reject before creating any effects until qualified.
+            _need(source[0]['platform'] not in ('automation', 'script'),
+                  'dependent_source_identity_unsupported')
             registry.append(await bridge.prepare('entity', source[0]['id'], {'entity_id': new}, self._scope))
             self._scope()
         change = await _drained(self.hass.async_add_executor_job, lambda: _capture(self.receipt, yaml))
