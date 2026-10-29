@@ -74,3 +74,25 @@ class DependentYAMLRuntime:
         _need(self.active is not None and self.active[0] is ticket)
         self.unresolved = True
         self.active = None
+
+    def begin_automation_transition(self):
+        self.check()
+        ticket = object()
+        self.active = ticket, 'automation_activation', None, asyncio.current_task()
+        return ticket
+
+    def complete_automation_transition(self, ticket):
+        _need(not self.unresolved and self.active is not None
+              and asyncio.current_task() is self.active[3] and self.active[0] is ticket
+              and self.active[1] == 'automation_activation')
+        try:
+            sample = self._sample(self.positions)
+            _need(not sample[1] and sample[0] == self.sample[0])
+            old = {row[0]: row[1:] for row in self.sample[2]}
+            new = {row[0]: row[1:] for row in sample[2]}
+            _need(all(new[key] == old[key] for key in old if key != 'automation'))
+        except BaseException:
+            self.unresolved = True
+            raise
+        self.sample, self.active = sample, None
+        self.check()
