@@ -3609,9 +3609,11 @@ class HAEntityRenamer extends HTMLElement {
         this._cancelRenameConfirmation();
       } else if (e.key === 'Tab') {
         e.preventDefault();
-        const cancel = root.getElementById('cancelRenameDialog');
-        const apply = root.getElementById('confirmRenameApply');
-        (root.activeElement === cancel ? apply : cancel)?.focus();
+        const controls = Array.from(e.currentTarget.querySelectorAll('summary, button:not(:disabled)'));
+        const current = controls.indexOf(root.activeElement);
+        const next = current < 0 ? (e.shiftKey ? controls.length - 1 : 0)
+          : (current + (e.shiftKey ? -1 : 1) + controls.length) % controls.length;
+        controls[next]?.focus();
       }
     });
 
