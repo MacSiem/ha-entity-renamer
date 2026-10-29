@@ -364,6 +364,31 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
             await stimulus(value)
         events['automation'].clear()
         events['script'].clear()
+        from attr import asdict
+        receipts_path = root / '.storage/ha_entity_renamer.registry_receipts'
+        receipt_bytes = receipts_path.read_bytes()
+        lifecycle = self.module('native_automation_lifecycle')
+        protected = {name: (root / name).read_bytes() for name in original}
+        before_registry = {key: asdict(row) for key, row in self.f.entity.entities.items()}
+        journal_bytes = (root / '.storage/ha_entity_renamer.migration_journal').read_bytes()
+        for missing in ('completed', 'stage_receipt'):
+            with self.subTest(missing_outer_lifecycle=missing):
+                damaged = json.loads(receipt_bytes)
+                key = lifecycle._key(result['operation_id'], result['fingerprint'], 'forward', missing)
+                self.assertIsNotNone(damaged['data']['events'].pop(key))
+                try:
+                    # Deliberate owned fixture loss, never a recovery permission.
+                    receipts_path.write_text(json.dumps(damaged))
+                    with self.assertRaises(self.module('transaction').Refused):
+                        await runtime.native_yaml_reverse(hass, result['operation_id'],
+                            result['fingerprint'], guard=lambda: None, refresh=refresh)
+                    self.assertEqual({key: asdict(row) for key, row in self.f.entity.entities.items()}, before_registry)
+                    for name, raw in protected.items():
+                        self.assertEqual((root / name).read_bytes(), raw)
+                    self.assertEqual((root / '.storage/ha_entity_renamer.migration_journal').read_bytes(), journal_bytes)
+                    self.assertEqual(events, {'automation': [], 'script': []})
+                finally:
+                    receipts_path.write_bytes(receipt_bytes)
         prior_stores = runtime.preparations, runtime.journal
         # Fresh native factory receives only opid/fingerprint; none of the live
         # forward session's objects or effects are handed into reverse.
