@@ -454,3 +454,75 @@ class SelectiveYAMLNativeEffectTests(unittest.IsolatedAsyncioTestCase):
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
             sys.monitoring.free_tool_id(tool)
             hass.services.async_remove('renamer_qa_monitor', 'observe')
+
+
+    async def test_final_recapture_rejects_equivalent_native_tracker_replacement_before_api(self):
+        import sys
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        runtime, mapping, uuids, _ = await self.data(variant='sensor')
+        hass = self.f.hass
+        consumer = next(e for p in async_get_platforms(hass, 'template') for e in p.entities.values())
+        old = consumer._template_result_info
+        cleanup = list(consumer._on_remove)
+        slot = cleanup.index(old.async_remove)
+        new = None
+        injected, attempts = [], []
+        node = self.module('native_template_state_registry_effect').NativeTemplateStateRegistryEffect
+        capture_code = node.capture.__func__.__code__
+        mutate_code = self.module('native_registry').NativeRegistryIO.mutate.__code__
+        monitor = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
+        def capture_returned(code_arg, offset, result):
+            nonlocal new
+            if not injected and result.root.hass is hass:
+                injected.append(True)
+                native = result.runtime
+                new = native.event.TrackTemplateResultInfo(hass, list(old._track_templates),
+                    consumer._handle_results, has_super_template=old._has_super_template)
+                old.async_remove()
+                new.async_setup()
+                consumer._template_result_info = new
+                consumer._on_remove[slot] = new.async_remove
+                # Independently authenticate this replacement with the actual
+                # native source/config sampler. Its content alone is legitimate.
+                self.module('native_template_state_binding').sample_state_bindings(
+                    native, result.root.program, result.snapshot.prefix,
+                    result.snapshot.yaml_position, result.root.chain.accepted_documents())
+        def attempted(code_arg, offset):
+            frame = sys._getframe(1)
+            if frame.f_locals['self'].hass is hass:
+                attempts.append(True)
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        sys.monitoring.use_tool_id(monitor, 'native owner replacement before final registry fence')
+        sys.monitoring.register_callback(monitor, sys.monitoring.events.PY_RETURN, capture_returned)
+        sys.monitoring.register_callback(monitor, sys.monitoring.events.PY_START, attempted)
+        sys.monitoring.set_local_events(monitor, capture_code, sys.monitoring.events.PY_RETURN)
+        sys.monitoring.set_local_events(monitor, mutate_code, sys.monitoring.events.PY_START)
+        session = None
+        try:
+            async with runtime.operation_lock:
+                session = await self.module('native_template_state_server').NativeTemplateStateServer.prepare(
+                    hass, mapping, guard=lambda: None, refresh=refresh)
+                original_yaml = {row.path: row.before for row in session.change.files}
+                with self.assertRaises(self.module('transaction').Refused):
+                    await session.apply()
+                self.assertEqual(injected, [True])
+                self.assertEqual(attempts, [], 'source owner substitution must refuse before actual native registry API')
+                for source, target in mapping.items():
+                    self.assertEqual(self.f.entity.async_get(source).id, uuids[source])
+                    self.assertIsNone(self.f.entity.async_get(target))
+                for path, before in original_yaml.items():
+                    self.assertEqual((self.f.root / path).read_bytes(), before)
+        finally:
+            if session is not None:
+                session.close()
+            sys.monitoring.set_local_events(monitor, capture_code, 0)
+            sys.monitoring.set_local_events(monitor, mutate_code, 0)
+            sys.monitoring.register_callback(monitor, sys.monitoring.events.PY_START, None)
+            sys.monitoring.register_callback(monitor, sys.monitoring.events.PY_RETURN, None)
+            sys.monitoring.free_tool_id(monitor)
+            if new is not None:
+                new.async_remove()
+                consumer._template_result_info = old
+                consumer._on_remove[:] = cleanup
+                old.async_setup()

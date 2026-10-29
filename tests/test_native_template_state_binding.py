@@ -168,3 +168,34 @@ class NativeTemplateStateBindingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(entity.unique_id == 'scope-value' for entity in transition.entities))
         self.assertFalse(any(pair.source_identity[2] == 'unrelated-untouched'
                              for pair in transition.source_pairs))
+
+
+    async def test_configured_variable_equal_owner_replacement_breaks_binding(self):
+        validation, _ = await self.boot(variables=True)
+        before = await self.sample_original(validation)
+        entity = before.rows[0].entity
+        original = entity._run_variables
+        from homeassistant.helpers.script_variables import ScriptVariables
+        replacement = (ScriptVariables(dict(original.as_dict())) if type(original) is ScriptVariables
+                       else dict(original))
+        try:
+            entity._run_variables = replacement
+            after = await self.sample_original(validation)
+            self.assertFalse(before.same_bindings(after), 'equivalent content cannot replace a retained configured owner')
+        finally:
+            entity._run_variables = original
+
+    async def test_configured_unmapped_variable_drift_refuses_full_source_sample(self):
+        validation, _ = await self.boot(variables=True)
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        from homeassistant.helpers.script_variables import ScriptVariables
+        entity = next(e for p in async_get_platforms(self.f.hass, 'template') for e in p.entities.values())
+        configured = entity._run_variables
+        values = configured.as_dict() if type(configured) is ScriptVariables else configured
+        original = values['unrelated']
+        try:
+            values['unrelated'] = 'sensor.unexpected_source'
+            with self.assertRaises(ValueError):
+                await self.sample_original(validation)
+        finally:
+            values['unrelated'] = original
