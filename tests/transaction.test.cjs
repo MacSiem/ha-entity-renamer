@@ -347,3 +347,36 @@ test('deferred options follow Polish confirmation and are absent for household a
   card.hass={...hass,user:{id:'household',is_admin:false}};
   assert.equal(card.shadowRoot.querySelector('.confirm-dialog'),null);assert.equal(card.shadowRoot.querySelector('input[type="file"]'),null);assert.equal(writes.length,0);
 });
+
+
+test('bulk confirmation exposes every entity and device in an expandable review', t => {
+  const {card,writes}=fixture(t);
+  card._renameQueue=Array.from({length:25},(_,i)=>({oldId:`sensor.old_${i}`,newId:`sensor.new_${i}`,newName:`Name ${i}`}));
+  card._devices=Array.from({length:12},(_,i)=>({id:`device_${i}`,name:`Original ${i}`}));
+  card._deviceRenameQueue=Object.fromEntries(card._devices.map((d,i)=>[d.id,`New device ${i}`]));
+  card._showRenameConfirmation();
+  const dialog=card.shadowRoot.querySelector('.confirm-dialog');
+  assert.match(dialog.textContent,/sensor\.new_24/);
+  assert.match(dialog.textContent,/New device 11/);
+  const more=dialog.querySelector('details');
+  assert.ok(more,'remaining rows can be inspected before confirming');
+  assert.ok(more.querySelector('summary'));
+  assert.equal(writes.length,0);
+  card._cancelRenameConfirmation();
+  assert.equal(card._renameQueue.length,25);
+  assert.equal(Object.keys(card._deviceRenameQueue).length,12);
+  assert.equal(writes.length,0);
+});
+
+test('confirmation renders the frozen reviewed scope and handles name-only changes', t => {
+  const {card,writes}=fixture(t);
+  card._renameQueue=[{oldId:'sensor.a',newId:'sensor.a',newName:'Name only'}];
+  card._showRenameConfirmation();
+  card._renameQueue.push({oldId:'sensor.b',newId:'sensor.unconfirmed'});
+  card.render();
+  const dialog=card.shadowRoot.querySelector('.confirm-dialog');
+  assert.match(dialog.textContent,/Name only/);
+  assert.doesNotMatch(dialog.textContent,/sensor\.unconfirmed/);
+  assert.doesNotMatch(dialog.textContent,/undefined/);
+  assert.equal(writes.length,0);
+});
