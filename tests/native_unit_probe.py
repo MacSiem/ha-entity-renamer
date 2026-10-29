@@ -9,6 +9,8 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
+import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
@@ -36,6 +38,7 @@ paths = list((ROOT/'custom_components/ha_entity_renamer').glob('*.py'))
 paths += list((ROOT/'custom_components/ha_entity_renamer').rglob('*.json'))
 paths += list((ROOT/'tests').glob('test*.py'))
 paths += [ROOT/'tests/native_template_composition_scenario.py']
+paths += list((ROOT/'tests').glob(args.pattern))
 paths += [ROOT/'ha-entity-renamer.js', ROOT/'scripts/stage_hacs_companion.py']
 sources = {str(p.relative_to(ROOT)): p.read_text() for p in paths}
 if args.powercalc_component_dir is not None:
@@ -76,9 +79,38 @@ if args.powercalc_profile_dir is not None:
             parser.error('public profile content mismatch')
         binary_sources['_public_profiles/' + name] = base64.b64encode(raw).decode('ascii')
     binary_sources['_public_profiles/PUBLIC-INPUTS.json'] = base64.b64encode(raw_manifest).decode('ascii')
+probe_token = uuid.uuid4().hex
+pidfile = '/config/renamer-unit-' + probe_token + '.pid'
 program = r'''
 import os, sys, tempfile, pathlib, unittest, json, base64
-with tempfile.TemporaryDirectory(prefix='renamer-unit-', dir='/config') as directory:
+import ctypes, signal, time
+# This guardian stays outside the tests and reaps children even if they create
+# sessions. Linux subreaper adoption keeps orphaned grandchildren in our scope.
+if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), 'cannot establish probe subreaper')
+start = pathlib.Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]
+with open(os.open(PIDFILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as record:
+    json.dump({'pid': os.getpid(), 'start': start, 'token': PROBE_TOKEN}, record)
+stopping = False
+def terminate(signum, frame):
+    global stopping
+    stopping = True
+signal.signal(signal.SIGTERM, terminate)
+child = os.fork()
+if child:
+    status = None
+    while True:
+        try:
+            pid, code = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            break
+        if pid == child:
+            status = code
+        if pid == 0:
+            time.sleep(0.05)
+    raise SystemExit(124 if stopping else os.waitstatus_to_exitcode(status))
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+with tempfile.TemporaryDirectory(prefix='renamer-unit-' + PROBE_TOKEN + '-', dir='/config') as directory:
     root = pathlib.Path(directory)
     for name, source in SOURCES.items():
         path = root/name
@@ -132,8 +164,109 @@ with tempfile.TemporaryDirectory(prefix='renamer-unit-', dir='/config') as direc
     success = result.wasSuccessful()
 raise SystemExit(0 if success else 1)
 '''
-completed = subprocess.run(['docker','exec','-i',args.container,'python','-X','faulthandler','-B','-'],
-    input='SOURCES = '+repr(sources)+'\nBINARY_SOURCES = '+repr(binary_sources)+'\nPROFILE_FIXTURE = '+repr(args.powercalc_profile_dir is not None)+'\nPATTERN = '+repr(args.pattern)+'\nREPEAT = '+repr(args.repeat)+'\nTEST_FILTER = '+repr(args.test_filter)+'\nVENDOR_FIXTURE = '+repr(args.powercalc_component_dir is not None)+'\nOWNED_HA_SOURCES = '+repr(args.owned_ha_sources)+'\n'+program, text=True, capture_output=True, timeout=args.timeout)
-print(completed.stdout)
-print(completed.stderr)
-completed.check_returncode()
+# A separate exec can only signal processes after validating their exact identity.
+# The guardian above, rather than Docker CLI's host group, owns and reaps them.
+cleanup_program = r'''
+import json, os, pathlib, signal, sys, time
+container_root = pathlib.Path('/config')
+token, pidfile = sys.argv[1:]
+def process(pid):
+    try:
+        base = pathlib.Path('/proc') / str(pid)
+        fields = (base / 'stat').read_text().rsplit(')', 1)[1].split()
+        argv = (base / 'cmdline').read_bytes().split(b'\0')
+        return {'pid': pid, 'ppid': int(fields[1]), 'start': fields[19], 'argv': argv}
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+def census():
+    return {int(p.name): row for p in pathlib.Path('/proc').iterdir()
+            if p.name.isdecimal() and (row := process(int(p.name))) is not None}
+def marked(row):
+    return row['argv'][:-1] == [b'python', b'-X', b'faulthandler', b'-B', b'-', token.encode()]
+rows = census()
+record_path = pathlib.Path(pidfile)
+if record_path.exists():
+    record = json.loads(record_path.read_text())
+    root = rows.get(record['pid'])
+    if root is not None and (record['token'] != token or root['start'] != record['start'] or not marked(root)):
+        raise RuntimeError('probe identity mismatch; cleanup refused')
+else:
+    root = None
+if root is None:
+    matches = {pid: row for pid, row in rows.items() if marked(row)}
+    roots = [row for row in matches.values() if row['ppid'] not in matches]
+    if len(roots) > 1:
+        raise RuntimeError('ambiguous probe identity; cleanup refused')
+    root = roots[0] if roots else None
+owned = {}
+if root is not None:
+    owned[root['pid']] = root
+    def refresh():
+        rows = census()
+        changed = True
+        while changed:
+            changed = False
+            for pid, row in rows.items():
+                parent = rows.get(row['ppid'])
+                known = owned.get(row['ppid'])
+                if pid not in owned and parent and known and parent['start'] == known['start']:
+                    owned[pid] = row
+                    changed = True
+    def alive(row):
+        current = process(row['pid'])
+        return current is not None and current['start'] == row['start']
+    def send(row, sig):
+        if alive(row):
+            try:
+                os.kill(row['pid'], sig)
+            except ProcessLookupError:
+                pass
+    refresh()
+    for row in list(owned.values())[::-1]:
+        send(row, signal.SIGTERM)
+    deadline = time.monotonic() + 5
+    while any(alive(row) for row in owned.values()) and time.monotonic() < deadline:
+        refresh()
+        time.sleep(0.05)
+    refresh()
+    for pid, row in owned.items():
+        if pid != root['pid']:
+            send(row, signal.SIGKILL)
+    # Allow the guardian to reap all adopted children before its own exit.
+    deadline = time.monotonic() + 5
+    while any(alive(row) for row in owned.values()) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if any(alive(row) for row in owned.values()):
+        raise RuntimeError('probe cleanup incomplete; owned processes remain')
+# Interrupted fixtures remain local for diagnosis, never recursively deleted.
+quarantine = container_root / ('renamer-unit-quarantine-' + token)
+for path in container_root.glob('renamer-unit-' + token + '-*'):
+    quarantine.mkdir(mode=0o700, exist_ok=True)
+    path.rename(quarantine / path.name)
+if record_path.exists():
+    quarantine.mkdir(mode=0o700, exist_ok=True)
+    record_path.rename(quarantine / record_path.name)
+print(json.dumps({'probe_cleanup': True, 'owned_processes_remaining': 0}))
+'''
+payload = 'SOURCES = '+repr(sources)+'\nBINARY_SOURCES = '+repr(binary_sources)+'\nPROFILE_FIXTURE = '+repr(args.powercalc_profile_dir is not None)+'\nPATTERN = '+repr(args.pattern)+'\nREPEAT = '+repr(args.repeat)+'\nTEST_FILTER = '+repr(args.test_filter)+'\nVENDOR_FIXTURE = '+repr(args.powercalc_component_dir is not None)+'\nOWNED_HA_SOURCES = '+repr(args.owned_ha_sources)+'\nPROBE_TOKEN = '+repr(probe_token)+'\nPIDFILE = '+repr(pidfile)+'\n'+program
+try:
+    completed = subprocess.run(['docker','exec','-i',args.container,'python','-X','faulthandler','-B','-',probe_token],
+        input=payload, text=True, capture_output=True, timeout=args.timeout)
+except subprocess.TimeoutExpired as timeout:
+    # TimeoutExpired carries bytes even with text=True. Flush partial evidence
+    # before cleanup or the original timeout is raised to the build receipt.
+    for stream, partial in ((sys.stdout, timeout.stdout), (sys.stderr, timeout.stderr)):
+        if partial:
+            stream.write(partial.decode('utf-8', errors='replace') if isinstance(partial, bytes) else partial)
+        stream.flush()
+    raise
+else:
+    print(completed.stdout, flush=True)
+    print(completed.stderr, file=sys.stderr, flush=True)
+    completed.check_returncode()
+finally:
+    cleanup = subprocess.run(['docker','exec','-i',args.container,'python','-B','-',probe_token,pidfile],
+        input=cleanup_program, text=True, capture_output=True, timeout=20)
+    print(cleanup.stdout, flush=True)
+    print(cleanup.stderr, file=sys.stderr, flush=True)
+    cleanup.check_returncode()
