@@ -141,7 +141,26 @@ class SelectiveYAMLNativeRootTests(unittest.IsolatedAsyncioTestCase):
         observer = module.NativeTemplateStateYAMLRuntimeReadback(hass, chain, composition, guard=lambda: None)
         self.assertIs(await observer.position(change), tx.Position.UNKNOWN)
         self.assertIs(await observer.position_at_inputs(change, state), tx.Position.BEFORE)
-        observer.runtime_check(tx.Position.BEFORE).check()
+        witness = observer.runtime_check(tx.Position.BEFORE)
+        witness.check()
+        # Ordinary producer events may replace native RenderInfo and `this`
+        # snapshots; the same checked source bindings remain authoritative.
+        self.producer._attr_native_value = 13
+        self.producer.async_write_ha_state()
+        await hass.async_block_till_done()
+        for _ in range(8):
+            await __import__('asyncio').sleep(0)
+        witness.check()
+        sampled = witness.sample[1]
+        native_template = sampled.rows[0].templates[0][0]
+        source_body = native_template.template
+        try:
+            native_template.template = source_body + ' '
+            with self.assertRaises((ValueError, tx.Refused)):
+                witness.check()
+        finally:
+            native_template.template = source_body
+        witness.check()
         self.assertEqual(observer.program.sha256, change.source_program_sha256)
         self.assertEqual(bundle.receipt, baseline.receipt)
         self.assertFalse(bundle.receipt.ready_for_apply)
