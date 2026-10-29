@@ -265,7 +265,49 @@ class SelectiveYAMLNativeEffectTests(unittest.IsolatedAsyncioTestCase):
             for entity in platform.entities.values())
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
-        calls = []
+        calls, accepted_prefixes, native_attempts = [], [], []
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        combined = next(entity for platform in async_get_platforms(hass, 'template')
+                        for entity in platform.entities.values() if entity.unique_id == 'scope-value')
+        source_objects = {self.producer.entity_id: self.producer, self.other.entity_id: self.other}
+        second_expected = []
+        node_type = self.module('native_template_state_registry_effect').NativeTemplateStateRegistryEffect
+        accept_code, effect_code = node_type.accepted.__code__, node_type.mutate.__code__
+        def boundary_start(code_arg, offset):
+            if code_arg is not effect_code:
+                return
+            node = observed_frame(code_arg).f_locals['self']
+            if node.root.hass is not hass:
+                return
+            direction, index = node.context.record.direction, node.context.index
+            native_attempts.append((direction, index))
+            if direction == 'forward' and index == 1:
+                self.assertTrue(second_expected)
+                self.assertEqual((root / 'template.yaml').read_bytes(), original_yaml)
+                self.assertEqual(hass.states.get(combined.entity_id).state, str(second_expected[0]))
+                bodies = [template.template for template in combined._template_attrs]
+                self.assertTrue(any(mapping[first] in body and second in body for body in bodies))
+                self.assertFalse(any(mapping[second] in body for body in bodies))
+        def boundary_return(code_arg, offset, value):
+            if code_arg is not accept_code:
+                return
+            node = observed_frame(code_arg).f_locals['self']
+            if node.root.hass is not hass:
+                return
+            direction, index = node.context.record.direction, node.context.index
+            accepted_prefixes.append((direction, index))
+            if direction == 'forward' and index == 0:
+                self.assertEqual(node.phase, 'accepted')
+                self.assertEqual((root / 'template.yaml').read_bytes(), original_yaml)
+                self.assertIsNotNone(self.f.entity.async_get(second))
+                self.assertIsNone(self.f.entity.async_get(mapping[second]))
+                first_state = hass.states.get(mapping[first])
+                self.assertIsNotNone(first_state)
+                second_expected.append(int(first_state.state) + 17)
+                # A genuine ordinary B update while only A is renamed. No
+                # callback/render/cache injection and no synthetic completion.
+                source_objects[second]._attr_native_value = 17
+                source_objects[second].async_write_ha_state()
         # Observe actual service dispatch with CPython monitoring, preserving
         # native methods, registered handlers and their independent code pins.
         import sys, time
@@ -286,23 +328,47 @@ class SelectiveYAMLNativeEffectTests(unittest.IsolatedAsyncioTestCase):
                     print('STATE_ROOT_PROFILE ' + json.dumps(timing), flush=True)
         tool = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
         code = type(hass.services).async_call.__code__
-        def called(code_arg, offset):
+        def observed_frame(expected):
             frame = sys._getframe(1)
+            while frame is not None and frame.f_code is not expected:
+                frame = frame.f_back
+            self.assertIsNotNone(frame, 'native monitoring frame must exist')
+            return frame
+        def called(code_arg, offset):
+            frame = observed_frame(code_arg)
             if frame.f_code is code and frame.f_locals.get('self') is hass.services:
                 calls.append((frame.f_locals.get('domain'), frame.f_locals.get('service')))
         sys.monitoring.use_tool_id(tool, 'selective YAML actual service observation')
         def started(code_arg, offset):
-            if code_arg in profile_codes:
+            if code_arg is effect_code:
+                boundary_start(code_arg, offset)
+            elif code_arg in profile_codes:
                 profile_start(code_arg, offset)
             else:
                 called(code_arg, offset)
         sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, started)
-        sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, profile_return)
+        def returned(code_arg, offset, value):
+            if code_arg is accept_code:
+                boundary_return(code_arg, offset, value)
+            else:
+                profile_return(code_arg, offset, value)
+        sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, returned)
+        sys.monitoring.set_local_events(tool, effect_code, sys.monitoring.events.PY_START)
+        sys.monitoring.set_local_events(tool, accept_code, sys.monitoring.events.PY_RETURN)
         for observed_code in profile_codes:
             sys.monitoring.set_local_events(tool, observed_code, sys.monitoring.events.PY_START | sys.monitoring.events.PY_RETURN)
         sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
+        from homeassistant.core import callback
+        probe_calls = []
+        @callback
+        def probe_handler(call):
+            probe_calls.append(call)
+        hass.services.async_register('renamer_qa_monitor', 'observe', probe_handler)
         forward = reverse = None
         try:
+            await hass.services.async_call('renamer_qa_monitor', 'observe', {}, blocking=True)
+            self.assertEqual(len(probe_calls), 1)
+            self.assertIn(('renamer_qa_monitor', 'observe'), calls)
             async with runtime.operation_lock:
                 forward = await factory.prepare(hass, mapping, guard=lambda: None, refresh=refresh)
                 ref, receipt_json = forward.plan.native_inputs, forward.chain.baseline.receipt_json
@@ -326,6 +392,8 @@ class SelectiveYAMLNativeEffectTests(unittest.IsolatedAsyncioTestCase):
                 reverse.close()
                 reverse = None
             self.assertNotIn(('template', 'reload'), calls)
+            self.assertEqual(native_attempts, [('forward', 0), ('forward', 1), ('rollback', 1), ('rollback', 0)])
+            self.assertEqual(accepted_prefixes, native_attempts)
             for old in mapping:
                 self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
             from homeassistant.helpers.entity_platform import async_get_platforms
@@ -338,6 +406,8 @@ class SelectiveYAMLNativeEffectTests(unittest.IsolatedAsyncioTestCase):
                 forward.close()
             if reverse is not None:
                 reverse.close()
+            sys.monitoring.set_local_events(tool, effect_code, 0)
+            sys.monitoring.set_local_events(tool, accept_code, 0)
             print('STATE_ROOT_PROFILE_FINAL ' + json.dumps(timing), flush=True)
             for observed_code in profile_codes:
                 sys.monitoring.set_local_events(tool, observed_code, 0)
@@ -345,3 +415,4 @@ class SelectiveYAMLNativeEffectTests(unittest.IsolatedAsyncioTestCase):
             sys.monitoring.set_local_events(tool, code, 0)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
             sys.monitoring.free_tool_id(tool)
+            hass.services.async_remove('renamer_qa_monitor', 'observe')
