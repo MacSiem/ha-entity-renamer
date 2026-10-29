@@ -168,7 +168,7 @@ class NativeTemplateStateRegistryEffect:
         await checked_sources()
         second = sample_state_bindings(self.runtime, self.root.program, self.expected,
             self.snapshot.yaml_position, documents)
-        _need(first == second, 'native_runtime_changed')
+        _need(first.same_bindings(second), 'native_runtime_changed')
         self.phase = 'observed_effect'
 
     async def accepted(self):

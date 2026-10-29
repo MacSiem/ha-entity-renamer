@@ -600,6 +600,6 @@ async def async_observe_accepted_state_bindings(hass, chain, program, *, guard,
     assert_discovery_managers_current(hass, observed, guard=check)
     _documents(state, observed); runtime.bindings()
     second = sample_state_bindings(runtime, program, prefix, position, chain.accepted_documents())
-    _need(first == second, 'template_state_native_observation_changed')
+    _need(first.same_bindings(second), 'template_state_native_observation_changed')
     check()
     return second
