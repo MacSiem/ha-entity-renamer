@@ -173,12 +173,64 @@ class StateConsumerSnapshot:
             tuple(variables), tuple(semantics))
 
 
-def accepted_state_prefix(chain, program):
+def _state_inputs(chain, input_state=None, *, live_intent=None, live_context=None, live_calls=()):
+    """Admit acknowledged state, or EXACT current live_yaml_inputs evidence.
+
+    Default reads still refuse every pending intent. An explicitly held accepted
+    state can survive ONLY its SAME active registry intent via its original
+    evidence guard. YAML partial calls require the dedicated live hook below.
+    """
+    from .accepted_input_state import AcceptedInputState
+    if input_state is None:
+        _need(live_intent is None and live_context is None and not live_calls,
+              'template_state_live_input_binding_required')
+        return chain.reconstruct_inputs()
+    _need(type(input_state) is AcceptedInputState,
+          'template_state_input_type_required')
+    if input_state._live_check is None:
+        _need(live_intent is None and live_context is None and not live_calls,
+              'template_state_accepted_head_changed')
+        states, head, _, _, pending = chain._reconstruct()
+        if pending is None:
+            _need(input_state.same_evidence(chain.reconstruct_inputs()),
+                  'template_state_accepted_head_changed')
+        else:
+            # This is a held pre-intent state, never a fresh reconstruction.
+            # _check_inputs_head owns the exact writable/current active-intent
+            # fence; it permits registry only here, not YAML or helper setup.
+            _need(input_state._evidence_check is not None and input_state.head == head
+                  and chain.store.read(pending[0])['payload']['kind'] == 'registry_intent',
+                  'template_state_held_registry_state_required')
+            chain._check_inputs_head(input_state.head)
+            input_state._bound(chain.original_receipt)
+            input_state.assert_current(chain.original_receipt)
+    else:
+        _need(live_intent is not None and live_context is not None,
+              'template_state_live_input_binding_required')
+        actual = chain.live_yaml_inputs(live_intent, live_context, live_calls)
+        # same_evidence deliberately refuses live objects. Match all evidence
+        # only against a newly validated SAME active intent, never cached state.
+        _need(type(actual) is AcceptedInputState and actual._live_check is not None
+              and input_state.original_json == actual.original_json
+              and input_state.head == actual.head
+              and input_state.sources() == actual.sources()
+              and input_state.documents() == actual.documents(),
+              'template_state_live_input_changed')
+        actual._bound(chain.original_receipt)
+    input_state._bound(chain.original_receipt)
+    _need(input_state.documents() == chain.accepted_documents(),
+          'template_state_accepted_documents_changed')
+    return input_state
+
+
+def accepted_state_prefix(chain, program, *, input_state=None, live_intent=None,
+                          live_context=None, live_calls=()):
     """Derive mask from immutable prepared registry UUIDs + SAME receipt chain."""
     from .native_registry_receipts import RegistryReceiptChain
     from .native_registry import PreparedRegistryChange
     _need(type(chain) is RegistryReceiptChain and type(program) is StateConfigProgram)
-    state = chain.reconstruct_inputs()
+    state = _state_inputs(chain, input_state, live_intent=live_intent,
+                          live_context=live_context, live_calls=live_calls)
     documents = chain.accepted_documents()
     registry = documents['core.entity_registry']['data']['entities']
     known, active, ids = {}, set(), []
@@ -484,14 +536,16 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents):
         (tuple(row.token for row in rows), tuple(inventory)))
 
 
-async def async_observe_accepted_state_bindings(hass, chain, program, *, guard):
+async def async_observe_accepted_state_bindings(hass, chain, program, *, guard,
+        input_state=None, live_intent=None, live_context=None, live_calls=()):
     """Two samples, code/source pins and SAME accepted whole-input manager fence."""
     from .native_discovery_inputs import (async_observe_discovery_inputs,
         assert_discovery_managers_current)
     from .native_template_accepted_consumers import _documents
     from .yaml_validation import _settled_executor
-    prefix = accepted_state_prefix(chain, program)
-    state = chain.reconstruct_inputs()
+    arguments = dict(live_intent=live_intent, live_context=live_context, live_calls=live_calls)
+    state = _state_inputs(chain, input_state, **arguments)
+    prefix = accepted_state_prefix(chain, program, input_state=state, **arguments)
     receipt = chain.original_receipt
     def check():
         result = guard()
@@ -500,8 +554,9 @@ async def async_observe_accepted_state_bindings(hass, chain, program, *, guard):
                 result.close()
             _need(False, 'template_state_synchronous_guard_required')
         _need(result is None or result is True, 'template_state_guard_rejected')
-        _need(prefix == accepted_state_prefix(chain, program)
-              and state.same_evidence(chain.reconstruct_inputs()), 'template_state_accepted_head_changed')
+        _state_inputs(chain, state, **arguments)
+        _need(prefix == accepted_state_prefix(chain, program, input_state=state, **arguments),
+              'template_state_accepted_head_changed')
     check()
     runtime = _StateRuntime(hass)
     _need(runtime.native.version == receipt.version, 'template_state_native_version_changed')

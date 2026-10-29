@@ -171,6 +171,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
 
     def __init__(self, store: RegistryReceiptStore, operation_id: str, plan: Plan,
                  receipt: ValidationReceipt, prepared_digests: dict[str, str], *, yaml_original_metadata=None):
+        from .native_template_state_yaml import PreparedTemplateStateYAML, assert_state_yaml_composition
         if (type(store) is not RegistryReceiptStore or type(plan) is not Plan
                 or type(operation_id) is not str or not operation_id):
             _fail('binding_invalid')
@@ -208,7 +209,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             change = decode_change(original_payload)
             expected_type = {'helpers': PreparedHelper, 'yaml': PreparedYAML,
                              'registry': PreparedRegistryChange}[step.adapter]
-            if type(change) is not expected_type:
+            if (type(change) is not expected_type
+                    and not (step.adapter == 'yaml' and type(change) is PreparedTemplateStateYAML)):
                 _fail('preparation_mismatch')
             if (change.identity != step.identity
                     or change.before_revision != step.before_revision
@@ -221,6 +223,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                            'registry_digest': prepared_registry_digest(change)}
             elif step.adapter == 'yaml':
                 change.checked()
+                if type(change) is PreparedTemplateStateYAML:
+                    assert_state_yaml_composition(self, change)
                 if change.receipt != receipt:
                     _fail('yaml_original_receipt_mismatch')
                 binding = {'ref': step.prepared_ref, 'digest': digest,
@@ -267,6 +271,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
     async def start(cls, store: RegistryReceiptStore, operation_id: str, plan: Plan,
                     receipt: ValidationReceipt, prepared_digests: dict[str, str], *,
                     yaml_original_metadata=None) -> RegistryReceiptChain:
+        from .native_template_state_yaml import PreparedTemplateStateYAML
         yaml_indices = [i for i, step in enumerate(plan.steps) if step.adapter == 'yaml']
         if yaml_indices and yaml_indices != [len(plan.steps) - 1]:
             _fail('gap_yaml_order')
@@ -276,7 +281,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             step = yaml_steps[-1]
             change = decode_change(store.preparations.resolve(
                 step.prepared_ref, prepared_digests[step.prepared_ref]))
-            if type(change) is not PreparedYAML:
+            if type(change) not in (PreparedYAML, PreparedTemplateStateYAML):
                 _fail('preparation_mismatch')
             captured = capture_yaml_original_metadata(receipt, change)
             if yaml_original_metadata is not None and canonical(yaml_original_metadata)[0] != captured:
@@ -336,14 +341,18 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
 
     def _original_change(self, index):
         """Re-resolve immutable original; never validate mutable cached helpers."""
+        from .native_template_state_yaml import PreparedTemplateStateYAML, assert_state_yaml_composition
         if self.plan.steps[index].adapter == 'yaml':
             binding = self.root['bindings'][index]
             payload = self.preparations.resolve(binding['ref'], binding['digest'])
             change = decode_change(payload)
-            if (_digest(payload) != binding['digest'] or type(change) is not PreparedYAML
+            if (_digest(payload) != binding['digest']
+                    or type(change) not in (PreparedYAML, PreparedTemplateStateYAML)
                     or _digest(json.loads(_json(asdict(change.checked())))) != binding['yaml_digest']
                     or change != self.changes[index]):
                 _fail('preparation_mismatch')
+            if type(change) is PreparedTemplateStateYAML:
+                assert_state_yaml_composition(self, change)
             return change
         if self.plan.steps[index].adapter != 'helpers':
             binding = self.root['bindings'][index]

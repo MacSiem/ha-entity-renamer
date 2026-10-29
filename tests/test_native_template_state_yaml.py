@@ -164,7 +164,7 @@ class SelectiveYAMLNativeRootTests(unittest.IsolatedAsyncioTestCase):
         saved = copy.deepcopy(reopened_store.plans[native_ref[0]])
         try:
             reopened_store.plans[native_ref[0]]['payload']['composition']['coverage_sha256'] = 'f' * 64
-            with self.assertRaises(ValueError):
+            with self.assertRaises(self.module('transaction').Refused):
                 module.assert_state_yaml_composition(readonly, change)
         finally:
             reopened_store.plans[native_ref[0]] = saved

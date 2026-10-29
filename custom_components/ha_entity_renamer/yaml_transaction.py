@@ -112,7 +112,12 @@ class PreparedYAML:
 
 
 def decode_yaml(data):
-    """Strict bounded JSON codec; no caller-controlled class/path resolution."""
+    """Legacy codec: selective state preparations never enter this gate."""
+    return _decode_yaml(data)
+
+
+def _decode_yaml(data, *, state_mode=False):
+    """Shared bounded file codec, with an explicit disjoint selective gate."""
     _keys(data, ('receipt', 'files'))
     raw = data['receipt']
     receipt_keys = ('config_root', 'source_files', 'source_directories', 'proposed_files',
@@ -166,7 +171,9 @@ def decode_yaml(data):
         proposed.append((_path(row[0]), _sha(row[1])))
     domains = tuple(sequence(raw['changed_domains'], 4))
     if (not domains or any(type(d) is not str or d not in _SUPPORTED for d in domains)
-            or len(set(domains)) != len(domains) or sequence(raw['unsupported_domains'], 0)):
+            or len(set(domains)) != len(domains)
+            or (sequence(raw['unsupported_domains'], 1) not in ((), [], ('template',), ['template'])
+                if state_mode else sequence(raw['unsupported_domains'], 0))):
         raise ValueError('unsupported_prepared_yaml_activation')
     files, total = [], 0
     for row in sequence(data['files'], 512):
@@ -196,13 +203,15 @@ def decode_yaml(data):
                                  None if after is None else _sha(after)))
     if len({row[0] for row in runtime_expected}) != len(runtime_expected):
         raise ValueError('invalid_prepared_yaml_runtime')
-    if 'template' in domains and (domains != ('template',)
+    if state_mode and domains != ('template',):
+        raise ValueError('template_state_only_preparation_required')
+    if not state_mode and 'template' in domains and (domains != ('template',)
             or len(runtime_expected) != 1 or runtime_expected[0][0] != 'template'
             or None in runtime_expected[0][1:]
             or runtime_expected[0][1] == runtime_expected[0][2]):
         raise ValueError('template_prepared_runtime_subset_required')
     receipt = ValidationReceipt(root, tuple(sources), tuple(directories), tuple(proposed),
-                                domains, (), _text(raw['version']), tuple(runtime_expected))
+                                domains, tuple(raw['unsupported_domains']), _text(raw['version']), tuple(runtime_expected))
     return PreparedYAML(receipt, tuple(files))
 
 

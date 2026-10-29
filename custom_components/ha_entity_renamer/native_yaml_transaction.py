@@ -104,6 +104,9 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
                 raise Refused('template_scoped_completion_guard_required')
         return change
 
+    def _hooks(self, change, context, intent, guard):
+        return _YAMLHooks(self, change, context, intent, guard)
+
     def _runtime_check(self, change, position):
         if 'template' in change.receipt.changed_domains:
             return self.observer.runtime_check(position)
@@ -242,7 +245,7 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
                 runtime_check.check()
             # begin_yaml validates native source and entire original-bound graph.
             intent = await self.chain.begin_yaml(context, before, input_state=state)
-            hooks = _YAMLHooks(self, change, context, intent, guard)
+            hooks = self._hooks(change, context, intent, guard)
             await hooks.checkpoint()  # begin durable ACK yielded; re-read journal.
             # Fresh authenticated native observation immediately before effects.
             before = await self._read(hooks.state(), guard, hooks.checkpoint)

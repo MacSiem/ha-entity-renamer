@@ -129,13 +129,27 @@ def _compare(result, original, reverse):
     return _hash(expected)
 
 
-async def _checker(before, after, timeout, checkpoint, *, with_sources=False):
+async def _checker(before, after, timeout, checkpoint, *, with_sources=False,
+                   state_mapping=None):
     """Execute the existing native worker by path, without copying its source."""
     worker = str(Path(__file__).with_name('yaml_validation_worker.py'))
+    state_args = ()
+    if state_mapping is not None:
+        from .yaml_plan import _mapping
+        if not with_sources:
+            _fail('state_source_evidence_required')
+        mapping = _mapping(state_mapping)
+        request = Path(before).parent / 'template-reference-mapping.json'
+        # Same private staged input owner; this contains entity IDs, no secrets.
+        with request.open('x', encoding='utf-8') as stream:
+            json.dump(mapping, stream, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        request.chmod(0o600)
+        state_args = ('--template-state-source-v3', '--template-reference-mapping',
+                      str(request), '--template-state-config-program')
     # Shield spawning too: cancellation must not orphan a checker with secrets.
     spawning = asyncio.create_task(asyncio.create_subprocess_exec(
         sys.executable, '-I', '-B', worker, str(before), str(after),
-        *(('--source-evidence',) if with_sources else ()),
+        *(('--source-evidence',) if with_sources else ()), *state_args,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         start_new_session=True))
     process = None
@@ -182,7 +196,7 @@ async def _checker(before, after, timeout, checkpoint, *, with_sources=False):
 
 
 async def async_revalidate_accepted_candidate(hass, chain, phase_loader,
-                                             scratch_parent, guard, *, timeout=120):
+                                             scratch_parent, guard, *, timeout=120, _state_program=None):
     """Actual isolated check_config on the complete accepted native+YAML image.
 
     Returned private proof is evidence only. It has no ready/receipt/permission
@@ -243,6 +257,14 @@ async def async_revalidate_accepted_candidate(hass, chain, phase_loader,
         change = chain._original_change(chain.yaml_index).checked()
         if change.receipt != original:
             _fail('original_preparation')
+        if _state_program is not None:
+            from .native_template_state_yaml import (PreparedTemplateStateYAML,
+                                                     assert_state_yaml_composition)
+            if type(change) is not PreparedTemplateStateYAML:
+                _fail('state_preparation_required')
+            composition = assert_state_yaml_composition(chain, change)
+            if _state_program != composition.state_config_program:
+                _fail('state_program_binding')
         with tempfile.TemporaryDirectory(prefix='renamer-candidate-', dir=scratch) as stage:
             before, after = Path(stage) / 'before', Path(stage) / 'after'
             before.mkdir(mode=0o700)
@@ -252,14 +274,88 @@ async def async_revalidate_accepted_candidate(hass, chain, phase_loader,
                 lambda: _stage(state, original, change, reverse, before, after))
             await checkpoint()
             await observe()
-            result = await _checker(before, after, timeout, checkpoint,
-                with_sources='template' in original.changed_domains)
+            if _state_program is None:
+                result = await _checker(before, after, timeout, checkpoint,
+                    with_sources='template' in original.changed_domains)
+            else:
+                mapping = dict(_state_program.mapping)
+                if reverse:
+                    mapping = {new: old for old, new in mapping.items()}
+                result = await _checker(before, after, timeout, checkpoint,
+                    with_sources=True, state_mapping=mapping)
             await checkpoint()
             await observe()
-            runtime_hash = _compare(result, original, reverse)
+            runtime_hash = (_compare(result, original, reverse) if _state_program is None
+                            else _compare_state(result, original, reverse, _state_program))
             fence()
-            return _AcceptedCandidateProof(chain.operation_id, chain.plan.fingerprint,
-                state.head, record.direction, _sha(original_json), graph_hash,
-                runtime_hash, original.version)
+            arguments = (chain.operation_id, chain.plan.fingerprint, state.head,
+                record.direction, _sha(original_json), graph_hash, runtime_hash, original.version)
+            if _state_program is not None:
+                return _AcceptedStateCandidateProof(*arguments, _state_program.sha256)
+            return _AcceptedCandidateProof(*arguments)
     except (OSError, TimeoutError):
         _fail('native_checker_unavailable')
+
+
+@dataclass(frozen=True)
+class _AcceptedStateCandidateProof(_AcceptedCandidateProof):
+    """Actual config-check evidence only; never a runtime proof or receipt."""
+    source_program_sha256: str
+
+
+def _compare_state(result, original, reverse, program):
+    """Explicit full state mode; the legacy unsupported/None gate is unchanged.
+
+    Actual native worker descriptors include every semantic field and inventory
+    row. check_config success alone, legacy digests or fixture projections cannot
+    satisfy this comparison. Reverse requires the opposite source/candidate.
+    """
+    from .template_state_program import StateConfigProgram, _digest
+    if type(program) is not StateConfigProgram:
+        _fail('state_program_required')
+    before, after = json.loads(program.original_json), json.loads(program.candidate_json)
+    if reverse:
+        before, after = after, before
+    expected = [[domain, new, old] if reverse else [domain, old, new]
+                for domain, old, new in original.runtime_expected]
+    if (type(result) is not dict or result.get('status') != 'valid'
+            or result.get('version') != original.version
+            or original.changed_domains != ('template',)
+            or not set(original.unsupported_domains) <= {'template'}
+            or result.get('changed_domains') != ['template']
+            or result.get('unsupported_domains') != list(original.unsupported_domains)
+            or result.get('runtime_expected') != expected
+            or result.get('template_state_config_program') != before
+            or result.get('template_candidate_state_config_program') != after):
+        _fail('state_native_result_mismatch')
+    for name, descriptor in (('template_state_source_profile', before),
+                             ('template_candidate_state_source_profile', after)):
+        profile = result.get(name)
+        if (type(profile) is not dict or profile.get('version') != original.version
+                or type(profile.get('states')) is not list
+                or any(type(row) is not list or len(row) != 4
+                       or type(row[3]) is not dict for row in profile['states'])
+                or [row[:3] for row in profile['states']] != [[domain, key, _digest(semantic)]
+                    for domain, key, semantic in descriptor['rows']]
+                or profile.get('rows') != [[row[0], row[1], _digest(row)]
+                    for row in descriptor['inventory']]):
+            _fail('state_native_profile_mismatch')
+    return _hash((program.sha256, reverse, before, after, expected))
+
+
+async def async_revalidate_accepted_template_state_candidate(hass, chain, phase_loader,
+        scratch_parent, guard, *, timeout=120):
+    """SAME accepted graph, retained StateComposition and actual isolated check.
+
+    No ORIGINAL replacement or replay. Runtime acceptance remains the separate
+    full prefix observer and its completion suffix. Every pending intent refuses.
+    """
+    from .native_template_state_yaml import PreparedTemplateStateYAML, assert_state_yaml_composition
+    if type(chain) is not RegistryReceiptChain or chain.yaml_index != len(chain.plan.steps) - 1:
+        _fail('chain_binding')
+    change = chain._original_change(chain.yaml_index)
+    if type(change) is not PreparedTemplateStateYAML:
+        _fail('state_preparation_required')
+    composition = assert_state_yaml_composition(chain, change)
+    return await async_revalidate_accepted_candidate(hass, chain, phase_loader,
+        scratch_parent, guard, timeout=timeout, _state_program=composition.state_config_program)
