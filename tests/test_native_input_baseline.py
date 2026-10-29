@@ -359,6 +359,30 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(entry['subentries'])
         self.assertEqual(baseline.decode_baseline(baseline.encode_baseline(captured)), captured)
 
+    async def test_native_manager_samples_validate_each_decoded_tree_once(self):
+        expected = tuple(baseline._json(baseline._loads(
+            __import__('homeassistant.helpers.json', fromlist=['_orjson_bytes_default_encoder'])
+            ._orjson_bytes_default_encoder(manager._data_to_save())))
+            for manager in self.managers)
+        original = baseline._bounded_json
+        roots = []
+        def bounded(value, depth=0, budget=None):
+            if depth == 0:
+                roots.append(value)
+            return original(value, depth, budget)
+        with patch.object(baseline, '_bounded_json', bounded):
+            observed = baseline._Managers(self.hass, self.receipt)
+            self.assertEqual(observed.initial, expected)
+            self.assertEqual(observed.sample(), expected)
+        self.assertEqual(len(roots), 6, 'one strict validation per fresh tree, not two')
+        # A later native sample remains fresh; changing an unrelated row is
+        # rejected even though the earlier decoded tree was already validated.
+        self.entity.async_update_entity(self.other.entity_id, name='Foreign change')
+        await self.entity._store.async_save(self.entity._data_to_save())
+        await self.hass.async_block_till_done()
+        with self.assertRaises(baseline.NativeInputBaselineError):
+            observed.check()
+
     async def test_no_native_load_save_or_flush_during_capture(self):
         async def forbidden(*args, **kwargs):
             raise AssertionError('native effect during read-only capture')
