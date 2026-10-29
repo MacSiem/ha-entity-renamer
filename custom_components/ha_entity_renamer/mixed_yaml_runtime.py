@@ -6,6 +6,8 @@ This module supplies no public admission or whole-family readiness.
 """
 from __future__ import annotations
 
+import threading
+
 from .dependent_yaml_runtime import DependentYAMLRuntime
 from .native_template_forward import _UnchangedConsumers
 from .native_template_yaml import NativeTemplateYAMLRuntimeReadback
@@ -33,6 +35,8 @@ class MixedYAMLConsumers(_UnchangedConsumers):
 
     def check(self):
         super().check()
+        if threading.get_ident() != self.thread:
+            return
         phases = getattr(self, 'phases', None)
         if phases is not None:
             phases.check()
