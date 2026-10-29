@@ -4,9 +4,57 @@ The fixture supplies native data, never a Plan or a positive verifier. Owner
 runs this acceptance target through FIFO on the supported actual Core versions.
 """
 import asyncio
+from contextlib import contextmanager
+import json
+from pathlib import Path
+import sys
 import unittest
 
 import test_native_template_yaml_server as server
+
+
+@contextmanager
+def native_diagnostics(module):
+    """Observe sanitized product failures/positions without replacing a seam."""
+    failures, positions = [], []
+    tool = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
+    sys.monitoring.use_tool_id(tool, 'mixed native YAML acceptance diagnosis')
+    def raised(code, offset, error):
+        if ('/custom_components/ha_entity_renamer/' not in code.co_filename
+                or isinstance(error, (StopIteration, StopAsyncIteration, GeneratorExit))
+                or str(error) == 'template_composition_rejected'):
+            return
+        row = (Path(code.co_filename).name, code.co_name, type(error).__name__, str(error)[:160])
+        if row not in failures:
+            failures.append(row)
+            del failures[:-30]
+    def returned(code, offset, value):
+        row = {'owner': code.co_qualname}
+        if type(value).__name__ == 'RegistryEvidence':
+            row.update(position=value.position, reason=value.reason)
+        else:
+            row['position'] = getattr(value, 'value', type(value).__name__)
+        positions.append(row)
+        del positions[:-20]
+    codes = [module('native_registry').NativeRegistryBridge.inspect.__code__,
+             module('native_registry_transaction').ReceiptedRegistryTransactionAdapter.inspect.__code__,
+             module('native_yaml_transaction').ReceiptedYAMLTransactionAdapter.inspect.__code__]
+    try:
+        sys.monitoring.register_callback(tool, sys.monitoring.events.RAISE, raised)
+        sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, returned)
+        sys.monitoring.set_events(tool, sys.monitoring.events.RAISE)
+        for code in codes:
+            sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_RETURN)
+        yield
+    finally:
+        sys.monitoring.set_events(tool, 0)
+        for code in codes:
+            sys.monitoring.set_local_events(tool, code, 0)
+        sys.monitoring.register_callback(tool, sys.monitoring.events.RAISE, None)
+        sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, None)
+        sys.monitoring.free_tool_id(tool)
+        print('MIXED_NATIVE_FAILURES', json.dumps(failures))
+        print('MIXED_NATIVE_POSITIONS', json.dumps(positions))
 
 
 class CompositeGuardThreadTests(unittest.IsolatedAsyncioTestCase):
@@ -128,9 +176,10 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
 
         # The ONLY caller input is the ordinary source mapping. In particular,
         # do not supply a fixture Plan, receipt, callback or alternate baseline.
-        result = await asyncio.wait_for(hass.async_create_task(
-            runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh),
-            'actual mixed YAML forward', eager_start=False), 180)
+        with native_diagnostics(self.module):
+            result = await asyncio.wait_for(hass.async_create_task(
+                runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh),
+                'actual mixed YAML forward', eager_start=False), 180)
         self.assertEqual(result['state'], 'applied')
         record = await runtime.journal.load(result['operation_id'])
         self.assertEqual(record.phases, ('verified',) * len(record.plan.steps))
