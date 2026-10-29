@@ -316,6 +316,17 @@ class SelectiveYAMLNativeEffectTests(unittest.IsolatedAsyncioTestCase):
             self.module('template_state_program').StateConfigProgram.assert_sources.__code__,
             self.module('native_template_state_yaml').assert_state_yaml_composition.__code__,
         }
+        failures = []
+        failure_codes = {
+            self.module('native_template_state_binding').async_observe_accepted_state_bindings.__code__,
+            self.module('native_template_state_yaml')._TemplateStateRuntimeCheck.check.__code__,
+            self.module('native_template_state_yaml').NativeTemplateStateYAMLRuntimeReadback._check.__code__,
+            self.module('native_template_state_yaml').NativeTemplateStateYAMLRuntimeReadback._sample.__code__,
+        }
+        def unwound(code_arg, offset, error):
+            if len(failures) < 12:
+                failures.append((code_arg.co_qualname, type(error).__name__, str(error)[:220]))
+                print('STATE_ROOT_REFUSAL ' + json.dumps(failures[-1]), flush=True)
         timing, entered = {}, {}
         def profile_start(code_arg, offset):
             entered.setdefault(code_arg, []).append(time.perf_counter())
@@ -353,6 +364,9 @@ class SelectiveYAMLNativeEffectTests(unittest.IsolatedAsyncioTestCase):
             else:
                 profile_return(code_arg, offset, value)
         sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, returned)
+        sys.monitoring.register_callback(tool, sys.monitoring.events.PY_UNWIND, unwound)
+        for checked_code in failure_codes:
+            sys.monitoring.set_local_events(tool, checked_code, sys.monitoring.events.PY_UNWIND)
         sys.monitoring.set_local_events(tool, effect_code, sys.monitoring.events.PY_START)
         sys.monitoring.set_local_events(tool, accept_code, sys.monitoring.events.PY_RETURN)
         for observed_code in profile_codes:
@@ -406,6 +420,9 @@ class SelectiveYAMLNativeEffectTests(unittest.IsolatedAsyncioTestCase):
                 forward.close()
             if reverse is not None:
                 reverse.close()
+            for checked_code in failure_codes:
+                sys.monitoring.set_local_events(tool, checked_code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_UNWIND, None)
             sys.monitoring.set_local_events(tool, effect_code, 0)
             sys.monitoring.set_local_events(tool, accept_code, 0)
             print('STATE_ROOT_PROFILE_FINAL ' + json.dumps(timing), flush=True)
