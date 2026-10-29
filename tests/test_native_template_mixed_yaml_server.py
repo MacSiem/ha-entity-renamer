@@ -370,7 +370,7 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         lifecycle = self.module('native_automation_lifecycle')
         protected = {name: (root / name).read_bytes() for name in original}
         before_registry = {key: asdict(row) for key, row in self.f.entity.entities.items()}
-        journal_bytes = (root / '.storage/ha_entity_renamer.migration_journal').read_bytes()
+        journal_bytes = (root / '.storage/ha_entity_renamer.migrations').read_bytes()
         for missing in ('completed', 'stage_receipt'):
             with self.subTest(missing_outer_lifecycle=missing):
                 damaged = json.loads(receipt_bytes)
@@ -385,7 +385,7 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual({key: asdict(row) for key, row in self.f.entity.entities.items()}, before_registry)
                     for name, raw in protected.items():
                         self.assertEqual((root / name).read_bytes(), raw)
-                    self.assertEqual((root / '.storage/ha_entity_renamer.migration_journal').read_bytes(), journal_bytes)
+                    self.assertEqual((root / '.storage/ha_entity_renamer.migrations').read_bytes(), journal_bytes)
                     self.assertEqual(events, {'automation': [], 'script': []})
                 finally:
                     receipts_path.write_bytes(receipt_bytes)
