@@ -259,3 +259,66 @@ class NativeTemplateStateSourceProfileTests(unittest.IsolatedAsyncioTestCase):
         normal = worker._normal(worker.full_template_state_semantics(block, 'sensor', entity))
         self.assertEqual(row[2], worker._fingerprint(worker.full_template_state_semantics(block, 'sensor', entity)))
         self.assertIsInstance(normal, list)
+
+
+    async def test_installed_preflight_uses_isolated_profile_and_keeps_original_inputs(self):
+        import asyncio
+        import stat
+        import sys
+        from pathlib import Path
+        await self.checked("""- unique_id: host
+  sensor:
+  - unique_id: counter
+    name: Host counter
+    state: "{% set value = states('sensor.original') | int(0) %}{{ value * 2 }}"
+    attributes:
+      tick: "{{ now().minute }}"
+      memory: "{{ this.attributes.get('count', 0) + 1 }}"
+""")
+        planner = self.module('yaml_plan')
+        validation = self.module('yaml_validation')
+        mapping = {'sensor.original': 'sensor.changed'}
+        plan = planner.plan_yaml(self.f.root, mapping)
+        self.assertTrue(plan.ready, plan.issues)
+        before = {p.path: (self.f.root / p.path).read_bytes() for p in plan.files}
+        native_before = await self._flush_documents(initialize=True)
+        calls, requests = [], []
+        code = asyncio.create_subprocess_exec.__code__
+        tool = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
+        def started(actual, offset):
+            frame = sys._getframe(1)
+            args = frame.f_locals['args']
+            if '--template-state-source-v3' in args:
+                self.assertIn('-I', args)
+                self.assertIn('-B', args)
+                self.assertIn('--source-evidence', args)
+                request = Path(args[args.index('--template-reference-mapping') + 1])
+                self.assertEqual(stat.S_IMODE(request.stat().st_mode), 0o600)
+                requests.append(request)
+                calls.append(json.loads(request.read_text()))
+                # Caller data changes while the detached request/worker is in
+                # progress. It must never change this SAME source validation.
+                mapping['sensor.original'] = 'sensor.tampered_later'
+        sys.monitoring.use_tool_id(tool, 'actual isolated state source request')
+        sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, started)
+        sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
+        try:
+            result = await validation.async_validate_proposed_with_template_state_sources(
+                self.f.hass, plan, mapping, self.f.root.parent)
+        finally:
+            sys.monitoring.set_local_events(tool, code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
+            sys.monitoring.free_tool_id(tool)
+        self.assertIs(type(result), validation.TemplateStateSourceValidation)
+        self.assertEqual(calls, [{'sensor.original': 'sensor.changed'}])
+        self.assertTrue(all(not request.exists() for request in requests))
+        self.assertFalse(result.migration_ready)
+        self.assertFalse(result.receipt.ready_for_apply, 'legacy reload admission must remain unsupported')
+        self.assertTrue(result.original_sources.source_matched)
+        self.assertTrue(result.candidate_sources.sources.source_matched)
+        result.candidate_sources.assert_original(result.receipt, result.original_sources)
+        result.evidence.assert_receipt(result.receipt)
+        validation.assert_validation_current(result.receipt)
+        self.assertEqual({p.path: (self.f.root / p.path).read_bytes() for p in plan.files}, before)
+        for manager in self.f.managers:
+            self.assertEqual(Path(manager._store.path).read_bytes(), native_before[manager._store.key])
