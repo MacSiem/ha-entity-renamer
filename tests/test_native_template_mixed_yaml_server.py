@@ -280,6 +280,35 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_one_mapping_actual_dependents_forward_and_fresh_reverse(self):
         await self._mixed_flow()
 
+    async def test_retained_review_foreign_source_refuses_without_new_original(self):
+        from attr import asdict
+        runtime, mapping, _, _, _ = await self.data()
+        hass, root = self.f.hass, self.f.root
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        review = await runtime.native_yaml_prepare(hass, mapping, actor_id='native-admin',
+            guard=lambda: None, refresh=refresh)
+        plan = runtime.reviews[review['operation_id']].plan
+        original = runtime.preparations.resolve_composition(plan.native_inputs)[0].receipt_json
+        before = {key: asdict(row) for key, row in self.f.entity.entities.items()}
+        path = root / 'mixed_automations.yaml'
+        path.write_bytes(path.read_bytes() + b'\n# foreign review edit\n')
+        edited = {name: (root / name).read_bytes() for name in (
+            'configuration.yaml', 'template.yaml', 'mixed_automations.yaml', 'mixed_scripts.yaml')}
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                actor_id='native-admin', guard=lambda: None, refresh=refresh)
+        self.assertNotIn(review['operation_id'], runtime.reviews)
+        self.assertIsNone(await runtime.journal.load(review['operation_id']))
+        self.assertEqual({key: asdict(row) for key, row in self.f.entity.entities.items()}, before)
+        for name, raw in edited.items():
+            self.assertEqual((root / name).read_bytes(), raw)
+        self.assertEqual(runtime.preparations.resolve_composition(plan.native_inputs)[0].receipt_json, original)
+        with self.assertRaises(self.module('transaction').Refused):
+            await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                actor_id='native-admin', guard=lambda: None, refresh=refresh)
+        self.assertFalse(runtime.operation_lock.locked())
+
     async def test_retained_review_actual_dependents_forward_and_fresh_reverse(self):
         await self._mixed_flow(retained=True)
 

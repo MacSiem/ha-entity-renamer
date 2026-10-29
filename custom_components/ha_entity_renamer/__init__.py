@@ -94,9 +94,10 @@ class Runtime:
             try:
                 current()
                 plan, operation = session.plan, session.operation_id
-                self.reviews[operation] = _PreparedReview(actor_id, plan, len(mapping))
+                count = len(session.registry_changes)
+                self.reviews[operation] = _PreparedReview(actor_id, plan, count)
                 return {'operation_id': operation, 'fingerprint': plan.fingerprint,
-                    'entity_count': len(mapping), 'migration_ready': False, 'family_complete': False}
+                    'entity_count': count, 'migration_ready': False, 'family_complete': False}
             finally:
                 session.close()
 
