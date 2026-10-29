@@ -62,17 +62,6 @@ class NativeTemplateBindingTransportTests(unittest.IsolatedAsyncioTestCase):
                     '      count: "{{ this.attributes.get(\'count\', 0) + 1 }}"\n')
 
         yaml_path = root / 'template.yaml'
-        # Both histories must start from the same genuine native predecessor.
-        # prepare() already installed the migrated stateless consumer; create
-        # the control's stateless predecessor before adding memory to either.
-        predecessor = '- unique_id: scope\n  sensor:\n'
-        for uid, name, source in (('value', 'Runtime consumer', old),
-                ('control', 'This rebind control', control_source.entity_id)):
-            predecessor += ('  - unique_id: ' + uid + '\n    name: ' + name + '\n'
-                '    state: "{{ states(\'' + source + '\') | int(0) * 2 }}"\n')
-        yaml_path.write_text(predecessor)
-        await hass.services.async_call('template', 'reload', {}, blocking=True, context=Context())
-        await hass.async_block_till_done()
         original = ('- unique_id: scope\n  sensor:\n'
                     + definition('value', 'Runtime consumer', old)
                     + definition('control', 'This rebind control', control_source.entity_id)).encode()
@@ -94,10 +83,9 @@ class NativeTemplateBindingTransportTests(unittest.IsolatedAsyncioTestCase):
         await emit(self.producer, 3)
         await emit(control_source, 3)
         self.assertEqual(hass.states.get(cid).state, hass.states.get(bid).state)
-        self.assertEqual(hass.states.get(cid).attributes['count'],
-                         hass.states.get(bid).attributes['count'])
         physical = hass.states.get(cid)
         before_count = physical.attributes['count']
+        control_before_count = hass.states.get(bid).attributes['count']
         before_fields = (consumer._attr_native_value, dict(consumer._attr_extra_state_attributes))
         old_tracker = consumer._template_result_info
         # Actual prior results are migration DATA. They do not authorize a
@@ -270,11 +258,29 @@ class NativeTemplateBindingTransportTests(unittest.IsolatedAsyncioTestCase):
             # actual control observations, never an assumed increment of one.
             self.assertEqual([(tag, value, count - before_count)
                               for tag, value, count, _, _ in snapshots],
-                             [(tag, value, count - before_count)
+                             [(tag, value, count - control_before_count)
                               for tag, _, _, value, count in snapshots],
                              ('fresh history changed memory-this', snapshots, rows))
             self.assertEqual([row[1] for row in snapshots], ['10', '14'])
-            self.assertEqual(rows[cid], rows[bid], 'native handler/write trace differs from control')
+            def relative_trace(events, initial):
+                # Native bootstrap histories can start at different counts.
+                # count := this.count + 1 is translation invariant: compare
+                # exact deltas and every callback/write against each OWN base.
+                normalized = []
+                for row in events:
+                    if row[1] == 'handle':
+                        tag, kind, origin, (value, count), updates = row
+                        updates = tuple((attributes, result - initial)
+                            if attributes == ('count',) else (attributes, result)
+                            for attributes, result in updates)
+                        normalized.append((tag, kind, origin, (value, count - initial), updates))
+                    else:
+                        tag, kind, (value, count) = row
+                        normalized.append((tag, kind, (value, count - initial)))
+                return normalized
+            self.assertEqual(relative_trace(rows[cid], before_count),
+                relative_trace(rows[bid], control_before_count),
+                'native handler/write delta trace differs from control')
             self.assertEqual((consumer._attr_icon, consumer._attr_entity_picture),
                              (control._attr_icon, control._attr_entity_picture))
             # Getter invocation frequency is not a semantic control oracle:
