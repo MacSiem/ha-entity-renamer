@@ -24,7 +24,7 @@ class NativeTemplateStateBindingTests(unittest.IsolatedAsyncioTestCase):
 
     async def boot(self, *, variables=False, uidless=False, unrelated_trigger=False):
         from homeassistant.core import Context
-        await self.prepare('yaml', variant='sensor', validate=False)
+        await self.prepare('yaml', variant='sensor', validate=False, uidless=uidless)
         old = self.source_id
         body = '- unique_id: scope\n'
         if variables:
@@ -127,13 +127,15 @@ class NativeTemplateStateBindingTests(unittest.IsolatedAsyncioTestCase):
         snapshot = await self.sample_original(validation)
         entity = snapshot.rows[0].entity
         # Controlled test fault; restoration is local and exact.
-        original = entity._template.template
+        template = next(t for t, paths in snapshot.rows[0].templates
+                        if any(path == ('state',) for path in paths))
+        original = template.template
         try:
-            entity._template.template = '{{ 123456 }}'
+            template.template = '{{ 123456 }}'
             with self.assertRaises(ValueError):
                 await self.sample_original(validation)
         finally:
-            entity._template.template = original
+            template.template = original
 
     async def test_descriptor_tamper_cannot_reseal_against_v3_full_config_hash(self):
         validation, mapping = await self.boot()

@@ -221,7 +221,9 @@ def _project(semantic, mapping, active):
     # Native normalized entity variables include inherited block variables.
     # A retained context copy must be congruent; it is projected independently.
     cfg = result[3]
-    variables = _get(cfg, 'variables')
+    entity_variables = _get(cfg, 'variables')
+    context_variables = _get(result[2], 'variables')
+    variables = entity_variables if entity_variables is not None else context_variables
     if variables is not None:
         raw = (variables.get('$variables', variables) if type(variables) is dict else None)
         _need(raw is not None, 'template_state_variables_descriptor_required')
@@ -273,8 +275,10 @@ def _project(semantic, mapping, active):
         static_values[name] = materialize(layouts[name])
     # Rewrite only proven producer variable locations. Alias Template bodies
     # remain syntax and may be identical at both prefixes.
-    original_variables = _get(semantic[3], 'variables')
-    next_variables = _get(result[3], 'variables')
+    original_variables = (_get(semantic[3], 'variables') if entity_variables is not None
+                          else _get(semantic[2], 'variables'))
+    next_variables = (_get(result[3], 'variables') if entity_variables is not None
+                      else _get(result[2], 'variables'))
     if original_variables is not None:
         before_rows = _pairs(original_variables.get('$variables', original_variables))
         after_rows = _pairs(next_variables.get('$variables', next_variables))
@@ -285,8 +289,8 @@ def _project(semantic, mapping, active):
     # Block defaults are full source context, even when the native constructor
     # retains only the effective entity copy. Keep them congruent for hashing.
     block_vars = _get(result[2], 'variables')
-    if block_vars is not None:
-        _need(variables is not None and _get(semantic[2], 'variables') == variables,
+    if block_vars is not None and entity_variables is not None:
+        _need(_get(semantic[2], 'variables') == variables,
               'template_state_variable_context_projection_unverified')
         for row in _pairs(result[2]):
             if row[0] == 'variables':

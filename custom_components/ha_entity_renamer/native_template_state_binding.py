@@ -5,6 +5,7 @@ Physical file position and runtime registry prefix are independent coordinates.
 """
 from __future__ import annotations
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 from collections import defaultdict
 from functools import partial
@@ -113,7 +114,7 @@ class StateConsumerSnapshot:
         result, variables, configured, entities, semantics = [], [], [], [], []
         for row in self.rows:
             semantic, static = desired[row.domain, row.source_key]
-            target_templates = dict(_templates(semantic[3]))
+            target_templates = dict(_templates(_effective_config(semantic)))
             changed = semantic != row.semantic
             if not changed:
                 continue
@@ -121,14 +122,14 @@ class StateConsumerSnapshot:
             semantics.append((row.domain, row.source_key, semantic))
             location = next(value for value in program.source_locations
                             if value[:2] == (row.domain, row.source_key))
-            before_config = _get(row.semantic[3], 'variables')
-            after_config = _get(semantic[3], 'variables')
+            before_config = _get(_effective_config(row.semantic), 'variables')
+            after_config = _get(_effective_config(semantic), 'variables')
             if before_config != after_config:
                 from homeassistant.helpers.script_variables import ScriptVariables
                 container = row.entity._run_variables
                 if type(container) is ScriptVariables:
                     container = container.as_dict()
-                _need(type(container) is dict, 'template_state_configured_variable_container_changed')
+                _need(isinstance(container, dict), 'template_state_configured_variable_container_changed')
                 before_variables = dict(_pairs(before_config.get('$variables', before_config)))
                 after_variables = dict(_pairs(after_config.get('$variables', after_config)))
                 _need(set(before_variables) == set(after_variables),
@@ -236,6 +237,17 @@ _MINIMUM_FIELDS = {'state': '_template', 'name': '_friendly_name_template',
     'unit_of_measurement': '_attr_native_unit_of_measurement',
     'device_class': '_attr_device_class', 'state_class': '_attr_state_class',
     'delay_on': '_delay_on_raw', 'delay_off': '_delay_off_raw'}
+
+
+def _effective_config(semantic):
+    # Minimum's pinned loader passes block variables to the state constructor;
+    # current schema moves them into each normalized entity. Authenticate the
+    # same effective constructor fields without altering either sealed source.
+    cfg = deepcopy(semantic[3])
+    block_variables = _get(semantic[2], 'variables')
+    if _get(cfg, 'variables') is None and block_variables is not None:
+        cfg['$map'].append(['variables', deepcopy(block_variables)])
+    return cfg
 
 
 def _configuration(runtime, entity, expected):
@@ -415,7 +427,7 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents):
                         or (entity.unique_id is not None and key != entity.unique_id)):
                     continue
                 try:
-                    cfg = _configuration(runtime, entity, semantic[3])
+                    cfg = _configuration(runtime, entity, _effective_config(semantic))
                 except ValueError:
                     continue
                 candidates.append((key, semantic, static, cfg))
@@ -434,7 +446,7 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents):
                       and entity.registry_entry is entry and entry.unique_id == key
                       and entry.disabled_by is None and entry.config_entry_id is None,
                       'template_state_registry_identity_changed')
-            expected_templates = dict(_templates(semantic[3]))
+            expected_templates = dict(_templates(_effective_config(semantic)))
             template_objects = defaultdict(lambda: [None, []])
             for path, template in _objects(cfg, runtime):
                 _need(path in expected_templates and template.template == expected_templates[path],
