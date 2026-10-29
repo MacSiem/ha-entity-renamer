@@ -321,3 +321,29 @@ test('a new resolved account gets permitted registries after the cancelled old w
  assert.equal(nextReads.length,2);assert.equal(nextReads.filter(x=>x.type.endsWith('/update')).length,0);assert.equal(f.writes.length,1);
  assert.equal(f.card._renameLog.length,0);assert.equal(f.card._confirmDialogOpen,false);assert.equal(f.card._applyOperation,null);
 });
+
+test('ordinary rename has no import and shows deferred dependency choices only at confirmation', t => {
+  const {card,writes}=fixture(t); card.render();
+  assert.equal(card.shadowRoot.querySelector('input[type="file"]'),null);
+  assert.equal(card.shadowRoot.getElementById('renamerMigrationPanel'),null);
+  assert.equal(card.shadowRoot.querySelector('[data-coming-soon]'),null);
+  openEntityEditor(card);
+  card.shadowRoot.getElementById('entityEditObjectId').value='chosen_id';
+  card.shadowRoot.getElementById('entityEditName').value='Chosen name';
+  card.shadowRoot.getElementById('queueEntityEdit').click();
+  card._deviceRenameQueue={dev:'Chosen device'};
+  card._showRenameConfirmation();
+  const dialog=card.shadowRoot.querySelector('.confirm-dialog');
+  assert.match(dialog.textContent,/sensor.chosen_id/);assert.match(dialog.textContent,/Chosen name/);assert.match(dialog.textContent,/Chosen device/);
+  const options=dialog.querySelectorAll('[data-coming-soon]');assert.equal(options.length,5);
+  for(const option of options){assert.equal(option.disabled,true);assert.equal(option.checked,false);assert.match(option.parentElement.textContent,/Coming soon/);}
+  assert.deepEqual([...options].map(x=>x.dataset.comingSoon),['template','powercalc','automation','script','config_entries']);
+  assert.equal(writes.length,0);card._cancelRenameConfirmation();assert.equal(card._renameQueue.length,1);assert.equal(writes.length,0);
+});
+test('deferred options follow Polish confirmation and are absent for household account', t => {
+  const {card,hass,writes}=fixture(t);card.hass={...hass,language:'pl'};
+  card._addToQueue('sensor.a','sensor.chosen');card._showRenameConfirmation();
+  const scope=card.shadowRoot.querySelector('.confirm-dialog fieldset');assert.ok(scope);assert.match(scope.textContent,/Szablony/);assert.match(scope.textContent,/Automatyzacje/);
+  card.hass={...hass,user:{id:'household',is_admin:false}};
+  assert.equal(card.shadowRoot.querySelector('.confirm-dialog'),null);assert.equal(card.shadowRoot.querySelector('input[type="file"]'),null);assert.equal(writes.length,0);
+});
