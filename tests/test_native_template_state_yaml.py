@@ -223,7 +223,22 @@ class SelectiveYAMLNativeEffectTests(unittest.IsolatedAsyncioTestCase):
         calls = []
         # Observe actual service dispatch with CPython monitoring, preserving
         # native methods, registered handlers and their independent code pins.
-        import sys
+        import sys, time
+        profile_codes = {
+            self.module('native_template_state_composition').TemplateStateComposition.assert_baseline.__code__,
+            self.module('template_state_program').StateConfigProgram.assert_sources.__code__,
+            self.module('native_template_state_yaml').assert_state_yaml_composition.__code__,
+        }
+        timing, entered = {}, {}
+        def profile_start(code_arg, offset):
+            entered.setdefault(code_arg, []).append(time.perf_counter())
+        def profile_return(code_arg, offset, value):
+            starts = entered.get(code_arg)
+            if starts:
+                row = timing.setdefault(code_arg.co_qualname, [0, 0.0])
+                row[0] += 1; row[1] += time.perf_counter() - starts.pop()
+                if code_arg.co_qualname.endswith('assert_baseline') and row[0] % 100 == 0:
+                    print('STATE_ROOT_PROFILE ' + json.dumps(timing), flush=True)
         tool = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
         code = type(hass.services).async_call.__code__
         def called(code_arg, offset):
@@ -231,7 +246,15 @@ class SelectiveYAMLNativeEffectTests(unittest.IsolatedAsyncioTestCase):
             if frame.f_code is code and frame.f_locals.get('self') is hass.services:
                 calls.append((frame.f_locals.get('domain'), frame.f_locals.get('service')))
         sys.monitoring.use_tool_id(tool, 'selective YAML actual service observation')
-        sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, called)
+        def started(code_arg, offset):
+            if code_arg in profile_codes:
+                profile_start(code_arg, offset)
+            else:
+                called(code_arg, offset)
+        sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, started)
+        sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, profile_return)
+        for observed_code in profile_codes:
+            sys.monitoring.set_local_events(tool, observed_code, sys.monitoring.events.PY_START | sys.monitoring.events.PY_RETURN)
         sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
         forward = reverse = None
         try:
@@ -270,6 +293,10 @@ class SelectiveYAMLNativeEffectTests(unittest.IsolatedAsyncioTestCase):
                 forward.close()
             if reverse is not None:
                 reverse.close()
+            print('STATE_ROOT_PROFILE_FINAL ' + json.dumps(timing), flush=True)
+            for observed_code in profile_codes:
+                sys.monitoring.set_local_events(tool, observed_code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, None)
             sys.monitoring.set_local_events(tool, code, 0)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
             sys.monitoring.free_tool_id(tool)
