@@ -400,9 +400,13 @@ class _Managers:
         self.stores = tuple(manager._store for manager in self.managers)
         if any(type(store) is not cls for store, cls in zip(self.stores, store_classes, strict=True)):
             _fail('native_input_store_unsupported')
-        self.initial = self.sample()
+        self._initial_native_images = self._native_images()
+        self.initial = self._canonical_documents(self._initial_native_images)
 
     def sample(self):
+        return self._canonical_documents(self._native_images())
+
+    def _native_images(self):
         from homeassistant.const import __version__
         if (__version__ != self.version or self.hass.state is not self.running
                 or Path(self.hass.config.config_dir) != Path(self.receipt.config_root)
@@ -434,7 +438,16 @@ class _Managers:
                 if key == _KEYS[2] and not manager._initialized.is_set():
                     _fail('native_input_manager_not_loaded')
             # Native fragments, datetime, sets and subentries use HA's actual encoder.
-            document = _loads(self.encoder(manager._data_to_save()))
+            raw = self.encoder(manager._data_to_save())
+            if type(raw) is not bytes:
+                _fail('native_input_limit')  # Same strict input type as _loads.
+            documents.append(raw)
+        return tuple(documents)
+
+    def _canonical_documents(self, images):
+        documents = []
+        for key, raw in zip(_KEYS, images, strict=True):
+            document = _loads(raw)
             _schema(document, key, self.version)
             documents.append(_encode_validated_json(document))
         if sum(map(len, documents)) > MAX_TOTAL_BYTES:
@@ -442,7 +455,16 @@ class _Managers:
         return tuple(documents)
 
     def check(self):
-        if self.sample() != self.initial:
+        # This is fresh native serialization after ALL lifecycle/store checks,
+        # compared with the immutable bytes validated at construction. Exact
+        # bytes cannot introduce a new duplicate key, schema or JSON value.
+        # Different bytes retain the old strict canonical comparison, including
+        # its tolerance for equivalent JSON ordering/whitespace. Never adopt a
+        # later image or cache a live observation as the new expectation.
+        images = self._native_images()
+        if images == self._initial_native_images:
+            return
+        if self._canonical_documents(images) != self.initial:
             _fail('native_input_manager_changed')
 
 
