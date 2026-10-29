@@ -278,6 +278,12 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runtime.operation_lock.locked())
 
     async def test_one_mapping_actual_dependents_forward_and_fresh_reverse(self):
+        await self._mixed_flow()
+
+    async def test_retained_review_actual_dependents_forward_and_fresh_reverse(self):
+        await self._mixed_flow(retained=True)
+
+    async def _mixed_flow(self, *, retained=False):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_platform import async_get_platforms
         runtime, mapping, uuids, dependents, original = await self.data()
@@ -326,10 +332,35 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         events['script'].clear()
         # The ONLY caller input is the ordinary source mapping. In particular,
         # do not supply a fixture Plan, receipt, callback or alternate baseline.
+        async def forward():
+            if not retained:
+                return await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+            review = await runtime.native_yaml_prepare(hass, mapping, actor_id='native-admin',
+                guard=lambda: None, refresh=refresh)
+            self.assertIsNone(await runtime.journal.load(review['operation_id']))
+            self.assertEqual(review['entity_count'], len(mapping))
+            for actor, fingerprint in (('different-admin', review['fingerprint']),
+                                        ('native-admin', '0' * 64)):
+                with self.assertRaises(self.module('transaction').Refused):
+                    await runtime.native_yaml_apply(hass, review['operation_id'], fingerprint,
+                        actor_id=actor, guard=lambda: None, refresh=refresh)
+            # A genuine ordinary producer event between requests must remain
+            # visible; it is not a replacement ORIGINAL or an admission token.
+            await stimulus(9)
+            events['automation'].clear()
+            events['script'].clear()
+            applied = await hass.async_create_task(runtime.native_yaml_apply(hass,
+                review['operation_id'], review['fingerprint'], actor_id='native-admin',
+                guard=lambda: None, refresh=refresh), 'fresh request applies retained plan', eager_start=False)
+            self.assertEqual((applied['operation_id'], applied['fingerprint']),
+                             (review['operation_id'], review['fingerprint']))
+            with self.assertRaises(self.module('transaction').Refused):
+                await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                    actor_id='native-admin', guard=lambda: None, refresh=refresh)
+            return applied
         with native_diagnostics(self.module):
             result = await asyncio.wait_for(hass.async_create_task(
-                runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh),
-                'actual mixed YAML forward', eager_start=False), 180)
+                forward(), 'actual mixed YAML forward', eager_start=False), 180)
         self.assertEqual(result['state'], 'applied')
         self.assertEqual(events['automation'], [], 'ID rename must not fire actions without a real source-value change')
         self.assertEqual(events['script'], [], 'migration must not invoke the user script')
