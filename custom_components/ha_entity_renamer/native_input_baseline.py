@@ -96,8 +96,17 @@ def _bounded_json(value, depth=0, budget=None):
 
 
 def _json(value):
+    _bounded_json(value)
+    return _encode_validated_json(value)
+
+
+def _encode_validated_json(value):
+    """Encode a local tree already checked by _loads, without revalidating it.
+
+    Only synchronous consumers of that detached decode may use this helper;
+    arbitrary caller-owned objects still enter through _json.
+    """
     try:
-        _bounded_json(value)
         return json.dumps(value, sort_keys=True, separators=(',', ':'),
                           ensure_ascii=True, allow_nan=False).encode('ascii')
     except (ValueError, TypeError, RecursionError, OverflowError):
@@ -424,7 +433,7 @@ class _Managers:
             # Native fragments, datetime, sets and subentries use HA's actual encoder.
             document = _loads(self.encoder(manager._data_to_save()))
             _schema(document, key, self.version)
-            documents.append(_json(document))
+            documents.append(_encode_validated_json(document))
         if sum(map(len, documents)) > MAX_TOTAL_BYTES:
             _fail('native_input_limit')
         return tuple(documents)
