@@ -129,6 +129,70 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         original = {path: (root / path).read_bytes() for path in paths}
         return runtime, mapping, uuids, dependents, original
 
+    async def _native_staging_case(self, enabled):
+        runtime, mapping, _, dependents, original = await self.data()
+        hass, root = self.f.hass, self.f.root
+        component = hass.data['automation']
+        entity, = component.entities
+        if not enabled:
+            await entity.async_turn_off()
+        events = []
+        remove = hass.bus.async_listen('mixed_yaml_automation_result',
+                                      lambda event: events.append(str(event.data['value'])))
+        self.addCleanup(remove)
+        native = self.module('native_automation_transition')
+        transition = native.NativeAutomationTransition(hass)
+        self.assertEqual(transition.enabled, (('mixed_source', enabled),))
+        before_ids = {(key, row.id) for key, row in self.f.entity.entities.items()}
+        await transition.quiesce()
+        transition.assert_disabled()
+        # A native reload would obey YAML initial_state:true. The staged native
+        # constructor must stay disabled even after a changed configuration.
+        path = root / 'mixed_automations.yaml'
+        proposed = original['mixed_automations.yaml'].replace(
+            b"states('", b"1 + states('").replace(b"') }}", b"')|int }}")
+        self.assertNotEqual(proposed, original['mixed_automations.yaml'])
+        path.write_bytes(proposed)
+        await transition.stage()
+        await hass.async_block_till_done()
+        transition.assert_disabled()
+        staged, = component.entities
+        self.assertIsNot(staged, entity)
+        self.assertEqual(staged.raw_config['initial_state'], True)
+        self.assertEqual(staged._initial_state, False)
+        self.assertEqual(events, [])
+        self.assertEqual({(key, row.id) for key, row in self.f.entity.entities.items()}, before_ids)
+        await transition.restore()
+        await hass.async_block_till_done()
+        self.assertIs(staged._is_enabled, enabled)
+        self.assertEqual(events, [])
+        await self.stimulus(11)
+        await hass.async_block_till_done()
+        self.assertEqual(events, ['12'] if enabled else [])
+        events.clear()
+        # Fresh capability, same native source and original physical bytes.
+        reverse = native.NativeAutomationTransition(hass)
+        await reverse.quiesce()
+        path.write_bytes(original['mixed_automations.yaml'])
+        await reverse.stage()
+        reverse.assert_disabled()
+        await reverse.restore()
+        await hass.async_block_till_done()
+        restored, = component.entities
+        self.assertIs(restored._is_enabled, enabled)
+        self.assertEqual(restored.raw_config, entity.raw_config)
+        self.assertEqual(events, [])
+        await self.stimulus(13)
+        await hass.async_block_till_done()
+        self.assertEqual(events, ['13'] if enabled else [])
+        self.assertEqual({(key, row.id) for key, row in self.f.entity.entities.items()}, before_ids)
+
+    async def test_native_staging_preserves_enabled_with_yaml_initial_true(self):
+        await self._native_staging_case(True)
+
+    async def test_native_staging_preserves_disabled_with_yaml_initial_true(self):
+        await self._native_staging_case(False)
+
     async def test_dependent_source_identity_refuses_before_effects(self):
         from attr import asdict
         runtime, mapping, _, dependents, original = await self.data()
