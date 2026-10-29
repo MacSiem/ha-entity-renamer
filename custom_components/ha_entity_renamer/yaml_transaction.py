@@ -368,7 +368,8 @@ class YAMLTransactionAdapter:
         assert_activation_available(self.hass, change.receipt)
         if 'template' in change.receipt.changed_domains:
             from .native_template_yaml import NativeTemplateYAMLRuntimeReadback
-            if type(self.observer) is not NativeTemplateYAMLRuntimeReadback:
+            from .mixed_yaml_runtime import MixedTemplateYAMLRuntimeReadback
+            if type(self.observer) not in (NativeTemplateYAMLRuntimeReadback, MixedTemplateYAMLRuntimeReadback):
                 raise Refused('template_scoped_runtime_observer_required')
             self.observer.assert_change(change)
         return change
