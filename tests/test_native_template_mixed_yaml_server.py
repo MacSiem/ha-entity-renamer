@@ -130,7 +130,7 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         return runtime, mapping, uuids, dependents, original
 
     async def test_dependent_source_identity_refuses_before_effects(self):
-        from dataclasses import asdict
+        from attr import asdict
         runtime, mapping, _, dependents, original = await self.data()
         hass, root = self.f.hass, self.f.root
         script_id = next(row[2] for row in dependents if row[0] == 'script')
