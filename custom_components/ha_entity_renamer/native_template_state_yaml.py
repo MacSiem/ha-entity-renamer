@@ -207,7 +207,7 @@ class NativeTemplateStateYAMLRuntimeReadback:
                                                 guard=lambda: self._check(state, live))
             self._check(state, live)
             sample = self._sample(runtime, state, live)
-            _need(sample[1] == snapshot, 'template_state_runtime_changed')
+            _need(sample[1].same_bindings(snapshot), 'template_state_runtime_changed')
             witness = _TemplateStateRuntimeCheck(self, state, live, runtime, observed, sample)
             witness.check()
             self._last_runtime = witness
@@ -249,7 +249,8 @@ class _TemplateStateRuntimeCheck:
         assert_discovery_managers_current(owner.hass, self.observed,
                                           guard=lambda: owner._check(self.state, self.live))
         _documents(self.state, self.observed)
-        _need(owner._sample(self.runtime, self.state, self.live) == self.sample,
+        current = owner._sample(self.runtime, self.state, self.live)
+        _need(current[0] is self.sample[0] and current[1].same_bindings(self.sample[1]),
               'template_state_runtime_check_changed')
 
 

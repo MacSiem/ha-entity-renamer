@@ -87,6 +87,7 @@ class StateEntityBinding:
     static_variables: tuple
     templates: tuple  # (actual Template, all matching source config paths)
     token: tuple
+    binding_token: tuple
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,23 @@ class StateConsumerSnapshot:
     rows: tuple[StateEntityBinding, ...]
     inventory: tuple
     token: tuple
+
+    def same_bindings(self, other):
+        """Compare retained source ownership, allowing ordinary native renders.
+
+        Both samples independently authenticate the complete native graph.
+        RenderInfo/cache/this values may advance between IO fences. Tracker,
+        configured Template, slot, variable-container and entity ownership may
+        not change without the corresponding accepted registry transition.
+        """
+        def bindings(sample):
+            return tuple((row.domain, row.source_key, row.registry_id,
+                row.semantic, row.static_variables, row.binding_token,
+                tuple((id(template), paths) for template, paths in row.templates))
+                for row in sample.rows)
+        return (type(other) is StateConsumerSnapshot and self.prefix == other.prefix
+            and self.yaml_position == other.yaml_position and self.inventory == other.inventory
+            and bindings(self) == bindings(other))
 
     @property
     def migration_ready(self):
@@ -517,7 +535,10 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents):
                           'template_state_static_rendered_variable_changed')
             rows.append(StateEntityBinding(domain, key, entity, None if entry is None else entry.id,
                 semantic, static, tuple((v[0], tuple(v[1])) for _, v in sorted(template_objects.items())),
-                (id(entity), id(entry), graph_token, _fingerprint(cfg))))
+                (id(entity), id(entry), graph_token, _fingerprint(cfg)),
+                (id(entity), id(entry), graph_token[:2],
+                 tuple(track[:3] for track in graph_token[3]), graph_token[4],
+                 _fingerprint(cfg))))
     _need(set(registry_rows) <= live, 'template_state_missing_registry_consumer')
     expected_unsupported = {(r[0], r[1]) for r in unsupported if r[0] != 'template.trigger'}
     _need(matched == set(expected) | expected_unsupported,
