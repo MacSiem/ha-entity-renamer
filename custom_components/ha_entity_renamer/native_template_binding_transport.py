@@ -55,6 +55,16 @@ class BindingSourcePair:
 
 
 @dataclass(frozen=True)
+class BindingVariablePair:
+    """Exact root-approved scalar producer location; never authority itself."""
+    container: dict
+    name: str
+    before: str
+    after: str
+    source_identity: tuple
+
+
+@dataclass(frozen=True)
 class _BindingCallerContext:
     """Root-owned live scope. Never deserialize, return to API, or persist this.
 
@@ -348,18 +358,47 @@ class NativeTemplateBindingTransport:
     to the root journal/recovery; rollback_before_registry is deliberately barred.
     """
     @classmethod
-    def capture(cls, hass, entities, *, source_pairs, caller_context):
+    def capture(cls, hass, entities, *, source_pairs, caller_context,
+                configured_variable_pairs=(), rendered_variable_pairs=()):
         _need(type(caller_context) is _BindingCallerContext,
               'template_binding_internal_caller_required')
         entities, source_pairs = tuple(entities), tuple(source_pairs)
+        configured_variable_pairs = tuple(configured_variable_pairs)
+        rendered_variable_pairs = tuple(rendered_variable_pairs)
         _need(bool(entities) and len({id(e) for e in entities}) == len(entities)
-              and bool(source_pairs) and all(type(p) is BindingSourcePair for p in source_pairs),
+              and bool(source_pairs or configured_variable_pairs or rendered_variable_pairs)
+              and all(type(p) is BindingSourcePair for p in source_pairs),
               'template_binding_qualified_sources_required')
         caller_context.check('capture', source_pairs, entities)
         obj = cls()
         obj.hass, obj.entities, obj.sources = hass, entities, source_pairs
         obj.context, obj.runtime = caller_context, _Runtime(hass)
         obj.phase, obj.rows = 'captured', []
+        obj.configured_variables = tuple(configured_variable_pairs)
+        obj.rendered_variables = tuple(rendered_variable_pairs)
+        from homeassistant.util.yaml.objects import NodeDictClass
+        obj.dictionary_types = (dict, NodeDictClass)
+        obj.configured_edits, obj.rendered_edits = {}, {}
+        obj.rendered_copies = {}
+        for pairs, edits in ((obj.configured_variables, obj.configured_edits),
+                             (obj.rendered_variables, obj.rendered_edits)):
+            for pair in pairs:
+                _need(type(pair) is BindingVariablePair and type(pair.container) in obj.dictionary_types
+                      and type(pair.name) is str and type(pair.before) is str
+                      and type(pair.after) is str and pair.name != 'this'
+                      and pair.before != pair.after
+                      and type(pair.source_identity) is tuple and bool(pair.source_identity)
+                      and pair.name in pair.container
+                      and isinstance(pair.container[pair.name], str)
+                      and pair.container[pair.name] == pair.before,
+                      'template_binding_variable_source_changed')
+                group = edits.setdefault(id(pair.container), {})
+                prior = group.get(pair.name)
+                _need(prior is None or (prior.before == pair.before and prior.after == pair.after
+                      and prior.source_identity == pair.source_identity),
+                      'template_binding_variable_source_duplicate')
+                group[pair.name] = pair
+
         Template = obj.runtime.template.Template
         by_id = {}
         for pair in source_pairs:
@@ -376,13 +415,14 @@ class NativeTemplateBindingTransport:
             bindings = {name: getattr(entity, name) for name in _FIELDS if hasattr(entity, name)}
             slots = [(slot, slot.template) for group in entity._template_attrs.values() for slot in group]
             declarations = [(slot, slot.template) for slot in getattr(entity, '_templates', {}).values()]
-            originals = {}
+            originals, containers = {}, {}
             def scan(value):
                 if type(value) is Template:
                     originals[id(value)] = value
                 elif type(value) is obj.runtime.ScriptVariables:
                     scan(value.variables)
                 elif isinstance(value, dict):
+                    containers[id(value)] = value
                     for key, item in value.items():
                         scan(key); scan(item)
                 elif isinstance(value, (list, tuple)):
@@ -407,13 +447,58 @@ class NativeTemplateBindingTransport:
                     replacements[id(template)] = Template(body, hass)
             obj.rows.append(dict(entity=entity, tracker=tracker, bindings=bindings,
                 attrs=entity._template_attrs, slots=slots, declarations=declarations,
-                replacements=replacements, originals=originals,
+                replacements=replacements, originals=originals, containers=containers,
                 bodies={key: value.template for key, value in originals.items()}, memo={},
                 cleanup=tuple(entity._on_remove), index=entity._on_remove.index(tracker.async_remove),
                 new=None, detached=False, time_moves=[]))
         _need(set(by_id) <= {key for row in obj.rows for key in row['originals']},
               'template_binding_source_not_in_group')
+        configured = {key: value for row in obj.rows for key, value in row['containers'].items()}
+        rendered = {id(track.variables): track.variables for row in obj.rows
+                    for track in row['tracker']._track_templates}
+        _need(all(configured.get(id(pair.container)) is pair.container for pair in obj.configured_variables)
+              and all(rendered.get(id(pair.container)) is pair.container for pair in obj.rendered_variables),
+              'template_binding_variable_not_in_group')
         return obj
+
+    def _variables_current(self):
+        if not self.configured_variables and not self.rendered_variables:
+            return
+        live = {}
+        def visit(value):
+            if type(value) is self.runtime.ScriptVariables:
+                visit(value.variables)
+            elif isinstance(value, dict):
+                live[id(value)] = value
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    visit(child)
+        for row in self.rows:
+            for name in row['bindings']:
+                visit(getattr(row['entity'], name))
+        rendered = {id(t.variables): t.variables for row in self.rows
+                    for t in row['tracker']._track_templates}
+        _need(all(live.get(id(p.container)) is p.container for p in self.configured_variables)
+              and all(rendered.get(id(p.container)) is p.container for p in self.rendered_variables),
+              'template_binding_variable_not_in_group')
+        for pair in self.configured_variables + self.rendered_variables:
+            _need(pair.name in pair.container and isinstance(pair.container[pair.name], str)
+                  and pair.container[pair.name] == pair.before,
+                  'template_binding_variable_source_changed')
+
+    def _rendered(self, variables):
+        edits = self.rendered_edits.get(id(variables))
+        if not edits:
+            return variables
+        if id(variables) not in self.rendered_copies:
+            # Preserve every unrelated live this/now/frozen snapshot by identity.
+            copied = dict(variables)
+            for name, pair in edits.items():
+                copied[name] = pair.after
+            self.rendered_copies[id(variables)] = copied
+        return self.rendered_copies[id(variables)]
 
     def _rewrite(self, row, value):
         if type(value) is self.runtime.template.Template:
@@ -424,7 +509,9 @@ class NativeTemplateBindingTransport:
         if type(value) is self.runtime.ScriptVariables:
             result = self.runtime.ScriptVariables(self._rewrite(row, value.variables))
         elif isinstance(value, dict):
-            result = {self._rewrite(row, k): self._rewrite(row, v) for k, v in value.items()}
+            edits = self.configured_edits.get(id(value), {})
+            result = {self._rewrite(row, k): (edits[k].after if k in edits
+                      else self._rewrite(row, v)) for k, v in value.items()}
         elif isinstance(value, list):
             result = [self._rewrite(row, v) for v in value]
         elif isinstance(value, tuple):
@@ -444,6 +531,7 @@ class NativeTemplateBindingTransport:
         _need(self.phase == 'captured', 'template_binding_one_use_required')
         # Last source IO and live graph validation are BEFORE any detach.
         self.runtime.sources()
+        self._variables_current()
         for row in self.rows:
             entity = row['entity']
             _need(self.runtime.graph(entity) is row['tracker']
@@ -459,7 +547,7 @@ class NativeTemplateBindingTransport:
                 # Re-rendering configured now()/this variables here would add
                 # a semantic observation without a source/time event.
                 tracks = [self.runtime.event.TrackTemplate(replacements[id(track.template)],
-                    track.variables, rate_limit=track.rate_limit)
+                    self._rendered(track.variables), rate_limit=track.rate_limit)
                     for track in row['tracker']._track_templates]
                 _need(len({track.template for track in tracks}) == len(tracks),
                       'template_binding_template_key_collision')
