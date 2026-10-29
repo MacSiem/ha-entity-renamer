@@ -140,7 +140,30 @@ class SelectiveYAMLNativeRootTests(unittest.IsolatedAsyncioTestCase):
         state = chain.reconstruct_inputs()
         observer = module.NativeTemplateStateYAMLRuntimeReadback(hass, chain, composition, guard=lambda: None)
         self.assertIs(await observer.position(change), tx.Position.UNKNOWN)
-        self.assertIs(await observer.position_at_inputs(change, state), tx.Position.BEFORE)
+        # Produce a normal update after the first independently authenticated
+        # sample, while the observer's own awaits are still in progress.
+        import sys
+        sample_code = self.module('native_template_state_binding').sample_state_bindings.__code__
+        monitor = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
+        emitted = []
+        def after_sample(code_arg, offset, result):
+            if not emitted:
+                emitted.append(True)
+                self.producer._attr_native_value = 11
+                self.producer.async_write_ha_state()
+        sys.monitoring.use_tool_id(monitor, 'ordinary event between independent source samples')
+        sys.monitoring.register_callback(monitor, sys.monitoring.events.PY_RETURN, after_sample)
+        sys.monitoring.set_local_events(monitor, sample_code, sys.monitoring.events.PY_RETURN)
+        try:
+            self.assertIs(await observer.position_at_inputs(change, state), tx.Position.BEFORE)
+            self.assertEqual(emitted, [True])
+            live_consumer = next(entity for platform in async_get_platforms(hass, 'template')
+                                 for entity in platform.entities.values() if entity.unique_id == 'scope-value')
+            self.assertEqual(float(hass.states.get(live_consumer.entity_id).state), 22.0)
+        finally:
+            sys.monitoring.set_local_events(monitor, sample_code, 0)
+            sys.monitoring.register_callback(monitor, sys.monitoring.events.PY_RETURN, None)
+            sys.monitoring.free_tool_id(monitor)
         witness = observer.runtime_check(tx.Position.BEFORE)
         witness.check()
         # Ordinary producer events may replace native RenderInfo and `this`
