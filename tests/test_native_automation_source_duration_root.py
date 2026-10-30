@@ -44,11 +44,14 @@ class NativeAutomationSourceDurationRootTests(unittest.IsolatedAsyncioTestCase):
         runtime, mapping, uuids, _, original = await self.data()
         hass, root = self.f.hass, self.f.root
         old, new = next(iter(mapping.items()))
-        duration = 329 if meaningful else 317
+        # Measured first full source-config forward/inverse: 326.594 s.
+        # Retain the actual timer through BOTH directions with measured headroom;
+        # active-expiry qualification remains a separate real natural path.
+        duration = 449 if meaningful else 437
         first, last = ('17', '29') if meaningful else ('16', '17')
-        body = "{{ 300 + states('" + old + "')|int }}"
-        target_body = "{{ 300 + states('" + new + "')|int }}"
-        control_body = "{{ 300 + states('sensor.duration_control')|int }}"
+        body = "{{ 420 + states('" + old + "')|int }}"
+        target_body = "{{ 420 + states('" + new + "')|int }}"
+        control_body = "{{ 420 + states('sensor.duration_control')|int }}"
         filters = '    from: "'+first+'"\n    to: "'+last+'"\n'
         path = root / 'mixed_automations.yaml'
         path.write_text(
@@ -327,6 +330,14 @@ class NativeAutomationSourceDurationRootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(future['handle'].cancelled())
                 self.assertEqual((len(actions), len(scripts), len(controls)), (1, 1, 1))
         finally:
+            print('NATIVE_SOURCE_DURATION_TIMING', {
+                'meaningful': meaningful,
+                'now': hass.loop.time(),
+                'retained_deadline': None if retained is None else retained[5],
+                'control_deadline': None if control_image is None else control_image[5],
+                'actions': (len(actions), len(scripts), len(controls)),
+                'roots': len(roots),
+            })
             for code in (*codes, *render_codes):
                 sys.monitoring.set_local_events(tool, code, 0)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
