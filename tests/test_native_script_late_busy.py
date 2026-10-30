@@ -7,7 +7,19 @@ import test_native_script_unrelated_wait as waits
 from native_script_wait_witness import NativeScriptWaitWitness
 
 
-class NativeScriptLateBusyTests(waits.NativeScriptUnrelatedWaitTests):
+@unittest.skipUnless(waits.mixed.server.activation.fixture.fixtures.HAS_HA, 'actual pinned HA required')
+class NativeScriptLateBusyTests(unittest.IsolatedAsyncioTestCase):
+    with_yaml = True
+    asyncSetUp = waits.NativeScriptUnrelatedWaitTests.asyncSetUp
+    _before_start = waits.NativeScriptUnrelatedWaitTests._before_start
+    _flush_documents = waits.NativeScriptUnrelatedWaitTests._flush_documents
+    prepare = waits.NativeScriptUnrelatedWaitTests.prepare
+    emit = waits.NativeScriptUnrelatedWaitTests.emit
+    _runtime = waits.NativeScriptUnrelatedWaitTests._runtime
+    module = waits.NativeScriptUnrelatedWaitTests.module
+    stimulus = waits.NativeScriptUnrelatedWaitTests.stimulus
+    data = waits.NativeScriptUnrelatedWaitTests.data
+
     async def test_late_busy_direct_apply_has_no_operation_record_or_native_api(self):
         await self._late_busy(retained=False)
 
