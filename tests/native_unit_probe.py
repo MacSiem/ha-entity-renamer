@@ -40,7 +40,8 @@ paths = list((ROOT/'custom_components/ha_entity_renamer').glob('*.py'))
 # Preserve genuine public translations for native config-flow bootstrap too.
 paths += list((ROOT/'custom_components/ha_entity_renamer').rglob('*.json'))
 paths += list((ROOT/'tests').glob('test*.py'))
-paths += [ROOT/'tests/native_template_composition_scenario.py']
+paths += [ROOT/'tests/native_template_composition_scenario.py',
+          ROOT/'tests/native_script_wait_witness.py']
 paths += list((ROOT/'tests').glob(args.pattern))
 paths += [ROOT/'ha-entity-renamer.js', ROOT/'scripts/stage_hacs_companion.py']
 sources = {str(p.relative_to(ROOT)): p.read_text() for p in paths}
@@ -158,7 +159,7 @@ with tempfile.TemporaryDirectory(prefix='renamer-unit-' + PROBE_TOKEN + '-', dir
             for item in items:
                 if isinstance(item, unittest.TestSuite):
                     yield from selected(item)
-                elif TEST_FILTER in item.id():
+                elif isinstance(item, unittest.loader._FailedTest) or TEST_FILTER in item.id():
                     yield item
         suite = unittest.TestSuite(selected(suite))
     if suite.countTestCases() == 0:
