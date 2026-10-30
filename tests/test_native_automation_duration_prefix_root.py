@@ -104,6 +104,9 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_match_all_overwrite_orphan_refuses_before_effect_and_is_preserved(self):
         await self._duration_case(mode='orphan')
 
+    async def test_foreign_native_main_and_existing_cancel_share_one_dispatch(self):
+        await self._duration_case(mode='transient')
+
     async def _duration_case(self, *, mode):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -111,11 +114,13 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         hass,root = self.f.hass,self.f.root
         old,new = next(iter(mapping.items()))
         meaningful = mode in ('meaningful','foreign','replace')
-        pending = mode in ('pending','cancel','from_only','attribute','rollback','foreign_route','orphan','replace')
+        pending = mode in ('pending','cancel','from_only','attribute','rollback','foreign_route','orphan','replace','transient')
         duration = 480 if pending else 180 if meaningful else 2
         # Every duration below is literal YAML, validated by ORIGINAL Core.
         if mode=='orphan':
             filters = ''
+        elif mode=='transient':
+            filters = '    not_from: "0"\n'
         elif mode=='replace':
             filters = '    from: ["16", "17"]\n    to: ["17", "29"]\n'
         elif meaningful:
@@ -269,7 +274,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             actor=frame.f_locals.get('self')
             if code is codes[4] and actor.hass is hass:
                 created.extend(actor.pending(frame.f_locals['route'].binding)[0])
-            if code is codes[0] and actor.hass is hass and mode=='foreign' and not emitted:
+            if code is codes[0] and actor.hass is hass and mode in ('foreign','transient') and not emitted:
                 self.producer._attr_native_value=31
                 self.producer.async_write_ha_state()
                 emitted.append(hass.states.get(new))
@@ -290,7 +295,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             for code in codes:
                 sys.monitoring.set_local_events(tool,code,sys.monitoring.events.PY_START)
             sys.monitoring.set_local_events(tool,codes[4],sys.monitoring.events.PY_RETURN)
-            if mode=='foreign':
+            if mode in ('foreign','transient'):
                 sys.monitoring.set_local_events(tool,codes[0],sys.monitoring.events.PY_START|sys.monitoring.events.PY_RETURN)
             with mixed.native_diagnostics(self.module):
                 if mode in ('rollback','foreign_route','orphan'):
@@ -348,7 +353,11 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 if mode=='foreign':
                     self.assertTrue(created[0]['handle'].cancelled())
                     self.assertEqual(len(emitted),1)
-                if pending and mode!='replace':
+                if mode=='transient':
+                    self.assertEqual(len(emitted),1)
+                    self.assertTrue(native_pending['handle'].cancelled())
+                    self.assertEqual(len(current_pending),1)
+                elif pending and mode!='replace':
                     actual=current_pending[0]
                     self.assertEqual((actual['clear'],actual['cancel'],actual['keys'],actual['cancel_job'],
                         actual['handle'],actual['handle'].when(),actual['handle']._context,actual['timer_job'],
@@ -397,8 +406,9 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 for name,content in original.items():
                     self.assertEqual((root/name).read_bytes(),content)
                 remaining=cap.pending(back)[0]
-                if mode in ('cancel','foreign'):
-                    self.assertEqual(remaining,())
+                if mode in ('cancel','foreign','transient'):
+                    if mode!='transient':
+                        self.assertEqual(remaining,())
                     return
                 if mode=='configured':
                     await self.stimulus(16);await self.stimulus(17)
