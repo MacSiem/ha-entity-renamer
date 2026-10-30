@@ -120,6 +120,15 @@ def _semantic_state(state, *, native_attribute_key=None):
     their serializers, descriptors, iterators or equality hooks in a callback.
     """
     budget = [4096, 1024 * 1024]
+    def static_member(kind, name):
+        # Even class attribute lookup can execute a descriptor. Read the
+        # actual type dictionaries, without invoking metaclass/member hooks.
+        for base in type.__getattribute__(kind, '__mro__'):
+            namespace = type.__getattribute__(base, '__dict__')
+            if name in namespace:
+                return namespace[name]
+        return None
+
     def freeze(value, depth=0, *, native_attributes=False):
         budget[0] -= 1
         if budget[0] < 0 or depth > 32:
@@ -129,9 +138,9 @@ def _semantic_state(state, *, native_attribute_key=None):
             return ('none',)
         native_key = (native_attribute_key is not None and kind is native_attribute_key
             and type(kind) is EnumType
-            and all(type.__getattribute__(kind, name) is getattr(str, name)
+            and all(static_member(kind, name) is getattr(str, name)
                     for name in ('__hash__', '__eq__', '__str__', '__getattribute__', '__len__'))
-            and not any('__bool__' in vars(base) for base in kind.__mro__))
+            and static_member(kind, '__bool__') is None)
         if kind is str or native_key:
             # Only native Unicode semantics: arbitrary str subclasses can have
             # different dictionary lookup or template semantics despite equal
@@ -141,20 +150,21 @@ def _semantic_state(state, *, native_attribute_key=None):
             if budget[1] < 0:
                 raise ValueError()
             return ('str', value)
-        if kind in (str, bool, int):
-            if kind is str and len(value) > 1024 * 1024:
-                raise ValueError()
-            return (kind.__name__, value)
+        if kind is bool:
+            return ('bool', value)
+        if kind is int:
+            return ('int', value)
         if kind is float and math.isfinite(value):
-            return ('float', value)
-        if kind in (list, tuple):
-            return (kind.__name__, tuple(freeze(item, depth + 1) for item in value))
+            return ('float', float.hex(value))
+        if kind is list or kind is tuple:
+            return ('list' if kind is list else 'tuple',
+                    tuple(freeze(item, depth + 1) for item in value))
         if kind is dict or native_attributes:
             if dict.__len__(value) > budget[0]:
                 raise ValueError()
             rows = []
             for key, item in dict.items(value):
-                if not isinstance(key, str):
+                if type(key) is not str and type(key) is not native_attribute_key:
                     raise ValueError()
                 rows.append((freeze(key, depth + 1), freeze(item, depth + 1)))
             return ('dict', tuple(sorted(rows)))
