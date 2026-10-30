@@ -395,8 +395,11 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 sys.monitoring.set_local_events(tool,codes[0],sys.monitoring.events.PY_START|sys.monitoring.events.PY_RETURN)
             with mixed.native_diagnostics(self.module):
                 if partial or mode in ('rollback','foreign_route','orphan'):
+                    monitor_tools=tuple(sys.monitoring.get_tool(k) for k in range(6))
                     with self.assertRaises((PermissionError,self.module('transaction').Refused,ValueError,RuntimeError)):
                         await runtime.native_forward(hass,mapping,guard=guard,refresh=refresh)
+                    self.assertEqual(tuple(sys.monitoring.get_tool(k) for k in range(6)),monitor_tools,
+                                     'Refused cleanup must release all request-owned monitors')
                     if partial:
                         self.assertTrue(faulted,'actual selected write must have completed')
                     self.assertEqual(handoffs,[],'No registry/source mutation API')
