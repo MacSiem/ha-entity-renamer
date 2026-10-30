@@ -148,6 +148,12 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hass.states.get(consumer.entity_id).state, 'off')
 
     async def test_pending_broad_rate_full_root_consumes_real_population_change_at_native_deadline(self):
+        await self._pending_rate_full_root(explicit=False)
+
+    async def test_pending_explicit_rate_full_root_keeps_native_deadline_despite_rename_add(self):
+        await self._pending_rate_full_root(explicit=True)
+
+    async def _pending_rate_full_root(self, *, explicit):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         from homeassistant.helpers.entity_platform import async_get_platforms
@@ -159,11 +165,11 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
         other._attr_name = 'Rate root native control source'
         await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([other])
         def definition(uid, source):
+            value = ("(states('" + source + "') | int(0))" if explicit else
+                     "(states | selectattr('entity_id', 'equalto', '" + source + "') | list | count)")
             return ('- unique_id: ' + uid + '\n  sensor:\n  - unique_id: value\n'
                 '    name: Rate root ' + uid + '\n'
-                '    state: "{{ (states | list | count) + '
-                '(states | selectattr(\'entity_id\', \'equalto\', \'' + source
-                + '\') | list | count) }}"\n')
+                '    state: "{{ (states | list | count) + ' + value + ' }}"\n')
         path = self.f.root / 'template.yaml'
         original = (definition('scope', old) + definition('control', other.entity_id)).encode()
         path.write_bytes(original)
@@ -177,6 +183,19 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
         other._attr_native_value = 3
         other.async_write_ha_state()
         await hass.async_block_till_done()
+        extra = type(self.producer)()
+        extra._attr_unique_id = None
+        extra._attr_name = 'Rate root population stimulus'
+        population_before = len(hass.states.async_all())
+        async def add_population():
+            await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([extra])
+            self.assertIsNone(self.f.entity.async_get(extra.entity_id))
+            await hass.async_block_till_done()
+            self.assertEqual(len(hass.states.async_all()), population_before + 1)
+        if explicit:
+            # Direct source events bypass the native limiter. A real unrelated
+            # population addition schedules the original broad-rate replay.
+            await add_population()
         initial = hass.states.get(subject.entity_id)
         self.assertEqual(initial.state, hass.states.get(control.entity_id).state)
         held = {}
@@ -210,14 +229,8 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
         monitor.set_local_events(tool, code, monitor.events.PY_START)
         # A real state-only source changes both global population expressions
         # without changing entity/device/config-entry registry inputs.
-        extra = type(self.producer)()
-        extra._attr_unique_id = None
-        extra._attr_name = 'Rate root population stimulus'
-        population_before = len(hass.states.async_all())
-        await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([extra])
-        self.assertIsNone(self.f.entity.async_get(extra.entity_id))
-        await hass.async_block_till_done()
-        self.assertEqual(len(hass.states.async_all()), population_before + 1)
+        if not explicit:
+            await add_population()
         self.assertIs(hass.states.get(subject.entity_id), initial)
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
@@ -238,7 +251,8 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
         # The held pre-expiry cache can predate another native Template entity's
         # initial addition. Its numeric value is not an oracle for population.
         self.assertEqual(len(hass.states.async_all()), population_before + 1)
-        self.assertEqual(int(hass.states.get(subject.entity_id).state), len(hass.states.async_all()) + 1)
+        self.assertEqual(int(hass.states.get(subject.entity_id).state),
+                         len(hass.states.async_all()) + (3 if explicit else 1))
         self.assertEqual(path.read_bytes(), original)
         for source, target in mapping.items():
             self.assertEqual(self.f.entity.async_get(source).id, uuids[source])
