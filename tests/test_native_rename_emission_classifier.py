@@ -58,6 +58,22 @@ class SemanticSnapshotTests(unittest.TestCase):
     def test_source_signed_float_zero_is_a_meaningful_attribute_change(self):
         self.assertNotEqual(self.snapshot({'fixture': 0.0}), self.snapshot({'fixture': -0.0}))
 
+    def test_source_template_visible_dictionary_order_and_native_key_type_are_preserved(self):
+        with self.subTest('dictionary iteration order'):
+            self.assertNotEqual(self.snapshot({'a': 1, 'b': 2}), self.snapshot({'b': 2, 'a': 1}))
+        from homeassistant import const
+        key_type = vars(const).get('EntityStateAttribute')
+        if key_type is not None:
+            with self.subTest('native enum key type'):
+                import importlib
+                module = importlib.import_module(server.activation.fixture.fixtures.PACKAGE
+                                                + '.native_rename_emission_classifier')
+                native = module._semantic_state(SimpleNamespace(state='1', attributes={
+                    key_type.FRIENDLY_NAME: 'fixture'}), native_attribute_key=key_type)
+                plain = self.snapshot({'friendly_name': 'fixture'})
+                self.assertIsNotNone(native)
+                self.assertNotEqual(native, plain)
+
     def test_foreign_string_key_lookup_semantics_cannot_be_promoted_to_neutral(self):
         import importlib
         module = importlib.import_module(server.activation.fixture.fixtures.PACKAGE
