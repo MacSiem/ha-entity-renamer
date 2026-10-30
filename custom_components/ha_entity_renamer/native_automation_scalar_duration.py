@@ -40,15 +40,11 @@ _PINS = {
         'probatio.error': 'dc6b83e7077e627ec19569021294bc52cf0a6cf484c92498462e7e2bc3e1aae7',
     },
 }
-# Installed Core 2026.10.2: all eight actual Template/CV/native validator
-# module bytes match .4 (scalar-core102-source-readback.json, 2026-10-30).
+# Installed Core 2026.10.2: all thirteen actual Template/CV/native validator
+# module bytes match .4; the six new source/Jinja files were compared separately
+# (scalar-core102-source-readback.json and scalar-source-core102-extra-readback.json).
 # The same per-runtime file/code/reference/protocol checks still apply.
-_PINS['2026.10.2'] = {name: digest for name, digest in _PINS['2026.10.4'].items()
-    if name not in {'homeassistant.helpers.template.states',
-        'homeassistant.helpers.template.extensions.state',
-        'homeassistant.helpers.template.extensions.type_cast',
-        'homeassistant.helpers.template.extensions.base',
-        'homeassistant.helpers.template.helpers'}}
+_PINS['2026.10.2'] = dict(_PINS['2026.10.4'])
 
 
 def configured_duration(config, hass):
@@ -250,7 +246,7 @@ class ScalarDurationNative:
         configured_duration({'for': value}, self.native.hass)
         if not tuple(Environment().parse(value.template).find_all(nodes.Call)):
             return
-        _need(self.native.version in ('2025.6.0', '2026.10.4'),
+        _need(self.native.version in ('2025.6.0', '2026.10.2', '2026.10.4'),
               'duration_scalar_source_core_unqualified')
         self.check()
         t, hass = self.template, self.native.hass
