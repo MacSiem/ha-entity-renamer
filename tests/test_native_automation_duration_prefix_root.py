@@ -94,6 +94,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             '      from_id: "{{ trigger.from_state.entity_id }}"\n'
             '      to_id: "{{ trigger.to_state.entity_id }}"\n'
             '      seconds: "{{ trigger.for.total_seconds() }}"\n'
+            '      configured: "{{ states(alias) }}"\n'
             '  - action: script.mixed_source\n'
             '- id: duration_control\n  alias: Independent native duration control\n  initial_state: true\n'
             '  triggers:\n  - trigger: state\n    entity_id: sensor.duration_control\n'
@@ -384,6 +385,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(actions[0].data['current']),'29' if meaningful else '17')
                 self.assertEqual(str(actions[0].data['previous']),'17' if meaningful else '16')
                 self.assertEqual(str(scripts[0].data['value']),'29' if meaningful else '17')
+                self.assertEqual(str(actions[0].data['configured']),'29' if meaningful else '17')
                 self.assertEqual(str(actions[0].data['from_id']),old)
                 self.assertEqual(str(actions[0].data['to_id']),new if meaningful else old)
                 self.assertEqual(cap.pending(cap.capture(source))[0],())
