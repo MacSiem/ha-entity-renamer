@@ -18,10 +18,11 @@ from .transaction import Refused
 
 
 def _result(operation_id, fingerprint, state, reason, *, summary=None):
+    eligible = state in ('applied', 'recoverable_prefix')
     result = {'operation_id': operation_id, 'fingerprint': fingerprint,
-        'state': state, 'reason': reason, 'eligible': state == 'applied',
+        'state': state, 'reason': reason, 'eligible': eligible,
         'migration_ready': False, 'family_complete': False}
-    if summary is not None and state == 'applied':
+    if summary is not None and eligible:
         result['change_summary'] = summary
     return result
 
@@ -59,8 +60,23 @@ def _prepared_scope(record, preparations):
 
 def _yaml_summary(session):
     """Sanitized exact scope after the existing strict server binder admitted it."""
-    sources = [{'current_entity_id': new, 'original_entity_id': old}
-               for old, new in sorted(session.mapping.items())]
+    sources, registry = [], []
+    named = False
+    for index, change in enumerate(session.registry_changes):
+        before, after = change.before, change.after
+        applied = session.record.phases[index] == 'verified'
+        current = after if applied else before
+        for old, new in change.mapping.items():
+            sources.append({'current_entity_id': new if applied else old,
+                            'original_entity_id': old})
+        keys = ('entity_id', 'name') if change.kind == 'entity' else ('name_by_user',)
+        fields = {key: {'current': current.get(key), 'original': before.get(key)}
+                  for key in keys if before.get(key) != after.get(key)}
+        named = named or change.kind == 'device' or 'name' in fields
+        target = ({'entity_id': current['entity_id']} if change.kind == 'entity'
+                  else {'device_id': change.identity})
+        registry.append({**target, 'applied': applied, 'fields': fields})
+    sources.sort(key=lambda row: row['original_entity_id'])
     definitions = session.evidence.template_sources.ledger.definitions
     consumers = [(row.domain.removeprefix('template.'), row.native_key)
                  for row in definitions
@@ -68,9 +84,12 @@ def _yaml_summary(session):
     if (not 1 <= len(sources) <= 10000 or not 1 <= len(consumers) <= 10000
             or len(set(consumers)) != len(consumers)):
         raise Refused('unsupported_recovery_plan')
-    return {'sources': sources,
-            'consumers': {'count': len(consumers),
-                          'domains': sorted({domain for domain, _ in consumers})}}
+    result = {'sources': sources,
+              'consumers': {'count': len(consumers),
+                            'domains': sorted({domain for domain, _ in consumers})}}
+    if named:
+        result['registry_changes'] = registry
+    return result
 
 
 async def _acquire_lease(hass, entry, *, guard, refresh):
@@ -179,6 +198,16 @@ class RecoveryController:
         for record in records:
             self.check()
             need, reason = True, 'unsupported_recovery_state'
+            from .native_template_prefix_recovery import acknowledged_registry_prefix
+            if acknowledged_registry_prefix(record):
+                # Snapshot shape only: actual source/chain/history inspection
+                # must still admit this scope before eligibility is reported.
+                operations.append({'operation_id': record.operation_id,
+                    'fingerprint': record.plan.fingerprint, 'status': record.status,
+                    'direction': record.direction, 'recovery_required': True,
+                    'reason': 'inspection_available', 'eligible': False})
+                required = True
+                continue
             if record.status in ('applied', 'rolled_back'):
                 try:
                     if (record.status == 'applied' and record.direction == 'forward'
@@ -247,8 +276,11 @@ class RecoveryController:
             if record.status == 'rolled_back':
                 # Do NOT infer full native/lifecycle completion from this status.
                 return _result(operation_id, fingerprint, 'refused', 'already_finished')
-            if (record.status != 'applied' or record.direction != 'forward'
-                    or record.phases != ('verified',) * len(record.plan.steps)):
+            from .native_template_prefix_recovery import acknowledged_registry_prefix
+            prefix = acknowledged_registry_prefix(record)
+            terminal = (record.status == 'applied' and record.direction == 'forward'
+                        and record.phases == ('verified',) * len(record.plan.steps))
+            if not terminal and not prefix:
                 return _result(operation_id, fingerprint, 'UNKNOWN', 'unsupported_recovery_state')
             if record.plan.required_scopes == ('registry', 'yaml'):
                 from . import _yaml_factory_for_plan
@@ -260,7 +292,9 @@ class RecoveryController:
                 self.check()
                 summary = _yaml_summary(session)
                 if not restore:
-                    return _result(operation_id, fingerprint, 'applied', 'complete', summary=summary)
+                    return _result(operation_id, fingerprint,
+                        'recoverable_prefix' if prefix else 'applied',
+                        'acknowledged_prefix' if prefix else 'complete', summary=summary)
                 result = await session.rollback()
                 self.check()
                 if result.status != 'rolled_back':
