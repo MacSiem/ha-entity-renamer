@@ -8,6 +8,12 @@ import test_native_rename_emission_classifier as emission
 
 class NativeSourceHandoffTests(emission.NativeRenameEmissionTests):
     async def test_source_handoff_retains_live_source_and_cleanup(self):
+        await self.handoff_flow()
+
+    async def test_source_handoff_keeps_real_unemitted_physical_value_change(self):
+        await self.handoff_flow(changed_value=29)
+
+    async def handoff_flow(self, *, changed_value=None):
         from homeassistant.core import callback
         from homeassistant.helpers.entity import Entity, entity_sources
         from homeassistant.helpers.json import _orjson_bytes_default_encoder
@@ -46,6 +52,9 @@ class NativeSourceHandoffTests(emission.NativeRenameEmissionTests):
         try:
             handoff = await self.module('native_source_handoff').NativeSourceHandoff.prepare(
                 io, change, change.after, guard=lambda: None)
+            if changed_value is not None:
+                # A real producer value changes; no State/Event is manufactured.
+                source._attr_native_value = changed_value
             mutation = handoff.mutate()
             await io.settle(change)
             await self._flush_documents()
@@ -59,8 +68,16 @@ class NativeSourceHandoffTests(emission.NativeRenameEmissionTests):
                 self.assertNotIn(old, entries)
             self.assertIsNone(hass.states.get(old))
             self.assertIsNotNone(hass.states.get(new))
+            self.assertEqual(handoff.api_calls, 1)
+            self.assertEqual(handoff.handler_calls, 1)
+            if changed_value is not None:
+                self.assertEqual(hass.states.get(new).state, str(changed_value))
             self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
-            await self.stimulus(23)
+            # Source-only qualification: Template consumers still use their old
+            # program and are deliberately outside this data-plane acceptance.
+            source._attr_native_value = 23
+            source.async_write_ha_state()
+            await hass.async_block_till_done()
             self.assertEqual(hass.states.get(new).state, '23')
             self.assertEqual(len([event for event in events if event.data.get('new_state') is not None
                                   and event.data['new_state'].state == '23']), 1)

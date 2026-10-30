@@ -69,7 +69,7 @@ class NativeSourceHandoff:
         obj.old, obj.new, obj.registry, obj.bus = audit.source_id, audit.target_id, audit.registry, audit.bus
         obj.owner, obj.thread, obj.loop = asyncio.current_task(), threading.get_ident(), audit.loop
         obj.attempted, obj.in_native, obj.closed, obj.error = False, False, False, None
-        obj.registry_calls, obj.handler_calls, obj.handler_done = 0, 0, False
+        obj.registry_calls, obj.api_calls, obj.handler_calls, obj.handler_done = 0, 0, 0, False
         obj.new_row = obj.payload = obj.registry_event = None
         obj.tool = None
         refs = [(SensorEntity, 'async_registry_entry_updated'),
@@ -134,6 +134,7 @@ class NativeSourceHandoff:
             sys.monitoring.register_callback(obj.tool, sys.monitoring.events.PY_START, obj._started)
             sys.monitoring.register_callback(obj.tool, sys.monitoring.events.PY_RETURN, obj._returned)
             sys.monitoring.set_local_events(obj.tool, audit.codes['fire'], sys.monitoring.events.PY_START)
+            sys.monitoring.set_local_events(obj.tool, audit.codes['registry_update'], sys.monitoring.events.PY_START)
             sys.monitoring.set_local_events(obj.tool, audit.codes['source'],
                 sys.monitoring.events.PY_START | sys.monitoring.events.PY_RETURN)
         except BaseException:
@@ -194,6 +195,9 @@ class NativeSourceHandoff:
                   (self.platform.entities, self.platform.domain_entities, self.platform.domain_platform_entities), self.maps))
               and self.id_cell.cell_contents == self.old
               and self.sources.get(self.old) is self.info and self.new not in self.sources
+              and len(self.info) == len(self.info_items)
+              and all(key is old_key and value is old_value for (key, value), (old_key, old_value)
+                      in zip(self.info.items(), self.info_items))
               and all(mapping.get(self.old) is self.source and self.new not in mapping for mapping in self.maps)
               and self.hass.states.get(self.old) is not None and self.hass.states.async_available(self.new)
               and not getattr(self.bus, '_dispatching', False), 'source_preflight_changed')
@@ -203,6 +207,12 @@ class NativeSourceHandoff:
         frame = sys._getframe(1)
         try:
             if not self.in_native:
+                return
+            if code is self.audit.codes['registry_update']:
+                if (frame.f_locals.get('self') is self.registry
+                        and frame.f_locals.get('entity_id') in (self.old, self.new)):
+                    self.api_calls += 1
+                    _need(self.api_calls == 1, 'extra_registry_api_uncertain')
                 return
             if code is self.audit.codes['source']:
                 if frame.f_locals.get('self') is self.source:
@@ -284,7 +294,7 @@ class NativeSourceHandoff:
             _need(self.registry_calls == 1, 'registry_dispatch_not_observed')
             _need(self.handler_calls == 1 and self.handler_done, 'native_handler_not_completed')
             _need(type(mutation) is NativeRegistryMutation and self.error is None
-                  and self.registry_calls == self.handler_calls == 1 and self.handler_done
+                  and self.api_calls == self.registry_calls == self.handler_calls == 1 and self.handler_done
                   and self.source.registry_entry is self.new_row
                   and self.registry.async_get(self.new) is self.new_row
                   and self.source.entity_id == self.new and self.source._state_info is self.state_info
@@ -315,7 +325,7 @@ class NativeSourceHandoff:
             return
         self.closed = True
         if self.tool is not None and sys.monitoring.get_tool(self.tool) == _NAME:
-            for code in (self.audit.codes['fire'], self.audit.codes['source']):
+            for code in (self.audit.codes['fire'], self.audit.codes['source'], self.audit.codes['registry_update']):
                 sys.monitoring.set_local_events(self.tool, code, 0)
             sys.monitoring.register_callback(self.tool, sys.monitoring.events.PY_START, None)
             sys.monitoring.register_callback(self.tool, sys.monitoring.events.PY_RETURN, None)
