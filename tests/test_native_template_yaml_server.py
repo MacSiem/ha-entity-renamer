@@ -34,7 +34,7 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         from homeassistant.helpers.entity_platform import async_get_platforms
-        self.assertIn(__version__, ('2025.6.0', '2026.10.4'))
+        self.assertIn(__version__, ('2025.6.0', '2026.10.2', '2026.10.4'))
         await self.prepare('yaml', variant=variant, binary_extra=binary_extra, validate=False,
                            uidless=uidless, duplicate_uidless=duplicate_uidless, uidless_alias=uidless_alias)
         self.assertFalse(hasattr(self, 'plan'))
