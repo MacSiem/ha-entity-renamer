@@ -15,7 +15,7 @@ from .native_template_yaml_server import NativeTemplateYAMLServer
 from .native_template_forward import _UnchangedConsumers
 from .native_input_baseline import _drained
 from .native_template_state_composition import TemplateStateComposition, MixedTemplateStateComposition
-from .native_registry_receipts import RegistryReceiptChain, native_registry_receipt_store
+from .native_registry_receipts import RegistryReceiptChain, RegistryRawObservation, native_registry_receipt_store
 from .prepared import encode_change, decode_change
 
 
@@ -76,9 +76,11 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         active = frozenset(next(iter(change.mapping)) for index, change in enumerate(self.registry_changes)
                            if record.phases[index] == 'verified')
+        identities = set(self.observer.identities.values())
         _need(actual.prefix.active == active and actual.yaml_position == 'original'
-              and all((row.entity.entity_id, row.registry_id) in set(self.observer.identities.values())
-                      for row in actual.rows), 'prefix_consumer_identity_changed')
+              and len(actual.rows) == len(identities)
+              and {(row.entity.entity_id, row.registry_id) for row in actual.rows} == identities,
+              'prefix_consumer_identity_changed')
         await self._final_history(state, witness)
         observed = await self._observe()
         self.chain.expected(PhaseContext(record, len(record.plan.steps) - 1), tuple(
