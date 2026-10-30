@@ -4,6 +4,7 @@ Synthetic byte receipts test format rejection only; the native composition
 roundtrip separately requires actual checker/source/program seals.
 """
 import copy
+import json
 from dataclasses import asdict, replace
 import unittest
 
@@ -103,7 +104,7 @@ class MixedStateYAMLCodecTests(unittest.TestCase):
         old = legacy.module.PreparedYAML(receipt, mixed.files).checked()
         encoded = legacy.prepared.encode_change(old)
         self.assertEqual(encoded, {'kind': 'yaml', 'data':
-                         legacy.prepared.canonical(asdict(old))[0]})
+                         legacy.prepared.canonical(json.loads(json.dumps(asdict(old))))[0]})
         self.assertEqual(old.identity, 'yaml:' + legacy.module._digest(asdict(old)))
         self.assertEqual(legacy.prepared.decode_change(encoded), old)
         encoded['data']['receipt']['runtime_expected'][-1][1:] = [None, None]
