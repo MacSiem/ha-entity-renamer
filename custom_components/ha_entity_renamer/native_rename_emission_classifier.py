@@ -149,7 +149,7 @@ def _semantic_state(state, *, native_attribute_key=None):
             budget[1] -= len(value)
             if budget[1] < 0:
                 raise ValueError()
-            return ('str', value)
+            return ('native_attribute_key' if native_key else 'str', value)
         if kind is bool:
             return ('bool', value)
         if kind is int:
@@ -167,7 +167,7 @@ def _semantic_state(state, *, native_attribute_key=None):
                 if type(key) is not str and type(key) is not native_attribute_key:
                     raise ValueError()
                 rows.append((freeze(key, depth + 1), freeze(item, depth + 1)))
-            return ('dict', tuple(sorted(rows)))
+            return ('dict', tuple(rows))
         raise ValueError()
     try:
         # State is the exact pinned native class at every callsite. Its outer
