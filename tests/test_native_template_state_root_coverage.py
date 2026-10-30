@@ -207,11 +207,23 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
         fired = hass.loop.create_future()
         observed = {}
         code = subject._template_result_info._refresh.__func__.__code__
+        mutate_code = self.module('native_rename_emission_classifier').NativeRenameEmissions.mutate.__code__
+        cutovers = []
         monitor = sys.monitoring
         tool = next(i for i in range(6) if monitor.get_tool(i) is None)
         monitor.use_tool_id(tool, 'full root actual pending native expiry')
         def observe(code_arg, offset):
             frame = sys._getframe(1)
+            if frame.f_code is mutate_code:
+                witness = frame.f_locals.get('self')
+                if witness.change.identity == uuids[old] and witness.source_id == old:
+                    handle, deadline, event, context = held[id(subject)]
+                    tracker = subject._template_result_info
+                    cutovers.append((any(item is handle for item in tracker._rate_limit._rate_limit_timers.values()),
+                                     not handle.cancelled(), hass.loop.time() < deadline,
+                                     handle.when() == deadline, handle._args[0] is event,
+                                     handle._context is context))
+                return
             if frame.f_code is not code or not frame.f_locals.get('replayed'):
                 return
             owner = frame.f_locals.get('self')
@@ -227,6 +239,7 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
                 fired.set_result(True)
         monitor.register_callback(tool, monitor.events.PY_START, observe)
         monitor.set_local_events(tool, code, monitor.events.PY_START)
+        monitor.set_local_events(tool, mutate_code, monitor.events.PY_START)
         # A real state-only source changes both global population expressions
         # without changing entity/device/config-entry registry inputs.
         if not explicit:
@@ -245,9 +258,11 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
             await hass.async_block_till_done()
         finally:
             monitor.set_local_events(tool, code, 0)
+            monitor.set_local_events(tool, mutate_code, 0)
             monitor.register_callback(tool, monitor.events.PY_START, None)
             monitor.free_tool_id(tool)
         self.assertEqual(hass.states.get(subject.entity_id).state, hass.states.get(control.entity_id).state)
+        self.assertEqual(cutovers, [(True,) * 6], 'forward API must encounter the live original pending timer')
         # The held pre-expiry cache can predate another native Template entity's
         # initial addition. Its numeric value is not an oracle for population.
         self.assertEqual(len(hass.states.async_all()), population_before + 1)

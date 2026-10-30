@@ -70,7 +70,7 @@ class NativeTemplateRenameIngress:
 
     @staticmethod
     def native_jobs(hass, event, filtered, expected):
-        from homeassistant.core import HassJob
+        from homeassistant.core import HassJob, HassJobType
         jobs = [filtered._action_as_hassjob]
         _need(type(filtered._listeners) is dict and len(filtered._listeners) <= 3,
               'template_ingress_listener_inventory_changed')
@@ -104,7 +104,8 @@ class NativeTemplateRenameIngress:
         def same(actual):
             return (actual is expected or (type(actual) is type(expected) is MethodType
                     and actual.__self__ is expected.__self__ and actual.__func__ is expected.__func__))
-        _need(all(type(job) is HassJob and same(job.target) for job in jobs),
+        _need(all(type(job) is HassJob and job.job_type is HassJobType.Callback and same(job.target)
+                  for job in jobs),
               'template_ingress_job_target_changed')
         return tuple({id(job): job for job in jobs}.values())
 

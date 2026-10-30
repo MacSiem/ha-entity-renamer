@@ -45,7 +45,7 @@ class SemanticSnapshotTests(unittest.TestCase):
         key = StringKey('friendly_name')
         attributes = {key: 'fixture'}
         armed = True
-        self.assertIsNotNone(module._semantic_state(SimpleNamespace(state='1', attributes=attributes)))
+        self.assertIsNone(module._semantic_state(SimpleNamespace(state='1', attributes=attributes)))
         self.assertEqual(calls, [])
         armed = False
         class UnsupportedKey:

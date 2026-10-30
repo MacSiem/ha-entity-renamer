@@ -16,6 +16,7 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 import dis
+from enum import EnumType
 from functools import partial
 import inspect
 import math
@@ -112,13 +113,13 @@ class _Emission:
     dispatched: bool = False
 
 
-def _semantic_state(state):
+def _semantic_state(state, *, native_attribute_key=None):
     """Bounded data snapshot, never a render or source-authority proof.
 
     Unsupported attribute objects make neutrality unknown/false. Do not invoke
     their serializers, descriptors, iterators or equality hooks in a callback.
     """
-    budget = [4096]
+    budget = [4096, 1024 * 1024]
     def freeze(value, depth=0, *, native_attributes=False):
         budget[0] -= 1
         if budget[0] < 0 or depth > 32:
@@ -126,12 +127,18 @@ def _semantic_state(state):
         kind = type(value)
         if value is None:
             return ('none',)
-        if isinstance(value, str):
-            # Native HA attributes include StrEnum keys/values. Read their
-            # underlying Unicode data without invoking subclass conversion,
-            # comparison, hashing or serialization hooks.
+        native_key = (native_attribute_key is not None and kind is native_attribute_key
+            and type(kind) is EnumType
+            and all(type.__getattribute__(kind, name) is getattr(str, name)
+                    for name in ('__hash__', '__eq__', '__str__', '__getattribute__', '__len__'))
+            and not any('__bool__' in vars(base) for base in kind.__mro__))
+        if kind is str or native_key:
+            # Only native Unicode semantics: arbitrary str subclasses can have
+            # different dictionary lookup or template semantics despite equal
+            # underlying text. They remain unknown, without invoking hooks.
             value = str.__str__(value)
-            if len(value) > 1024 * 1024:
+            budget[1] -= len(value)
+            if budget[1] < 0:
                 raise ValueError()
             return ('str', value)
         if kind in (str, bool, int):
@@ -268,6 +275,7 @@ class NativeRenameEmissions:
               == {k: v for k, v in after.items() if k not in ('entity_id', 'modified_at')},
               'pure_rename_required')
         import homeassistant
+        from homeassistant import const
         from homeassistant.const import __version__
         from homeassistant.core import Event, EventBus, HomeAssistant, State, StateMachine
         from homeassistant.helpers import entity_platform, event as event_helper
@@ -287,6 +295,7 @@ class NativeRenameEmissions:
               and type(io.registries['entity']) is EntityRegistry, 'native_runtime_required')
         self.owner, self.thread = asyncio.current_task(), threading.get_ident()
         self.Event, self.State, self.Entity, self.Platform = Event, State, Entity, entity_platform.EntityPlatform
+        self.const, self.attribute_key = const, vars(const).get('EntityStateAttribute')
         self.queued = __version__ != '2025.6.0'
         self.error = None
         self.closed, self.attempted, self.in_mutate, self.finished = False, False, False, False
@@ -383,6 +392,8 @@ class NativeRenameEmissions:
             self.guard()
 
     def _native_check(self):
+        _need(vars(self.const).get('EntityStateAttribute') is self.attribute_key,
+              'native_attribute_key_changed')
         unchanged(list(self.refs.values()), tuple(self.methods.values()), tuple(self.codes.values()))
         _need(NativeRegistryIO.mutate is self.io_mutate and NativeRegistryIO.settle is self.io_settle
               and self.io_mutate.__code__ is self.io_mutate_code
@@ -594,7 +605,8 @@ class NativeRenameEmissions:
             receipt = _Emission(phase, raw, values.get('context'), values.get('origin'), id(frame))
             if phase != 'registry':
                 receipt.binding = (raw['entity_id'], raw['old_state'], raw['new_state'])
-                receipt.semantic = _semantic_state(raw['old_state'] if phase == 'remove' else raw['new_state'])
+                receipt.semantic = _semantic_state(raw['old_state'] if phase == 'remove' else raw['new_state'],
+                                                   native_attribute_key=self.attribute_key)
             self.emissions.append(receipt)
             if not self.queued:
                 self.dispatches[id(frame)] = receipt
