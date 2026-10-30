@@ -134,7 +134,7 @@ class NativeScriptPrefixPhase:
 
     def abort(self, node):
         _need(self.active is not None and self.active[0] is node
-              and (node.witness is None or not node.witness.attempted))
+              and not node._registry_attempted())
         transfer = self.active[1]
         if transfer is not None and transfer.phase == 'installed':
             transfer.restore_before_attempt()

@@ -168,12 +168,33 @@ class NativeTemplateStateRegistryEffect:
                            for r in self.snapshot.rows), 'installed_identity_changed')
         return True
 
+    def _registry_attempted(self):
+        witness = self.witness
+        if witness is None or not witness.attempted:
+            return False
+        # Entering the witness consumes its one-shot, but the typed driver has
+        # one additional owning preflight before it can enter NativeRegistryIO.
+        # Recognize zero API only with its exact untouched source/registry graph.
+        from .native_source_handoff import NativeSourceHandoff
+        handoff = witness.source_handoff
+        if (type(handoff) is NativeSourceHandoff and not handoff.attempted
+                and handoff.api_calls == handoff.registry_calls == handoff.handler_calls == 0
+                and handoff.new_row is None and witness.mutation is None
+                and handoff.registry.async_get(handoff.old) is handoff.row
+                and handoff.registry.async_get(handoff.new) is None
+                and handoff.source.registry_entry is handoff.row
+                and handoff.source.entity_id == handoff.old
+                and all(mapping.get(handoff.old) is handoff.source and handoff.new not in mapping
+                        for mapping in handoff.maps)):
+            return False
+        return True
+
     def _restore_own_pre_attempt(self):
         transfer = self.transport
         if transfer is None or transfer.phase not in ('installed', 'registry_attempted'):
             return
         _need(self.phase in ('captured', 'failed_before_attempt')
-              and (self.witness is None or not self.witness.attempted),
+              and not self._registry_attempted(),
               'cleanup_after_attempt_forbidden')
         # Revoked request authorization cannot prevent restoring our own
         # unpublished synchronous cutover. No await/reentry happened since it.
@@ -217,7 +238,7 @@ class NativeTemplateStateRegistryEffect:
             return self.io.mutate(self.change,
                 self.change.before if self.context.record.direction == 'rollback' else self.change.after)
         except BaseException:
-            if self.witness is not None and not self.witness.attempted:
+            if self.witness is not None and not self._registry_attempted():
                 # The final owning guard can refuse after installing bindings
                 # but before the witness starts any registry attempt. Only that
                 # proven pre-attempt branch may restore our exact own graph.
