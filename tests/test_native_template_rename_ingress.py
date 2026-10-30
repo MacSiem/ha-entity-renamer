@@ -1,6 +1,7 @@
 """Actual own-listener ingress; not Root admission or pre-cutover queue proof."""
 import asyncio
 import importlib
+import sys
 import unittest
 
 import test_native_template_binding_transport as binding
@@ -19,6 +20,34 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
     def module_named(self, name):
         return importlib.import_module(binding.server.activation.fixture.fixtures.PACKAGE + '.' + name)
 
+    async def wait_native_rate_idle(self):
+        """Observe real native replay returns, including finite self echoes."""
+        trackers = tuple(entity._template_result_info for entity in (self.consumer, self.control))
+        code = trackers[0]._refresh.__func__.__code__
+        monitor = sys.monitoring
+        tool = next(key for key in range(6) if monitor.get_tool(key) is None)
+        monitor.use_tool_id(tool, 'native domain control idle')
+        wake = None
+        def returned(code_arg, offset, result):
+            frame = sys._getframe(1)
+            if (frame.f_locals.get('replayed') and any(frame.f_locals.get('self') is tracker for tracker in trackers)
+                    and wake is not None and not wake.done()):
+                wake.set_result(None)
+        monitor.register_callback(tool, monitor.events.PY_RETURN, returned)
+        monitor.set_local_events(tool, code, monitor.events.PY_RETURN)
+        try:
+            while True:
+                wake = self.f.hass.loop.create_future()
+                handles = [handle for tracker in trackers for handle in tracker._rate_limit._rate_limit_timers.values()]
+                if not handles:
+                    return
+                await asyncio.wait_for(wake, max([0] + [handle.when() - self.f.hass.loop.time()
+                                                        for handle in handles]) + 5)
+        finally:
+            monitor.set_local_events(tool, code, 0)
+            monitor.register_callback(tool, monitor.events.PY_RETURN, None)
+            monitor.free_tool_id(tool)
+
     async def test_actual_entity_ingress_suppresses_neutral_rename_then_delivers_producer_change(self):
         await self.round_trip()
 
@@ -33,6 +62,9 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
 
     async def round_trip(self, *, preflight_gap=False, producer_hook=False, domain=False):
         await self.pair(domain=domain)
+        if domain:
+            # Isolate actual domain-add bookkeeping from bootstrap timers.
+            await self.wait_native_rate_idle()
         if producer_hook:
             from homeassistant.core import Context
             from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -164,6 +196,11 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
                         for entity in (self.consumer, self.control)]})
                 finally:
                     remove()
+                if domain:
+                    # Broad native controls also hear their own output. Let
+                    # the real finite self replay finish before the next input;
+                    # coalescing into that Event exercises Core's loop limiter.
+                    await self.wait_native_rate_idle()
                 self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, str(value * 2))
                 self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state,
                                  self.f.hass.states.get(self.control.entity_id).state)
