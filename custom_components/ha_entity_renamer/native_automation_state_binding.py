@@ -35,6 +35,11 @@ _PINS = {
     },
 }
 
+# The installed staging Core has the identical six audited source bodies as
+# 2026.10.4 (including Script in the emission witness). Each capture still
+# hashes the actual local files; version similarity alone grants no admission.
+_PINS['2026.10.2'] = dict(_PINS['2026.10.4'])
+
 
 def _need(condition, reason):
     if not condition:
