@@ -42,6 +42,8 @@ class _Route:
     duration_transported: bool = False
     duration_operations: object = None
     duration_events: object = None
+    duration_delivered: object = None
+    duration_dispatch: object = None
 
 
 def _stable(binding):
@@ -118,6 +120,7 @@ class OwnedAutomationGraph:
                     queue=deque(), seen=set(), added_keys=[]))
                 if hasattr(binding, '_duration'):
                     self.routes[-1].duration_events = {}
+                    self.routes[-1].duration_delivered = set()
                     self.duration.lock(self.routes[-1])
 
     def install(self, witness):
@@ -193,6 +196,21 @@ class OwnedAutomationGraph:
     def _receive_duration(self, route, event, cancel):
         try:
             _need(self.live and route.binding.keyed_job.target is route.wrapper)
+            if route.duration_dispatch is not None:
+                original_event, pending, image = route.duration_dispatch
+                _need(event is original_event and cancel is not None
+                      and cancel['cancel_job'] is pending['cancel_job'],
+                      'automation_duration_dispatch_role_changed')
+                token = (id(event), id(cancel['cancel_job']))
+                _need(token not in route.seen, 'automation_duration_duplicate_role')
+                _need(self._duration_role_image(route, pending) == image,
+                      'automation_duration_dispatch_owner_changed')
+                route.seen.add(token)
+                cancel['cancel_listener'](event)
+                route.duration_delivered.add(token)
+                route.duration_dispatch = None
+                self.duration.wrap(self, route)
+                return
             self.duration.check_route(route)
             change = self.witness.owned_state_change(event)
             token = (id(event), id(None if cancel is None else cancel['cancel_job']))
@@ -204,9 +222,18 @@ class OwnedAutomationGraph:
             _need(change is None or change.disposition == 'meaningful',
                   'automation_duration_owned_state_unknown')
             if change is None and not route.queue:
-                original = route.binding.listener if cancel is None else cancel['cancel_listener']
-                original(event)
-                self.duration.lock(route)
+                if cancel is None:
+                    pending = tuple(p for p in self.duration.pending(route.binding)[0]
+                                    if p['key'] == event.data['entity_id'])
+                    _need(len(pending) <= 1, 'automation_duration_dispatch_inventory')
+                    if pending:
+                        route.duration_dispatch = (event, pending[0], self._duration_role_image(route, pending[0]))
+                    route.binding.listener(event)
+                    route.duration_delivered.add(token)
+                    if not pending:
+                        self.duration.wrap(self, route)
+                else:
+                    self._forward_duration(route, event, cancel)
                 return
             route.queue.append((event, change, cancel))
             if route.handle is None:
@@ -214,21 +241,62 @@ class OwnedAutomationGraph:
         except BaseException:
             self.witness._poison('automation_duration_ingress_uncertain')
 
+    def _duration_role_image(self, route, pending):
+        # The old native cancel still occupies its original dispatch.copy()
+        # position. Main may replace U[key], but cannot alter these retained
+        # edges. Validate them before allowing that cancel to touch anything.
+        b = route.binding
+        self.duration.check_sources()
+        _need(_stable(b) == route.stable and self.hass.data.get(b.tracker.key) is b.data
+              and b.data.callbacks is b.callbacks and b.data.listener is b.bus_remove,
+              'automation_duration_dispatch_native_owner')
+        job, handle = pending['cancel_job'], pending['handle']
+        wrapper, original, shape = self.duration.wrappers[job]
+        _need(job.target is wrapper and pending['cancel_listener'] is original
+              and tuple(pending['keys']) == (pending['key'],)
+              and sum(j is job for j in b.callbacks.get(pending['key'], ())) == 1
+              and not any(j is job for key, members in b.callbacks.items()
+                          if key != pending['key'] for j in members)
+              and not handle.cancelled() and handle._loop is self.hass.loop
+              and sum(h is handle for h in self.hass.loop._scheduled) == 1,
+              'automation_duration_dispatch_retained_edges')
+        return (_value(pending['clear']), _value(pending['cancel']),
+                _value(pending['cancel_listener']), _value(pending['predicate']),
+                _value(wrapper), shape, handle.when(), id(handle._context),
+                id(handle._callback), tuple(map(id, handle._args)))
+
+    def _forward_duration(self, route, event, cancel):
+        token = (id(event), id(None if cancel is None else cancel['cancel_job']))
+        if token in route.duration_delivered:
+            return
+        if cancel is None:
+            # Capture only the cancel roles present BEFORE native main runs.
+            # Main may replace U[key]; its old cancel must finish before a full
+            # census can judge that transient overwrite. Keep the SAME Event.
+            pending_before = tuple(p for p in self.duration.pending(route.binding)[0]
+                                   if p['key'] == event.data['entity_id'])
+            route.binding.listener(event)
+            for pending in pending_before:
+                cancel_token = (id(event), id(pending['cancel_job']))
+                if cancel_token not in route.duration_delivered:
+                    pending['cancel_listener'](event)
+                    route.duration_delivered.add(cancel_token)
+        else:
+            cancel['cancel_listener'](event)
+        route.duration_delivered.add(token)
+        # Native dispatch.copy() may subsequently call the old wrapper: its
+        # authentic role has already run once. Never send this starting Event
+        # to a newly created cancel job. Census remains strict before wrapping.
+        self.duration.wrap(self, route)
+
     def _deliver_duration(self, route):
         while route.queue:
             self.duration.check_route(route)
             event, change, cancel = route.queue.popleft()
             if change is None:
-                pending_before = self.duration.pending(route.binding)[0] if cancel is None else ()
-                original = route.binding.listener if cancel is None else cancel['cancel_listener']
-                original(event)
-                # The OWN timer was absent from dispatch.copy() for this queued
-                # foreign Event. Deliver that SAME Event once, in the shared FIFO.
-                for pending in pending_before:
-                    token = (id(event), id(pending['cancel_job']))
-                    if token not in route.seen:
-                        pending['cancel_listener'](event)
-                        route.seen.add(token)
+                # Includes a pending OWN timer created by an earlier FIFO
+                # entry, even if absent from this Event's native dispatch.copy().
+                self._forward_duration(route, event, cancel)
             else:
                 _need(self.witness.owned_state_change(event) == change, 'automation_owned_pair_changed')
                 if cancel is None:
@@ -285,7 +353,8 @@ class OwnedAutomationGraph:
         if hasattr(b, '_duration'):
             route, = (r for r in self.routes if r.binding is b)
             for pending in self.duration.pending(b)[0]:
-                if not pending['predicate'](event.data['entity_id'], prior, new):
+                if (pending['key'] == event.data['entity_id']
+                        and not pending['predicate'](event.data['entity_id'], prior, new)):
                     pending['clear']()
             self.duration.lock(route)
             self.duration.start_pair(self, route, change)
@@ -362,7 +431,8 @@ class OwnedAutomationGraph:
             self.registrations(self.hass, entity)
 
     def pending(self):
-        return any(route.queue or route.handle is not None for route in self.routes)
+        return any(route.queue or route.handle is not None or route.duration_dispatch is not None
+                   for route in self.routes)
 
     def retire(self, *, before_attempt=False):
         if not self.live:
