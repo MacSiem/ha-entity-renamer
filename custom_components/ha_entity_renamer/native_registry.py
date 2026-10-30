@@ -453,7 +453,13 @@ class NativeRegistryBridge:
             # Trusted whole-input/intent consumer runs AFTER the final async
             # runtime inspection. No await separates its final fence from API.
             node = await before_mutation()
-            self._fresh(change, source, guard)
+            try:
+                self._fresh(change, source, guard)
+            except BaseException:
+                from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
+                if type(node) is NativeTemplateStateRegistryEffect:
+                    node.abort_before_attempt()
+                raise
         # No await between fresh authorization/revision and one native mutation.
         if node is None:
             stamp = self.io.mutate(change, target)
@@ -465,6 +471,8 @@ class NativeRegistryBridge:
                     or node.target != target['entity_id']):
                 raise RegistryConflict('own_helper_effect_binding_mismatch')
             stamp = node.mutate()
+            if type(node) is NativeTemplateStateRegistryEffect:
+                await node.finish_native()
         await self.io.settle(change)
         self._fresh(change, target, guard)
         await self.io.flush(change.kind)

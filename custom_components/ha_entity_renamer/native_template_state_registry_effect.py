@@ -63,13 +63,49 @@ class NativeTemplateStateRegistryEffect:
             registry_ids=tuple((identity, obj.target if identity == change.identity else value)
                                for identity, value in snapshot.prefix.registry_ids))
         obj.transport = None
+        obj.witness = obj.delivery = obj.ingress = None
+        pure = ({key: value for key, value in change.before.items() if key not in ('entity_id', 'modified_at')}
+                == {key: value for key, value in change.after.items() if key not in ('entity_id', 'modified_at')})
+        if transition.entities and pure:
+            from .native_rename_emission_classifier import NativeRenameEmissions
+            from .native_template_rename_ingress import NativeTemplateProducerDelivery
+            obj.witness = await NativeRenameEmissions.prepare(io, change,
+                change.before if reverse else change.after, guard=guard)
+            try:
+                obj.delivery = NativeTemplateProducerDelivery(obj.runtime, transition.entities, obj.witness)
+            except BaseException:
+                obj.witness.close()
+                raise
         return obj
+
+    async def before_attempt(self):
+        if self.delivery is not None:
+            await self.delivery.drain()
+
+    def abort_before_attempt(self):
+        _need(self.phase in ('captured', 'failed_before_attempt'), 'attempt_cannot_be_aborted')
+        if self.ingress is not None:
+            self.ingress.retire()
+        self._restore_own_pre_attempt()
+        if self.witness is not None:
+            self.witness.close()
+        self.phase = 'failed_before_attempt'
+
+    async def finish_native(self):
+        if self.witness is not None:
+            try:
+                await self.witness.finish()
+            finally:
+                if self.ingress is not None:
+                    self.ingress.retire()
 
     def _capture_at_final_fence(self):
         # Runtime values may legitimately advance during intent/phase IO. The
         # SAME immutable source program remains authoritative; recapture actual
         # tracker/history data synchronously at the final registry seam.
         self.guard()
+        if self.delivery is not None:
+            self.delivery.retire_at_final_fence()
         self.state.assert_current(self.root.receipt)
         self.root.chain.verify_intent_source(self.intent, self.context, self.before)
         self.runtime.sources()
@@ -111,8 +147,10 @@ class NativeTemplateStateRegistryEffect:
 
     def _restore_own_pre_attempt(self):
         transfer = self.transport
-        if transfer is None or transfer.phase != 'installed':
+        if transfer is None or transfer.phase not in ('installed', 'registry_attempted'):
             return
+        _need(self.phase == 'captured' and (self.witness is None or not self.witness.attempted),
+              'cleanup_after_attempt_forbidden')
         # Revoked request authorization cannot prevent restoring our own
         # unpublished synchronous cutover. No await/reentry happened since it.
         _need(asyncio.current_task() is self.task, 'cleanup_task_changed')
@@ -131,18 +169,27 @@ class NativeTemplateStateRegistryEffect:
             if self.transport is not None:
                 self.transport.install_before_registry(self.caller)
                 self.transport.mark_registry_attempt(self.caller)
+                if self.witness is not None:
+                    from .native_template_rename_ingress import NativeTemplateRenameIngress
+                    self.ingress = NativeTemplateRenameIngress.install(self.transport, self.witness, self.caller)
             else:
                 self.guard()
                 self.root.chain.verify_intent_source(self.intent, self.context, self.before)
                 self.state.assert_current(self.root.receipt)
         except BaseException:
-            self._restore_own_pre_attempt()
-            self.phase = 'failed_before_attempt'
+            self.abort_before_attempt()
             raise
         self.phase = 'registry_attempted'
         # Exact NativeRegistryIO, not a callable supplied by an import/request.
-        return self.io.mutate(self.change,
-            self.change.before if self.context.record.direction == 'rollback' else self.change.after)
+        try:
+            if self.witness is not None:
+                return self.witness.mutate()
+            return self.io.mutate(self.change,
+                self.change.before if self.context.record.direction == 'rollback' else self.change.after)
+        except BaseException:
+            if self.ingress is not None:
+                self.ingress.retire()
+            raise
 
     async def verify_effect(self, mutation, after):
         from .native_registry import NativeRegistryMutation

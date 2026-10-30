@@ -24,7 +24,7 @@ class NativeTemplateRenameIngress:
         _need(type(transport) is NativeTemplateBindingTransport
               and type(witness) is NativeRenameEmissions
               and witness.hass is transport.hass and not witness.closed
-              and not witness.attempted and transport.phase == 'installed',
+              and not witness.attempted and transport.phase in ('installed', 'registry_attempted'),
               'template_ingress_owned_transport_required')
         transport._check('registry_attempt', caller_context)
         transport.runtime.sources()

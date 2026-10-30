@@ -212,11 +212,16 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
                 node = await NativeTemplateStateRegistryEffect.capture(self._template_state_root,
                     self.bridge.io, change, context, intent, before,
                     self._template_state_root.observation_state, guard)
-                await self._durable_context(guard, context)
-                before = await self._read(guard)
-                self.chain.verify_intent_source(intent, context, before)
-                guard()
-                return node
+                try:
+                    await self._durable_context(guard, context)
+                    before = await self._read(guard)
+                    self.chain.verify_intent_source(intent, context, before)
+                    guard()
+                    await node.before_attempt()
+                    return node
+                except BaseException:
+                    node.abort_before_attempt()
+                    raise
             if binding is not None:
                 node = self._own_node(binding, own, change, context, intent, before, guard)
                 return node
