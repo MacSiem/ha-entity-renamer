@@ -16,7 +16,7 @@ import test_native_template_yaml_server as server
 @contextmanager
 def native_diagnostics(module):
     """Observe sanitized product failures/positions without replacing a seam."""
-    failures, positions, graph_diffs, source_issues = [], [], [], []
+    failures, positions, graph_diffs, source_issues, duration_frames = [], [], [], [], []
     tool = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
     sys.monitoring.use_tool_id(tool, 'mixed native YAML acceptance diagnosis')
     def raised(code, offset, error):
@@ -27,7 +27,26 @@ def native_diagnostics(module):
         row = (Path(code.co_filename).name, code.co_name, type(error).__name__, str(error)[:160])
         if row not in failures:
             failures.append(row)
-            del failures[:-30]
+            del failures[:-120]
+        if code.co_name == '_need' and any(reason in str(error) for reason in
+                ('duration_pending_changed_during_root', 'duration_rollback_slot_changed')):
+            frame = sys._getframe(1).f_back
+            stack = []
+            for _ in range(8):
+                if frame is None:
+                    break
+                route = frame.f_locals.get('route')
+                if route is not None and hasattr(route, 'binding'):
+                    log = route.duration_operations
+                    stack.append({'function':frame.f_code.co_qualname,
+                        'entity':route.binding.entity.unique_id,
+                        'before_attempt':frame.f_locals.get('before_attempt'),
+                        'wrapper_written':route.wrapper_written,
+                        'log_present':log is not None,
+                        'records':[(r[0][0],r[3]) for r in getattr(log,'records',())]})
+                frame=frame.f_back
+            duration_frames.append(stack)
+            del duration_frames[:-6]
         if code.co_name == '_fail' and str(error) == 'registry_receipt_input_graph_changed':
             caller = sys._getframe(1).f_back
             if caller is not None and caller.f_code.co_name == 'assert_current':
@@ -75,6 +94,8 @@ def native_diagnostics(module):
             print('MIXED_NATIVE_INPUT_GRAPH_DIFF', json.dumps(graph_diffs))
         if source_issues:
             print('MIXED_NATIVE_YAML_SOURCE_ISSUES', json.dumps(source_issues))
+        if duration_frames:
+            print('MIXED_NATIVE_DURATION_FRAMES', json.dumps(duration_frames))
 
 
 class CompositeGuardThreadTests(unittest.IsolatedAsyncioTestCase):
