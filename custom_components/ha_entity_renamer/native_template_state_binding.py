@@ -413,8 +413,6 @@ def _graph(runtime, entity):
     from homeassistant.helpers.template import RenderInfo
     from .yaml_runtime_observer import _registered_bus_remove
     info = runtime.graph(entity)
-    _need(not info._rate_limit._rate_limit_timers,
-          'template_state_pending_rate_root_unqualified')
     event, native = runtime.event, runtime.native
     _need(type(info._info) is dict, 'template_state_complete_render_group_required')
     complete = set(info._info) == set(entity._template_attrs)
