@@ -26,7 +26,7 @@ def _cell(f, name):
 def _history_signature(event, from_state, to_state):
     """Retained data values; native State.expire/report/cache changes stay legal."""
     from homeassistant.core import Context, Event, State
-    from homeassistant.const import EntityStateAttribute
+    from homeassistant import const
     from .native_rename_emission_classifier import _semantic_state
     def context(value):
         _need(type(value) is Context, 'duration_history_context_type')
@@ -39,7 +39,7 @@ def _history_signature(event, from_state, to_state):
             return None
         _need(type(value) is State and all(type(v) is str for v in
               (value.entity_id,value.domain,value.object_id)), 'duration_history_state_type')
-        semantic=_semantic_state(value,native_attribute_key=EntityStateAttribute)
+        semantic=_semantic_state(value,native_attribute_key=vars(const).get('EntityStateAttribute'))
         _need(semantic is not None and type(value.last_changed) is datetime
               and type(value.last_updated) is datetime and type(value.last_updated_timestamp) is float,
               'duration_history_state_fields')
