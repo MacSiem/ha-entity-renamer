@@ -104,9 +104,9 @@ def _destination(source: Path, output: Path) -> Path:
 def build_companion(source: Path, output: Path) -> dict:
     """Create isolated integration repository layout; never overwrite any path.
 
-    A real public integration release is intentionally refused. In particular,
-    a development version and hide_default_branch prevent silently promoting
-    the backend merely because a package can be assembled.
+    Non-development manifest versions are intentionally refused. Assembling a
+    development package does not qualify its backend for publication or use.
+    hide_default_branch is a HACS display preference, not a release guard.
     """
     requested_source = Path(source).expanduser().absolute()
     _reject_symlink_chain(requested_source)
