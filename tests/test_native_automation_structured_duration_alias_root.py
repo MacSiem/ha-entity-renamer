@@ -125,6 +125,8 @@ class NativeAutomationStructuredDurationAliasRootTests(unittest.IsolatedAsyncioT
                  'emission': self.module('native_rename_emission_classifier').NativeRenameEmissions.mutate.__code__,
                  'registry': self.module('native_registry').NativeRegistryIO.mutate.__code__}
         write_code = log_type.write.__code__
+        alias_check_code = transport._check_duration_aliases.__code__
+        alias_refusals = []
         roots, transfers, injected, writes, root_writes = [], [], [], [], []
         graph_undos, log_undos, api = [], [], []
         actions, scripts = [], []
@@ -212,6 +214,13 @@ class NativeAutomationStructuredDurationAliasRootTests(unittest.IsolatedAsyncioT
             add_alias(transfer, edge)
             raise FixtureAliasAfterWriteFault('foreign alias after completed configured journal prefix')
 
+        def raised(code, offset, error):
+            frame = sys._getframe(1)
+            if (code is alias_check_code and transfers
+                    and frame.f_locals.get('self') is transfers[0]
+                    and str(error) == 'automation_duration_foreign_mutable_alias'):
+                alias_refusals.append((frame.f_back.f_code.co_name, error))
+
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
 
@@ -221,9 +230,11 @@ class NativeAutomationStructuredDurationAliasRootTests(unittest.IsolatedAsyncioT
         try:
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, started)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, returned)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.RAISE, raised)
             for code in codes.values():
                 sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
             sys.monitoring.set_local_events(tool, write_code, sys.monitoring.events.PY_RETURN)
+            sys.monitoring.set_local_events(tool, alias_check_code, sys.monitoring.events.RAISE)
             with mixed.native_diagnostics(self.module):
                 monitors = tuple(sys.monitoring.get_tool(k) for k in range(6))
                 try:
@@ -247,12 +258,12 @@ class NativeAutomationStructuredDurationAliasRootTests(unittest.IsolatedAsyncioT
                 self.assertIsNone(getattr(transfer, '_config_log', None))
             self.assertIsNone(result)
             self.assertIsNotNone(error, 'actual native Root must refuse this foreign alias')
-            chain, cursor = [], error
-            while cursor is not None and all(cursor is not prior for prior in chain):
-                chain.append(cursor)
-                cursor = cursor.__cause__ or cursor.__context__
-            self.assertTrue(any('automation_duration_foreign_mutable_alias' in str(exc) for exc in chain),
-                            'foreign alias refusal must be present in the actual exception chain')
+            # The server may report apply_unresolved after persisting a refusal,
+            # without retaining its Python exception chain. Observe the original
+            # guard at the exact transfer and required boundary instead.
+            self.assertTrue(any(caller == ('cleanup_plan' if after_write else 'check_before')
+                                for caller, _ in alias_refusals),
+                            'the original alias guard must refuse at the required boundary')
             self.assertEqual((api, actions, scripts), ([], [], []))
             self.assertIs(hass.states.get(old), physical)
             self.assertIsNone(hass.states.get(new))
@@ -284,8 +295,9 @@ class NativeAutomationStructuredDurationAliasRootTests(unittest.IsolatedAsyncioT
                 self.assertIs(configured['seconds'], leaf)
                 self.assertEqual(graph(configured), before_root)
         finally:
-            for code in (*codes.values(), write_code):
+            for code in (*codes.values(), write_code, alias_check_code):
                 sys.monitoring.set_local_events(tool, code, 0)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, None)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.RAISE, None)
             sys.monitoring.free_tool_id(tool)
