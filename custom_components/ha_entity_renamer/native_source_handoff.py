@@ -35,6 +35,7 @@ _SENSOR_PINS = {
     '2025.6.0': 'c8144af56e98f34adf6b46c78bd81284b870c52573a4ca2f6a9e4e53b7ab5dc9',
     '2026.10.4': 'c3cbda48f1cdfae2401e800ab0dd77399b12a64b654b728d0de28f2c07b5fd09',
 }
+_SENSOR_PINS['2026.10.2'] = _SENSOR_PINS['2026.10.4']  # actual installed source readback is exact
 _NAME = 'ha_entity_renamer.source_binding_handoff'
 
 
