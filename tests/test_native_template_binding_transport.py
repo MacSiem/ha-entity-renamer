@@ -578,6 +578,70 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(old._rate_limit._rate_limit_timers, timers)
         self.assertTrue(all(not handle.cancelled() for handle in timers.values()))
 
+    async def test_pending_rate_keeps_timer_deadline_event_and_natural_native_expiry(self):
+        await self.pair(broad=True)
+        hass, entity, control = self.f.hass, self.consumer, self.control
+        await self.emit(self.producer, 3)
+        await self.emit(self.other, 3)
+        old = entity._template_result_info
+        timers = dict(old._rate_limit._rate_limit_timers)
+        self.assertTrue(timers)
+        originals = {id(handle): (handle, handle.when(), handle._args[0], handle._context)
+                     for handle in timers.values()}
+        control_timers = dict(control._template_result_info._rate_limit._rate_limit_timers)
+        self.assertTrue(control_timers)
+        physical = hass.states.get(entity.entity_id)
+        transport = self.capture()
+        await self.apply(transport)
+        current = entity._template_result_info
+        self.assertIsNot(current, old)
+        self.assertEqual({id(handle) for handle in current._rate_limit._rate_limit_timers.values()}, set(originals))
+        self.assertFalse(old._rate_limit._rate_limit_timers)
+        self.assertIs(hass.states.get(entity.entity_id), physical)
+        for template, handle in current._rate_limit._rate_limit_timers.items():
+            before, deadline, event, context = originals[id(handle)]
+            self.assertIs(handle, before)
+            self.assertFalse(handle.cancelled())
+            self.assertEqual(handle.when(), deadline)
+            self.assertIs(handle._args[0], event)
+            self.assertIs(handle._context, context)
+            self.assertEqual(handle._callback, current._refresh)
+            self.assertEqual(len(handle._args[1]), 1)
+            self.assertIs(handle._args[1][0].template, template)
+            self.assertIs(handle._args[2], True)
+        await self.emit(self.producer, 5)
+        await self.emit(self.other, 5)
+        # Observe real native expiry; no callback invocation, clock alteration,
+        # timer replacement, output seeding or expected value from a moved cache.
+        fired = hass.loop.create_future()
+        seen = set()
+        code = current._refresh.__func__.__code__
+        monitor = sys.monitoring
+        tool = next(i for i in range(6) if monitor.get_tool(i) is None)
+        monitor.use_tool_id(tool, 'actual pending Template native expiry')
+        def observe(code_arg, offset):
+            frame = sys._getframe(1)
+            if frame.f_code is not code or not frame.f_locals.get('replayed'):
+                return
+            owner = frame.f_locals.get('self')
+            if owner is current or owner is control._template_result_info:
+                seen.add(id(owner))
+                if len(seen) == 2 and not fired.done():
+                    fired.set_result(True)
+        monitor.register_callback(tool, monitor.events.PY_START, observe)
+        monitor.set_local_events(tool, code, monitor.events.PY_START)
+        try:
+            deadline = max(handle.when() for handle in (*timers.values(), *control_timers.values()))
+            await asyncio.wait_for(fired, max(0, deadline - hass.loop.time()) + 10)
+            await hass.async_block_till_done()
+        finally:
+            monitor.set_local_events(tool, code, 0)
+            monitor.register_callback(tool, monitor.events.PY_START, None)
+            monitor.free_tool_id(tool)
+        self.assertEqual(hass.states.get(entity.entity_id).state, hass.states.get(control.entity_id).state)
+        self.assertTrue(all(handle.cancelled() for handle in timers.values()))
+        self.assertEqual(self.f.entity.async_get(self.new).id, self.source_uuid)
+
 
     async def test_failed_collision_install_keeps_old_tracker_active_and_exact_bindings(self):
         await self.pair(time=True)
