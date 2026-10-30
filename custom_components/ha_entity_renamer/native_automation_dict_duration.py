@@ -566,7 +566,9 @@ class DictDurationNative:
         build = self.modules['probatio._build_policy']
         _need(policy._policy is policy.CompilePolicy.AUTO
               and policy._DEFAULT_POLICY is policy.CompilePolicy.AUTO
-              and build._policy is build.BuildPolicy.EAGER
+              # Home Assistant's application bootstrap selects LAZY before
+              # constructing its schemas; the library default remains EAGER.
+              and build._policy is build.BuildPolicy.LAZY
               and build._DEFAULT_POLICY is build.BuildPolicy.EAGER,
               'duration_dict_native_policy_changed')
         _need(type(schema._INHERIT_CONTEXT) is schema._InheritContext
