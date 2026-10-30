@@ -43,8 +43,10 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(asyncio.current_task(), owner)
             self.assertIs(io.hass, hass)
         renamed = False
+        mutation = None
         try:
             witness = await classifier.NativeRenameEmissions.prepare(io, change, change.after, guard=guard)
+            self.addCleanup(witness.close)
             mutation = witness.mutate()
             renamed = True
             self.assertIs(type(mutation), native.NativeRegistryMutation)
@@ -63,7 +65,13 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
             # Restore through a separately prepared witness. Never repeat the
             # forward API call after uncertainty or construct a replacement row.
             if renamed and self.f.entity.async_get(new) is not None:
+                from homeassistant.helpers.json import _orjson_bytes_default_encoder
+                await io.settle(change)
+                row = self.f.entity.async_get(new)
+                self.assertEqual(_orjson_bytes_default_encoder(row.as_storage_fragment).decode('utf-8'),
+                                 mutation.after_json, 'inverse needs exact confirmed owned effect')
                 inverse = await classifier.NativeRenameEmissions.prepare(io, change, change.before, guard=guard)
+                self.addCleanup(inverse.close)
                 inverse.mutate()
                 inverse_proof = await inverse.finish()
                 self.assertEqual((inverse_proof['rename_remove'], inverse_proof['rename_add']), (1, 1))
