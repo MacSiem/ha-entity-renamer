@@ -1,5 +1,6 @@
 """Actual server-root coverage beyond isolated Template binding primitives."""
 import asyncio
+import sys
 import unittest
 
 import test_native_template_yaml_server as server
@@ -145,3 +146,95 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handle.cancelled())
         self.assertIsNone(consumer._delay_cancel)
         self.assertEqual(hass.states.get(consumer.entity_id).state, 'off')
+
+    async def test_pending_broad_rate_full_root_consumes_real_population_change_at_native_deadline(self):
+        from homeassistant.core import Context
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        runtime, mapping, uuids, _ = await self.data(variant='sensor')
+        hass = self.f.hass
+        old = next(iter(mapping))
+        other = type(self.producer)()
+        other._attr_unique_id = 'rate-root-native-control-source'
+        other._attr_name = 'Rate root native control source'
+        await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([other])
+        def definition(uid, source):
+            return ('- unique_id: ' + uid + '\n  sensor:\n  - unique_id: value\n'
+                '    name: Rate root ' + uid + '\n'
+                '    state: "{{ (states | list | count) + '
+                '(states | selectattr(\'entity_id\', \'equalto\', \'' + source
+                + '\') | list | count) }}"\n')
+        path = self.f.root / 'template.yaml'
+        original = (definition('scope', old) + definition('control', other.entity_id)).encode()
+        path.write_bytes(original)
+        await hass.services.async_call('template', 'reload', {}, blocking=True, context=Context())
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        entities = {entity.unique_id: entity for platform in async_get_platforms(hass, 'template')
+                    for entity in platform.entities.values()}
+        subject, control = entities['scope-value'], entities['control-value']
+        await self.source(3)
+        other._attr_native_value = 3
+        other.async_write_ha_state()
+        await hass.async_block_till_done()
+        initial = hass.states.get(subject.entity_id)
+        self.assertEqual(initial.state, hass.states.get(control.entity_id).state)
+        held = {}
+        for entity in (subject, control):
+            timers = entity._template_result_info._rate_limit._rate_limit_timers
+            self.assertEqual(len(timers), 1)
+            handle = next(iter(timers.values()))
+            held[id(entity)] = (handle, handle.when(), handle._args[0], handle._context)
+        fired = hass.loop.create_future()
+        observed = {}
+        code = subject._template_result_info._refresh.__func__.__code__
+        monitor = sys.monitoring
+        tool = next(i for i in range(6) if monitor.get_tool(i) is None)
+        monitor.use_tool_id(tool, 'full root actual pending native expiry')
+        def observe(code_arg, offset):
+            frame = sys._getframe(1)
+            if frame.f_code is not code or not frame.f_locals.get('replayed'):
+                return
+            owner = frame.f_locals.get('self')
+            for entity in (subject, control):
+                handle, deadline, event, context = held[id(entity)]
+                if owner is entity._template_result_info and frame.f_locals.get('event') is event:
+                    self.assertTrue(any(item is handle for item in owner._rate_limit._rate_limit_timers.values()))
+                    self.assertEqual(handle.when(), deadline)
+                    self.assertIs(handle._context, context)
+                    self.assertGreaterEqual(hass.loop.time() + 0.001, deadline)
+                    observed[id(entity)] = True
+            if len(observed) == 2 and not fired.done():
+                fired.set_result(True)
+        monitor.register_callback(tool, monitor.events.PY_START, observe)
+        monitor.set_local_events(tool, code, monitor.events.PY_START)
+        # A real state-only source changes both global population expressions
+        # without changing entity/device/config-entry registry inputs.
+        extra = type(self.producer)()
+        extra._attr_unique_id = None
+        extra._attr_name = 'Rate root population stimulus'
+        await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([extra])
+        self.assertIsNone(self.f.entity.async_get(extra.entity_id))
+        await hass.async_block_till_done()
+        self.assertIs(hass.states.get(subject.entity_id), initial)
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        try:
+            result = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+            self.assertEqual(result['state'], 'applied')
+            inverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
+                guard=lambda: None, refresh=refresh)
+            self.assertEqual(inverse['state'], 'rolled_back')
+            deadline = max(item[1] for item in held.values())
+            await asyncio.wait_for(fired, max(0, deadline - hass.loop.time()) + 10)
+            await hass.async_block_till_done()
+        finally:
+            monitor.set_local_events(tool, code, 0)
+            monitor.register_callback(tool, monitor.events.PY_START, None)
+            monitor.free_tool_id(tool)
+        self.assertEqual(hass.states.get(subject.entity_id).state, hass.states.get(control.entity_id).state)
+        self.assertEqual(int(hass.states.get(subject.entity_id).state), int(initial.state) + 1)
+        self.assertEqual(path.read_bytes(), original)
+        for source, target in mapping.items():
+            self.assertEqual(self.f.entity.async_get(source).id, uuids[source])
+            self.assertIsNone(self.f.entity.async_get(target))
