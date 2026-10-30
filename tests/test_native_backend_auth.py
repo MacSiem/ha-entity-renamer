@@ -53,7 +53,7 @@ class NativeBackendAuthTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(connection.async_handle_close)
         return connection, user, output
 
-    async def _revocation_while_waiting(self, command):
+    async def _revocation_while_waiting(self, command, *, payload=None, runtime_method='discover'):
         from homeassistant.auth.const import GROUP_ID_USER
         backend = self._loaded_backend()
         hass = self.f.hass
@@ -67,7 +67,7 @@ class NativeBackendAuthTests(unittest.IsolatedAsyncioTestCase):
         lock = runtime.operation_lock
         seen = hass.loop.create_future()
         lock_code = asyncio.Lock.acquire.__code__
-        discover_code = backend.Runtime.discover.__code__
+        discover_code = getattr(backend.Runtime, runtime_method).__code__
         observed_task = None
         tool = None
         def observe(code, offset, value):
@@ -101,7 +101,8 @@ class NativeBackendAuthTests(unittest.IsolatedAsyncioTestCase):
         try:
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_YIELD, observe)
             sys.monitoring.set_local_events(tool, lock_code, sys.monitoring.events.PY_YIELD)
-            connection.async_handle({'id': 1, 'type': request_type, 'proposal': {}})
+            connection.async_handle({'id': 1, 'type': request_type,
+                                     **({'proposal': {}} if payload is None else payload)})
             await asyncio.wait((seen, output), return_when=asyncio.FIRST_COMPLETED)
             self.assertTrue(seen.done(), 'registered command returned before native Runtime lock wait')
             task = seen.result()
