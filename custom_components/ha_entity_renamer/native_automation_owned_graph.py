@@ -48,6 +48,13 @@ class _Route:
     duration_retained: object = None
 
 
+@dataclass(frozen=True)
+class _RetirementPlan:
+    routes: tuple
+    installed: bool
+    witness: object
+
+
 def _stable(binding, *, configured_view=None):
     b = binding
     cells = _closure(b.listener, b._native.state.__name__,
@@ -454,9 +461,14 @@ class OwnedAutomationGraph:
         witness = self.witness
         transfer = getattr(self, 'transfer', None)
         if transfer is not None:
-            transfer.check_configured_retained()
+            transfer.check_configured_retained(configured_view=configured_view)
         _need(not self.live or not self.pending() or before_attempt or witness.error is not None,
               'automation_ingress_delivery_pending')
+        if self.live and self.duration is not None:
+            expiry = self.duration.expiry
+            _need(expiry.witness is witness and witness.automation_graph is self
+                  and not any(record.state == 'active' for record in expiry.records.values()),
+                  'automation_retire_expiry_owner_changed')
         # Validate EVERY retained edge before changing any one of them. In
         # particular, never iterate a foreign replacement/extended keys list as
         # our cleanup plan. Partial installation has its own exact write log.
@@ -519,11 +531,13 @@ class OwnedAutomationGraph:
                     if not projected:
                         callbacks=tuple((k,v) for k,v in callbacks if k!=key)
                 shadow[slot]=callbacks
-        return tuple(plans)
+        return _RetirementPlan(tuple(plans), self.live, witness)
 
-    def apply_retire(self, plans, *, before_attempt=False):
-        witness = self.witness
-        for route, expected, target, duration_plan in plans:
+    def apply_retire(self, plan, *, before_attempt=False):
+        _need(type(plan) is _RetirementPlan and self.live is plan.installed
+              and self.witness is plan.witness, 'automation_retire_plan_owner_changed')
+        witness = plan.witness
+        for route, expected, target, duration_plan in plan.routes:
             b = route.binding
             if hasattr(b, '_duration') and (self.live or route.duration_operations is not None):
                 self.duration.retire(route, before_attempt, duration_plan)
@@ -542,10 +556,13 @@ class OwnedAutomationGraph:
         self.routes.clear()
         # Successful witness.finish keeps its original monitor until this
         # final synchronous native retirement has actually completed.
-        if self.duration is not None and witness is not None:
-            self.duration.expiry.detach(witness)
-        if witness is not None and witness.finished:
-            witness.close()
+        # A pre-graph prefix does not own the prepared new witness. Its caller
+        # closes that witness; a previous edge's stale graph witness is untouched.
+        if plan.installed:
+            if self.duration is not None:
+                self.duration.expiry.detach(witness)
+            if witness.finished:
+                witness.close()
 
     def retire(self, *, before_attempt=False):
         plans = self.plan_retire(before_attempt=before_attempt)

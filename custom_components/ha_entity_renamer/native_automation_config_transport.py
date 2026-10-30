@@ -270,9 +270,13 @@ class NativeAutomationConfigTransport:
                 _need(owner.image is before, 'automation_restored_holder_changed')
                 owner.check()
 
-    def check_configured_retained(self):
+    def check_configured_retained(self, *, configured_view=None):
         for edge in self.duration_edges:
             edge.check_pins()
+            # Historical OWN holders/snapshot siblings must pass BEFORE undo.
+            # Only a journal-validated pre-graph prefix may select a BEFORE view.
+            for owner, _, _ in edge.owners:
+                owner.check(configured_view)
         slots = getattr(self, '_retained_original_slots', None)
         if slots is not None:
             _need(self._actor_graph(slots=slots) == self.original,
