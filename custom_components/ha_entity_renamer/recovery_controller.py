@@ -251,10 +251,11 @@ class RecoveryController:
                     or record.phases != ('verified',) * len(record.plan.steps)):
                 return _result(operation_id, fingerprint, 'UNKNOWN', 'unsupported_recovery_state')
             if record.plan.required_scopes == ('registry', 'yaml'):
-                from .native_template_yaml_server import NativeTemplateYAMLServer
+                from . import _yaml_factory_for_plan
+                factory = _yaml_factory_for_plan(preparations, record.plan)
                 # Fresh actual source/history/auth admission, independently repeated
                 # for restore; no inspect result is retained as write authority.
-                session = await NativeTemplateYAMLServer.bind_reverse(self.hass,
+                session = await factory.bind_reverse(self.hass,
                     operation_id, fingerprint, guard=self.check, refresh=self.refresh)
                 self.check()
                 summary = _yaml_summary(session)

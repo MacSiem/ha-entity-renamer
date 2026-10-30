@@ -13,6 +13,30 @@ def CONFIG_SCHEMA(config):
     return config_entry_only_config_schema(DOMAIN)(config)
 
 
+def _yaml_factory_for_plan(preparations, plan):
+    """Advisory typed routing only; the factory freshly admits every original.
+
+    Peek at the already authenticated immutable row instead of decoding/copying
+    its potentially large baseline solely to choose an implementation.
+    """
+    from .transaction import Plan, Refused
+    from .native_template_state_server import NativeTemplateStateServer
+    from .native_template_yaml_server import NativeTemplateYAMLServer
+    preparations._ready()
+    if type(plan) is not Plan or type(plan.native_inputs) is not tuple or len(plan.native_inputs) != 3:
+        raise Refused('yaml_original_profile_unavailable')
+    row = preparations.plans.get(plan.native_inputs[0])
+    if row is None or row['digest'] != plan.native_inputs[1]:
+        raise Refused('yaml_original_profile_unavailable')
+    composition = row['payload'].get('composition')
+    profile = composition.get('profile') if type(composition) is dict else None
+    if profile in ('template_state_binding_v3', 'template_mixed_state_binding_v1'):
+        return NativeTemplateStateServer
+    if profile in ('template_numeric_entry_reverse_v1', 'template_dependent_yaml_v1'):
+        return NativeTemplateYAMLServer
+    raise Refused('yaml_original_profile_unavailable')
+
+
 @dataclass(frozen=True)
 class _PreparedReview:
     """Server-retained immutable Plan; no live session, callback or HA tokens."""
@@ -78,7 +102,7 @@ class Runtime:
         The future authenticated transport supplies its own fresh actor identity;
         neither a Plan nor any original/source document is accepted from clients.
         """
-        from .native_template_yaml_server import NativeTemplateYAMLServer
+        from .native_template_state_server import NativeTemplateStateServer
         from .native_template_reverse import _authorize
         from .transaction import Refused
         def current():
@@ -90,7 +114,7 @@ class Runtime:
         async with self.operation_lock:
             await refresh()
             current()
-            session = await NativeTemplateYAMLServer.prepare(hass, mapping, guard=current, refresh=refresh)
+            session = await NativeTemplateStateServer.prepare(hass, mapping, guard=current, refresh=refresh)
             try:
                 current()
                 plan, operation = session.plan, session.operation_id
@@ -125,7 +149,8 @@ class Runtime:
                 raise Refused('review_unavailable_or_mismatched')
             self.reviews.pop(operation_id)
             async def operation():
-                session = await NativeTemplateYAMLServer.bind_prepared(hass, operation_id,
+                factory = _yaml_factory_for_plan(self.preparations, review.plan)
+                session = await factory.bind_prepared(hass, operation_id,
                     review.plan, guard=current, refresh=refresh)
                 try:
                     return await session.apply()
@@ -161,8 +186,8 @@ class Runtime:
                 # Selection is server-owned; unsupported populations refuse.
                 factory = NativeTemplateForward
                 if not hass.config_entries.async_entries('template'):
-                    from .native_template_yaml_server import NativeTemplateYAMLServer
-                    factory = NativeTemplateYAMLServer
+                    from .native_template_state_server import NativeTemplateStateServer
+                    factory = NativeTemplateStateServer
                 session = await factory.prepare(hass, mapping,
                     guard=current, refresh=refresh)
                 try:
@@ -192,7 +217,13 @@ class Runtime:
             await refresh()
             current()
             async def operation():
-                session = await NativeTemplateYAMLServer.bind_reverse(hass, operation_id,
+                from .transaction import Refused
+                record = await self.journal.load(operation_id)
+                current()
+                if record is None or record.plan.fingerprint != fingerprint:
+                    raise Refused('yaml_operation_mismatch')
+                factory = _yaml_factory_for_plan(self.preparations, record.plan)
+                session = await factory.bind_reverse(hass, operation_id,
                     fingerprint, guard=current, refresh=refresh)
                 try:
                     return await session.rollback()
