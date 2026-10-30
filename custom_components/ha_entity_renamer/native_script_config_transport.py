@@ -40,7 +40,7 @@ def _source_string(original, text):
     return replacement
 
 
-def _graph(value, *, include_scripts=False):
+def _graph(value, *, include_scripts=False, slots=None):
     """Identity of reachable configured/cache edges, without evaluating leaves.
 
     Compiled Template artifacts and render counters may advance normally; their
@@ -65,9 +65,11 @@ def _graph(value, *, include_scripts=False):
             head += (tuple((name, visit(getattr(item, name), ancestry))
                 for name in ('__config_file__', '__line__') if hasattr(item, name)),)
         if kind in (dict, NodeDictClass):
-            return head + (tuple((visit(key, ancestry), visit(child, ancestry)) for key, child in item.items()),)
+            entries = item.items() if slots is None or id(item) not in slots else slots[id(item)]
+            return head + (tuple((visit(key, ancestry), visit(child, ancestry)) for key, child in entries),)
         if kind in (list, tuple, NodeListClass):
-            return head + (tuple(visit(child, ancestry) for child in item),)
+            values = item if slots is None or id(item) not in slots else slots[id(item)]
+            return head + (tuple(visit(child, ancestry) for child in values),)
         if kind is Template:
             return head + (id(item.hass), visit(item.template, ancestry))
         if kind is ScriptVariables:

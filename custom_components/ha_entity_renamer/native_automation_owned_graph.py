@@ -44,6 +44,8 @@ class _Route:
     duration_events: object = None
     duration_delivered: object = None
     duration_dispatch: object = None
+    duration_pending: object = None
+    duration_retained: object = None
 
 
 def _stable(binding):
@@ -161,7 +163,10 @@ class OwnedAutomationGraph:
                     self.duration.wrap(self, route)
             self.check()
         except BaseException:
-            self.retire(before_attempt=True)
+            # Config transport validates its retained slots before graph undo.
+            # A standalone graph still owns its complete cleanup boundary.
+            if getattr(self,'transfer',None) is None:
+                self.retire(before_attempt=True)
             raise
 
     def _receive(self, route, event):
@@ -444,8 +449,8 @@ class OwnedAutomationGraph:
         # Validate EVERY retained edge before changing any one of them. In
         # particular, never iterate a foreign replacement/extended keys list as
         # our cleanup plan. Partial installation has its own exact write log.
-        plans = []
-        for route in self.routes:
+        plans, shadow = [], {}
+        for route in reversed(self.routes):
             b = route.binding
             b._native.check()
             _need(_stable(b) == route.stable and b.entity._is_enabled is True
@@ -465,8 +470,6 @@ class OwnedAutomationGraph:
                   and b.data.callbacks is b.callbacks and b.data.listener is b.bus_remove,
                   'automation_retire_callback_owner_changed')
             rc = _closure(b.remove, b._native.state.__name__, 'async_attach_trigger.<locals>.async_remove')
-            if hasattr(b, '_duration'):
-                self.duration.check_route(route)
             _need(rc['unsub'] is b.unsubscribe and (hasattr(b, '_duration') or not rc['unsub_track_same'])
                   and b.unsubscribe.func is b._native.event._remove_listener
                   and not b.unsubscribe.keywords
@@ -479,13 +482,30 @@ class OwnedAutomationGraph:
                       == (1 if key in expected else 0) for key, members in b.callbacks.items())
                   and all(key in b.callbacks for key in expected),
                   'automation_retire_route_membership_changed')
-            if hasattr(b, '_duration'):
-                self.duration.validate_retire(route)
-            plans.append((route, expected, route.before if before_attempt else route.target))
-        for route, expected, target in reversed(plans):
+            duration_plan = (self.duration.validate_retire(route, before_attempt,shadow)
+                             if hasattr(b, '_duration') else None)
+            target=route.before if before_attempt else route.target
+            plans.append((route, expected,target,duration_plan))
+            if before_attempt:
+                # Later routes share callbacks with earlier routes. Project
+                # their main-route cleanup too before validating earlier logs.
+                slot=('dict',id(b.callbacks))
+                callbacks=shadow.get(slot,tuple(b.callbacks.items()))
+                for key in expected:
+                    if key in target:
+                        continue
+                    members=next(v for k,v in callbacks if k==key)
+                    member_slot=('list',id(members))
+                    current=shadow.get(member_slot,tuple(members))
+                    projected=tuple(j for j in current if j is not b.keyed_job)
+                    shadow[member_slot]=projected
+                    if not projected:
+                        callbacks=tuple((k,v) for k,v in callbacks if k!=key)
+                shadow[slot]=callbacks
+        for route, expected, target, duration_plan in plans:
             b = route.binding
-            if hasattr(b, '_duration') and route.duration_transported:
-                self.duration.retire(route, before_attempt)
+            if hasattr(b, '_duration'):
+                self.duration.retire(route, before_attempt, duration_plan)
             if route.handle is not None:
                 route.handle.cancel()  # only this OWN handle, never native ready work
             for key in expected:

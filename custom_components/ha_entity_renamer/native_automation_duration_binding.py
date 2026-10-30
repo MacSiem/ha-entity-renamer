@@ -40,6 +40,114 @@ def _shape(f):
     return id(f), id(f.__code__), id(f.__globals__), tuple((id(c),id(c.cell_contents)) for c in f.__closure__ or ())
 
 
+
+class _PreEffectLog:
+    """Exact shallow slots, with a read-only rollback plan before any undo."""
+    ABSENT = object()
+
+    def __init__(self):
+        self.slots, self.records = {}, []
+
+    @staticmethod
+    def read(kind, owner):
+        if kind == 'list':
+            return tuple(owner)
+        if kind == 'dict':
+            return tuple(owner.items())
+        if kind == 'entry':
+            table, key = owner
+            return table.get(key, _PreEffectLog.ABSENT)
+        return getattr(owner, kind)
+
+    @staticmethod
+    def token(kind, value):
+        if kind == 'dict':
+            return tuple((id(k), id(v)) for k, v in value)
+        if kind == 'list':
+            return tuple(map(id, value))
+        return id(value)
+
+    def retain(self, kind, owner):
+        key = (kind, id(owner[0]), id(owner[1])) if kind == 'entry' else (kind, id(owner))
+        if key not in self.slots:
+            self.slots[key] = kind, owner, self.read(kind, owner)
+        return key
+
+    def write(self, kind, owner, after, apply):
+        key = self.retain(kind, owner)
+        record = [key, self.read(kind, owner), after, False]
+        self.records.append(record)
+        apply()
+        record[3] = True
+
+    def plan(self,shadow=None):
+        if shadow is None:
+            shadow={}
+        def current(key,kind,owner):
+            return shadow[key] if key in shadow else self.read(kind,owner)
+        expected = {key: before for key, (_, _, before) in self.slots.items()}
+        completed = []
+        for index, (key, before, after, done) in enumerate(self.records):
+            kind, owner, _ = self.slots[key]
+            same = lambda a, b: self.token(kind, a) == self.token(kind, b)
+            _need(same(expected[key], before), 'duration_write_log_changed')
+            if not done:
+                # An interrupted built-in write has precisely two admissible
+                # outcomes. Partial dict update/foreign values remain UNKNOWN.
+                _need(index == len(self.records)-1, 'duration_write_log_uncertain')
+                actual = current(key,kind,owner)
+                _need(same(actual, before) or same(actual, after), 'duration_partial_write_uncertain')
+                done = same(actual, after) and not same(actual, before)
+            if done:
+                expected[key] = after
+                completed.append((kind, owner, before))
+        for key, (kind, owner, _) in self.slots.items():
+            _need(self.token(kind, current(key,kind,owner)) == self.token(kind, expected[key]),
+                  'duration_rollback_slot_changed')
+        for key, (_, _, before) in self.slots.items():
+            shadow[key]=before
+        return tuple(reversed(completed))
+
+    @staticmethod
+    def undo(plan):
+        for kind, owner, before in plan:
+            if kind == 'list':
+                owner[:] = before
+            elif kind == 'dict':
+                owner.clear()
+                owner.update(before)
+            elif kind == 'entry':
+                table, key = owner
+                if before is _PreEffectLog.ABSENT:
+                    table.pop(key)
+                else:
+                    table[key] = before
+            else:
+                setattr(owner, kind, before)
+
+
+def _retained_value(value, omitted, seen=()):
+    """Pin closure topology while separately journaled slots change values."""
+    if id(value) in seen or id(value) in omitted:
+        return type(value), id(value)
+    seen = (*seen, id(value))
+    if type(value) is FunctionType:
+        return (id(value), id(value.__code__), id(value.__globals__),
+            tuple((id(c), None if id(c) in omitted else _retained_value(c.cell_contents, omitted, seen))
+                  for c in value.__closure__ or ()),
+            tuple((name, id(value.__globals__[name])) for name in value.__code__.co_names
+                  if name in value.__globals__), _value(value.__dict__))
+    if type(value) is partial:
+        return (id(value), _retained_value(value.func, omitted, seen),
+                _retained_value(value.args, omitted, seen), _retained_value(value.keywords, omitted, seen))
+    if type(value) in (list, tuple):
+        return id(value), tuple(_retained_value(v, omitted, seen) for v in value)
+    if type(value) is dict:
+        return id(value), tuple((_retained_value(k, omitted, seen), _retained_value(v, omitted, seen))
+                               for k, v in value.items())
+    return _value(value)
+
+
 def literal_duration(cfg):
     value = cfg.get('for')
     _need(type(value) is timedelta and value > timedelta(0), 'literal_duration_required')
@@ -292,30 +400,49 @@ class NativeAutomationDurationCapability:
         for p in pending:
             old,new=p['key'],mapping[p['key']]
             _need(old==new or not any(j is p['cancel_job'] for j in b.callbacks.get(new,())), 'duration_cancel_collision')
-        if getattr(route,'duration_operations',None) is None:
-            route.duration_operations=[]
-        log=route.duration_operations
+        _need(route.duration_operations is None, 'duration_transport_repeated')
+        log = route.duration_operations = _PreEffectLog()
+        route.duration_pending = pending
+        # Retain every related mutable slot, including untouched ones, before
+        # the first duration write. Membership lists retain foreign job order.
+        log.retain('dict', b.callbacks)
+        for members in b.callbacks.values():
+            log.retain('list', members)
+        for values in maps:
+            log.retain('dict', values)
+        for p in pending:
+            log.retain('list', p['keys'])
+            log.retain('cell_contents', p['entity_cell'])
+            log.retain('target', p['cancel_job'])
+            log.retain('entry', (self.wrappers, p['cancel_job']))
+            if p.get('own') is not None:
+                log.retain('approved_entity', p['own'])
+        route.duration_retained = self._retained(route)
         def write(kind,owner,before,after,apply):
-            record=[kind,owner,before,after,False]
-            log.append(record)
-            apply()
-            record[4]=True
+            slot = {'append':'list','remove':'list','keys':'list',
+                    'cell':'cell_contents','map_clear':'dict','map_update':'dict'}.get(kind,kind)
+            _need(log.token(slot,log.read(slot,owner)) == log.token(slot,before),
+                  'duration_write_before_changed')
+            log.write(slot,owner,after,apply)
         for p in pending:
             old,new=p['key'],mapping[p['key']]
             if old!=new:
+                _need(new in b.callbacks, 'duration_cancel_target_missing')
                 write('append',b.callbacks[new],tuple(b.callbacks[new]),(*b.callbacks[new],p['cancel_job']),
                       lambda: b.callbacks[new].append(p['cancel_job']))
                 members=b.callbacks[old]
                 write('remove',members,tuple(members),tuple(j for j in members if j is not p['cancel_job']),
                       lambda: members.remove(p['cancel_job']))
                 if not members:
-                    write('pop',b.callbacks,(old,members),None,lambda: b.callbacks.pop(old))
+                    write('dict',b.callbacks,tuple(b.callbacks.items()),
+                          tuple((k,v) for k,v in b.callbacks.items() if k!=old),lambda: b.callbacks.pop(old))
                 write('keys',p['keys'],tuple(p['keys']),(new,),lambda: p['keys'].__setitem__(slice(None),[new]))
                 write('cell',p['entity_cell'],p['entity_cell'].cell_contents,new,
                       lambda: setattr(p['entity_cell'],'cell_contents',new))
                 if p['own'] is not None:
-                    write('approved_entity',p['own'],p['own'].approved_entity,new,
-                          lambda: setattr(p['own'],'approved_entity',new))
+                    own=p['own']
+                    write('approved_entity',own,own.approved_entity,new,
+                          lambda: setattr(own,'approved_entity',new))
         for values in maps:
             projected={mapping.get(k,k):v for k,v in values.items()}
             write('map_clear',values,tuple(values.items()),(),values.clear)
@@ -334,30 +461,67 @@ class NativeAutomationDurationCapability:
                     graph._receive_duration(route,event,pending)
                 return receive
             wrapper=factory(MappingProxyType(dict(p)))
-            self.wrappers[job]=(wrapper,p['cancel_listener'],_shape(wrapper))
-            job.target=wrapper
+            entry=(wrapper,p['cancel_listener'],_shape(wrapper))
+            if route.duration_operations is not None:
+                log=route.duration_operations
+                log.write('entry',(self.wrappers,job),entry,
+                          lambda: self.wrappers.__setitem__(job,entry))
+                log.write('target',job,wrapper,lambda: setattr(job,'target',wrapper))
+            else:
+                self.wrappers[job]=entry
+                job.target=wrapper
         self.lock(route)
 
-    def validate_retire(self,route):
-        _need(all(record[4] for record in route.duration_operations or ()),
-              'duration_partial_write_uncertain')
+    def _retained(self,route):
+        log=route.duration_operations
+        omitted={id(owner) for kind,owner,_ in log.slots.values() if kind!='entry'}
+        rows=[]
+        for values in (route.binding.listener_cells['period'],route.binding.listener_cells['unsub_track_same']):
+            _,_,before=log.slots[('dict',id(values))]
+            rows.append(tuple(_retained_value(v,omitted) for _,v in before))
+        for p in route.duration_pending:
+            handle=p['handle']
+            _need(not handle.cancelled() and sum(h is handle for h in self.hass.loop._scheduled)==1
+                  and not any(h is handle for h in self.hass.loop._ready), 'duration_rollback_timer_changed')
+            rows.append((id(handle),handle.when(),id(handle._loop),id(handle._context),
+                id(handle._callback),tuple(map(id,handle._args)),
+                tuple(_retained_value(p[n],omitted) for n in
+                      ('clear','cancel','cancel_listener','predicate','action')),
+                tuple((id(p[n]),id(p[n].target),p[n].job_type,p[n].name,
+                       p[n]._cancel_on_shutdown,_value(p[n]._cache)) for n in ('timer_job','same_job')),
+                (id(p['cancel_job']),p['cancel_job'].job_type,p['cancel_job'].name,
+                 p['cancel_job']._cancel_on_shutdown,_value(p['cancel_job']._cache)),
+                None if p.get('own') is None else
+                (id(p['own'].binding),id(p['own'].change),id(p['own'].entity_cell),
+                 id(p['own'].action),id(p['own'].predicate),id(p['own'].clear),_value(p['own'].edges))))
+        return tuple(rows)
+
+    def validate_retire(self,route,before_attempt=False,shadow=None):
+        if before_attempt and route.duration_operations is not None:
+            self.check_sources()
+            for p in route.duration_pending:
+                if p['cancel_job'] in self.wrappers:
+                    wrapper,original,shape=self.wrappers[p['cancel_job']]
+                    _need(_shape(wrapper)==shape and _cells(wrapper)['route'] is route
+                          and original is p['cancel_listener'], 'duration_rollback_wrapper_changed')
+            _need(self._retained(route)==route.duration_retained, 'duration_rollback_retained_changed')
+            return route.duration_operations.plan(shadow)
         self.check_route(route)
         for job,(wrapper,original,shape) in self.wrappers.items():
             if _cells(wrapper)['route'] is route:
                 _need(job.target is wrapper and _shape(wrapper)==shape,'duration_retire_wrapper')
                 _nested(original,self.native.event.async_track_same_state,'state_for_cancel_listener')
+        return None
 
-    def retire(self,route,before_attempt):
-        b=route.binding
+    def retire(self,route,before_attempt,plan=None):
+        if before_attempt and route.duration_operations is not None:
+            _need(plan is not None,'duration_rollback_plan_missing')
+            _PreEffectLog.undo(plan)
+            return
         for job,(wrapper,original,_) in tuple(self.wrappers.items()):
             if _cells(wrapper)['route'] is route:
                 job.target=original
                 self.wrappers.pop(job)
-        if before_attempt:
-            class Reverse:
-                binding=b
-                before=route.target
-            self.transport(Reverse(),route.before)
 
     def start_pair(self,graph,route,change):
         b=route.binding;key=change.event.data['entity_id']

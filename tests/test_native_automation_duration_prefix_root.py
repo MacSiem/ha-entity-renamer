@@ -113,6 +113,15 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_multi_id_queued_foreign_event_preserves_other_pending(self):
         await self._duration_case(mode='multi_foreign')
 
+    async def test_partial_duration_keys_write_restores_before_native_api(self):
+        await self._duration_case(mode='partial_keys')
+
+    async def test_partial_duration_map_clear_restores_before_native_api(self):
+        await self._duration_case(mode='partial_map')
+
+    async def test_partial_duration_wrapper_registration_restores_before_native_api(self):
+        await self._duration_case(mode='partial_wrapper')
+
     async def _duration_case(self, *, mode):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -120,9 +129,10 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         hass,root = self.f.hass,self.f.root
         old,new = next(iter(mapping.items()))
         multi = mode in ('multi','multi_foreign')
+        partial = mode.startswith('partial_')
         foreign = mode in ('foreign','transient','multi_foreign')
         meaningful = mode in ('meaningful','foreign','replace','multi','multi_foreign')
-        pending = mode in ('pending','cancel','from_only','attribute','rollback','foreign_route','orphan','replace','transient')
+        pending = partial or mode in ('pending','cancel','from_only','attribute','rollback','foreign_route','orphan','replace','transient')
         duration = 480 if pending or multi else 180 if meaningful else 2
         other_id = 'sensor.duration_other'
         original_keys = [old,other_id] if multi else [old]
@@ -262,11 +272,14 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         duration_type=self.module('native_automation_duration_binding').NativeAutomationDurationCapability
         codes=(handoff_type.mutate.__code__,graph_type._action.__code__,root_type._install.__code__,
                witness_type.mutate.__code__,duration_type.start_pair.__code__)
+        if partial:
+            codes+= (self.module('native_automation_duration_binding')._PreEffectLog.write.__code__,)
         tool=next(k for k in range(6) if sys.monitoring.get_tool(k) is None)
         sys.monitoring.use_tool_id(tool,'actual Root literal for acceptance')
         emitted=[]
         created=[]
         revoked=False
+        faulted=False
         def guard():
             if revoked:
                 raise PermissionError('fixture pre-effect authorization loss')
@@ -290,8 +303,18 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(actor.attempted)
                 revoked=True
         def returned(code,offset,value):
+            nonlocal faulted
             frame=sys._getframe(1)
             actor=frame.f_locals.get('self')
+            if partial and code is codes[5] and not faulted:
+                kind,owner=frame.f_locals['kind'],frame.f_locals['owner']
+                selected=(mode=='partial_keys' and kind=='list' and owner is native_pending['keys']
+                    or mode=='partial_map' and kind=='dict' and owner is before.listener_cells['period']
+                    and not owner
+                    or mode=='partial_wrapper' and kind=='entry' and owner[1] is native_pending['cancel_job'])
+                if selected:
+                    faulted=True
+                    raise RuntimeError('fixture after actual duration write')
             if code is codes[4] and actor.hass is hass:
                 created.extend(actor.pending(frame.f_locals['route'].binding)[0])
             if code is codes[0] and actor.hass is hass and foreign and not emitted:
@@ -315,12 +338,16 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             for code in codes:
                 sys.monitoring.set_local_events(tool,code,sys.monitoring.events.PY_START)
             sys.monitoring.set_local_events(tool,codes[4],sys.monitoring.events.PY_RETURN)
+            if partial:
+                sys.monitoring.set_local_events(tool,codes[5],sys.monitoring.events.PY_RETURN)
             if foreign:
                 sys.monitoring.set_local_events(tool,codes[0],sys.monitoring.events.PY_START|sys.monitoring.events.PY_RETURN)
             with mixed.native_diagnostics(self.module):
-                if mode in ('rollback','foreign_route','orphan'):
-                    with self.assertRaises((PermissionError,self.module('transaction').Refused,ValueError)):
+                if partial or mode in ('rollback','foreign_route','orphan'):
+                    with self.assertRaises((PermissionError,self.module('transaction').Refused,ValueError,RuntimeError)):
                         await runtime.native_forward(hass,mapping,guard=guard,refresh=refresh)
+                    if partial:
+                        self.assertTrue(faulted,'actual selected write must have completed')
                     self.assertEqual(handoffs,[],'No registry/source mutation API')
                     self.assertIs(hass.states.get(old),physical)
                     self.assertIsNone(hass.states.get(new))

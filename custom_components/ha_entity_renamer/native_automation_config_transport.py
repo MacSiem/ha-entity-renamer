@@ -178,11 +178,11 @@ class NativeAutomationConfigTransport:
         self.check_before()
         return self
 
-    def _actor_graph(self):
-        return tuple((id(a.entity), id(a.script), _graph(a.entity.raw_config),
-            _graph(a.script.sequence), _graph(a.script.variables),
-            _graph(getattr(a.entity, '_variables', None)),
-            _graph(getattr(a.entity, '_trigger_config', None))) for a in self.actors)
+    def _actor_graph(self, *, slots=None):
+        return tuple((id(a.entity), id(a.script), _graph(a.entity.raw_config, slots=slots),
+            _graph(a.script.sequence, slots=slots), _graph(a.script.variables, slots=slots),
+            _graph(getattr(a.entity, '_variables', None), slots=slots),
+            _graph(getattr(a.entity, '_trigger_config', None), slots=slots)) for a in self.actors)
 
     def check_before(self):
         _need(asyncio.current_task() is self.task and self.phase == 'captured')
@@ -214,28 +214,55 @@ class NativeAutomationConfigTransport:
 
     def install(self, witness):
         self.check_before()
-        completed = []
+        from .native_automation_duration_binding import _PreEffectLog
+        log=_PreEffectLog()
+        # Retain unmodified slots too; never restore an uncleared foreign cache.
+        for kind,container,_,_ in self.operations:
+            log.retain(kind,container)
+        slots={id(container):before for _,container,before,_ in self.operations}
+        def cache_token(value):
+            # Observe the retained ORIGINAL slot references while traversing
+            # their actual current children. Unlike masking a whole edited
+            # container, this detects foreign changes in untouched descendants.
+            return _graph(value,include_scripts=True,slots=slots)
+        saved=[]
+        for actor in self.actors:
+            for name,cache,items in actor.caches:
+                log.retain('dict',cache)
+                saved.append((actor.script,name,cache,items,cache_token(items)))
+        def cleanup_plan():
+            _need(self._actor_graph(slots=slots)==self.original, 'automation_cleanup_root_changed')
+            for actor in self.actors:
+                _need(actor.entity.action_script is actor.script
+                      if actor.entity.entity_id.startswith('automation.')
+                      else actor.entity.script is actor.script,
+                      'automation_cleanup_script_changed')
+                _idle_census(actor.script)
+            _need(all(getattr(script,name) is cache and cache_token(items)==token
+                      for script,name,cache,items,token in saved), 'automation_cleanup_cache_changed')
+            return log.plan()  # all config/cache slots validated before any cleanup write
+        self._config_log,self._config_cleanup_plan=log,cleanup_plan
         try:
             for operation in self.operations:
-                self._write(operation)
-                completed.append(operation)
+                kind,container,before,after=operation
+                log.write(kind,container,after,lambda: self._write(operation))
             for actor in self.actors:
                 _idle_census(actor.script)
                 if actor.changed:
                     for _, cache, _ in actor.caches:
-                        cache.clear()
+                        log.write('dict',cache,(),cache.clear)
             self.graph.install(witness)
             self._rows(self.after)
             self.installed = self._actor_graph()
         except BaseException:
-            self.graph.retire(before_attempt=True)
-            for operation in reversed(completed):
-                self._write(operation, reverse=True)
-            for actor in self.actors:
-                for _, cache, items in actor.caches:
-                    cache.clear()
-                    cache.update(items)
-            self.phase = 'failed_before_attempt'
+            try:
+                plan=cleanup_plan()
+                self.graph.retire(before_attempt=True)
+                log.undo(plan)
+                self.phase = 'failed_before_attempt'
+            except BaseException:
+                self.phase = 'failed_before_attempt_cleanup_unknown'
+                raise
             raise
         self.phase = 'installed'
 
@@ -251,12 +278,12 @@ class NativeAutomationConfigTransport:
             _idle_census(actor.script)
             if actor.changed:
                 _need(all(not cache for _, cache, _ in actor.caches))
-        self.graph.retire(before_attempt=True)
-        for operation in reversed(self.operations):
-            self._write(operation, reverse=True)
-        for actor in self.actors:
-            if actor.changed:
-                for _, cache, items in actor.caches:
-                    cache.update(items)
-        self._rows(self.before)
-        self.phase = 'restored_before_attempt'
+        plan=self._config_cleanup_plan()
+        try:
+            self.graph.retire(before_attempt=True)
+            self._config_log.undo(plan)
+            self._rows(self.before)
+            self.phase = 'restored_before_attempt'
+        except BaseException:
+            self.phase = 'failed_before_attempt_cleanup_unknown'
+            raise
