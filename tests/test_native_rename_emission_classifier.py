@@ -232,7 +232,17 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
             mutation = witness.mutate()
             renamed = True
             self.assertIs(type(mutation), native.NativeRegistryMutation)
-            proof = await witness.finish()
+            try:
+                proof = await witness.finish()
+            except BaseException:
+                if source_handoff:
+                    print('HANDOFF_CLASSIFIER_DIAGNOSTIC', {
+                        'phases': [(item.phase, item.event is not None, item.dispatched) for item in witness.emissions],
+                        'source_runs': witness.source_runs,
+                        'tasks': [(task.done(), record[2]) for task, record in witness.tasks.items()],
+                        'pending': len(witness.pending), 'dispatches': len(witness.dispatches),
+                        'constructors': len(witness.constructors), 'keyed': len(witness.keyed)})
+                raise
             self.assertEqual((proof['rename_remove'], proof['rename_add']), (1, 1))
             self.assertTrue(proof['source_tasks_complete'])
             self.assertTrue(proof['dispatches_complete'])
