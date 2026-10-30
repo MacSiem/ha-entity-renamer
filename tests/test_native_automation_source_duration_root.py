@@ -181,6 +181,7 @@ class NativeAutomationSourceDurationRootTests(unittest.IsolatedAsyncioTestCase):
             for domain, rows in phase.program.rows(frozenset(active)):
                 self.assertEqual(normal(observer._projection(domain)[0]), rows)
 
+        retained = control_image = None
         try:
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, start)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, returned)
