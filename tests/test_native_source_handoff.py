@@ -17,7 +17,7 @@ class NativeSourceHandoffTests(emission.NativeRenameEmissionTests):
         old, new = next(iter(mapping.items()))
         native = self.module('native_registry')
         io = native.NativeRegistryIO(hass)
-        bridge = native.NativeRegistryBridge(io)
+        bridge = native.NativeRegistryBridge(io, self.module('recorder_guard').NativeRecorderGuard(hass))
         change = await bridge.prepare('entity', uuids[old], {'entity_id': new}, lambda: None)
         platform = source.platform
         info = entity_sources(hass)[old]
