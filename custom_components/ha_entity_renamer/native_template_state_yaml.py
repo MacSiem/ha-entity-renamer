@@ -110,8 +110,9 @@ def assert_state_yaml_composition(chain, change):
     from .native_template_state_composition import (TemplateStateComposition,
         MixedTemplateStateComposition, retain_state_composition)
     from .native_script_program_composition import ScriptTemplateStateComposition
+    from .native_automation_program_composition import AutomationTemplateStateComposition
     expected = {PreparedTemplateStateYAML: (TemplateStateComposition,),
-                PreparedMixedTemplateStateYAML: (MixedTemplateStateComposition, ScriptTemplateStateComposition)}
+                PreparedMixedTemplateStateYAML: (MixedTemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)}
     if type(change) not in expected:
         raise Refused('template_state_yaml_preparation_required')
     from .native_template_composition import decode_composition
@@ -166,8 +167,9 @@ class NativeTemplateStateYAMLRuntimeReadback:
         from .native_template_mixed_state_yaml import NativeMixedTemplateStateYAMLRuntimeReadback
         from .native_template_state_binding import _StateRuntime
         from .native_script_program_composition import ScriptTemplateStateComposition
+        from .native_automation_program_composition import AutomationTemplateStateComposition
         expected = {NativeTemplateStateYAMLRuntimeReadback: (TemplateStateComposition,),
-                    NativeMixedTemplateStateYAMLRuntimeReadback: (MixedTemplateStateComposition, ScriptTemplateStateComposition)}
+                    NativeMixedTemplateStateYAMLRuntimeReadback: (MixedTemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)}
         _need(type(chain) is RegistryReceiptChain and type(self) in expected
               and type(composition) in expected[type(self)], 'template_state_original_chain_required')
         composition.assert_baseline(chain.baseline)

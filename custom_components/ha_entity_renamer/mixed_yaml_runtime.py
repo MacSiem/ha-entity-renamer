@@ -42,7 +42,11 @@ class MixedYAMLConsumers(_UnchangedConsumers):
     def bind_prefix_phases(self, root):
         from .native_script_prefix_phase import NativeScriptPrefixPhase
         self.runtime_sample = None
-        self.phases = NativeScriptPrefixPhase(root)
+        from .native_automation_program_composition import AutomationTemplateStateComposition
+        from .native_automation_prefix_phase import NativeAutomationPrefixPhase
+        phase_type = (NativeAutomationPrefixPhase if type(root.composition) is AutomationTemplateStateComposition
+                      else NativeScriptPrefixPhase)
+        self.phases = phase_type(root)
         self.check()
 
     def check(self):

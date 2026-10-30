@@ -9,6 +9,9 @@ Only exact installed, pinned CPython/HA code is supported. No producer method,
 Event, State, callback, native queue or registry object is replaced or edited.
 """
 from __future__ import annotations
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from homeassistant.core import Event, State
 
 import ast
 import asyncio
@@ -97,6 +100,15 @@ def _audit(root, pins, refs, edges):
                 for name in codes[key].co_names if name in method.__globals__))
                 for key, method in methods.items()}
     return methods, codes, sites, globals_
+
+
+@dataclass(frozen=True)
+class OwnedNativeStateChange:
+    phase: str
+    event: Event
+    prior_state: State
+    new_state: State | None
+    disposition: str
 
 
 @dataclass(eq=False)
@@ -195,7 +207,10 @@ class _Occurrences:
         # PY_UNWIND is not a local event (CPython sys.monitoring API). Only
         # this owned slot subscribes globally; unrelated code returns at once.
         self.global_mask = monitor.events.PY_UNWIND
-        for name in ('event', 'source', 'keyed', 'registry_keyed', 'dispatch'):
+        names = ('event', 'source', 'keyed', 'registry_keyed', 'dispatch')
+        if witness.automation_graph is not None:
+            names += ('automation_action', 'automation_run', 'script_run')
+        for name in names:
             self.masks[witness.codes[name]] = start | end
         # On min, dispatch IS fire: its start is deliberately unused. The
         # fanout supplies the authoritative fire-frame identity, independently
@@ -273,7 +288,7 @@ class NativeRenameEmissions:
     """One source, one attempt, one genuine IO call, original Events only."""
 
     @classmethod
-    async def prepare(cls, io, change, target, *, guard, source_handoff=None):
+    async def prepare(cls, io, change, target, *, guard, source_handoff=None, automation_graph=None):
         _need(type(io) is NativeRegistryIO and type(change) is PreparedRegistryChange,
               'trusted_io_required')
         _need(callable(guard), 'guard_required')
@@ -304,6 +319,11 @@ class NativeRenameEmissions:
               and __version__ in ('2025.6.0', '2026.10.2', '2026.10.4'), 'runtime_unavailable')
         self = cls()
         self.io, self.change, self.destination, self.guard = io, change, target, guard
+        if automation_graph is not None:
+            from .native_automation_owned_graph import OwnedAutomationGraph
+            _need(type(automation_graph) is OwnedAutomationGraph and automation_graph.hass is io.hass
+                  and source_handoff is not None, 'typed_automation_handoff_required')
+        self.automation_graph = automation_graph
         self.source_handoff = source_handoff
         self.handoff_state = self.handoff_semantic = None
         self.handoff_methods = self.handoff_codes = self.handoff_sites = None
@@ -375,9 +395,21 @@ class NativeRenameEmissions:
         }
         # set_state has a second fire for state_reported. Select its own exact
         # state_changed call in the audit, never resolve source in a callback.
+        pins = {**_SOURCES[__version__], 'helpers/event.py': _EVENT_PINS[__version__]}
+        if automation_graph is not None:
+            from homeassistant.components.automation import AutomationEntity
+            from homeassistant.helpers.script import Script
+            from .native_automation_state_binding import _PINS
+            _need(__version__ in _PINS, 'automation_runtime_unsupported')
+            pins['components/automation/__init__.py'] = _PINS[__version__]['components/automation/__init__.py']
+            pins['helpers/script.py'] = ('c78dec6e98825b8ebdc0593061ad821f34735951ef564cc2a96231d04d9477e2'
+                if __version__ == '2025.6.0' else
+                '75376abc1686bcfde2f5d235863728b630b91f703ad03eb1a4b6a22eb8387ee3')
+            self.refs['automation_action'] = (AutomationEntity, '_async_trigger_if_enabled')
+            self.refs['automation_run'] = (AutomationEntity, 'async_trigger')
+            self.refs['script_run'] = (Script, 'async_run')
         self.methods, self.codes, self.sites, self.globals = await self.hass.async_add_executor_job(
-            _audit, homeassistant.__file__,
-            {**_SOURCES[__version__], 'helpers/event.py': _EVENT_PINS[__version__]}, self.refs, edges)
+            _audit, homeassistant.__file__, pins, self.refs, edges)
         if source_handoff is not None:
             from .native_source_handoff import NativeSourceHandoff
             self.handoff_methods = (NativeSourceHandoff.mutate, NativeSourceHandoff._native_check)
@@ -703,11 +735,18 @@ class NativeRenameEmissions:
             _need(len(self.pending) < _MAX_OCCURRENCES, 'occurrence_overflow')
             self.pending.append((kind, raw, receipt))
 
+    def _preflight(self):
+        from .native_template_rename_ingress import NativeTemplateProducerDelivery
+        from .native_automation_producer_delivery import NativeAutomationProducerDelivery
+        _need(type(self.preflight) in (NativeTemplateProducerDelivery, NativeAutomationProducerDelivery)
+              and self.preflight.witness is self, 'typed_producer_delivery_required')
+        return self.preflight
+
     def _started(self, frame):
         if self.closed or self.error is not None:
             return
         if self.preflight is not None:
-            self.preflight.started(frame)
+            self._preflight().started(frame)
         code, values = frame.f_code, frame.f_locals
         if code is self.codes['source']:
             self._source_started(frame)
@@ -784,7 +823,7 @@ class NativeRenameEmissions:
 
     def _ended(self, frame, failed):
         if self.preflight is not None:
-            self.preflight.ended(frame, failed)
+            self._preflight().ended(frame, failed)
         code, key = frame.f_code, id(frame)
         changed = False
         if code is self.codes['event']:
@@ -838,6 +877,22 @@ class NativeRenameEmissions:
                     return False
                 return True
         return False
+
+    def owned_state_change(self, event):
+        """Exact witnessed Event + owning-boundary physical pair; no caller pair."""
+        if not self.is_owned_rename(event):
+            return None
+        item = next(item for item in self.emissions if item.event is event)
+        if item.phase == 'remove':
+            return OwnedNativeStateChange('remove', event, item.raw['old_state'], None, 'structural')
+        handoff = self.source_handoff
+        _need(handoff is not None and type(self.handoff_state) is self.State
+              and self.handoff_state is handoff.original_state
+              and item.raw['old_state'] is None and type(item.raw['new_state']) is self.State,
+              'owned_physical_pair_unavailable')
+        disposition = ('unknown' if self.handoff_semantic is None or item.semantic is None else
+            'neutral' if self.handoff_semantic == item.semantic else 'meaningful')
+        return OwnedNativeStateChange('add', event, self.handoff_state, item.raw['new_state'], disposition)
 
     def suppresses_template_boundary(self, event):
         """Only a structural remove or a proven data-neutral native re-add.
@@ -904,6 +959,14 @@ class NativeRenameEmissions:
             _need(type(self.ingress) is NativeTemplateRenameIngress and self.ingress.witness is self,
                   'owned_ingress_changed')
             pending = pending or bool(self.ingress.deferred)
+        if self.automation_graph is not None:
+            from .native_automation_owned_graph import OwnedAutomationGraph
+            from .native_automation_producer_delivery import NativeAutomationProducerDelivery
+            _need(type(self.automation_graph) is OwnedAutomationGraph
+                  and self.automation_graph.witness is self
+                  and type(self.preflight) is NativeAutomationProducerDelivery,
+                  'typed_automation_delivery_changed')
+            pending = pending or self.automation_graph.pending() or self.preflight.pending_actions()
         # Only actual native keyed deliveries of our original Events count.
         # Never execute/cancel a Handle or retain the rest of the ready queue.
         count = 0

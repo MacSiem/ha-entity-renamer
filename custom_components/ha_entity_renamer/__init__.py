@@ -30,7 +30,7 @@ def _yaml_factory_for_plan(preparations, plan):
         raise Refused('yaml_original_profile_unavailable')
     composition = row['payload'].get('composition')
     profile = composition.get('profile') if type(composition) is dict else None
-    if profile in ('template_state_binding_v3', 'template_mixed_state_binding_v1', 'template_script_prefix_binding_v1'):
+    if profile in ('template_state_binding_v3', 'template_mixed_state_binding_v1', 'template_script_prefix_binding_v1', 'template_automation_prefix_binding_v1'):
         return NativeTemplateStateServer
     if profile in ('template_numeric_entry_reverse_v1', 'template_dependent_yaml_v1'):
         return NativeTemplateYAMLServer

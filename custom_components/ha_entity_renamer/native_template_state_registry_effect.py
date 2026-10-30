@@ -65,8 +65,15 @@ class NativeTemplateStateRegistryEffect:
         obj.transport = None
         obj.witness = obj.delivery = obj.ingress = None
         from .native_script_program_composition import ScriptTemplateStateComposition
+        from .native_automation_program_composition import AutomationTemplateStateComposition
         obj.script_phase = (root.consumers.phases
-            if type(root.composition) is ScriptTemplateStateComposition else None)
+            if type(root.composition) in (ScriptTemplateStateComposition, AutomationTemplateStateComposition) else None)
+        if type(root.composition) is AutomationTemplateStateComposition:
+            from .native_automation_prefix_phase import NativeAutomationPrefixPhase
+            _need(type(obj.script_phase) is NativeAutomationPrefixPhase, 'typed_automation_phase_required')
+        elif type(root.composition) is ScriptTemplateStateComposition:
+            from .native_script_prefix_phase import NativeScriptPrefixPhase
+            _need(type(obj.script_phase) is NativeScriptPrefixPhase, 'typed_script_phase_required')
         pure = ({key: value for key, value in change.before.items() if key not in ('entity_id', 'modified_at')}
                 == {key: value for key, value in change.after.items() if key not in ('entity_id', 'modified_at')})
         if (transition.entities or obj.script_phase is not None) and pure:
@@ -81,13 +88,21 @@ class NativeTemplateStateRegistryEffect:
             supported = NativeSourceHandoff.supports_source(io, change, target_image)
             if obj.script_phase is not None:
                 _need(supported, 'script_prefix_source_handoff_unsupported')
-            if (type(root.composition) in (TemplateStateComposition, ScriptTemplateStateComposition)
+            if (type(root.composition) in (TemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)
                     and supported):
                 handoff = await NativeSourceHandoff.prepare(io, change, target_image, guard=guard)
             try:
+                graph = getattr(obj.script_phase, 'graph', None)
+                if graph is not None:
+                    from homeassistant.helpers.entity_component import DATA_INSTANCES
+                    component = root.hass.data.get(DATA_INSTANCES, {}).get('automation')
+                    await graph.prepare(tuple(component.entities) if component is not None else (), guard=guard)
                 obj.witness = await NativeRenameEmissions.prepare(io, change, target_image,
-                    guard=guard, source_handoff=handoff)
-                if transition.entities:
+                    guard=guard, source_handoff=handoff, automation_graph=graph)
+                if graph is not None:
+                    from .native_automation_producer_delivery import NativeAutomationProducerDelivery
+                    obj.delivery = NativeAutomationProducerDelivery(obj.runtime, transition.entities, obj.witness, graph)
+                elif transition.entities:
                     obj.delivery = NativeTemplateProducerDelivery(obj.runtime, transition.entities, obj.witness)
             except BaseException:
                 if obj.witness is not None:
@@ -117,6 +132,8 @@ class NativeTemplateStateRegistryEffect:
         if self.witness is not None:
             try:
                 await self.witness.finish()
+                if self.script_phase is not None and hasattr(self.script_phase, 'graph'):
+                    self.script_phase.finish_native(self)
             finally:
                 if self.ingress is not None:
                     self.ingress.retire()
@@ -250,6 +267,9 @@ class NativeTemplateStateRegistryEffect:
             else:
                 if self.script_phase is not None:
                     self.script_phase.poison(self)
+                    graph = getattr(self.script_phase, 'graph', None)
+                    if graph is not None:
+                        graph.retire()
                 if self.ingress is not None:
                     self.ingress.retire()
             raise

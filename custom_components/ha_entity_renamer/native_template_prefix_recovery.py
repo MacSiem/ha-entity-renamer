@@ -30,6 +30,7 @@ def unstarted_rollback_complete(chain, record):
         PreparedMixedTemplateStateYAML, assert_state_yaml_composition)
     from .native_template_state_composition import TemplateStateComposition
     from .native_script_program_composition import ScriptTemplateStateComposition
+    from .native_automation_program_composition import AutomationTemplateStateComposition
     if (type(chain) is not RegistryReceiptChain or type(record) is not Record
             or record.plan != chain.plan or record.operation_id != chain.operation_id
             or record.direction != 'rollback' or record.status not in ('rolling_back', 'rolled_back')
@@ -49,4 +50,5 @@ def unstarted_rollback_complete(chain, record):
         return False
     return (type(change), type(assert_state_yaml_composition(chain, change))) in (
         (PreparedTemplateStateYAML, TemplateStateComposition),
-        (PreparedMixedTemplateStateYAML, ScriptTemplateStateComposition))
+        (PreparedMixedTemplateStateYAML, ScriptTemplateStateComposition),
+        (PreparedMixedTemplateStateYAML, AutomationTemplateStateComposition))

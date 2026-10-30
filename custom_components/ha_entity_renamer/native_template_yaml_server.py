@@ -35,12 +35,14 @@ def _need(value, reason):
 def _mixed_composition(value):
     from .native_template_state_composition import MixedTemplateStateComposition
     from .native_script_program_composition import ScriptTemplateStateComposition
-    return type(value) in (MixedTemplateComposition, MixedTemplateStateComposition, ScriptTemplateStateComposition)
+    from .native_automation_program_composition import AutomationTemplateStateComposition
+    return type(value) in (MixedTemplateComposition, MixedTemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)
 
 
 def _script_prefix_composition(value):
     from .native_script_program_composition import ScriptTemplateStateComposition
-    return type(value) is ScriptTemplateStateComposition
+    from .native_automation_program_composition import AutomationTemplateStateComposition
+    return type(value) in (ScriptTemplateStateComposition, AutomationTemplateStateComposition)
 
 
 def _registry_mapping(changes, composition):
@@ -548,8 +550,9 @@ class NativeTemplateYAMLServer:
                 from .native_template_state_composition import TemplateStateComposition
                 from .native_template_state_server import NativeTemplateStateServer
                 from .native_script_program_composition import ScriptTemplateStateComposition
+                from .native_automation_program_composition import AutomationTemplateStateComposition
                 _need(cls is NativeTemplateStateServer
-                      and type(obj.composition) in (TemplateStateComposition, ScriptTemplateStateComposition),
+                      and type(obj.composition) in (TemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition),
                       'prefix_profile_unsupported')
             obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
             obj.digests = dict(obj.composition.prepared_digests)
@@ -739,6 +742,7 @@ class NativeTemplateYAMLServer:
         consumers = getattr(self, 'consumers', None)
         phases = getattr(consumers, 'phases', None)
         from .native_script_prefix_phase import NativeScriptPrefixPhase
-        if type(phases) is NativeScriptPrefixPhase:
+        from .native_automation_prefix_phase import NativeAutomationPrefixPhase
+        if type(phases) in (NativeScriptPrefixPhase, NativeAutomationPrefixPhase):
             phases.close()
         self.bound, self.closed = False, True

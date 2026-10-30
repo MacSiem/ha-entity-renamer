@@ -130,12 +130,18 @@ def _trigger_listener(hass, entity, listener, module, name, config, index):
     return cells, (id(listener), id(job), id(action.__self__), id(action.__func__))
 
 
-def _automation_registrations(hass, entity):
+def _automation_registrations(hass, entity, *, owned_automation=None):
     """Prove a narrow static native trigger graph; all other shapes fail closed.
 
     No callbacks, template renderers, matchers or unsubscribe functions are run.
     Tokens retain registration identity across the observer's two samples.
     """
+    if owned_automation is not None:
+        from .native_automation_owned_graph import OwnedAutomationGraph
+        if type(owned_automation) is not OwnedAutomationGraph or owned_automation.hass is not hass:
+            raise ValueError('typed_owned_automation_graph_required')
+        if owned_automation.owns(entity):
+            return owned_automation.registrations(hass, entity)
     from homeassistant.helpers import event as event_helper
     from homeassistant.helpers import trigger as trigger_helper
     from homeassistant.helpers.template import Template
@@ -252,12 +258,17 @@ class NativeYAMLRuntimeReadback:
     active scripts, unsupported triggers and mixed runtime versions fail closed.
     """
 
-    def __init__(self, hass, *, inventory_verifier: IndependentYAMLInventoryVerifier | None = None):
+    def __init__(self, hass, *, inventory_verifier: IndependentYAMLInventoryVerifier | None = None, owned_automation=None):
         if inventory_verifier is not None and not callable(
                 getattr(inventory_verifier, 'verify_inventory', None)):
             raise ValueError('independent_inventory_verifier_required')
         self.hass = hass
         self.inventory_verifier = inventory_verifier
+        if owned_automation is not None:
+            from .native_automation_owned_graph import OwnedAutomationGraph
+            if type(owned_automation) is not OwnedAutomationGraph or owned_automation.hass is not hass:
+                raise ValueError('typed_owned_automation_graph_required')
+        self.owned_automation = owned_automation
 
     def _projection(self, domain):
         from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -334,7 +345,7 @@ class NativeYAMLRuntimeReadback:
                 if entity._is_enabled is True:
                     identities[-1] = (entity.entity_id, id(entity), id(script),
                         id(entity.raw_config), id(entity.registry_entry),
-                        _automation_registrations(self.hass, entity))
+                        _automation_registrations(self.hass, entity, owned_automation=self.owned_automation))
                 elif entity._is_enabled is False and entity._async_detach_triggers is None:
                     identities[-1] = (entity.entity_id, id(entity), id(script),
                         id(entity.raw_config), id(entity.registry_entry), ('disabled',))

@@ -72,13 +72,17 @@ class DependentConfigSample:
 
 class NativeDependentConfigReadback:
     """Full native rows + ORIGINAL source/registry/object bijection, no write API."""
-    def __init__(self, hass, program, evidence, receipt, plan):
+    def __init__(self, hass, program, evidence, receipt, plan, *, owned_automation=None):
         from .dependent_config_program import _bytes
         from .native_template_state_composition import _retained_fields
         from .native_input_baseline import _Managers
         _need(type(program) is DependentConfigProgram)
         program.assert_sources(receipt, evidence, plan=plan, mapping=dict(program.mapping),
                                source_order=program.source_order)
+        if owned_automation is not None:
+            from .native_automation_owned_graph import OwnedAutomationGraph
+            _need(type(owned_automation) is OwnedAutomationGraph and owned_automation.hass is hass)
+        self.owned_automation = owned_automation
         self.hass, self.program, self.evidence = hass, program, evidence
         self.receipt, self.plan = receipt, plan
         self._program_json, self._program_sha = _bytes(program.descriptor_json.decode()), program.sha256
@@ -113,7 +117,7 @@ class NativeDependentConfigReadback:
                   for key, raw in zip(keys, self._managers.sample(), strict=True)),
               'dependent_config_full_native_inputs_changed')
         expected = self.program.rows(prefix.active)
-        observer = NativeYAMLRuntimeReadback(self.hass)
+        observer = NativeYAMLRuntimeReadback(self.hass, owned_automation=self.owned_automation)
         actual = []
         for domain, rows in expected:
             from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -124,7 +128,7 @@ class NativeDependentConfigReadback:
             actual.append((domain, normalized))
         population, blockers, tokens = _runtime_rows_sample(self.hass, self.evidence,
             documents['core.entity_registry']['data']['entities'],
-            expected_projections=tuple((domain, _digest(rows)) for domain, rows in expected))
+            expected_projections=tuple((domain, _digest(rows)) for domain, rows in expected), owned_automation=self.owned_automation)
         _need(not blockers, 'dependent_config_source_bijection_changed')
         # Recheck the authenticated head after the synchronous full native read.
         _need(accepted_dependent_prefix(chain, self.program, **live) == prefix,

@@ -180,7 +180,7 @@ def _native_families(observed):
     return result, entities, devices
 
 
-def _runtime_family(hass, domain):
+def _runtime_family(hass, domain, *, owned_automation=None):
     """Reuse exact native consumer projections without executing user actions."""
     from homeassistant.const import __version__
     from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -190,7 +190,7 @@ def _runtime_family(hass, domain):
         if (__version__ not in ('2025.6.0', '2026.10.2', '2026.10.4')
                 or _pending_native_work(hass, (domain,))):
             raise ValueError('runtime_unsettled')
-        rows, identities = NativeYAMLRuntimeReadback(hass)._projection(domain)
+        rows, identities = NativeYAMLRuntimeReadback(hass, owned_automation=owned_automation)._projection(domain)
         component = hass.data.get(DATA_INSTANCES, {}).get(domain)
         locators = {entity.unique_id: entity.entity_id for entity in component.entities}
         if (len(locators) != len(rows) or any(type(row[0]) is not str

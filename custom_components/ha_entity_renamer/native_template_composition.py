@@ -242,6 +242,9 @@ class MixedTemplateComposition(TemplateComposition):
 
 
 def encode_composition(composition, baseline):
+    from .native_automation_program_composition import AutomationTemplateStateComposition, encode_automation_state_composition
+    if type(composition) is AutomationTemplateStateComposition:
+        return encode_automation_state_composition(composition, baseline)
     from .native_script_program_composition import ScriptTemplateStateComposition, encode_script_state_composition
     if type(composition) is ScriptTemplateStateComposition:
         return encode_script_state_composition(composition, baseline)
@@ -268,6 +271,9 @@ def encode_composition(composition, baseline):
 
 
 def decode_composition(payload, baseline):
+    if type(payload) is dict and payload.get('profile') == 'template_automation_prefix_binding_v1':
+        from .native_automation_program_composition import decode_automation_state_composition
+        return decode_automation_state_composition(payload, baseline)
     if type(payload) is dict and payload.get('profile') == 'template_script_prefix_binding_v1':
         from .native_script_program_composition import decode_script_state_composition
         return decode_script_state_composition(payload, baseline)

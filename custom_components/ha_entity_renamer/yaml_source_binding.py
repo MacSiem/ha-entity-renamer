@@ -202,7 +202,7 @@ class _RuntimeSourceSampler:
             and row.get('entity_id', '').split('.', 1)[0] == row.get('platform'))
         return cls(evidence, observed, observed.files, native, native.manager_json, rows)
 
-    def sample(self, hass, evidence, observed):
+    def sample(self, hass, evidence, observed, *, owned_automation=None):
         import json
         # Identity checks also reject equivalent replacement snapshots. Frozen
         # fields/bytes and strong refs prevent mutation or object-id reuse; no
@@ -213,9 +213,9 @@ class _RuntimeSourceSampler:
         # Decode only qualifying rows into fresh local dicts. No mutable expected
         # row/projection is shared with a caller or a later sample.
         return _runtime_rows_sample(hass, evidence,
-                                    (json.loads(row) for row in self._rows))
+                                    (json.loads(row) for row in self._rows), owned_automation=owned_automation)
 
-    def sample_at_positions(self, hass, evidence, observed, receipt, positions):
+    def sample_at_positions(self, hass, evidence, observed, receipt, positions, *, owned_automation=None):
         """Read dependent runtimes against ORIGINAL checker seals at each phase.
 
         This is a synchronous semantic/UUID sample, not an effect or source
@@ -253,7 +253,7 @@ class _RuntimeSourceSampler:
                 overrides.append((domain, after))
         return _runtime_rows_sample(hass, evidence,
             (json.loads(row) for row in self._rows),
-            expected_projections=tuple(overrides))
+            expected_projections=tuple(overrides), owned_automation=owned_automation)
 
 
 def _runtime_sample(hass, evidence, observed):
@@ -265,7 +265,7 @@ def _runtime_sample(hass, evidence, observed):
     return _runtime_rows_sample(hass, evidence, rows())
 
 
-def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=()):
+def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=(), owned_automation=None):
     """Same native projections, plus full ORIGINAL registry/object bijection."""
     import hashlib
     import json
@@ -279,7 +279,7 @@ def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=
     registry_rows = tuple(registry_rows)
     registry = hass.data.get(er.DATA_REGISTRY)
     _need(type(registry) is er.EntityRegistry)
-    observer = NativeYAMLRuntimeReadback(hass)
+    observer = NativeYAMLRuntimeReadback(hass, owned_automation=owned_automation)
     rows, tokens, blockers = [], [], set()
     for expected in evidence.domains:
         domain = expected.domain
