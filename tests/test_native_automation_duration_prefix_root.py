@@ -129,6 +129,9 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_partial_retained_two_routes_restore_shared_native_callback_lists(self):
         await self._duration_case(mode='partial_multi')
 
+    async def test_partial_retained_unstarted_route_preserves_owned_config_projection(self):
+        await self._duration_case(mode='partial_unstarted')
+
     async def test_native_pending_expiry_during_active_root_keeps_one_action_and_fresh_inverse(self):
         await self._duration_case(mode='active_expiry')
 
@@ -155,6 +158,8 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         other_id = 'sensor.duration_other'
         original_keys = [old,other_id] if multi else [old]
         target_keys = [new,other_id] if multi else [new]
+        two_routes = mode in ('partial_multi','partial_unstarted')
+        secondary_id = 'aa_duration_first' if mode=='partial_unstarted' else 'zz_duration_second'
         # Every duration below is literal YAML, validated by ORIGINAL Core.
         if mode=='orphan':
             filters = ''
@@ -191,9 +196,9 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             '  triggers:\n  - trigger: state\n    entity_id: sensor.duration_control\n'
             '    from: "16"\n    to: "17"\n    for: {seconds: '+str(duration)+'}\n'
             '  actions:\n  - event: duration_control_result\n')
-        if mode=='partial_multi':
+        if two_routes:
             path.write_text(path.read_text()+
-                '- id: duration_second\n  alias: Second affected native duration\n  initial_state: true\n'
+                '- id: '+secondary_id+'\n  alias: Second affected native duration\n  initial_state: true\n'
                 '  triggers:\n  - trigger: state\n    entity_id: '+old+'\n'
                 '    from: "16"\n    to: "17"\n    for: {seconds: '+str(duration)+'}\n'
                 '  actions:\n  - action: script.mixed_source\n')
@@ -254,9 +259,9 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         other_pending=next((p for p in all_saved if p['key']==other_id),None)
         saved=tuple(p for p in all_saved if p['key']==old)
         second_before=second_pending=None
-        if mode=='partial_multi':
+        if two_routes:
             second=next(e for e in hass.data[DATA_INSTANCES]['automation'].entities
-                        if e.unique_id=='duration_second')
+                        if e.unique_id==secondary_id)
             second_before=cap.capture(second)
             second_pending=cap.pending(second_before)[0][0]
             second_image=(second_pending['handle'],second_pending['handle'].when(),
@@ -371,7 +376,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     or mode in ('partial_map','partial_foreign') and kind=='dict' and owner is before.listener_cells['period']
                     and not owner
                     or mode=='partial_wrapper' and kind=='entry' and owner[1] is native_pending['cancel_job'])
-                selected=selected or (mode=='partial_multi' and kind=='dict'
+                selected=selected or (two_routes and kind=='dict'
                     and owner is second_before.listener_cells['period'] and not owner)
                 if selected:
                     faulted=True
@@ -459,7 +464,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(native_pending['keys'],[old])
                         self.assertIs(restored.keyed_job.target,before.listener)
                         self.assertIs(native_pending['cancel_job'].target,native_pending['cancel_listener'])
-                        if mode=='partial_multi':
+                        if two_routes:
                             restored_second=cap.capture(second)
                             self.assertEqual(restored_second.original_keys,[old])
                             self.assertEqual(restored_second.config_ids,[old])

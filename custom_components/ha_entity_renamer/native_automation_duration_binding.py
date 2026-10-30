@@ -128,6 +128,7 @@ class _PreEffectLog:
 
 def _retained_value(value, omitted, seen=()):
     """Pin closure topology while separately journaled slots change values."""
+    from homeassistant.util.yaml.objects import NodeDictClass, NodeListClass
     if id(value) in seen or id(value) in omitted:
         return type(value), id(value)
     seen = (*seen, id(value))
@@ -140,9 +141,9 @@ def _retained_value(value, omitted, seen=()):
     if type(value) is partial:
         return (id(value), _retained_value(value.func, omitted, seen),
                 _retained_value(value.args, omitted, seen), _retained_value(value.keywords, omitted, seen))
-    if type(value) in (list, tuple):
+    if type(value) in (list, tuple, NodeListClass):
         return id(value), tuple(_retained_value(v, omitted, seen) for v in value)
-    if type(value) is dict:
+    if type(value) in (dict, NodeDictClass):
         return id(value), tuple((_retained_value(k, omitted, seen), _retained_value(v, omitted, seen))
                                for k, v in value.items())
     return _value(value)
@@ -253,6 +254,16 @@ class NativeAutomationDurationCapability:
         self.check_sources()
         from contextvars import Context as TimerContext
         n,e=self.native,self.native.event
+        # ConfigTransport owns this one configured-ID list. Its exact values
+        # are checked by the config journal and graph registration guard.
+        # Lifecycle snapshots retain its identity without conflating our prior
+        # config edit with timer drift in a route not installed yet.
+        omitted={id(b.config_ids)}
+        def function_image(function):
+            return _retained_value(function,omitted)
+        def job_image(job):
+            return (id(job),function_image(job.target),job.name,
+                    job._cancel_on_shutdown,_value(job._cache))
         period,unsubs=b.listener_cells['period'],b.listener_cells['unsub_track_same']
         _need(set(unsubs)==set(period) and set(period)<=set(b.original_keys),'duration_map_keys')
         _need(all(k in b.callbacks and sum(j is b.keyed_job for j in b.callbacks[k])==1
@@ -337,8 +348,8 @@ class NativeAutomationDurationCapability:
             pending.append(dict(key=key,clear=clear,cancel=cancel,keys=keys,cancel_job=job,
                 cancel_listener=target,predicate=predicate,handle=handle,timer_job=tj,same_job=sj,
                 action=action,entity_cell=entity_cell,own=own if type(own) is _OwnDuration else None))
-            rows.append((key,id(clear),id(handle),handle.when(),id(handle._context),_job(tj),_job(sj),
-                _value(action),_value(predicate),id(a['event'].context),id(a['from_s']),id(a['to_s']),
+            rows.append((key,id(clear),id(handle),handle.when(),id(handle._context),job_image(tj),job_image(sj),
+                function_image(action),function_image(predicate),id(a['event'].context),id(a['from_s']),id(a['to_s']),
                 id(cancel),id(keys),tuple(keys),id(job),_shape(target)))
         expected_jobs={id(p['cancel_job']):p for p in pending
             if (occurrence := self.expiry.for_clear(b,p['key'],p['clear'])) is None
