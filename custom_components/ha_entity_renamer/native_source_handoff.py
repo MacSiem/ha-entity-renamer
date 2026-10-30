@@ -38,6 +38,14 @@ _SENSOR_PINS = {
 _NAME = 'ha_entity_renamer.source_binding_handoff'
 
 
+def _extra_audit(root, pins, refs):
+    methods, codes = prove_methods(root, pins, refs)
+    globals_ = tuple((method.__globals__, tuple((name, method.__globals__[name])
+        for name in code.co_names if name in method.__globals__))
+        for method, code in zip(methods, codes, strict=True))
+    return methods, codes, globals_
+
+
 def _nested(code):
     for item in code.co_consts:
         if type(item) is CodeType:
@@ -59,29 +67,38 @@ class NativeSourceHandoff:
         from homeassistant.helpers.entity import Entity, EntityPlatformState, entity_sources
         _need(cls is NativeSourceHandoff and __version__ in _SENSOR_PINS
               and type(io) is NativeRegistryIO, 'runtime_unqualified')
+        from .prepared import canonical
+        guard()
+        _need(type(target) is dict, 'target_unqualified')
+        target, target_sha = canonical(target)
+        _need(target in (change.before, change.after), 'target_unqualified')
         # Reuse the existing genuine IO/source/native-code audit, not its old
         # remove/add classification. Retire its observers before this new mode.
         audit = await NativeRenameEmissions.prepare(io, change, target, guard=guard)
         audit.close()
         obj = object.__new__(cls)
-        obj.audit, obj.io, obj.change, obj.target, obj.guard = audit, io, change, dict(target), guard
+        obj.audit, obj.io, obj.change, obj.target, obj.guard = audit, io, change, target, guard
+        obj.target_sha = target_sha
         obj.hass, obj.source, obj.platform, obj.row = audit.hass, audit.source, audit.platform, audit.row
         obj.old, obj.new, obj.registry, obj.bus = audit.source_id, audit.target_id, audit.registry, audit.bus
         obj.owner, obj.thread, obj.loop = asyncio.current_task(), threading.get_ident(), audit.loop
         obj.attempted, obj.in_native, obj.closed, obj.error = False, False, False, None
         obj.registry_calls, obj.api_calls, obj.handler_calls, obj.handler_done = 0, 0, 0, False
         obj.new_row = obj.payload = obj.registry_event = None
+        obj.new_unsub, obj.old_retired = None, False
         obj.tool = None
         refs = [(SensorEntity, 'async_registry_entry_updated'),
                 (SensorEntity, '_async_read_entity_options'), (SensorEntity, '_update_suggested_precision'),
                 (Entity, 'async_on_remove'), (Entity, 'async_internal_added_to_hass'),
-                (event_helper, 'async_track_entity_registry_updated_event'), (StateMachine, 'async_available')]
+                (event_helper, 'async_track_entity_registry_updated_event'), (StateMachine, 'async_available'),
+                (event_helper, '_async_track_event'), (event_helper, '_remove_listener')]
         pins = dict(_SOURCES[__version__])
         pins.update({'helpers/event.py': _EVENT_PINS[__version__],
                      'components/sensor/__init__.py': _SENSOR_PINS[__version__]})
         obj.refs = refs
-        obj.methods, obj.codes = await obj.hass.async_add_executor_job(
-            prove_methods, Path(homeassistant.__file__).resolve().parent, pins, refs)
+        obj.methods, obj.codes, obj.globals = await obj.hass.async_add_executor_job(
+            _extra_audit, Path(homeassistant.__file__).resolve().parent, pins, refs)
+        obj.subscribe = obj.methods[5]
         guard()
         _need(isinstance(obj.source, SensorEntity) and type(obj.source).__setattr__ is object.__setattr__,
               'sensor_source_required')
@@ -148,11 +165,14 @@ class NativeSourceHandoff:
         self.guard()
         self.audit._native_check()
         unchanged(self.refs, self.methods, self.codes)
+        _need(all(method.__globals__ is namespace and all(namespace.get(name) is value for name, value in bindings)
+                  for method, (namespace, bindings) in zip(self.methods, self.globals, strict=True)),
+              'native_globals_changed')
         _need(type(self.source).__setattr__ is object.__setattr__
               and all(inspect.getattr_static(type(self.source), name, None) is None
                       for name in ('entity_id', 'registry_entry'))
               and all(inspect.getattr_static(self.source, self.refs[index][1]) is self.methods[index]
-                      for index in range(3)), 'source_hook_changed')
+                      for index in range(5)), 'source_hook_changed')
 
     def _callbacks_current(self):
         return (self.source._on_remove is self.remove_callbacks
@@ -183,7 +203,10 @@ class NativeSourceHandoff:
 
     def _before(self):
         from homeassistant.helpers.entity import EntityPlatformState
+        from .prepared import canonical
         self._owner()
+        _need(canonical(self.target)[1] == self.target_sha and self.target == self.audit.target_row
+              and self.target['entity_id'] == self.new, 'target_changed')
         _need(not self.attempted and not self.closed and self.error is None
               and self.registry.async_get(self.old) is self.row and self.registry.async_get(self.new) is None
               and self.source.registry_entry is self.row and self.source.entity_id == self.old
@@ -202,6 +225,45 @@ class NativeSourceHandoff:
               and self.hass.states.get(self.old) is not None and self.hass.states.async_available(self.new)
               and not getattr(self.bus, '_dispatching', False), 'source_preflight_changed')
         self._subscription(self.unsub, self.old)
+
+    def _monitor_current(self):
+        monitor = sys.monitoring
+        _need(self.tool is not None and monitor.get_tool(self.tool) == _NAME
+              and monitor.get_events(self.tool) == 0
+              and all(monitor.get_local_events(self.tool, self.audit.codes[name]) == events
+                  for name, events in (('fire', monitor.events.PY_START),
+                    ('registry_update', monitor.events.PY_START),
+                    ('source', monitor.events.PY_START | monitor.events.PY_RETURN))), 'monitor_lost')
+
+    def _overlap_current(self):
+        expected = self.callbacks + (self.new_unsub,)
+        return (self.source._on_remove is self.remove_callbacks and len(self.remove_callbacks) == len(expected)
+                and all(actual is item for actual, item in zip(self.remove_callbacks, expected)))
+
+    def _retire_old(self):
+        """Retire only the old native job, including after an uncertain attempt."""
+        if self.new_unsub is None or self.old_retired:
+            return
+        # Cleanup needs its own native helper fence, even after revoked auth or
+        # a changed Sensor hook. It does not execute another registry API.
+        unchanged(self.refs[7:], self.methods[7:], self.codes[7:])
+        _need(all(method.__globals__ is namespace and all(namespace.get(name) is value for name, value in bindings)
+                  for method, (namespace, bindings) in zip(self.methods[7:], self.globals[7:], strict=True)),
+              'subscription_cleanup_globals_changed')
+        _, tracker, _, job, callbacks = self.unsub.args
+        data = self.hass.data.get(tracker.key)
+        count = sum(item is job for members in callbacks.values() for item in members)
+        _need(count in (0, 1), 'subscription_cleanup_ownership_changed')
+        if count:
+            _need(data is not None and data.callbacks is callbacks, 'subscription_cleanup_owner_changed')
+            self._subscription(self.unsub, self.old)
+            self.unsub()
+        current = self.source._on_remove
+        _need(type(current) is list, 'subscription_cleanup_list_changed')
+        for index in range(len(current) - 1, -1, -1):
+            if current[index] is self.unsub:
+                del current[index]
+        self.old_retired = True
 
     def _started(self, code, offset):
         frame = sys._getframe(1)
@@ -256,6 +318,14 @@ class NativeSourceHandoff:
                   and all(mapping.get(self.old) is self.source and self.new not in mapping for mapping in self.maps),
                   'registry_new_row_unqualified')
             self.payload, self.new_row = payload, new
+            # Keep OLD for this native registry event, and subscribe NEW before
+            # any user callback can emit a subsequent registry update. The
+            # native dispatcher selects OLD for this first event, so it still
+            # invokes the source exactly once. Subscription emits no event.
+            from homeassistant.core import HassJobType
+            self.new_unsub = self.subscribe(self.hass, self.new, self.source._async_registry_updated,
+                                           job_type=HassJobType.Callback)
+            self.source.async_on_remove(self.new_unsub)
             # Genuine row is already committed by native registry. No callback,
             # State write/remove, API replay or await runs inside this monitor.
             for mapping in self.maps:
@@ -282,12 +352,11 @@ class NativeSourceHandoff:
             del frame
 
     def mutate(self):
-        from homeassistant.core import HassJobType
-        from homeassistant.helpers.event import async_track_entity_registry_updated_event
-        self._before()
-        self.original_state = self.hass.states.get(self.old)
-        self.attempted, self.in_native = True, True
         try:
+            self._before()
+            self._monitor_current()
+            self.original_state = self.hass.states.get(self.old)
+            self.attempted, self.in_native = True, True
             mutation = self.io.mutate(self.change, self.target)
             if self.error is not None:
                 raise NativeSourceHandoffError(self.error)
@@ -299,26 +368,29 @@ class NativeSourceHandoff:
                   and self.registry.async_get(self.new) is self.new_row
                   and self.source.entity_id == self.new and self.source._state_info is self.state_info
                   and self.source._Entity__remove_future is self.remove_future
-                  and self._callbacks_current()
+                  and self._overlap_current()
                   and self.hass.states.get(self.old) is self.original_state,
                   'registry_attempt_uncertain')
             state = self.hass.states.get(self.new)
             _need(type(state) is self.audit.State, 'new_native_state_unconfirmed')
+            self._retire_old()
+            self._subscription(self.new_unsub, self.new)
             # Native handler has written NEW first, without lifecycle removal.
             self.hass.states.async_remove(self.old, context=state.context)
-            self.unsub()
-            unsubscribe = async_track_entity_registry_updated_event(self.hass, self.new,
-                self.source._async_registry_updated, job_type=HassJobType.Callback)
-            self.source._on_remove[self.unsub_index] = unsubscribe
-            self._subscription(unsubscribe, self.new)
-            _need(self.hass.states.get(self.old) is None and self.hass.states.get(self.new) is state
+            self._owner()
+            _need(self.error is None and self.api_calls == self.registry_calls == self.handler_calls == 1
+                  and self.source.registry_entry is self.new_row and self.registry.async_get(self.new) is self.new_row
+                  and self.hass.states.get(self.old) is None and self.hass.states.get(self.new) is state
                   and all(mapping.get(self.new) is self.source and self.old not in mapping for mapping in self.maps)
                   and self.sources.get(self.new) is self.info and self.old not in self.sources
                   and self.id_cell.cell_contents == self.new, 'source_handoff_readback_uncertain')
             return mutation
         finally:
             self.in_native = False
-            self.close()
+            try:
+                self._retire_old()
+            finally:
+                self.close()
 
     def close(self):
         if self.closed:

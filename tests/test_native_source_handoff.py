@@ -89,13 +89,30 @@ class NativeSourceHandoffTests(emission.NativeRenameEmissionTests):
             remove()
             handoff.close()
 
+    async def test_source_review_lost_own_monitor_refuses_before_api(self):
+        handoff, _, old, _ = await self.prepared_handoff()
+        key = handoff.tool
+        sys.monitoring.set_local_events(key, handoff.audit.codes['fire'], 0)
+        try:
+            with self.assertRaisesRegex(self.module('native_source_handoff').NativeSourceHandoffError, 'monitor_lost'):
+                handoff.mutate()
+            self.assertFalse(handoff.attempted)
+            self.assertTrue(handoff.closed)
+            self.assertIsNone(sys.monitoring.get_tool(key))
+            self.assertIsNotNone(self.f.entity.async_get(old))
+        finally:
+            handoff.close()
+
+    async def test_source_handoff_forward_unload_retires_all_owned_jobs(self):
+        await self.handoff_flow(inverse=False)
+
     async def test_source_handoff_retains_live_source_and_cleanup(self):
         await self.handoff_flow()
 
     async def test_source_handoff_keeps_real_unemitted_physical_value_change(self):
         await self.handoff_flow(changed_value=29)
 
-    async def handoff_flow(self, *, changed_value=None):
+    async def handoff_flow(self, *, changed_value=None, inverse=True):
         from homeassistant.core import callback
         from homeassistant.helpers.entity import Entity, entity_sources
         from homeassistant.helpers.json import _orjson_bytes_default_encoder
@@ -110,6 +127,14 @@ class NativeSourceHandoffTests(emission.NativeRenameEmissionTests):
         platform = source.platform
         info = entity_sources(hass)[old]
         state_info = source._state_info
+        from functools import partial
+        def subscription():
+            unsub = next(item for item in source._on_remove if type(item) is partial)
+            return unsub.args[3:5]
+        retired = [subscription()]
+        def gone(jobs):
+            for job, callbacks in jobs:
+                self.assertFalse(any(item is job for entries in callbacks.values() for item in entries))
         source_removals, gaps, events = [], [], []
         callbacks = [(type(item).__name__, getattr(item, '__qualname__', None)) for item in source._on_remove]
         print('SOURCE_CLEANUP_SHAPE', json.dumps(callbacks))
@@ -152,6 +177,8 @@ class NativeSourceHandoffTests(emission.NativeRenameEmissionTests):
             self.assertIsNotNone(hass.states.get(new))
             self.assertEqual(handoff.api_calls, 1)
             self.assertEqual(handoff.handler_calls, 1)
+            gone(retired)
+            retired.append(subscription())
             if changed_value is not None:
                 self.assertEqual(hass.states.get(new).state, str(changed_value))
             self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
@@ -164,26 +191,29 @@ class NativeSourceHandoffTests(emission.NativeRenameEmissionTests):
             self.assertEqual(len([event for event in events if event.data.get('new_state') is not None
                                   and event.data['new_state'].state == '23']), 1)
         finally:
-            sys.monitoring.set_local_events(tool, code, 0)
-            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
-            sys.monitoring.free_tool_id(tool)
-            remove_state()
-            if mutation is not None:
-                current = self.f.entity.async_get(new)
-                self.assertIsNotNone(current)
-                self.assertEqual(json.loads(_orjson_bytes_default_encoder(current.as_storage_fragment)),
-                                 json.loads(mutation.after_json))
-                inverse = await self.module('native_source_handoff').NativeSourceHandoff.prepare(
-                    io, change, change.before, guard=lambda: None)
-                inverse.mutate()
-                await io.settle(change)
-                await self._flush_documents()
-                self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
-                self.assertIsNone(self.f.entity.async_get(new))
+            try:
+                if mutation is not None and inverse:
+                    current = self.f.entity.async_get(new)
+                    self.assertIsNotNone(current)
+                    self.assertEqual(json.loads(_orjson_bytes_default_encoder(current.as_storage_fragment)),
+                                     json.loads(mutation.after_json))
+                    reverse = await self.module('native_source_handoff').NativeSourceHandoff.prepare(
+                        io, change, change.before, guard=lambda: None)
+                    reverse.mutate()
+                    await io.settle(change)
+                    await self._flush_documents()
+                    self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+                    self.assertIsNone(self.f.entity.async_get(new))
+                    self.assertEqual(source_removals, [])
+                    self.assertFalse(gaps)
+                    gone(retired)
+                    retired.append(subscription())
+            finally:
+                sys.monitoring.set_local_events(tool, code, 0)
+                sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
+                sys.monitoring.free_tool_id(tool)
+                remove_state()
         # Normal actual unload must clean every CURRENT map and subscription.
-        from functools import partial
-        subscription = next(item for item in source._on_remove if type(item) is partial)
-        old_job, callbacks = subscription.args[3:5]
         await source.async_remove()
         await hass.async_block_till_done()
         for entries in (platform.entities, platform.domain_entities, platform.domain_platform_entities):
@@ -191,4 +221,4 @@ class NativeSourceHandoffTests(emission.NativeRenameEmissionTests):
             self.assertNotIn(new, entries)
         self.assertNotIn(old, entity_sources(hass))
         self.assertNotIn(new, entity_sources(hass))
-        self.assertFalse(any(job is old_job for members in callbacks.values() for job in members))
+        gone(retired)
