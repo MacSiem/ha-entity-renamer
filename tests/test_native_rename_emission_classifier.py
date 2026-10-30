@@ -32,6 +32,7 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
         await self.round_trip(reemit=False, producer_gap=True)
 
     async def round_trip(self, *, reemit, producer_gap=False):
+        from homeassistant.core import callback
         runtime, mapping, uuids, original = await self.data(variant='sensor')
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
@@ -44,6 +45,7 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
         change = await bridge.prepare('entity', uuids[old], {'entity_id': new}, lambda: None)
         received = []
         reemitted = set()
+        @callback
         def collect(event):
             if event.data.get('entity_id') in (old, new):
                 received.append(event)
