@@ -635,9 +635,11 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         # unchanged control and transported group consume that change at their
         # original native deadlines, not at the rename seam.
         self.assertEqual(hass.states.get(entity.entity_id).state, '1')
-        await self.producer.async_remove()
-        await self.other.async_remove()
+        await self.producer.async_remove(force_remove=True)
+        await self.other.async_remove(force_remove=True)
         await hass.async_block_till_done()
+        self.assertIsNone(hass.states.get(self.producer.entity_id))
+        self.assertIsNone(hass.states.get(self.other.entity_id))
         # Observe real native expiry; no callback invocation, clock alteration,
         # timer replacement, output seeding or expected value from a moved cache.
         fired = hass.loop.create_future()
@@ -669,6 +671,37 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hass.states.get(entity.entity_id).state, '0')
         self.assertTrue(all(handle.cancelled() for handle in timers.values()))
         self.assertEqual(self.f.entity.async_get(self.new).id, self.source_uuid)
+
+    async def test_pending_broad_rate_pre_registry_rollback_restores_exact_native_timer(self):
+        await self.pair(broad_membership=True)
+        await self.emit(self.producer, 3)
+        hass, entity = self.f.hass, self.consumer
+        old = entity._template_result_info
+        timers = dict(old._rate_limit._rate_limit_timers)
+        self.assertTrue(timers)
+        saved = {id(handle): (handle._callback, handle._args, handle._context, handle.when())
+                 for handle in timers.values()}
+        physical = hass.states.get(entity.entity_id)
+        listeners = old._track_state_changes._last_track_states
+        cleanup = tuple(entity._on_remove)
+        transport = self.capture()
+        transport.install_before_registry(self.context)
+        new = entity._template_result_info
+        self.assertFalse(old._rate_limit._rate_limit_timers)
+        transport.rollback_before_registry(self.context)
+        self.assertIs(entity._template_result_info, old)
+        self.assertEqual(old._rate_limit._rate_limit_timers, timers)
+        self.assertEqual(old._track_state_changes._last_track_states, listeners)
+        self.assertEqual(tuple(entity._on_remove), cleanup)
+        self.assertFalse(new._rate_limit._rate_limit_timers)
+        self.assertIs(hass.states.get(entity.entity_id), physical)
+        for handle in timers.values():
+            callback, args, context, deadline = saved[id(handle)]
+            self.assertIs(handle._callback, callback)
+            self.assertIs(handle._args, args)
+            self.assertIs(handle._context, context)
+            self.assertEqual(handle.when(), deadline)
+            self.assertFalse(handle.cancelled())
 
 
     async def test_failed_collision_install_keeps_old_tracker_active_and_exact_bindings(self):
