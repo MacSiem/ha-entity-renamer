@@ -62,3 +62,18 @@ class NativeDependentConfigBindingTests(unittest.IsolatedAsyncioTestCase):
                          frozenset())
         self.assertIsNone(await runtime.journal.load(review['operation_id']))
         self.assertFalse(runtime.operation_lock.locked())
+        # A complete native input read must also reject ordinary-source drift,
+        # even when all Automation/Script rows still equal the expected image.
+        source_id = next(iter(mapping))
+        source = self.f.entity.async_get(source_id)
+        original_name = source.name
+        self.f.entity.async_update_entity(source_id, name='Synthetic dependent source drift')
+        await self._flush_documents()
+        try:
+            with self.assertRaises((ValueError, self.module('transaction').Refused)):
+                observer.sample(chain)
+        finally:
+            self.f.entity.async_update_entity(source_id, name=original_name)
+            await self._flush_documents()
+            self.assertEqual(self.f.entity.async_get(source_id).id, source.id)
+            self.assertEqual(self.f.entity.async_get(source_id).name, original_name)
