@@ -40,6 +40,45 @@ def _source_string(original, text):
     return replacement
 
 
+def _graph(value, *, include_scripts=False):
+    """Identity of reachable configured/cache edges, without evaluating leaves.
+
+    Compiled Template artifacts and render counters may advance normally; their
+    configured object/body/hass edges remain pinned. Opaque native callables are
+    compared by identity, never called, stringified or introspected generically.
+    """
+    from homeassistant.helpers.template import Template
+    from homeassistant.helpers.script_variables import ScriptVariables
+    from homeassistant.helpers.script import Script
+    from homeassistant.util.yaml.objects import NodeStrClass, NodeListClass, NodeDictClass
+    count = 0
+    def visit(item, ancestry=()):
+        nonlocal count
+        count += 1
+        _need(count <= 100_000 and len(ancestry) <= 64, 'native_script_config_graph_limit')
+        kind = type(item)
+        head = (kind, id(item))
+        if id(item) in ancestry:
+            return head + ('ref',)
+        ancestry += (id(item),)
+        if kind in (NodeStrClass, NodeListClass, NodeDictClass):
+            head += (tuple((name, visit(getattr(item, name), ancestry))
+                for name in ('__config_file__', '__line__') if hasattr(item, name)),)
+        if kind in (dict, NodeDictClass):
+            return head + (tuple((visit(key, ancestry), visit(child, ancestry)) for key, child in item.items()),)
+        if kind in (list, tuple, NodeListClass):
+            return head + (tuple(visit(child, ancestry) for child in item),)
+        if kind is Template:
+            return head + (id(item.hass), visit(item.template, ancestry))
+        if kind is ScriptVariables:
+            return head + (visit(item.variables, ancestry),)
+        if kind is Script and include_scripts:
+            return head + (visit(item.sequence, ancestry), visit(item.variables, ancestry),
+                tuple((name, visit(getattr(item, name), ancestry)) for name in _cache_names()))
+        return head
+    return visit(value)
+
+
 def _idle_census(root):
     """Known native lazy-cache graph, including every retained nested Script."""
     from homeassistant.helpers.script import Script
@@ -61,7 +100,7 @@ def _idle_census(root):
         for name in _cache_names():
             cache = getattr(script, name)
             _need(type(cache) is dict)
-            caches.append((name, id(cache), tuple((key, id(value)) for key, value in cache.items())))
+            caches.append((name, _graph(cache)))
         result.append((id(script), id(script.sequence), id(script.variables), tuple(caches)))
         for name in ('_repeat_script', '_sequence_scripts'):
             for key, child in getattr(script, name).items():
@@ -132,6 +171,7 @@ class NativeScriptConfigTransport:
         _need(bool(obj.actors), 'native_script_config_no_change')
         obj.operations = tuple(obj.operations)
         obj.actors = tuple(obj.actors)
+        obj._before_actor_graph = obj._actor_graph()
         obj.check_before()
         return obj
 
@@ -198,9 +238,19 @@ class NativeScriptConfigTransport:
     def check_before(self):
         _need(asyncio.current_task() is self.task and self.phase == 'captured')
         self.guard()
+        _need(self._actor_graph() == self._before_actor_graph, 'native_script_config_live_edges_changed')
         _need(self.observer.sample(self.chain) == self.sample, 'native_script_config_prefix_changed')
         _need(all(entity.script is script and _idle_census(script) == census
                   for entity, script, census, _ in self.actors), 'native_script_config_cache_changed')
+
+    def _actor_graph(self):
+        return tuple((id(entity), id(entity.script), _graph(entity.raw_config),
+                      _graph(script.sequence), _graph(script.variables))
+                     for entity, script, _, _ in self.actors)
+
+    def _saved_cache_graph(self):
+        return tuple((id(cache), _graph(items, include_scripts=True))
+                     for _, _, _, caches in self.actors for _, cache, items in caches)
 
     def _check_rows(self, expected):
         from .yaml_runtime_observer import NativeYAMLRuntimeReadback
@@ -237,6 +287,8 @@ class NativeScriptConfigTransport:
                 for _, cache, _ in caches:
                     cache.clear()
             self._check_rows(self.after)
+            self._after_actor_graph = self._actor_graph()
+            self._after_saved_cache_graph = self._saved_cache_graph()
         except BaseException:
             for operation in reversed(completed):
                 self._write(operation, reverse=True)
@@ -257,6 +309,9 @@ class NativeScriptConfigTransport:
         """Only this exact still-owned idle data plane, never registry replay."""
         _need(asyncio.current_task() is self.task and self.phase == 'installed')
         self._check_rows(self.after)
+        _need(self._actor_graph() == self._after_actor_graph
+              and self._saved_cache_graph() == self._after_saved_cache_graph,
+              'native_script_config_cleanup_live_edges_changed')
         for kind, container, _, after in self.operations:
             current = tuple(container) if kind == 'list' else tuple(container.items())
             _need(len(current) == len(after) and all(
