@@ -216,6 +216,61 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_nonempty_source_corpus_mixed_forward_and_fresh_reverse(self):
         await self.flow(variant='mixed', source_consumers=True)
 
+    async def test_handoff_root_last_guard_refusal_restores_bindings_and_monitors(self):
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        runtime, mapping, uuids, original = await self.data(variant='sensor')
+        hass = self.f.hass
+        await self.stimulus(5)
+        entities = tuple(entity for platform in async_get_platforms(hass, 'template')
+                         for entity in platform.entities.values())
+        trackers = tuple(entity._template_result_info for entity in entities)
+        witness_type = self.module('native_rename_emission_classifier').NativeRenameEmissions
+        io_type = self.module('native_registry').NativeRegistryIO
+        codes = (witness_type.mutate.__code__, io_type.mutate.__code__)
+        witnesses, attempts = [], []
+        revoked = False
+        def guard():
+            if revoked:
+                raise PermissionError('actual final caller authorization revoked')
+        async def refresh():
+            guard()
+        tool = next(index for index in range(6) if sys.monitoring.get_tool(index) is None)
+        sys.monitoring.use_tool_id(tool, 'root last pre-API authorization refusal')
+        def started(code, offset):
+            nonlocal revoked
+            actor = sys._getframe(1).f_locals.get('self')
+            if actor.hass is not hass:
+                return
+            if code is codes[0]:
+                witnesses.append(actor)
+                revoked = True
+            else:
+                attempts.append(actor)
+        try:
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, started)
+            for code in codes:
+                sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
+            tools_before = tuple(sys.monitoring.get_tool(index) for index in range(6))
+            with self.assertRaises((PermissionError, self.module('transaction').Refused)):
+                await runtime.native_forward(hass, mapping, guard=guard, refresh=refresh)
+            self.assertEqual(len(witnesses), 1)
+            self.assertFalse(witnesses[0].attempted)
+            self.assertEqual(attempts, [])
+            for old, new in mapping.items():
+                self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+                self.assertIsNone(self.f.entity.async_get(new))
+            self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+            self.assertTrue(all(entity._template_result_info is tracker
+                                for entity, tracker in zip(entities, trackers, strict=True)))
+            self.assertEqual(tuple(sys.monitoring.get_tool(index) for index in range(6)), tools_before)
+            self.assertFalse(runtime.operation_lock.locked())
+            await self.stimulus(23)
+        finally:
+            for code in codes:
+                sys.monitoring.set_local_events(tool, code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
+            sys.monitoring.free_tool_id(tool)
+
     async def test_selective_root_native_source_handoff_forward_and_fresh_inverse(self):
         from homeassistant.helpers.entity import Entity
         handoff = self.module('native_source_handoff').NativeSourceHandoff
