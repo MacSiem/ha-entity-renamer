@@ -31,11 +31,27 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_producer_change_between_prepare_and_mutate_remains_a_producer_event(self):
         await self.round_trip(reemit=False, producer_gap=True)
 
-    async def round_trip(self, *, reemit, producer_gap=False):
+    async def test_real_producer_write_in_native_remove_hook_is_not_a_rename_event(self):
+        await self.round_trip(reemit=False, producer_hook=True)
+
+    async def round_trip(self, *, reemit, producer_gap=False, producer_hook=False):
         from homeassistant.core import callback
         runtime, mapping, uuids, original = await self.data(variant='sensor')
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
+        if producer_hook:
+            from homeassistant.helpers.entity_component import DATA_INSTANCES
+            class HookSource(type(self.producer)):
+                async def async_will_remove_from_hass(source):
+                    await super().async_will_remove_from_hass()
+                    source._attr_native_value = 7
+                    source.async_write_ha_state()
+            hooked = HookSource()
+            hooked._attr_unique_id = 'classifier-native-hook-source'
+            hooked._attr_name = 'Classifier native hook source'
+            await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([hooked])
+            old, new = hooked.entity_id, 'sensor.classifier_native_hook_next'
+            uuids = {old: self.f.entity.async_get(old).id}
         # Import before any mutation. The observer must own the one genuine API
         # call, rather than infer causality from values/UUID after another call.
         classifier = self.module('native_rename_emission_classifier')
@@ -83,6 +99,12 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
             own = [event for event in received if witness.is_owned_rename(event)]
             self.assertEqual(len(own), 2)
             self.assertTrue(all(not witness.is_owned_rename(event) for event in ordinary))
+            if producer_hook:
+                updates = [event for event in received
+                           if event.data['old_state'] is not None and event.data['new_state'] is not None]
+                self.assertEqual(len(updates), 1)
+                self.assertEqual((updates[0].data['old_state'].state, updates[0].data['new_state'].state), ('1', '7'))
+                self.assertFalse(witness.is_owned_rename(updates[0]))
             if reemit:
                 self.assertEqual(len(received), 4)
                 groups = {}
@@ -97,7 +119,7 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
             removed = next(event for event in own if event.data['new_state'] is None)
             added = next(event for event in own if event.data['old_state'] is None)
             self.assertEqual((removed.data['entity_id'], added.data['entity_id']), (old, new))
-            if producer_gap:
+            if producer_gap or producer_hook:
                 self.assertEqual((removed.data['old_state'].state, added.data['new_state'].state), ('7', '7'))
             self.assertIs(added.data['new_state'], hass.states.get(new))
             self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
