@@ -163,6 +163,9 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
             for row in document[family]:
                 if row['id'] in owned:
                     row.pop('modified_at', None)
+            # Native rename pops/reinserts the same UUID. Keep every complete
+            # row and compare populations independently of dictionary order.
+            document[family].sort(key=lambda row: row['id'])
             return document
         owned = {uuids[old], self.f.entity.async_get(extra_id).id}
         actual_entities = normalized(io.document('entity'), 'entities', owned)

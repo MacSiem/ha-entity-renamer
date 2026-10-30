@@ -9,6 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import signal
 import sys
 import uuid
 
@@ -248,10 +249,31 @@ if record_path.exists():
     record_path.rename(quarantine / record_path.name)
 print(json.dumps({'probe_cleanup': True, 'owned_processes_remaining': 0}))
 '''
+class ProbeInterrupted(BaseException):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+def interrupt_probe(signum, frame):
+    # The FIFO runner terminates its host process group. Convert that signal
+    # into normal stack unwinding so the separately authenticated container
+    # guardian cleanup in finally always runs. Ignore repeated host signals
+    # while reaping; never signal an unverified container PID directly.
+    for handled in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(handled, signal.SIG_IGN)
+    raise ProbeInterrupted(signum)
+
+
+for handled in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    signal.signal(handled, interrupt_probe)
+
 payload = 'SOURCES = '+repr(sources)+'\nBINARY_SOURCES = '+repr(binary_sources)+'\nPROFILE_FIXTURE = '+repr(args.powercalc_profile_dir is not None)+'\nPATTERN = '+repr(args.pattern)+'\nREPEAT = '+repr(args.repeat)+'\nTEST_FILTER = '+repr(args.test_filter)+'\nVENDOR_FIXTURE = '+repr(args.powercalc_component_dir is not None)+'\nOWNED_HA_SOURCES = '+repr(args.owned_ha_sources)+'\nPROBE_TOKEN = '+repr(probe_token)+'\nPIDFILE = '+repr(pidfile)+'\n'+program
 try:
     completed = subprocess.run(['docker','exec','-i',args.container,'python','-X','faulthandler','-B','-',probe_token],
         input=payload, text=True, capture_output=True, timeout=args.timeout)
+except ProbeInterrupted as interrupted:
+    print(json.dumps({'probe_interrupted_by_signal': interrupted.signum}), flush=True)
+    raise SystemExit(128 + interrupted.signum)
 except subprocess.TimeoutExpired as timeout:
     # TimeoutExpired carries bytes even with text=True. Flush partial evidence
     # before cleanup or the original timeout is raised to the build receipt.
