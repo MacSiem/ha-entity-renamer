@@ -225,6 +225,10 @@ class NativeAutomationConfigTransport:
             # their actual current children. Unlike masking a whole edited
             # container, this detects foreign changes in untouched descendants.
             return _graph(value,include_scripts=True,slots=slots)
+        # Replaced Template/annotated-string leaves are retained objects too.
+        # An edit inside our projected replacement must not be discarded just
+        # because its containing slot still has the same object identity.
+        projected=tuple((after,cache_token(after)) for _,_,_,after in self.operations)
         saved=[]
         for actor in self.actors:
             for name,cache,items in actor.caches:
@@ -232,6 +236,8 @@ class NativeAutomationConfigTransport:
                 saved.append((actor.script,name,cache,items,cache_token(items)))
         def cleanup_plan():
             _need(self._actor_graph(slots=slots)==self.original, 'automation_cleanup_root_changed')
+            _need(all(cache_token(value)==token for value,token in projected),
+                  'automation_cleanup_projected_value_changed')
             for actor in self.actors:
                 _need(actor.entity.action_script is actor.script
                       if actor.entity.entity_id.startswith('automation.')
