@@ -1,4 +1,4 @@
-"""Private literal-duration evidence and transparent OWN pair bridge.
+"""Private literal/scalar-duration evidence and transparent OWN pair bridge.
 
 Native pending timers stay native. Only the newly matched genuine pair uses OWN
 closures around the ORIGINAL async_track_same_state and Automation action job.
@@ -159,6 +159,10 @@ class _PreEffectLog:
 def _retained_value(value, omitted, seen=()):
     """Pin closure topology while separately journaled slots change values."""
     from homeassistant.util.yaml.objects import NodeDictClass, NodeListClass
+    from homeassistant.helpers.template import Template
+    from .native_script_config_transport import _graph
+    if type(value) is Template:
+        return _graph(value)
     if id(value) in seen or id(value) in omitted:
         return type(value), id(value)
     seen = (*seen, id(value))
@@ -191,7 +195,7 @@ class NativeAutomationDurationBinding(NativeAutomationStateBinding):
 
 
 class NativeAutomationDurationCapability:
-    def __init__(self, hass, native):
+    def __init__(self, hass, native, scalar=False):
         _need(type(native) is _Native and native.hass is hass, 'duration_source_owner')
         self.hass, self.native, self.wrappers = hass, native, {}
         self.refs = [(native.event,n) for n in ('async_track_same_state','async_call_later',
@@ -200,11 +204,18 @@ class NativeAutomationDurationCapability:
         self.functions = tuple(_value(f) for f in self.methods)
         from .native_automation_duration_expiry import NativeDurationExpiry
         self.expiry = NativeDurationExpiry(self)
+        from .native_automation_scalar_duration import ScalarDurationNative
+        # Runtime inventory is read on the HA loop by with_duration(). Only
+        # native source/protocol qualification runs in this executor lane.
+        _need(type(scalar) is bool, 'duration_scalar_preparation_flag')
+        self.scalar = ScalarDurationNative(native) if scalar else None
         self.check_sources()
 
     def check_sources(self):
         self.native.check()
         self.expiry.check_sources()
+        if self.scalar is not None:
+            self.scalar.check()
         unchanged(self.refs,self.methods,self.codes)
         _need(tuple(_value(getattr(o,n)) for o,n in self.refs) == self.functions
               and self.native.state.async_track_same_state is self.native.event.async_track_same_state,
@@ -221,7 +232,10 @@ class NativeAutomationDurationCapability:
         _need(type(cfg) in (dict,NodeDictClass) and cfg.get('platform') == 'state'
               and cfg.get('enabled',True) is True and 'variables' not in cfg
               and entity._trigger_variables is None, 'duration_static_config_required')
-        literal_duration(cfg)
+        from .native_automation_scalar_duration import configured_duration
+        configured_duration(cfg, h)
+        if type(cfg['for']) is not timedelta:
+            _need(self.scalar is not None, 'duration_scalar_source_not_prepared')
         detach = entity._async_detach_triggers
         removes = _closure(detach,n.trigger.__name__,'async_initialize_triggers.<locals>.remove_triggers')['removes']
         _need(type(removes) is list and len(removes) == 1,'duration_remove_inventory')
@@ -266,6 +280,12 @@ class NativeAutomationDurationCapability:
             cells['match_all'],detach,removes,remove,unsub,tracker,data,callbacks,data.listener,entry,cells,n)
         b=NativeAutomationDurationBinding(*values,())
         object.__setattr__(b,'_duration',self)
+        if type(cfg['for']) is not timedelta:
+            from .native_script_config_transport import _graph
+            _need(type(cells['_variables']) is dict, 'duration_attach_variables_required')
+            object.__setattr__(b,'_duration_scalar_image', (
+                _cell(listener,'time_delta'), cfg['for'], _graph(cfg['for']),
+                cells['_variables'], _value(cells['_variables'])))
         object.__setattr__(b,'_original',b._read())
         b.assert_original()
         return b
@@ -275,6 +295,15 @@ class NativeAutomationDurationCapability:
         _need(set(c)==set(b.listener_cells) and c['config'] is b.config
               and c['period'] is b.listener_cells['period'] and c['unsub_track_same'] is b.listener_cells['unsub_track_same'],
               'duration_map_identity_changed')
+        image = getattr(b, '_duration_scalar_image', None)
+        if image is not None:
+            from .native_script_config_transport import _graph
+            cell, configured, graph, variables, values = image
+            _need(_cell(b.listener, 'time_delta') is cell and cell.cell_contents is configured
+                  and c['time_delta'] is configured and b.config['for'] is configured
+                  and _graph(configured) == graph and c['_variables'] is variables
+                  and _value(variables) == values,
+                  'duration_scalar_config_or_attach_variables_changed')
         return tuple((k,_value(v)) for k,v in c.items() if k not in ('config','period','unsub_track_same'))+(
             ('period',id(c['period'])),('unsub_track_same',id(c['unsub_track_same'])))
 
@@ -284,6 +313,7 @@ class NativeAutomationDurationCapability:
         self.check_sources()
         from contextvars import Context as TimerContext
         n,e=self.native,self.native.event
+        self.stable(b)
         # ConfigTransport owns this one configured-ID list. Its exact values
         # are checked by the config journal and graph registration guard.
         # Lifecycle snapshots retain its identity without conflating our prior
@@ -303,7 +333,13 @@ class NativeAutomationDurationCapability:
             u=_nested(clear,e.async_track_same_state,'clear_listener')
             _need(set(u)=={'async_remove_state_for_cancel','async_remove_state_for_listener'},'duration_clear_cells')
             cancel,timer=u['async_remove_state_for_cancel'],u['async_remove_state_for_listener']
-            _need(type(period[key]) is timedelta and period[key]==literal_duration(b.config),'duration_period_changed')
+            if type(b.config['for']) is timedelta:
+                _need(type(period[key]) is timedelta and period[key]==literal_duration(b.config),
+                      'duration_period_changed')
+            else:
+                # A computed native occurrence is evidence, never a new render.
+                _need(type(period[key]) is timedelta and period[key] >= timedelta(0),
+                      'duration_computed_period_required')
             occurrence = self.expiry.for_clear(b,key,clear)
             if occurrence is not None and occurrence.state == 'active':
                 if self.expiry.active(occurrence):
@@ -378,10 +414,13 @@ class NativeAutomationDurationCapability:
             pending.append(dict(key=key,clear=clear,cancel=cancel,keys=keys,cancel_job=job,
                 cancel_listener=target,predicate=predicate,handle=handle,timer_job=tj,same_job=sj,
                 action=action,entity_cell=entity_cell,own=own if type(own) is _OwnDuration else None))
-            rows.append((key,id(clear),id(handle),handle.when(),id(handle._context),job_image(tj),job_image(sj),
+            row=(key,id(clear),id(handle),handle.when(),id(handle._context),job_image(tj),job_image(sj),
                 function_image(action),function_image(predicate),id(a['event'].context),id(a['from_s']),id(a['to_s']),
                 id(cancel),id(keys),tuple(keys),id(job),_shape(target),
-                _history_signature(a['event'],a['from_s'],a['to_s'])))
+                _history_signature(a['event'],a['from_s'],a['to_s']))
+            if hasattr(b, '_duration_scalar_image'):
+                row += ((id(period[key]), period[key]),)
+            rows.append(row)
         expected_jobs={id(p['cancel_job']):p for p in pending
             if (occurrence := self.expiry.for_clear(b,p['key'],p['clear'])) is None
             or occurrence.state != 'active' or self.expiry.active(occurrence)};found=set()
@@ -433,7 +472,7 @@ class NativeAutomationDurationCapability:
 
     def tokens(self,entity):
         b=self.capture(entity)
-        return ('literal_for',id(b.detach),id(b.removes),id(b.remove),id(b.unsubscribe),
+        return ('scalar_template_for' if hasattr(b, '_duration_scalar_image') else 'literal_for',id(b.detach),id(b.removes),id(b.remove),id(b.unsubscribe),
             id(b.config),id(b.config_ids),id(b.original_keys),id(b.data),id(b.callbacks),
             id(b.keyed_job),id(b.listener),id(b.action_job),_shape(b.detach),_shape(b.remove),
             _shape(b.listener),tuple((k,id(b.callbacks[k])) for k in b.original_keys),self.stable(b))
@@ -584,8 +623,15 @@ class NativeAutomationDurationCapability:
     def start_pair(self,graph,route,change):
         b=route.binding;key=change.event.data['entity_id']
         _need(key not in {p['key'] for p in self.pending(b)[0]},'duration_match_would_orphan_pending')
+        if hasattr(b, '_duration_scalar_image'):
+            self.stable(b)
+            value = self.scalar.render(b, change)
+            if value is None:
+                return  # native TemplateError/Invalid: no new period/U/Handle
+        else:
+            value = literal_duration(b.config)
         own=_OwnDuration(b,change)
-        b.listener_cells['period'][key]=literal_duration(b.config)
+        b.listener_cells['period'][key]=value
         own.clear=self.native.event.async_track_same_state(self.hass,b.listener_cells['period'][key],own.action,own.predicate,entity_ids=key)
         b.listener_cells['unsub_track_same'][key]=own.clear
         self.wrap(graph,route)
@@ -622,6 +668,8 @@ class _OwnDuration:
     def check(self):
         b,c=self.binding,self.change
         b._native.check()
+        if hasattr(b, '_duration_scalar_image'):
+            b._duration.stable(b)
         target=b.action_job.target
         _need(getattr(target,'__self__',None) is b.entity
               and getattr(target,'__func__',None) is b._native.AutomationEntity._async_trigger_if_enabled

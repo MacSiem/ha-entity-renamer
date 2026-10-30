@@ -96,8 +96,13 @@ def _call_scope(hass, before, after):
         _idle_census(script)
         if key[0] == 'automation' and entity._is_enabled:
             from datetime import timedelta
+            from .native_automation_scalar_duration import configured_duration
+            for cfg in entity._trigger_config:
+                if 'for' in cfg and type(cfg['for']) is not timedelta:
+                    configured_duration(cfg, hass)
             _need(all(cfg.get('platform') == 'state'
-                      and ('for' not in cfg or type(cfg['for']) is timedelta and cfg['for'] > timedelta(0))
+                      and ('for' not in cfg or type(cfg['for']) is timedelta and cfg['for'] > timedelta(0)
+                           or type(cfg['for']) is Template)
                       and cfg.get('enabled', True) is True and 'variables' not in cfg
                       for cfg in entity._trigger_config), 'automation_opaque_caller_unsupported')
     return entities, frozenset(admitted), frozenset(changed)
@@ -156,6 +161,8 @@ class NativeAutomationConfigTransport:
                     for cfg, old_cfg, new_cfg in zip(entity._trigger_config, old[2], new[2], strict=True):
                         _need(type(old_cfg) is dict and type(new_cfg) is dict)
                         a, b = dict(old_cfg['$map']), dict(new_cfg['$map'])
+                        _need(a.get('for') == b.get('for'),
+                              'automation_dynamic_duration_change_unsupported')
                         _need({k:v for k,v in a.items() if k != 'entity_id'}
                               == {k:v for k,v in b.items() if k != 'entity_id'},
                               'automation_trigger_topology_change_unsupported')

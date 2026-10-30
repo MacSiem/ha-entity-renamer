@@ -86,10 +86,13 @@ class OwnedAutomationGraph:
         component = hass.data.get(DATA_INSTANCES, {}).get('automation')
         if component is not None and any(e._is_enabled and any('for' in c for c in e._trigger_config)
                                         for e in component.entities):
+            from homeassistant.helpers.template import Template
+            scalar = any(e._is_enabled and any(type(c.get('for')) is Template
+                         for c in e._trigger_config) for e in component.entities)
             guard()
             native = await hass.async_add_executor_job(_Native, hass)
             guard()
-            obj.duration = await hass.async_add_executor_job(NativeAutomationDurationCapability, hass, native)
+            obj.duration = await hass.async_add_executor_job(NativeAutomationDurationCapability, hass, native, scalar)
             guard()
         return obj
 
@@ -115,6 +118,12 @@ class OwnedAutomationGraph:
                 if binding.entity is not entity:
                     continue
                 binding.assert_original()
+                if hasattr(binding, '_duration_scalar_image'):
+                    # First scalar profile has no source/cell transport. Refuse
+                    # even an unchanged opaque reference to this edge's IDs.
+                    body = binding.config['for'].template
+                    _need(not any(key in body for key in (*mapping, *mapping.values())),
+                          'automation_duration_source_reference_unsupported')
                 old = tuple(binding.original_keys)
                 target = tuple(mapping.get(key, key) for key in old)
                 _need(len(set(target)) == len(target), 'automation_route_collision')
