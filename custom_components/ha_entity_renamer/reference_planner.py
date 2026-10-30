@@ -274,8 +274,48 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                     expression(node.arg, bindings)
                 node = node.node
 
+        def state_collection(node, bindings):
+            """Prove HA State collections and exact entity_id comparison sinks.
+
+            Arbitrary records with an entity_id label are not HA references.
+            Return origin values without consuming them until the whole chain
+            is known; dynamic predicates cannot authorize a partial rewrite.
+            """
+            charge()
+            if isinstance(node, nodes.Name) and node.name == 'states':
+                return ()
+            if isinstance(node, (nodes.Getattr, nodes.Getitem)) and isinstance(node.node, nodes.Name) and node.node.name == 'states':
+                domain = (node.attr if isinstance(node, nodes.Getattr) else
+                          node.arg.value if isinstance(node.arg, nodes.Const)
+                          and type(node.arg.value) is str else None)
+                if type(domain) is str and re.fullmatch(r'[a-z_][a-z0-9_]*', domain):
+                    return ()
+                return None
+            if (not isinstance(node, nodes.Filter)
+                    or node.kwargs or node.dyn_args or node.dyn_kwargs):
+                return None
+            if node.name == 'list' and not node.args:
+                return state_collection(node.node, bindings)
+            if (node.name in ('selectattr', 'rejectattr') and len(node.args) == 3
+                    and isinstance(node.args[0], nodes.Const) and node.args[0].value == 'entity_id'
+                    and isinstance(node.args[1], nodes.Const)
+                    and node.args[1].value in ('equalto', 'eq', '==')):
+                bound = value(node.args[2], bindings)
+                parents = state_collection(node.node, bindings)
+                if parents is not None and bound is not None and bound[0] == 'scalar':
+                    return parents + (bound,)
+            return None
+
         def expression(node, bindings):
             charge()
+            if isinstance(node, nodes.Filter):
+                collection = state_collection(node, bindings)
+                if (collection is None and node.name in ('count', 'length')
+                        and not (node.args or node.kwargs or node.dyn_args or node.dyn_kwargs)):
+                    collection = state_collection(node.node, bindings)
+                if collection is not None:
+                    consume(collection)
+                    return
             # HA creates this local object for every repeat iteration. Counters
             # and flags carry no entity provenance; item/dynamic access may.
             if isinstance(node, (nodes.Getattr, nodes.Getitem)) and isinstance(node.node, nodes.Name):
