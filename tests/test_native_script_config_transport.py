@@ -121,3 +121,64 @@ class NativeScriptConfigTransportTests(binding.NativeDependentConfigBindingTests
             container[key] = owned
             transport.restore_before_attempt()
         self.assertEqual(observer.sample(chain), transport.sample)
+
+    async def test_script_review_foreign_equal_template_before_install_is_preserved(self):
+        from homeassistant.helpers.template import Template
+        observer, chain, mapping, entity, _ = await self.script_binding()
+        module = self.module('native_script_config_transport')
+        transport = module.NativeScriptConfigTransport.capture(observer, chain, next(iter(mapping)), guard=lambda: None)
+        container = entity.script.sequence[0]['if'][0]
+        original = container['value_template']
+        foreign = Template(original.template, original.hass)
+        container['value_template'] = foreign
+        try:
+            with self.assertRaises(self.module('transaction').Refused):
+                transport.install()
+            self.assertIs(container['value_template'], foreign)
+            self.assertEqual(transport.phase, 'captured')
+        finally:
+            if transport.phase == 'installed':
+                transport.restore_before_attempt()
+            container['value_template'] = original
+        self.assertEqual(observer.sample(chain), transport.sample)
+
+    async def test_script_review_detached_variables_abort_has_no_partial_restore(self):
+        observer, chain, mapping, entity, _ = await self.script_binding()
+        module = self.module('native_script_config_transport')
+        transport = module.NativeScriptConfigTransport.capture(observer, chain, next(iter(mapping)), guard=lambda: None)
+        transport.install()
+        variables = entity.script.variables
+        owned = variables.variables
+        foreign = dict(owned)
+        variables.variables = foreign
+        try:
+            with self.assertRaises(self.module('transaction').Refused):
+                transport.restore_before_attempt()
+            self.assertIs(variables.variables, foreign)
+            transport._check_rows(transport.after)  # no partial BEFORE image
+        finally:
+            variables.variables = owned
+            try:
+                observer.sample(chain)
+            except (ValueError, self.module('transaction').Refused):
+                transport.restore_before_attempt()
+        self.assertEqual(observer.sample(chain), transport.sample)
+
+    async def test_script_review_inner_native_cache_list_change_refuses(self):
+        observer, chain, mapping, entity, _ = await self.script_binding()
+        module = self.module('native_script_config_transport')
+        transport = module.NativeScriptConfigTransport.capture(observer, chain, next(iter(mapping)), guard=lambda: None)
+        data = next(iter(entity.script._if_data.values()))
+        original = data['if_conditions']
+        foreign = list(original)
+        data['if_conditions'] = foreign
+        try:
+            with self.assertRaises(self.module('transaction').Refused):
+                transport.install()
+            self.assertIs(data['if_conditions'], foreign)
+            self.assertEqual(transport.phase, 'captured')
+        finally:
+            if transport.phase == 'installed':
+                transport.restore_before_attempt()
+            data['if_conditions'] = original
+        self.assertEqual(observer.sample(chain), transport.sample)
