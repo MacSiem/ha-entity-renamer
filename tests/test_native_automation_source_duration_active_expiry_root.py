@@ -36,9 +36,12 @@ class NativeAutomationSourceDurationActiveExpiryRootTests(unittest.IsolatedAsync
         runtime, mapping, uuids, _, original = await self.data()
         hass, root = self.f.hass, self.f.root
         old, new = next(iter(mapping.items()))
-        body = "{{ 13 + states('" + old + "')|int }}"
-        target_body = "{{ 13 + states('" + new + "')|int }}"
-        control_body = "{{ 13 + states('sensor.duration_control')|int }}"
+        # The actual 30 s probe reached preinstall-ready during preparation
+        # (31.431/31.294 s). Give preparation real headroom and keep the
+        # native action alive beyond natural expiry, without changing a timer.
+        body = "{{ 163 + states('" + old + "')|int }}"
+        target_body = "{{ 163 + states('" + new + "')|int }}"
+        control_body = "{{ 163 + states('sensor.duration_control')|int }}"
         (root / 'mixed_automations.yaml').write_text(
             '- id: mixed_source\n  alias: Source duration active expiry\n  initial_state: true\n'
             '  variables:\n    source: '+old+'\n    alias: "{{ source }}"\n'
@@ -64,7 +67,7 @@ class NativeAutomationSourceDurationActiveExpiryRootTests(unittest.IsolatedAsync
             '- id: duration_slow\n  alias: Native action expiry overlap\n  initial_state: true\n'
             '  triggers:\n  - trigger: state\n    entity_id: '+old+'\n'
             '    from: "17"\n    to: "29"\n'
-            '  actions:\n  - delay: {seconds: 40}\n'
+            '  actions:\n  - delay: {seconds: 200}\n'
             '  - event: duration_slow_result\n    event_data:\n'
             '      value: "{{ states(\''+old+'\') }}"\n')
         (root / 'mixed_scripts.yaml').write_text(
@@ -235,14 +238,14 @@ class NativeAutomationSourceDurationActiveExpiryRootTests(unittest.IsolatedAsync
             native_pending, = cap.pending(before)[0]
             self.assertIsNone(native_pending['own'])
             retained = pending_image(native_pending, before)
-            self.assertEqual(retained[14].total_seconds(), 30)
+            self.assertEqual(retained[14].total_seconds(), 180)
             expiry_code = native_pending['timer_job'].target.__code__
             sys.monitoring.set_local_events(tool, expiry_code,
                 sys.monitoring.events.PY_START | sys.monitoring.events.PY_RETURN)
             attach_vars = before.listener_cells['_variables']
             source_render, = source_rows(renders)
             self.assertIs(source_render[0], configured)
-            self.assertEqual(source_render[2], 30)
+            self.assertEqual(source_render[2], 180)
             trigger = source_render[1]['trigger']
             self.assertEqual(set(trigger), {'platform', 'entity_id', 'from_state', 'to_state'})
             self.assertEqual((trigger['platform'], trigger['entity_id']), ('state', old))
@@ -255,17 +258,17 @@ class NativeAutomationSourceDurationActiveExpiryRootTests(unittest.IsolatedAsync
             self.assertNotIn('source', source_render[1])
             self.assertNotIn('alias', source_render[1])
             self.assertEqual(len(source_rows(template_calls)), 1)
-            self.assertTrue(any(value == 30 and result is retained[14] for value, result in validations))
+            self.assertTrue(any(value == 180 and result is retained[14] for value, result in validations))
             hass.states.async_set('sensor.duration_control', '16')
             hass.states.async_set('sensor.duration_control', '17')
             await hass.async_block_till_done()
             control_binding = cap.capture(control)
             control_pending, = cap.pending(control_binding)[0]
             control_image = pending_image(control_pending, control_binding)
-            self.assertEqual(control_image[14].total_seconds(), 30)
+            self.assertEqual(control_image[14].total_seconds(), 180)
             self.assertEqual(timer_attachments, [old, 'sensor.duration_control'])
             control_render, = [r for r in renders if r[0] is control_configured]
-            self.assertEqual(control_render[2], 30)
+            self.assertEqual(control_render[2], 180)
             self.assertEqual((control_render[1]['trigger']['from_state'].state,
                               control_render[1]['trigger']['to_state'].state), ('16', '17'))
             with self.assertRaises(ValueError):
@@ -309,12 +312,12 @@ class NativeAutomationSourceDurationActiveExpiryRootTests(unittest.IsolatedAsync
             self.assertEqual(tuple(str(event.data[k]) for k in
                 ('bound', 'previous', 'current', 'from_id', 'to_id', 'configured')),
                 (new, '16', '17', old, old, '29'))
-            self.assertEqual(float(event.data['seconds']), 30)
+            self.assertEqual(float(event.data['seconds']), 180)
             self.assertEqual(event.context.parent_id, retained[12].context.id)
             self.assertEqual(str(scripts[0].data['value']), '29')
             self.assertEqual(str(slow[0].data['value']), '29')
             self.assertEqual(tuple(str(controls[0].data[k]) for k in ('previous', 'current')), ('16', '17'))
-            self.assertEqual(float(controls[0].data['seconds']), 30)
+            self.assertEqual(float(controls[0].data['seconds']), 180)
             self.assertEqual(controls[0].context.parent_id, control_image[12].context.id)
             self.assertEqual(len(pairs), 1)
             self.assertEqual((pairs[0].prior_state.state, pairs[0].new_state.state), ('17', '29'))
