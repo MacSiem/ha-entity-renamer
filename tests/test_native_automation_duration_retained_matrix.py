@@ -27,10 +27,10 @@ class NativeAutomationDurationRetainedMatrixTests(unittest.IsolatedAsyncioTestCa
     async def test_retained_neutral_native_timer(self):
         await self._duration_case(mode='pending')
 
-    async def test_retained_from_only_native_predicate(self):
+    async def test_retained_filter_from_only_native_predicate(self):
         await self._duration_case(mode='from_only')
 
-    async def test_retained_attribute_native_history(self):
+    async def test_retained_filter_attribute_native_history(self):
         await self._duration_case(mode='attribute')
 
     async def test_retained_meaningful_own_timer(self):
