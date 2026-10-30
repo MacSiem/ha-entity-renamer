@@ -119,6 +119,7 @@ class NativeTemplateStateRegistryEffect:
             self.transport = NativeTemplateBindingTransport.capture(self.root.hass,
                 self.transition.entities, source_pairs=self.transition.source_pairs,
                 caller_context=self.caller,
+                rename_witness=self.witness,
                 configured_variable_pairs=tuple(BindingVariablePair(p.container, p.name,
                     p.before, p.after, p.source_identity) for p in self.transition.configured_variables),
                 rendered_variable_pairs=tuple(BindingVariablePair(p.variables, p.name,

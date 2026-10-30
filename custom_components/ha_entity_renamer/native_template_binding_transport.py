@@ -229,11 +229,9 @@ class _Runtime:
                   and sum(item is track for item in tracker._track_templates) == 1
                   and template in tracker._info and template in tracker._rate_limit._last_triggered,
                   'template_binding_rate_timer_template_changed')
-            # Native source-add events bypass rate limiting for explicit entity
-            # dependencies and cancel the pending replay. That handoff needs an
-            # independently qualified ingress classifier; do not admit it here.
-            _need(not tracker._info[template].entities,
-                  'template_binding_pending_explicit_rate_event_unqualified')
+            # Read-only graph sampling authenticates both kinds. Mutation of
+            # explicit pending work is gated separately on a live internal
+            # rename witness and completed producer-delivery fence.
         return timers
 
     def update_rate_listeners(self, tracker):
@@ -409,7 +407,7 @@ class NativeTemplateBindingTransport:
     """
     @classmethod
     def capture(cls, hass, entities, *, source_pairs, caller_context,
-                configured_variable_pairs=(), rendered_variable_pairs=()):
+                configured_variable_pairs=(), rendered_variable_pairs=(), rename_witness=None):
         _need(type(caller_context) is _BindingCallerContext,
               'template_binding_internal_caller_required')
         entities, source_pairs = tuple(entities), tuple(source_pairs)
@@ -424,6 +422,7 @@ class NativeTemplateBindingTransport:
         obj.hass, obj.entities, obj.sources = hass, entities, source_pairs
         obj.context, obj.runtime = caller_context, _Runtime(hass)
         obj.phase, obj.rows = 'captured', []
+        obj.rename_witness = rename_witness
         obj.configured_variables = tuple(configured_variable_pairs)
         obj.rendered_variables = tuple(rendered_variable_pairs)
         from homeassistant.util.yaml.objects import NodeDictClass
@@ -509,7 +508,24 @@ class NativeTemplateBindingTransport:
         _need(all(configured.get(id(pair.container)) is pair.container for pair in obj.configured_variables)
               and all(rendered.get(id(pair.container)) is pair.container for pair in obj.rendered_variables),
               'template_binding_variable_not_in_group')
+        obj._pending_explicit_witness()
         return obj
+
+    def _pending_explicit_witness(self):
+        explicit = any(row['tracker']._info[template].entities for row in self.rows
+                       for template in self.runtime.rate_timers(row['tracker']))
+        if not explicit:
+            return
+        from .native_rename_emission_classifier import NativeRenameEmissions
+        from .native_template_rename_ingress import NativeTemplateProducerDelivery
+        witness = self.rename_witness
+        _need(type(witness) is NativeRenameEmissions and witness.hass is self.hass
+              and not witness.attempted and not witness.closed
+              and type(witness.preflight) is NativeTemplateProducerDelivery
+              and not witness.preflight.live and not witness.preflight.pending(),
+              'template_binding_pending_explicit_rate_event_unqualified')
+        witness._owner_guard()
+        witness._check()
 
     def _variables_current(self):
         if not self.configured_variables and not self.rendered_variables:
@@ -582,6 +598,7 @@ class NativeTemplateBindingTransport:
         # Last source IO and live graph validation are BEFORE any detach.
         self.runtime.sources()
         self._variables_current()
+        self._pending_explicit_witness()
         for row in self.rows:
             entity = row['entity']
             _need(self.runtime.graph(entity) is row['tracker']
