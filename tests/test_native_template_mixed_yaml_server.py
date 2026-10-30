@@ -193,6 +193,48 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_staging_preserves_disabled_with_yaml_initial_true(self):
         await self._native_staging_case(False)
 
+    async def test_unrelated_automation_remains_live_during_owned_transition(self):
+        from homeassistant.core import Context
+        runtime, mapping, _, _, _ = await self.data()
+        hass, root = self.f.hass, self.f.root
+        path = root / 'mixed_automations.yaml'
+        path.write_text(path.read_text() +
+            '- id: foreign_idle\n  alias: Foreign unrelated automation\n  initial_state: true\n'
+            '  triggers:\n  - trigger: event\n    event_type: renamer_unrelated_fixture\n'
+            '  actions:\n  - event: renamer_foreign_result\n    event_data:\n      value: ok\n')
+        await hass.services.async_call('automation', 'reload', {}, blocking=True, context=Context())
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        entities = {entity.unique_id: entity for entity in hass.data['automation'].entities}
+        target, foreign = entities['mixed_source'], entities['foreign_idle']
+        listener = foreign._async_detach_triggers
+        registry_id = self.f.entity.async_get(foreign.entity_id).id
+        events, sampled = [], []
+        remove = hass.bus.async_listen('renamer_foreign_result',
+            lambda event: events.append(event.data['value']))
+        self.addCleanup(remove)
+        def guard():
+            if not sampled and target._is_enabled is False:
+                sampled.append(foreign._is_enabled)
+                # A real unrelated event while only our target is detached.
+                hass.bus.async_fire('renamer_unrelated_fixture')
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        result = await runtime.native_forward(hass, mapping, guard=guard, refresh=refresh)
+        self.assertEqual(result['state'], 'applied')
+        self.assertEqual(sampled, [True], 'migration must not disable an unrelated automation')
+        self.assertEqual(events, ['ok'], 'unrelated real event must execute exactly once')
+        self.assertIs(foreign._async_detach_triggers, listener)
+        self.assertEqual(self.f.entity.async_get(foreign.entity_id).id, registry_id)
+        inverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
+            guard=lambda: None, refresh=refresh)
+        self.assertEqual(inverse['state'], 'rolled_back')
+        self.assertIs(foreign._async_detach_triggers, listener)
+        hass.bus.async_fire('renamer_unrelated_fixture')
+        await hass.async_block_till_done()
+        self.assertEqual(events, ['ok', 'ok'])
+        self.assertIs(foreign._is_enabled, True)
+
     async def test_real_source_change_in_detached_interval_never_succeeds(self):
         from attr import asdict
         runtime, mapping, _, _, original = await self.data()
