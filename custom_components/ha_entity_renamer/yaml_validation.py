@@ -57,6 +57,7 @@ class TemplateStateSourceValidation:
     original_sources: OriginalTemplateStateSources
     candidate_sources: CandidateTemplateStateSources
     state_config_program: object = None
+    dependent_config_program: object = None
 
     @property
     def migration_ready(self):
@@ -348,7 +349,8 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
     if dependent_reference_mapping is not None:
         from .yaml_plan import _mapping
         if (not with_sources or native_helpers or powercalc_bundle is not None
-                or template_reference_mapping is not None):
+                or template_reference_mapping is not None
+                and dependent_reference_mapping != template_reference_mapping):
             raise YAMLValidationError('dependent_config_program_scope_required')
         dependent_reference_mapping = _mapping(dependent_reference_mapping)
     if template_reference_mapping is not None:
@@ -472,12 +474,12 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 evidence = seal_original_sources(receipt, plan, staged[2], result['source_runtime'],
                     template_ledger=staged[3], template_native=result['template_sources'],
                     template_candidate_native=result['template_candidate_sources'])
+                dependent_program = None
                 if dependent_reference_mapping is not None:
                     from .dependent_config_program import seal_dependent_config_program
-                    program = seal_dependent_config_program(receipt, evidence,
+                    dependent_program = seal_dependent_config_program(receipt, evidence,
                         result['dependent_config_program'], plan=plan,
                         mapping=dependent_reference_mapping, source_order=tuple(sorted(dependent_reference_mapping)))
-                    return DependentConfigValidation(receipt, evidence, program)
                 if powercalc_bundle is not None:
                     from dataclasses import replace
                     from .powercalc_source_binding import seal_powercalc_sources
@@ -506,7 +508,9 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                             result['template_state_config_program'],
                             result['template_candidate_state_config_program'],
                             mapping=template_reference_mapping, plan=plan)
-                    return TemplateStateSourceValidation(receipt, evidence, original, candidate, program)
+                    return TemplateStateSourceValidation(receipt, evidence, original, candidate, program, dependent_program)
+                if dependent_program is not None:
+                    return DependentConfigValidation(receipt, evidence, dependent_program)
                 return receipt, evidence
             return receipt
     except (OSError, TimeoutError):
@@ -535,14 +539,18 @@ async def async_validate_proposed_with_dependent_config_program(hass, plan, mapp
 
 
 async def async_validate_proposed_with_template_state_sources(
-        hass, plan, mapping, scratch_parent, *, timeout=120, with_state_program=False):
+        hass, plan, mapping, scratch_parent, *, timeout=120, with_state_program=False,
+        with_dependent_program=False):
     """Explicit internal full-state source preflight; no readiness/activation.
 
     Same staging, isolated native checker, receipt and source/directory fences.
     This opt-in does not replace the legacy receipt or its old reload semantics.
     """
+    if type(with_dependent_program) is not bool:
+        raise YAMLValidationError('dependent_config_program_scope_required')
     return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
-        with_sources=True, template_reference_mapping=mapping, template_state_program=with_state_program)
+        with_sources=True, template_reference_mapping=mapping, template_state_program=with_state_program,
+        dependent_reference_mapping=mapping if with_dependent_program else None)
 
 
 def assert_proposal_matches(receipt, plan):

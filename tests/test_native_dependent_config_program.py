@@ -15,7 +15,7 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
     def module(self, name):
         return importlib.import_module(fixture.fixtures.PACKAGE + '.' + name)
 
-    async def compile(self, *, empty_automation=False, secret=False):
+    async def compile(self, *, empty_automation=False, secret=False, mixed=False):
         root = self.f.root
         (root / 'configuration.yaml').write_text('script: !include scripts.yaml\n' +
             ('automation: []\n' if empty_automation else 'automation: !include automations.yaml\n'))
@@ -44,6 +44,14 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
     - variables:
         sample: "{{ states('sensor.original') ~ states('sensor.second') }}"
 ''')
+        if mixed:
+            with (root / 'configuration.yaml').open('a') as stream:
+                stream.write('template: !include templates.yaml\n')
+            (root / 'templates.yaml').write_text('''- sensor:
+    - name: Dependent program template
+      unique_id: dependent_template
+      state: "{{ states('sensor.original') ~ states('sensor.second') }}"
+''')
         if secret:
             with (root / 'scripts.yaml').open('a') as stream:
                 stream.write('  description: !secret synthetic_description\n')
@@ -52,8 +60,12 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
         plan = self.module('yaml_plan').plan_yaml(root, mapping)
         self.assertTrue(plan.ready, plan.issues)
         validate = self.module('yaml_validation')
-        result = await validate.async_validate_proposed_with_dependent_config_program(
-            self.f.hass, plan, mapping, root.parent)
+        if mixed:
+            result = await validate.async_validate_proposed_with_template_state_sources(
+                self.f.hass, plan, mapping, root.parent, with_state_program=True, with_dependent_program=True)
+        else:
+            result = await validate.async_validate_proposed_with_dependent_config_program(
+                self.f.hass, plan, mapping, root.parent)
         return result, plan, mapping
 
     async def test_full_native_prefixes_same_original_codec_and_tamper_guards(self):
@@ -113,3 +125,19 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
             await self.compile(secret=True)
         self.assertNotIn('local_synthetic_fixture', str(raised.exception))
         self.assertNotIn('local_synthetic_fixture', str(getattr(raised.exception, '__notes__', ())))
+
+    async def test_mixed_template_and_dependents_share_one_original_invocation(self):
+        result, plan, mapping = await self.compile(mixed=True)
+        p = result.dependent_config_program
+        self.assertIsNotNone(result.state_config_program)
+        p.assert_sources(result.receipt, result.evidence, plan=plan, mapping=mapping,
+                         source_order=tuple(sorted(mapping)))
+        self.assertEqual(p.mapping, result.state_config_program.mapping)
+        self.assertEqual(result.state_config_program.original_sha256, result.original_sources.sha256)
+        self.assertEqual(result.state_config_program.candidate_sha256, result.candidate_sources.sha256)
+        legacy = await self.module('yaml_validation').async_validate_proposed_with_template_state_sources(
+            self.f.hass, plan, mapping, self.f.root.parent, with_state_program=True)
+        self.assertEqual(legacy.receipt, result.receipt)
+        self.assertEqual(legacy.evidence, result.evidence)
+        self.assertEqual(legacy.state_config_program, result.state_config_program)
+        self.assertIsNone(legacy.dependent_config_program)
