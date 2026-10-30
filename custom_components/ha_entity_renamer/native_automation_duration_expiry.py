@@ -155,7 +155,7 @@ class NativeDurationExpiry:
         self._image_check(matches[0])
 
     def _image(self, route, p):
-        from .native_automation_duration_binding import _cell, _retained_value
+        from .native_automation_duration_binding import _cell, _retained_value, _history_signature
         b, h = route.binding, p['handle']
         # Native expiry changes ONLY these two cells. Other mutable maps are
         # validated by the normal full census/route snapshot, not by recursion
@@ -183,6 +183,7 @@ class NativeDurationExpiry:
                 tuple(map(id, h._args)), functions, jobs,
                 id(event), event.event_type, id(event.context), id(event.origin), _value(event.data),
                 id(history['from_s']), id(history['to_s']),
+                _history_signature(event,history['from_s'],history['to_s']),
                 None if own is None else (id(own), id(own.binding), id(own.change),
                     id(own.clear), id(own.action), id(own.predicate), own.approved_entity,
                     tuple(map(id, own.edges))))

@@ -6,6 +6,7 @@ Default observers still refuse durations. No public family/readiness admission.
 """
 from __future__ import annotations
 import asyncio
+from datetime import datetime
 from datetime import timedelta
 from functools import partial
 from types import FunctionType, CodeType
@@ -20,6 +21,35 @@ def _cells(f):
 
 def _cell(f, name):
     return dict(zip(f.__code__.co_freevars, f.__closure__ or (), strict=True))[name]
+
+
+def _history_signature(event, from_state, to_state):
+    """Retained data values; native State.expire/report/cache changes stay legal."""
+    from homeassistant.core import Context, Event, State
+    from homeassistant.const import EntityStateAttribute
+    from .native_rename_emission_classifier import _semantic_state
+    def context(value):
+        _need(type(value) is Context, 'duration_history_context_type')
+        fields=(value.id,value.parent_id,value.user_id)
+        _need(type(fields[0]) is str and all(v is None or type(v) is str for v in fields[1:]),
+              'duration_history_context_fields')
+        return fields
+    def state(value):
+        if value is None:
+            return None
+        _need(type(value) is State and all(type(v) is str for v in
+              (value.entity_id,value.domain,value.object_id)), 'duration_history_state_type')
+        semantic=_semantic_state(value,native_attribute_key=EntityStateAttribute)
+        _need(semantic is not None and type(value.last_changed) is datetime
+              and type(value.last_updated) is datetime and type(value.last_updated_timestamp) is float,
+              'duration_history_state_fields')
+        # expire() replaces Context with equal causal fields. last_reported and
+        # native cache/state_info bookkeeping may advance without changing the
+        # historical trigger values; none of those are rewritten here.
+        return (value.entity_id,value.domain,value.object_id,semantic,value.last_changed,
+                value.last_updated,value.last_updated_timestamp,context(value.context))
+    _need(type(event) is Event, 'duration_history_event_type')
+    return context(event.context),state(from_state),state(to_state)
 
 
 def _codes(code):
@@ -350,7 +380,8 @@ class NativeAutomationDurationCapability:
                 action=action,entity_cell=entity_cell,own=own if type(own) is _OwnDuration else None))
             rows.append((key,id(clear),id(handle),handle.when(),id(handle._context),job_image(tj),job_image(sj),
                 function_image(action),function_image(predicate),id(a['event'].context),id(a['from_s']),id(a['to_s']),
-                id(cancel),id(keys),tuple(keys),id(job),_shape(target)))
+                id(cancel),id(keys),tuple(keys),id(job),_shape(target),
+                _history_signature(a['event'],a['from_s'],a['to_s'])))
         expected_jobs={id(p['cancel_job']):p for p in pending
             if (occurrence := self.expiry.for_clear(b,p['key'],p['clear'])) is None
             or occurrence.state != 'active' or self.expiry.active(occurrence)};found=set()
@@ -507,6 +538,7 @@ class NativeAutomationDurationCapability:
         for p in route.duration_pending:
             handle=p['handle']
             self.expiry.location(handle,route.binding)
+            history=p['own'].history() if p['own'] is not None else _cells(p['action'])
             rows.append((id(handle),handle.when(),id(handle._loop),id(handle._context),
                 id(handle._callback),tuple(map(id,handle._args)),
                 tuple(_retained_value(p[n],omitted) for n in
@@ -517,7 +549,8 @@ class NativeAutomationDurationCapability:
                  p['cancel_job']._cancel_on_shutdown,_value(p['cancel_job']._cache)),
                 None if p.get('own') is None else
                 (id(p['own'].binding),id(p['own'].change),id(p['own'].entity_cell),
-                 id(p['own'].action),id(p['own'].predicate),id(p['own'].clear),_value(p['own'].edges))))
+                 id(p['own'].action),id(p['own'].predicate),id(p['own'].clear),_value(p['own'].edges)),
+                _history_signature(history['event'],history['from_s'],history['to_s'])))
         return tuple(rows)
 
     def validate_retire(self,route,before_attempt=False,shadow=None):
@@ -584,6 +617,7 @@ class _OwnDuration:
         self.approved_entity=entity
         self.edges=(binding.config,binding.action_job,binding.listener_cells['period'],change,
             change.prior_state,change.new_state,change.event,change.event.context)
+        self.history_value=_history_signature(change.event,change.prior_state,change.new_state)
 
     def check(self):
         b,c=self.binding,self.change
@@ -601,6 +635,8 @@ class _OwnDuration:
               and _cell(self.action,'entity') is self.entity_cell
               and all(x is y for x,y in zip(self.edges,(b.config,b.action_job,b.listener_cells['period'],c,
                   c.prior_state,c.new_state,c.event,c.event.context),strict=True)),'duration_own_edges')
+        _need(_history_signature(c.event,c.prior_state,c.new_state)==self.history_value,
+              'duration_own_history_changed')
 
     def history(self):
         return dict(event=self.change.event,from_s=self.change.prior_state,to_s=self.change.new_state)
