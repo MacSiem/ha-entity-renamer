@@ -207,6 +207,13 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
             self.path.write_bytes(desired)
             transport.install_before_registry(context)
             ingress = ingress_module.NativeTemplateRenameIngress.install(transport, witness, context)
+            outputs = []
+            from homeassistant.core import callback
+            @callback
+            def native_output(event):
+                if event.data['entity_id'] == self.consumer.entity_id and event.data['new_state'] is not None:
+                    outputs.append(event.data['new_state'].state)
+            remove_output = self.f.hass.bus.async_listen('state_changed', native_output)
             try:
                 transport.mark_registry_attempt(context)
                 if hybrid and source_id == self.old:
@@ -214,6 +221,7 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
                 mutation = witness.mutate()
                 proof = await witness.finish()
             finally:
+                remove_output()
                 ingress.retire()
             from homeassistant.helpers.json import _orjson_bytes_default_encoder
             row = self.f.entity.async_get(target_id)
@@ -229,6 +237,10 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
                           self.consumer._template_result_info)
             if changed:
                 self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, '58' if hybrid else '14')
+                if hybrid:
+                    self.assertEqual(outputs, ['58'])
+                    self.assertGreater(ingress.deferred_count, 0)
+                    self.assertEqual(ingress.deferred, [])
             else:
                 self.assertIs(self.f.hass.states.get(self.consumer.entity_id), physical)
             self.assertEqual(self.producer.entity_id, target_id)
