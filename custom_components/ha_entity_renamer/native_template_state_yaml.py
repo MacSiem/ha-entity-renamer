@@ -109,8 +109,9 @@ def assert_state_yaml_composition(chain, change):
     """Every root/reopen binds the exact new preparation to retained sources."""
     from .native_template_state_composition import (TemplateStateComposition,
         MixedTemplateStateComposition, retain_state_composition)
-    expected = {PreparedTemplateStateYAML: TemplateStateComposition,
-                PreparedMixedTemplateStateYAML: MixedTemplateStateComposition}
+    from .native_script_program_composition import ScriptTemplateStateComposition
+    expected = {PreparedTemplateStateYAML: (TemplateStateComposition,),
+                PreparedMixedTemplateStateYAML: (MixedTemplateStateComposition, ScriptTemplateStateComposition)}
     if type(change) not in expected:
         raise Refused('template_state_yaml_preparation_required')
     from .native_template_composition import decode_composition
@@ -137,7 +138,7 @@ def assert_state_yaml_composition(chain, change):
     binding[4]()
     if binding[3] != payload.get('composition'):
         raise Refused('template_state_yaml_original_composition_changed')
-    if (type(composition) is not expected[type(change)] or baseline != chain.baseline
+    if (type(composition) not in expected[type(change)] or baseline != chain.baseline
             or change.receipt != chain.original_receipt or baseline.receipt != change.receipt
             or change.source_program_sha256 != composition.state_config_program.sha256):
         raise Refused('template_state_yaml_original_composition_mismatch')
@@ -164,11 +165,13 @@ class NativeTemplateStateYAMLRuntimeReadback:
         from .native_template_state_composition import TemplateStateComposition, MixedTemplateStateComposition
         from .native_template_mixed_state_yaml import NativeMixedTemplateStateYAMLRuntimeReadback
         from .native_template_state_binding import _StateRuntime
-        expected = {NativeTemplateStateYAMLRuntimeReadback: TemplateStateComposition,
-                    NativeMixedTemplateStateYAMLRuntimeReadback: MixedTemplateStateComposition}
+        from .native_script_program_composition import ScriptTemplateStateComposition
+        expected = {NativeTemplateStateYAMLRuntimeReadback: (TemplateStateComposition,),
+                    NativeMixedTemplateStateYAMLRuntimeReadback: (MixedTemplateStateComposition, ScriptTemplateStateComposition)}
         _need(type(chain) is RegistryReceiptChain and type(self) in expected
-              and type(composition) is expected[type(self)], 'template_state_original_chain_required')
+              and type(composition) in expected[type(self)], 'template_state_original_chain_required')
         composition.assert_baseline(chain.baseline)
+        self.composition = composition
         self.hass, self.chain, self.program, self.guard = hass, chain, composition.state_config_program, guard
         self.receipt, self._last_runtime = chain.original_receipt, None
         self.native = _StateRuntime(hass)

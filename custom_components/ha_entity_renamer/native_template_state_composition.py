@@ -217,9 +217,8 @@ def retain_state_composition(value, baseline):
     """
     from .native_template_yaml_server import _baseline_stamp
     from .transaction import Refused
-    encode = (encode_mixed_state_composition if type(value) is MixedTemplateStateComposition
-              else encode_state_composition)
-    wire = encode(value, baseline)
+    from .native_template_composition import encode_composition
+    wire = encode_composition(value, baseline)
     original, original_baseline = _retained_fields(value), _baseline_stamp(baseline)
     def check():
         if (_retained_fields(value) != original

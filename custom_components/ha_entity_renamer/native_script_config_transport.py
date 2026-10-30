@@ -134,12 +134,12 @@ class NativeScriptConfigTransport:
         _need(False, 'native_script_config_capture_required')
 
     @classmethod
-    def capture(cls, observer, chain, source, *, reverse=False, guard):
+    def capture(cls, observer, chain, source, *, reverse=False, guard, input_state=None):
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         _need(cls is NativeScriptConfigTransport and type(observer) is NativeDependentConfigReadback
               and type(reverse) is bool and asyncio.current_task() is not None)
         guard()
-        sample = observer.sample(chain)
+        sample = observer.sample(chain, input_state=input_state)
         active = sample.prefix.active
         _need(source in observer.program.source_order and (source in active) == reverse)
         target = active - {source} if reverse else active | {source}
@@ -149,6 +149,7 @@ class NativeScriptConfigTransport:
         _need(before['automation'] == after['automation'], 'native_script_config_automation_change_unsupported')
         obj = object.__new__(cls)
         obj.observer, obj.chain, obj.guard, obj.sample = observer, chain, guard, sample
+        obj.input_state = input_state
         obj.before, obj.after, obj.active, obj.target = before, after, active, target
         obj.task, obj.phase, obj.operations, obj.actors = asyncio.current_task(), 'captured', [], []
         obj._projected = {}
@@ -239,7 +240,7 @@ class NativeScriptConfigTransport:
         _need(asyncio.current_task() is self.task and self.phase == 'captured')
         self.guard()
         _need(self._actor_graph() == self._before_actor_graph, 'native_script_config_live_edges_changed')
-        _need(self.observer.sample(self.chain) == self.sample, 'native_script_config_prefix_changed')
+        _need(self.observer.sample(self.chain, input_state=self.input_state) == self.sample, 'native_script_config_prefix_changed')
         _need(all(entity.script is script and _idle_census(script) == census
                   for entity, script, census, _ in self.actors), 'native_script_config_cache_changed')
 

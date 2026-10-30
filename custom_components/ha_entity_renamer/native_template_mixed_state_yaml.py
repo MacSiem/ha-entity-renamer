@@ -121,6 +121,10 @@ class _MixedStateYAMLHooks(_TemplateStateYAMLHooks):
         # Existing full-prefix proof replaces Template activation completely.
         await super().activate()
         observer = self.adapter.observer
+        from .native_template_yaml_server import _script_prefix_composition
+        if _script_prefix_composition(observer.composition):
+            observer.dependents.phases.check()
+            return
         for domain in ('script', 'automation'):
             if domain not in self.change.receipt.changed_domains:
                 continue

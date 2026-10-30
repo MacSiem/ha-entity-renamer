@@ -34,7 +34,13 @@ def _need(value, reason):
 
 def _mixed_composition(value):
     from .native_template_state_composition import MixedTemplateStateComposition
-    return type(value) in (MixedTemplateComposition, MixedTemplateStateComposition)
+    from .native_script_program_composition import ScriptTemplateStateComposition
+    return type(value) in (MixedTemplateComposition, MixedTemplateStateComposition, ScriptTemplateStateComposition)
+
+
+def _script_prefix_composition(value):
+    from .native_script_program_composition import ScriptTemplateStateComposition
+    return type(value) is ScriptTemplateStateComposition
 
 
 def _registry_mapping(changes, composition):
@@ -492,7 +498,7 @@ class NativeTemplateYAMLServer:
         self._scope()
         await self._fresh_stores(None)
         await self._common(False, initial=True)
-        if _mixed_composition(self.composition):
+        if _mixed_composition(self.composition) and not _script_prefix_composition(self.composition):
             from .journal import Record
             from .native_automation_lifecycle import NativeAutomationLifecycle
             # Persist the ordinary operation BEFORE any native detach, as in
@@ -665,6 +671,10 @@ class NativeTemplateYAMLServer:
         observed = await async_observe_discovery_inputs(self.hass, guard=self._scope)
         self._scope()
         sampler = _RuntimeSourceSampler.bind(self.evidence, observed)
+        if _script_prefix_composition(self.composition):
+            self.consumers.bind_prefix_phases(self)
+            self._scope()
+            return
         if _mixed_composition(self.composition):
             self.consumers.bind_phases(self.receipt, self.evidence, observed, Position.AFTER)
             self._scope()
@@ -703,7 +713,7 @@ class NativeTemplateYAMLServer:
             await self._prefix_current(self.record)
         else:
             await self._terminal(self.record, rollback=False)
-        if _mixed_composition(self.composition):
+        if _mixed_composition(self.composition) and not _script_prefix_composition(self.composition):
             from .native_automation_lifecycle import NativeAutomationLifecycle
             self.automation_lifecycle = NativeAutomationLifecycle(self, 'rollback')
             self.observer.automation_lifecycle = self.automation_lifecycle
@@ -722,4 +732,9 @@ class NativeTemplateYAMLServer:
         _need(asyncio.current_task() is self.task, 'owner_task_required')
         if hasattr(self, 'automation_lifecycle'):
             self.automation_lifecycle.close()
+        consumers = getattr(self, 'consumers', None)
+        phases = getattr(consumers, 'phases', None)
+        from .native_script_prefix_phase import NativeScriptPrefixPhase
+        if type(phases) is NativeScriptPrefixPhase:
+            phases.close()
         self.bound, self.closed = False, True

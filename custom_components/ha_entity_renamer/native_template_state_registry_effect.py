@@ -64,9 +64,12 @@ class NativeTemplateStateRegistryEffect:
                                for identity, value in snapshot.prefix.registry_ids))
         obj.transport = None
         obj.witness = obj.delivery = obj.ingress = None
+        from .native_script_program_composition import ScriptTemplateStateComposition
+        obj.script_phase = (root.consumers.phases
+            if type(root.composition) is ScriptTemplateStateComposition else None)
         pure = ({key: value for key, value in change.before.items() if key not in ('entity_id', 'modified_at')}
                 == {key: value for key, value in change.after.items() if key not in ('entity_id', 'modified_at')})
-        if transition.entities and pure:
+        if (transition.entities or obj.script_phase is not None) and pure:
             from .native_rename_emission_classifier import NativeRenameEmissions
             from .native_template_rename_ingress import NativeTemplateProducerDelivery
             from .native_source_handoff import NativeSourceHandoff
@@ -75,13 +78,17 @@ class NativeTemplateStateRegistryEffect:
             # Dependent A/S lifecycle retains its existing source-event proof
             # until the separate full program/phase transport is integrated.
             from .native_template_state_composition import TemplateStateComposition
-            if (type(root.composition) is TemplateStateComposition
-                    and NativeSourceHandoff.supports_source(io, change, target_image)):
+            supported = NativeSourceHandoff.supports_source(io, change, target_image)
+            if obj.script_phase is not None:
+                _need(supported, 'script_prefix_source_handoff_unsupported')
+            if (type(root.composition) in (TemplateStateComposition, ScriptTemplateStateComposition)
+                    and supported):
                 handoff = await NativeSourceHandoff.prepare(io, change, target_image, guard=guard)
             try:
                 obj.witness = await NativeRenameEmissions.prepare(io, change, target_image,
                     guard=guard, source_handoff=handoff)
-                obj.delivery = NativeTemplateProducerDelivery(obj.runtime, transition.entities, obj.witness)
+                if transition.entities:
+                    obj.delivery = NativeTemplateProducerDelivery(obj.runtime, transition.entities, obj.witness)
             except BaseException:
                 if obj.witness is not None:
                     obj.witness.close()
@@ -99,6 +106,9 @@ class NativeTemplateStateRegistryEffect:
         if self.ingress is not None:
             self.ingress.retire()
         self._restore_own_pre_attempt()
+        if (self.script_phase is not None and self.script_phase.active is not None
+                and self.script_phase.active[0] is self):
+            self.script_phase.abort(self)
         if self.witness is not None:
             self.witness.close()
         self.phase = 'failed_before_attempt'
@@ -180,6 +190,9 @@ class NativeTemplateStateRegistryEffect:
               'one_use_required')
         try:
             self._capture_at_final_fence()
+            if self.script_phase is not None:
+                self.script_phase.capture(self)
+                self.script_phase.install(self)
             if self.transport is not None:
                 self.transport.install_before_registry(self.caller)
                 self.transport.mark_registry_attempt(self.caller)
@@ -197,7 +210,10 @@ class NativeTemplateStateRegistryEffect:
         # Exact NativeRegistryIO, not a callable supplied by an import/request.
         try:
             if self.witness is not None:
-                return self.witness.mutate()
+                result = self.witness.mutate()
+                if self.script_phase is not None:
+                    self.script_phase.mark_attempt(self)
+                return result
             return self.io.mutate(self.change,
                 self.change.before if self.context.record.direction == 'rollback' else self.change.after)
         except BaseException:
@@ -210,8 +226,11 @@ class NativeTemplateStateRegistryEffect:
                     self.abort_before_attempt()
                 finally:
                     self.witness.close()
-            elif self.ingress is not None:
-                self.ingress.retire()
+            else:
+                if self.script_phase is not None:
+                    self.script_phase.poison(self)
+                if self.ingress is not None:
+                    self.ingress.retire()
             raise
 
     async def verify_effect(self, mutation, after):
@@ -248,4 +267,6 @@ class NativeTemplateStateRegistryEffect:
         _need(actual.prefix.active == self.expected.active
               and actual.prefix.registry_ids == self.expected.registry_ids,
               'accepted_effect_changed')
+        if self.script_phase is not None:
+            self.script_phase.accepted(self)
         self.phase = 'accepted'

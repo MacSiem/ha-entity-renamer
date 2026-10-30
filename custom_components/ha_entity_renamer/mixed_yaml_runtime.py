@@ -33,6 +33,12 @@ class MixedYAMLConsumers(_UnchangedConsumers):
         self.phases = phases
         self.check()
 
+    def bind_prefix_phases(self, root):
+        from .native_script_prefix_phase import NativeScriptPrefixPhase
+        self.runtime_sample = None
+        self.phases = NativeScriptPrefixPhase(root)
+        self.check()
+
     def check(self):
         super().check()
         if threading.get_ident() != self.thread:

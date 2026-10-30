@@ -17,6 +17,7 @@ from .native_input_baseline import _drained
 from .native_template_state_composition import TemplateStateComposition, MixedTemplateStateComposition
 from .native_registry_receipts import RegistryReceiptChain, RegistryRawObservation, native_registry_receipt_store
 from .prepared import encode_change, decode_change
+from .native_script_program_composition import ScriptTemplateStateComposition
 
 
 def _need(value, reason):
@@ -90,6 +91,18 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         _need(yaml.ready and bool(yaml.patches), 'yaml_proposal_required')
         bundle = await async_validate_proposed_with_template_state_sources(
             self.hass, yaml, self.mapping, root.parent, with_state_program=True)
+        if bundle.receipt.changed_domains == ('script', 'template'):
+            # Both programs come from one extended checked invocation, with
+            # exact ORIGINAL equality to the preceding legacy admission.
+            extended = await async_validate_proposed_with_template_state_sources(
+                self.hass, yaml, self.mapping, root.parent, with_state_program=True,
+                with_dependent_program=True)
+            _need((extended.receipt, extended.evidence, extended.original_sources,
+                   extended.candidate_sources, extended.state_config_program)
+                  == (bundle.receipt, bundle.evidence, bundle.original_sources,
+                      bundle.candidate_sources, bundle.state_config_program),
+                  'script_program_original_changed')
+            bundle = extended
         self.receipt, self.evidence, self.program = bundle.receipt, bundle.evidence, bundle.state_config_program
         self._scope()
         domains = self.receipt.changed_domains
@@ -182,11 +195,14 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         consumer_history = await self.history.capture(consumer_ids)
         self._scope()
-        composition_type = MixedTemplateStateComposition if self.mixed_state else TemplateStateComposition
+        script_prefix = self.receipt.changed_domains == ('script', 'template')
+        composition_type = (ScriptTemplateStateComposition if script_prefix else
+                            MixedTemplateStateComposition if self.mixed_state else TemplateStateComposition)
         self.composition = composition_type(self.evidence, bundle.original_sources,
             bundle.candidate_sources, self.program, yaml, tuple(sorted(self.mapping.items())),
             tuple(sorted(self.digests.items())), source_history, consumer_history,
-            self.program.sha256, physical)
+            self.program.sha256, physical,
+            **({'dependent_config_program': bundle.dependent_config_program} if script_prefix else {}))
         inputs = await self.preparations.create_native_inputs(own + '-original', baseline,
                                                              composition=self.composition)
         self._scope()
@@ -217,10 +233,12 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
 
     def _new_observer(self):
         from .native_template_state_yaml import NativeTemplateStateYAMLRuntimeReadback
-        _need(type(self.composition) in (TemplateStateComposition, MixedTemplateStateComposition), 'state_composition_required')
+        _need(type(self.composition) in (TemplateStateComposition, MixedTemplateStateComposition, ScriptTemplateStateComposition), 'state_composition_required')
         self.program = self.composition.state_config_program
+        if type(self.composition) is ScriptTemplateStateComposition:
+            self.consumers.bind_prefix_phases(self)
         _need(self.composition.mapping == tuple(sorted(self.mapping.items())), 'original_mapping_changed')
-        if type(self.composition) is MixedTemplateStateComposition:
+        if type(self.composition) in (MixedTemplateStateComposition, ScriptTemplateStateComposition):
             from .native_template_mixed_state_yaml import NativeMixedTemplateStateYAMLRuntimeReadback
             return NativeMixedTemplateStateYAMLRuntimeReadback(self.hass, self.chain,
                 self.composition, self.consumers, guard=self._scope)
@@ -242,7 +260,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         _need(position is wanted, 'runtime_unconfirmed')
         witness = self.observer.runtime_check(wanted)
-        if type(self.composition) is MixedTemplateStateComposition:
+        if type(self.composition) in (MixedTemplateStateComposition, ScriptTemplateStateComposition):
             self.observer.assert_dependents_position(wanted)
         actual = await async_observe_accepted_state_bindings(self.hass, self.chain,
             self.program, guard=self._scope)
@@ -285,7 +303,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             full_verify_rollback=lambda _: self._common(True))
         registry.bind_template_state_root(self)
         adapter_type, compose = ReceiptedTemplateStateYAMLTransactionAdapter, compose_template_state_yaml_coordinator
-        if type(self.composition) is MixedTemplateStateComposition:
+        if type(self.composition) in (MixedTemplateStateComposition, ScriptTemplateStateComposition):
             from .native_template_mixed_state_yaml import (ReceiptedMixedTemplateStateYAMLTransactionAdapter,
                 compose_mixed_template_state_yaml_coordinator)
             adapter_type, compose = ReceiptedMixedTemplateStateYAMLTransactionAdapter, compose_mixed_template_state_yaml_coordinator
