@@ -35,8 +35,10 @@ _PINS = {
         'probatio.error': 'dc6b83e7077e627ec19569021294bc52cf0a6cf484c92498462e7e2bc3e1aae7',
     },
 }
-# The installed .2 has not had its Template/CV/package bodies read in this
-# bounded draft. Literal support is unchanged; scalar .2 remains unsupported.
+# Installed Core 2026.10.2: all eight actual Template/CV/native validator
+# module bytes match .4 (scalar-core102-source-readback.json, 2026-10-30).
+# The same per-runtime file/code/reference/protocol checks still apply.
+_PINS['2026.10.2'] = dict(_PINS['2026.10.4'])
 
 
 def configured_duration(config, hass):
