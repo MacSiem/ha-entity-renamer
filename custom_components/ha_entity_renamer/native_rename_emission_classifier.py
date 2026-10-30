@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import dis
 from functools import partial
 import inspect
+import math
 from pathlib import Path
 import sys
 import threading
@@ -105,9 +106,47 @@ class _Emission:
     origin: object
     fire_id: int
     binding: tuple = ()
+    semantic: object = None
     event: object = None
     event_context: object = None
     dispatched: bool = False
+
+
+def _semantic_state(state):
+    """Bounded data snapshot, never a render or source-authority proof.
+
+    Unsupported attribute objects make neutrality unknown/false. Do not invoke
+    their serializers, descriptors, iterators or equality hooks in a callback.
+    """
+    budget = [4096]
+    def freeze(value, depth=0):
+        budget[0] -= 1
+        if budget[0] < 0 or depth > 32:
+            raise ValueError()
+        kind = type(value)
+        if value is None:
+            return ('none',)
+        if kind in (str, bool, int):
+            if kind is str and len(value) > 1024 * 1024:
+                raise ValueError()
+            return (kind.__name__, value)
+        if kind is float and math.isfinite(value):
+            return ('float', value)
+        if kind in (list, tuple):
+            return (kind.__name__, tuple(freeze(item, depth + 1) for item in value))
+        if kind is dict:
+            if any(type(key) is not str for key in value):
+                raise ValueError()
+            return ('dict', tuple((key, freeze(item, depth + 1))
+                                  for key, item in sorted(dict.items(value))))
+        raise ValueError()
+    try:
+        # State is the exact pinned native class at every callsite. Its outer
+        # attributes are native ReadOnlyDict; bypass overridden dict methods.
+        attributes = dict(dict.items(state.attributes))
+        return (freeze(state.state), freeze(attributes))
+    except (ValueError, TypeError, RecursionError):
+        return None
 
 
 class _Occurrences:
@@ -541,6 +580,7 @@ class NativeRenameEmissions:
             receipt = _Emission(phase, raw, values.get('context'), values.get('origin'), id(frame))
             if phase != 'registry':
                 receipt.binding = (raw['entity_id'], raw['old_state'], raw['new_state'])
+                receipt.semantic = _semantic_state(raw['old_state'] if phase == 'remove' else raw['new_state'])
             self.emissions.append(receipt)
             if not self.queued:
                 self.dispatches[id(frame)] = receipt
@@ -769,7 +809,11 @@ class NativeRenameEmissions:
             self._owner_guard()
             self._check()
             self.finished = True
+            snapshots = {item.phase: item.semantic for item in self.emissions if item.phase in ('remove', 'add')}
+            neutral = (snapshots['remove'] is not None and snapshots['add'] is not None
+                       and snapshots['remove'] == snapshots['add'])
             return {'rename_remove': counts['remove'], 'rename_add': counts['add'],
+                    'neutral': neutral,
                     'source_tasks_complete': source_complete,
                     'dispatches_complete': dispatch_complete}
         except BaseException:

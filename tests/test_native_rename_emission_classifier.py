@@ -98,6 +98,8 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((proof['rename_remove'], proof['rename_add']), (1, 1))
             self.assertTrue(proof['source_tasks_complete'])
             self.assertTrue(proof['dispatches_complete'])
+            if not producer_hook:
+                self.assertTrue(proof['neutral'])
             own = [event for event in received if witness.is_owned_rename(event)]
             self.assertEqual(len(own), 2)
             self.assertTrue(all(not witness.is_owned_rename(event) for event in ordinary))
