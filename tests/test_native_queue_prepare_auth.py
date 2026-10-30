@@ -115,3 +115,47 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
                 self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
                 self.assertIsNone(self.f.entity.async_get(new))
+
+    async def test_network_review_replacement_and_reload_reclaim_abandoned_preparations(self):
+        from aiohttp import ClientSession
+        runtime, old, new, uuids, original, payload = await self.selection()
+        hass = self.f.hass
+        connection, user, unused = await self._connection(admin=True)
+        token = await hass.auth.async_create_refresh_token(user,
+            client_id='https://renamer.invalid/ordinary-selection-network-qa')
+        self.addCleanup(hass.auth.async_remove_refresh_token, token)
+        access = hass.auth.async_create_access_token(token, remote_ip='127.0.0.1')
+        foreign = 'synthetic-unowned-preparation'
+        await runtime.preparations.create(foreign, {'kind': 'synthetic-unowned', 'keep': True})
+        foreign_row = runtime.preparations.plans[foreign]
+        async with ClientSession() as client:
+            async with client.ws_connect('http://127.0.0.1:' + str(hass.http.server_port)
+                                         + '/api/websocket') as ws:
+                self.assertEqual((await ws.receive_json(timeout=10))['type'], 'auth_required')
+                await ws.send_json({'type': 'auth', 'access_token': access})
+                self.assertEqual((await ws.receive_json(timeout=10))['type'], 'auth_ok')
+                first_count = None
+                for ident in (1, 2, 3):
+                    await ws.send_json({'id': ident, 'type': 'ha_entity_renamer/prepare', **payload})
+                    response = await ws.receive_json(timeout=60)
+                    self.assertTrue(response.get('success'), response)
+                    self.assertFalse(response['result']['migration_ready'])
+                    self.assertEqual(len(runtime.reviews), 1)
+                    current_count = len(runtime.preparations.plans)
+                    if first_count is None:
+                        first_count = current_count
+                    self.assertEqual(current_count, first_count)
+        self.assertTrue(await hass.config_entries.async_reload(self.backend_entry_id))
+        await hass.async_block_till_done()
+        fresh = hass.data[self._loaded_backend().DATA_RUNTIME]
+        self.assertIsNot(fresh, runtime)
+        self.assertFalse(fresh.reviews)
+        self.assertEqual(fresh.preparations.plans, {foreign: foreign_row})
+        receipts = self.module('native_registry_receipts').native_registry_receipt_store(hass, fresh.preparations)
+        await receipts.initialize()
+        self.assertEqual(receipts.rows, {})
+        self.assertEqual(await fresh.journal.all(), ())
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        await self.stimulus(7)
