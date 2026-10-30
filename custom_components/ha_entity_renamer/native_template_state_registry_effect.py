@@ -126,10 +126,13 @@ class NativeTemplateStateRegistryEffect:
         _need(self.phase in ('captured', 'failed_before_attempt'), 'attempt_cannot_be_aborted')
         if self.ingress is not None:
             self.ingress.retire()
-        self._restore_own_pre_attempt()
+        # Reverse the installation order. Duration journals retain exact global
+        # callback slots; native Template teardown/setup is a separate owned
+        # operation and must run after those journals have been restored.
         if (self.script_phase is not None and self.script_phase.active is not None
                 and self.script_phase.active[0] is self):
             self.script_phase.abort(self)
+        self._restore_own_pre_attempt()
         if self.witness is not None:
             self.witness.close()
         self.phase = 'failed_before_attempt'
@@ -248,19 +251,22 @@ class NativeTemplateStateRegistryEffect:
               'one_use_required')
         try:
             self._capture_at_final_fence()
-            if self.script_phase is not None:
-                self.script_phase.capture(self)
-                self.script_phase.install(self)
             if self.transport is not None:
                 self.transport.install_before_registry(self.caller)
                 self.transport.mark_registry_attempt(self.caller)
-                if self.witness is not None:
-                    from .native_template_rename_ingress import NativeTemplateRenameIngress
-                    self.ingress = NativeTemplateRenameIngress.install(self.transport, self.witness, self.caller)
             else:
                 self.guard()
                 self.root.chain.verify_intent_source(self.intent, self.context, self.before)
                 self.state.assert_current(self.root.receipt)
+            # Capture global native duration callback slots only after the
+            # Template cutover has completed. No await or external ingress lies
+            # between this capture/install and the ordinary native mutation.
+            if self.script_phase is not None:
+                self.script_phase.capture(self)
+                self.script_phase.install(self)
+            if self.transport is not None and self.witness is not None:
+                from .native_template_rename_ingress import NativeTemplateRenameIngress
+                self.ingress = NativeTemplateRenameIngress.install(self.transport, self.witness, self.caller)
         except BaseException:
             self.abort_before_attempt()
             raise

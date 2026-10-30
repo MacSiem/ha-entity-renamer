@@ -350,7 +350,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             frame=sys._getframe(1);actor=frame.f_locals.get('self')
             if (mode=='rollback' and code is codes[5]
                     and frame.f_locals.get('reason')=='duration_rollback_slot_changed'
-                    and not frame.f_locals.get('value')):
+                    and not frame.f_locals.get('condition')):
                 caller=frame.f_back
                 local=caller.f_locals
                 kind,owner,key=local['kind'],local['owner'],local['key']
