@@ -107,8 +107,11 @@ def _capture_template_state_yaml(bundle, plan, mapping, prepared_type):
 
 def assert_state_yaml_composition(chain, change):
     """Every root/reopen binds the exact new preparation to retained sources."""
-    from .native_template_state_composition import TemplateStateComposition, retain_state_composition
-    if type(change) is not PreparedTemplateStateYAML:
+    from .native_template_state_composition import (TemplateStateComposition,
+        MixedTemplateStateComposition, retain_state_composition)
+    expected = {PreparedTemplateStateYAML: TemplateStateComposition,
+                PreparedMixedTemplateStateYAML: MixedTemplateStateComposition}
+    if type(change) not in expected:
         raise Refused('template_state_yaml_preparation_required')
     from .native_template_composition import decode_composition
     from .native_template_yaml_server import _baseline_stamp
@@ -134,7 +137,7 @@ def assert_state_yaml_composition(chain, change):
     binding[4]()
     if binding[3] != payload.get('composition'):
         raise Refused('template_state_yaml_original_composition_changed')
-    if (type(composition) is not TemplateStateComposition or baseline != chain.baseline
+    if (type(composition) is not expected[type(change)] or baseline != chain.baseline
             or change.receipt != chain.original_receipt or baseline.receipt != change.receipt
             or change.source_program_sha256 != composition.state_config_program.sha256):
         raise Refused('template_state_yaml_original_composition_mismatch')
@@ -158,10 +161,13 @@ class NativeTemplateStateYAMLRuntimeReadback:
     """
     def __init__(self, hass, chain, composition, *, guard):
         from .native_registry_receipts import RegistryReceiptChain
-        from .native_template_state_composition import TemplateStateComposition
+        from .native_template_state_composition import TemplateStateComposition, MixedTemplateStateComposition
+        from .native_template_mixed_state_yaml import NativeMixedTemplateStateYAMLRuntimeReadback
         from .native_template_state_binding import _StateRuntime
-        _need(type(chain) is RegistryReceiptChain and type(composition) is TemplateStateComposition,
-              'template_state_original_chain_required')
+        expected = {NativeTemplateStateYAMLRuntimeReadback: TemplateStateComposition,
+                    NativeMixedTemplateStateYAMLRuntimeReadback: MixedTemplateStateComposition}
+        _need(type(chain) is RegistryReceiptChain and type(self) in expected
+              and type(composition) is expected[type(self)], 'template_state_original_chain_required')
         composition.assert_baseline(chain.baseline)
         self.hass, self.chain, self.program, self.guard = hass, chain, composition.state_config_program, guard
         self.receipt, self._last_runtime = chain.original_receipt, None
