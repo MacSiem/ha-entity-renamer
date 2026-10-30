@@ -42,7 +42,38 @@ def decode_template_state_yaml(data):
     return PreparedTemplateStateYAML(base.receipt, base.files, program_sha)
 
 
+@dataclass(frozen=True)
+class PreparedMixedTemplateStateYAML(PreparedYAML):
+    source_program_sha256: str
+
+    @property
+    def identity(self):
+        return 'template_mixed_state_yaml:' + _digest(asdict(self))
+
+    def checked(self):
+        if decode_mixed_template_state_yaml(asdict(self)) != self:
+            raise ValueError('noncanonical_prepared_template_mixed_state_yaml')
+        return self
+
+
+def decode_mixed_template_state_yaml(data):
+    """Exact mixed kind; program digest is bound to full sources by composition."""
+    if type(data) is not dict or set(data) != {'receipt', 'files', 'source_program_sha256'}:
+        raise ValueError('invalid_prepared_template_mixed_state_yaml')
+    program_sha = _sha(data['source_program_sha256'])
+    base = _decode_yaml({key: data[key] for key in ('receipt', 'files')}, mixed_state_mode=True)
+    return PreparedMixedTemplateStateYAML(base.receipt, base.files, program_sha)
+
+
 def capture_template_state_yaml(bundle, plan, mapping):
+    return _capture_template_state_yaml(bundle, plan, mapping, PreparedTemplateStateYAML)
+
+
+def capture_mixed_template_state_yaml(bundle, plan, mapping):
+    return _capture_template_state_yaml(bundle, plan, mapping, PreparedMixedTemplateStateYAML)
+
+
+def _capture_template_state_yaml(bundle, plan, mapping, prepared_type):
     """Capture actual ORIGINAL bytes under caller's locks, after actual check.
 
     This consumes the same native validation bundle as StateComposition. It
@@ -67,7 +98,7 @@ def capture_template_state_yaml(bundle, plan, mapping):
                 raise Refused('yaml_source_changed')
             files.append(YAMLFile(patch.path, before.hex(), patch.proposed_bytes.hex(),
                                   info.st_dev, info.st_ino))
-        result = PreparedTemplateStateYAML(receipt, tuple(files), program.sha256).checked()
+        result = prepared_type(receipt, tuple(files), program.sha256).checked()
         assert_validation_current(receipt)
         return result
     finally:

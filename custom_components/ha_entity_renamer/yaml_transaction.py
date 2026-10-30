@@ -116,8 +116,37 @@ def decode_yaml(data):
     return _decode_yaml(data)
 
 
-def _decode_yaml(data, *, state_mode=False):
-    """Shared bounded file codec, with an explicit disjoint selective gate."""
+def _assert_mixed_state_scope(receipt):
+    """Private codec scope only; full Template source proof lives in composition.
+
+    Template may retain genuine missing legacy projections. Automation/script
+    still require the same exact checker seals as the legacy mixed profile.
+    """
+    domains, expected = receipt.changed_domains, receipt.runtime_expected
+    if (type(domains) is not tuple or len(domains) not in (2, 3)
+            or any(type(domain) is not str for domain in domains)
+            or 'template' not in domains
+            or set(domains) - {'automation', 'script', 'template'}
+            or domains != tuple(sorted(set(domains)))
+            or type(expected) is not tuple
+            or any(type(row) is not tuple or len(row) != 3
+                   or type(row[0]) is not str for row in expected)
+            or tuple(row[0] for row in expected) != domains
+            or type(receipt.unsupported_domains) is not tuple
+            or receipt.unsupported_domains not in ((), ('template',))):
+        raise ValueError('template_mixed_state_scope_required')
+    for domain, before, after in expected:
+        if domain != 'template' and (before is None or after is None or before == after):
+            raise ValueError('template_mixed_state_runtime_required')
+        for value in (before, after):
+            if value is not None:
+                _sha(value)
+
+
+def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False):
+    """Shared bounded file codec, with explicit disjoint selective gates."""
+    if state_mode and mixed_state_mode:
+        raise ValueError('ambiguous_prepared_yaml_mode')
     _keys(data, ('receipt', 'files'))
     raw = data['receipt']
     receipt_keys = ('config_root', 'source_files', 'source_directories', 'proposed_files',
@@ -173,7 +202,7 @@ def _decode_yaml(data, *, state_mode=False):
     if (not domains or any(type(d) is not str or d not in _SUPPORTED for d in domains)
             or len(set(domains)) != len(domains)
             or (sequence(raw['unsupported_domains'], 1) not in ((), [], ('template',), ['template'])
-                if state_mode else sequence(raw['unsupported_domains'], 0))):
+                if state_mode or mixed_state_mode else sequence(raw['unsupported_domains'], 0))):
         raise ValueError('unsupported_prepared_yaml_activation')
     files, total = [], 0
     for row in sequence(data['files'], 512):
@@ -205,7 +234,7 @@ def _decode_yaml(data, *, state_mode=False):
         raise ValueError('invalid_prepared_yaml_runtime')
     if state_mode and domains != ('template',):
         raise ValueError('template_state_only_preparation_required')
-    if not state_mode and 'template' in domains:
+    if not state_mode and not mixed_state_mode and 'template' in domains:
         # Parsing one aggregate ordinary YAML change does not grant activation.
         # The receipted adapter still requires its exact typed composite observer
         # and ORIGINAL composition. Every changed domain needs checker seals;
@@ -217,6 +246,8 @@ def _decode_yaml(data, *, state_mode=False):
             raise ValueError('template_prepared_runtime_subset_required')
     receipt = ValidationReceipt(root, tuple(sources), tuple(directories), tuple(proposed),
                                 domains, tuple(raw['unsupported_domains']), _text(raw['version']), tuple(runtime_expected))
+    if mixed_state_mode:
+        _assert_mixed_state_scope(receipt)
     return PreparedYAML(receipt, tuple(files))
 
 

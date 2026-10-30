@@ -24,9 +24,19 @@ class NativeTemplateStateCompositionTests(unittest.IsolatedAsyncioTestCase):
         return importlib.import_module(server.activation.fixture.fixtures.PACKAGE + '.' + name)
 
     async def test_full_source_composition_reopens_same_original_and_rejects_tampering(self):
+        await self._assert_source_composition_roundtrip(mixed=False)
+
+    async def test_mixed_state_codec_reopens_same_original_with_full_program_proof(self):
+        await self._assert_source_composition_roundtrip(mixed=True)
+
+    async def _assert_source_composition_roundtrip(self, *, mixed):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_platform import async_get_platforms
-        runtime, mapping, uuids, _ = await self.data(variant='sensor')
+        if mixed:
+            import test_native_template_mixed_yaml_server as mixed_fixture
+            runtime, mapping, uuids, _, _ = await mixed_fixture.NativeTemplateMixedYAMLServerTests.data(self)
+        else:
+            runtime, mapping, uuids, _ = await self.data(variant='sensor')
         hass, root = self.f.hass, self.f.root
         old, new = next(iter(mapping.items()))
         path = root / 'template.yaml'
@@ -44,6 +54,15 @@ class NativeTemplateStateCompositionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(yaml.ready, yaml.issues)
         bundle = await validation.async_validate_proposed_with_template_state_sources(
             hass, yaml, mapping, root.parent, with_state_program=True)
+        if mixed:
+            state_yaml = self.module('native_template_state_yaml')
+            captured = await validation._settled_executor(hass,
+                state_yaml.capture_mixed_template_state_yaml, bundle, yaml, mapping)
+            self.assertIs(type(captured), state_yaml.PreparedMixedTemplateStateYAML)
+            self.assertEqual(captured.receipt, bundle.receipt)
+            self.assertEqual(captured.source_program_sha256, bundle.state_config_program.sha256)
+            preparations = self.module('prepared')
+            self.assertEqual(preparations.decode_change(preparations.encode_change(captured)), captured)
         baseline_module = self.module('native_input_baseline')
         baseline = await baseline_module.async_capture_native_input_baseline(
             hass, bundle.receipt, guard=lambda: None)
@@ -61,7 +80,8 @@ class NativeTemplateStateCompositionTests(unittest.IsolatedAsyncioTestCase):
         consumer_history = await history.capture(consumers)
         # Product class missing in RED. No test-built positive evidence/Plan.
         state = self.module('native_template_state_composition')
-        composition = state.TemplateStateComposition(bundle.evidence,
+        cls = state.MixedTemplateStateComposition if mixed else state.TemplateStateComposition
+        composition = cls(bundle.evidence,
             bundle.original_sources, bundle.candidate_sources, bundle.state_config_program, yaml,
             tuple(sorted(mapping.items())), (('state-source-registry', digest),),
             source_history, consumer_history, bundle.state_config_program.sha256)
@@ -74,9 +94,43 @@ class NativeTemplateStateCompositionTests(unittest.IsolatedAsyncioTestCase):
         reopened = prepared.native_prepared_store(hass)
         await reopened.initialize()
         actual, restored = reopened.resolve_composition(reference)
-        self.assertIs(type(restored), state.TemplateStateComposition)
+        self.assertIs(type(restored), cls)
         self.assertEqual((actual.digest, actual.receipt_json), (original_digest, original_receipt))
         self.assertEqual(codec.encode_composition(restored, actual), encoded)
+        self.assertEqual(encoded['profile'], 'template_mixed_state_binding_v1' if mixed
+                         else 'template_state_binding_v3')
+        wire, check = state.retain_state_composition(restored, actual)
+        self.assertEqual(wire, encoded)
+        check()
+        if mixed:
+            self.assertEqual(actual.receipt.changed_domains, ('automation', 'script', 'template'))
+            self.assertEqual(tuple(row[0] for row in actual.receipt.runtime_expected),
+                             actual.receipt.changed_domains)
+            for domain, before, after in actual.receipt.runtime_expected:
+                if domain != 'template':
+                    self.assertIsNotNone(before)
+                    self.assertIsNotNone(after)
+                    self.assertNotEqual(before, after)
+            altered = copy.deepcopy(encoded)
+            altered['profile'] = 'template_state_binding_v3'
+            with self.assertRaises(ValueError):
+                codec.decode_composition(altered, actual)
+            with self.assertRaises(ValueError):
+                state.encode_state_composition(restored, actual)
+            for key in ('state_config_program', 'coverage_sha256'):
+                altered = copy.deepcopy(encoded)
+                if key == 'state_config_program':
+                    altered[key]['fields']['candidate_json'] = 'e30='
+                else:
+                    altered[key] = '0' * 64
+                with self.assertRaises(ValueError, msg=key):
+                    codec.decode_composition(altered, actual)
+            # Nested mutable histories are detached by the retained fence.
+            restored.source_history['state_ids'].append(2147483647)
+            with self.assertRaises(self.module('transaction').Refused):
+                check()
+            restored.source_history['state_ids'].pop()
+            check()
         self.assertFalse(restored.migration_ready)
         self.assertFalse(actual.receipt.ready_for_apply)
         self.assertTrue(await history.verify(restored.source_history))

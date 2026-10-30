@@ -210,9 +210,9 @@ def encode_change(change):
     from .energy_native import PreparedEnergy
     from .helper_transaction import PreparedHelper
     from .yaml_transaction import PreparedYAML
-    from .native_template_state_yaml import PreparedTemplateStateYAML
-    kinds = {PreparedTemplateStateYAML: 'template_state_yaml', PreparedRegistryChange: 'registry', PreparedDashboard: 'dashboard', PreparedEnergy: 'energy', PreparedHelper: 'helper', PreparedYAML: 'yaml'}
-    if type(change) in (PreparedYAML, PreparedTemplateStateYAML):
+    from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML
+    kinds = {PreparedMixedTemplateStateYAML: 'template_mixed_state_yaml', PreparedTemplateStateYAML: 'template_state_yaml', PreparedRegistryChange: 'registry', PreparedDashboard: 'dashboard', PreparedEnergy: 'energy', PreparedHelper: 'helper', PreparedYAML: 'yaml'}
+    if type(change) in (PreparedYAML, PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
         change.checked()
     if type(change) is PreparedHelper:
         change.plan()
@@ -229,6 +229,9 @@ def decode_change(row):
     if type(row) is not dict or set(row) != {'kind', 'data'} or type(row['data']) is not dict:
         raise ValueError('invalid_prepared_change')
     data = deepcopy(row['data'])
+    if row['kind'] == 'template_mixed_state_yaml':
+        from .native_template_state_yaml import decode_mixed_template_state_yaml
+        return decode_mixed_template_state_yaml(data)
     if row['kind'] == 'template_state_yaml':
         from .native_template_state_yaml import decode_template_state_yaml
         return decode_template_state_yaml(data)

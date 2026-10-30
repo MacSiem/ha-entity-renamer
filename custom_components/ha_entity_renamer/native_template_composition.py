@@ -242,7 +242,10 @@ class MixedTemplateComposition(TemplateComposition):
 
 
 def encode_composition(composition, baseline):
-    from .native_template_state_composition import TemplateStateComposition, encode_state_composition
+    from .native_template_state_composition import (TemplateStateComposition,
+        MixedTemplateStateComposition, encode_state_composition, encode_mixed_state_composition)
+    if type(composition) is MixedTemplateStateComposition:
+        return encode_mixed_state_composition(composition, baseline)
     if type(composition) is TemplateStateComposition:
         return encode_state_composition(composition, baseline)
     _need(type(composition) in (TemplateComposition, MixedTemplateComposition))
@@ -262,6 +265,9 @@ def encode_composition(composition, baseline):
 
 
 def decode_composition(payload, baseline):
+    if type(payload) is dict and payload.get('profile') == 'template_mixed_state_binding_v1':
+        from .native_template_state_composition import decode_mixed_state_composition
+        return decode_mixed_state_composition(payload, baseline)
     if type(payload) is dict and payload.get('profile') == 'template_state_binding_v3':
         from .native_template_state_composition import decode_state_composition
         return decode_state_composition(payload, baseline)

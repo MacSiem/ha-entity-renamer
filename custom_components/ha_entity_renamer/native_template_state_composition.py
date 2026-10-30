@@ -22,6 +22,7 @@ from .yaml_plan import (Plan, FileSnapshot, DirectorySnapshot, IncludeEdge, File
     Edit, Issue, VariableBindingProof, TemplateVariableBinding, PowercalcSourceInputs, _mapping)
 
 _PROFILE = 'template_state_binding_v3'
+_MIXED_PROFILE = 'template_mixed_state_binding_v1'
 _TYPES.update({t.__name__: t for t in (OriginalTemplateStateSources,
     CandidateTemplateStateSources, StateConfigProgram, Plan, FileSnapshot, DirectorySnapshot,
     IncludeEdge, FilePatch, Edit, Issue, VariableBindingProof, TemplateVariableBinding, PowercalcSourceInputs)})
@@ -50,13 +51,16 @@ class TemplateStateComposition:
     def migration_ready(self):
         return False
 
+    def _assert_changed_scope(self, receipt):
+        _need(receipt.changed_domains == ('template',) and bool(receipt.proposed_files)
+              and set(receipt.unsupported_domains) <= {'template'})
+
     def assert_baseline(self, baseline):
         _need(type(baseline) is NativeInputBaseline and type(self.yaml_plan) is Plan
               and self.yaml_plan.ready and self.yaml_plan.powercalc_inputs is None)
         receipt, evidence = baseline.receipt, self.evidence
-        _need(receipt.changed_domains == ('template',) and bool(receipt.proposed_files)
-              and set(receipt.unsupported_domains) <= {'template'}
-              and type(evidence) is OriginalSourceEvidence
+        self._assert_changed_scope(receipt)
+        _need(type(evidence) is OriginalSourceEvidence
               and evidence.powercalc_sources is None and evidence.powercalc_candidate_sources is None
               and evidence.template_sources is not None
               and evidence.template_candidate_sources is not None)
@@ -119,9 +123,27 @@ class TemplateStateComposition:
                                               definition.origin.start_line))
 
 
+@dataclass(frozen=True)
+class MixedTemplateStateComposition(TemplateStateComposition):
+    """Separate selective mixed profile, carrying the SAME ORIGINAL seals."""
+
+    def _assert_changed_scope(self, receipt):
+        from .yaml_transaction import _assert_mixed_state_scope
+        _assert_mixed_state_scope(receipt)
+        _need(bool(receipt.proposed_files))
+
+
 def encode_state_composition(value, baseline):
-    _need(type(value) is TemplateStateComposition)
-    result = {'schema': 3, 'profile': _PROFILE,
+    return _encode_state_composition(value, baseline, TemplateStateComposition, _PROFILE)
+
+
+def encode_mixed_state_composition(value, baseline):
+    return _encode_state_composition(value, baseline, MixedTemplateStateComposition, _MIXED_PROFILE)
+
+
+def _encode_state_composition(value, baseline, cls, profile):
+    _need(type(value) is cls)
+    result = {'schema': 3, 'profile': profile,
         'evidence': _typed(value.evidence, OriginalSourceEvidence, encode=True),
         'original_sources': _typed(value.original_sources, OriginalTemplateStateSources, encode=True),
         'candidate_sources': _typed(value.candidate_sources, CandidateTemplateStateSources, encode=True),
@@ -138,12 +160,20 @@ def encode_state_composition(value, baseline):
 
 
 def decode_state_composition(payload, baseline):
+    return _decode_state_composition(payload, baseline, TemplateStateComposition, _PROFILE)
+
+
+def decode_mixed_state_composition(payload, baseline):
+    return _decode_state_composition(payload, baseline, MixedTemplateStateComposition, _MIXED_PROFILE)
+
+
+def _decode_state_composition(payload, baseline, cls, profile):
     _need(type(payload) is dict and set(payload) == {'schema', 'profile', 'evidence',
         'original_sources', 'candidate_sources', 'state_config_program', 'yaml_plan', 'mapping', 'prepared_digests',
         'source_history', 'consumer_history', 'coverage_sha256', 'physical_consumers'}
         and type(payload['schema']) is int and payload['schema'] == 3
-        and payload['profile'] == _PROFILE)
-    value = TemplateStateComposition(
+        and payload['profile'] == profile)
+    value = cls(
         _typed(payload['evidence'], OriginalSourceEvidence, encode=False),
         _typed(payload['original_sources'], OriginalTemplateStateSources, encode=False),
         _typed(payload['candidate_sources'], CandidateTemplateStateSources, encode=False),
@@ -172,7 +202,7 @@ def _retained_fields(value):
     if kind is dict:
         return (kind, frozenset((_retained_fields(key), _retained_fields(item))
                                 for key, item in value.items()))
-    if kind is TemplateStateComposition or kind in _TYPES.values():
+    if kind in (TemplateStateComposition, MixedTemplateStateComposition) or kind in _TYPES.values():
         return (kind, tuple((field.name, _retained_fields(getattr(value, field.name)))
                              for field in fields(kind)))
     from .transaction import Refused
@@ -187,7 +217,9 @@ def retain_state_composition(value, baseline):
     """
     from .native_template_yaml_server import _baseline_stamp
     from .transaction import Refused
-    wire = encode_state_composition(value, baseline)
+    encode = (encode_mixed_state_composition if type(value) is MixedTemplateStateComposition
+              else encode_state_composition)
+    wire = encode(value, baseline)
     original, original_baseline = _retained_fields(value), _baseline_stamp(baseline)
     def check():
         if (_retained_fields(value) != original
