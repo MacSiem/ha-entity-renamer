@@ -1,4 +1,5 @@
 """Actual whole Root Script prefix/config/actions/fresh inverse qualification."""
+import sys
 import unittest
 
 import test_native_template_mixed_yaml_server as mixed
@@ -98,3 +99,81 @@ class NativeScriptPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await history.verify(before_history))
             self.assertTrue(await history.verify(composition.consumer_history))
             self.assertFalse(runtime.operation_lock.locked())
+
+    async def test_script_prefix_source_guard_refusal_restores_both_programs(self):
+        from homeassistant.core import Context
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        runtime, mapping, uuids, _, original = await self.data(with_automation=False)
+        hass, root = self.f.hass, self.f.root
+        await self.stimulus(17)
+        events = []
+        self.addCleanup(hass.bus.async_listen('mixed_yaml_script_result',
+            lambda event: events.append(str(event.data['value']))))
+        await hass.services.async_call('script', 'mixed_source', {}, blocking=True, context=Context())
+        await hass.async_block_till_done()
+        self.assertEqual(events, ['17'])
+        entity = next(iter(hass.data[DATA_INSTANCES]['script'].entities))
+        script, service = entity.script, hass.services._services['script']['mixed_source']
+        graph = self.module('native_script_config_transport')._graph
+        before_graph = graph(entity.raw_config), graph(script.sequence), graph(script.variables)
+        templates = tuple(entity for platform in async_get_platforms(hass, 'template')
+                          for entity in platform.entities.values())
+        trackers = tuple(entity._template_result_info for entity in templates)
+        await self._flush_documents()
+        source_type = self.module('native_source_handoff').NativeSourceHandoff
+        io_type = self.module('native_registry').NativeRegistryIO
+        codes = source_type.mutate.__code__, io_type.mutate.__code__
+        sources, attempts, revoked = [], [], False
+        def guard():
+            if revoked:
+                raise PermissionError('actual Script root final source authorization revoked')
+        async def refresh():
+            guard()
+        tool = next(index for index in range(6) if sys.monitoring.get_tool(index) is None)
+        sys.monitoring.use_tool_id(tool, 'Script root pre-API source refusal')
+        def started(code, offset):
+            nonlocal revoked
+            actor = sys._getframe(1).f_locals.get('self')
+            if actor.hass is not hass:
+                return
+            if code is codes[0]:
+                sources.append(actor)
+                revoked = True
+            else:
+                attempts.append(actor)
+        try:
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, started)
+            for code in codes:
+                sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
+            tools_before = tuple(sys.monitoring.get_tool(index) for index in range(6))
+            with self.assertRaises((PermissionError, self.module('transaction').Refused)):
+                await runtime.native_forward(hass, mapping, guard=guard, refresh=refresh)
+            self.assertEqual(len(sources), 1)
+            self.assertFalse(sources[0].attempted)
+            self.assertEqual(attempts, [])
+            self.assertEqual(events, ['17'])
+            self.assertEqual((graph(entity.raw_config), graph(script.sequence), graph(script.variables)), before_graph)
+            self.assertIs(entity.script, script)
+            self.assertIs(hass.services._services['script']['mixed_source'], service)
+            self.assertTrue(all(entity._template_result_info is tracker
+                                for entity, tracker in zip(templates, trackers, strict=True)))
+            self.assertEqual(tuple(sys.monitoring.get_tool(index) for index in range(6)), tools_before)
+            for old, new in mapping.items():
+                self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+                self.assertIsNone(self.f.entity.async_get(new))
+            for path, contents in original.items():
+                self.assertEqual((root / path).read_bytes(), contents)
+            self.assertFalse(runtime.operation_lock.locked())
+            records = await runtime.journal.active()
+            self.assertEqual(len(records), 1)
+            self.assertNotEqual(records[0].status, 'applied')
+            await self.stimulus(23)
+            await hass.services.async_call('script', 'mixed_source', {}, blocking=True, context=Context())
+            await hass.async_block_till_done()
+            self.assertEqual(events, ['17', '23'])
+        finally:
+            for code in codes:
+                sys.monitoring.set_local_events(tool, code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
+            sys.monitoring.free_tool_id(tool)
