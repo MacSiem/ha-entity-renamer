@@ -663,6 +663,14 @@ class DictDurationNative:
                 continue
             prefix = cls.__qualname__ + '.'
             for expected in self.expected[module.__name__]:
+                # Four typing.overload stubs in the independently hash-pinned
+                # source are replaced by the concrete All.__init__ at line 260.
+                # They are not runtime class methods. The concrete body remains
+                # mandatory below; no observed live method defines this allowlist.
+                if (module.__name__ == 'probatio.validators.combinators'
+                        and expected.co_qualname == 'All.__init__'
+                        and expected.co_firstlineno in (218, 228, 239, 251)):
+                    continue
                 if (not expected.co_qualname.startswith(prefix)
                         or '.' in expected.co_qualname[len(prefix):]
                         or expected.co_name.startswith('<')
