@@ -132,14 +132,27 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
         try:
             await move(self.old, self.new, change.after, self.original, self.desired)
             for value in (7, 11):
-                await self.emit(self.producer, value)
-                await self.emit(self.other, value)
-                self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, str(value * 2),
-                    {'native_control': self.f.hass.states.get(self.control.entity_id).state,
-                     'subject_listeners': self.consumer._template_result_info.listeners,
-                     'control_listeners': self.control._template_result_info.listeners,
-                     'subject_timers': len(self.consumer._template_result_info._rate_limit._rate_limit_timers),
-                     'control_timers': len(self.control._template_result_info._rate_limit._rate_limit_timers)})
+                from homeassistant.core import callback
+                fired = self.f.hass.loop.create_future()
+                @callback
+                def actual_outputs(event):
+                    if (not fired.done() and all(self.f.hass.states.get(entity.entity_id).state == str(value * 2)
+                                                for entity in (self.consumer, self.control))):
+                        fired.set_result(None)
+                remove = self.f.hass.bus.async_listen('state_changed', actual_outputs)
+                try:
+                    await self.emit(self.producer, value)
+                    await self.emit(self.other, value)
+                    deadlines = [handle.when() for entity in (self.consumer, self.control)
+                                 for handle in entity._template_result_info._rate_limit._rate_limit_timers.values()]
+                    # Domain native controls may rate-limit for one second.
+                    # Await their real output events, never invent immediate
+                    # delivery or advance a clock/call a native handler.
+                    await asyncio.wait_for(fired, max([0] + [deadline - self.f.hass.loop.time()
+                                                           for deadline in deadlines]) + 5)
+                finally:
+                    remove()
+                self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, str(value * 2))
                 self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state,
                                  self.f.hass.states.get(self.control.entity_id).state)
         finally:
