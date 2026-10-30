@@ -152,7 +152,20 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.f.device.async_get(device.id).name_by_user, 'Reviewed device')
         self.assertEqual(hass.states.get(new).attributes['friendly_name'], 'Reviewed source')
         self.assertEqual(hass.states.get(extra_id).attributes['friendly_name'], 'Reviewed extra')
-        inverse = await runtime.native_yaml_reverse(hass, review['operation_id'], review['fingerprint'],
+        applied = await runtime.journal.load(review['operation_id'])
+        inspected = await runtime.recovery_inspect(hass, review['operation_id'], review['fingerprint'],
+            guard=lambda: None, refresh=refresh)
+        self.assertEqual((inspected['state'], inspected['eligible']), ('applied', True))
+        self.assertEqual(inspected['change_summary']['registry_changes'], [
+            {'entity_id': new, 'applied': True, 'fields': {
+                'entity_id': {'current': new, 'original': old},
+                'name': {'current': 'Reviewed source', 'original': None}}},
+            {'entity_id': extra_id, 'applied': True, 'fields': {
+                'name': {'current': 'Reviewed extra', 'original': None}}},
+            {'device_id': device.id, 'applied': True, 'fields': {
+                'name_by_user': {'current': 'Reviewed device', 'original': None}}}])
+        self.assertEqual(await runtime.journal.load(review['operation_id']), applied)
+        inverse = await runtime.recovery_restore(hass, review['operation_id'], review['fingerprint'],
             guard=lambda: None, refresh=refresh)
         self.assertEqual(inverse['state'], 'rolled_back')
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)

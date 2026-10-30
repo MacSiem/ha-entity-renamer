@@ -74,6 +74,12 @@ class NativeTemplatePrefixRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await runtime.native_yaml_reverse(hass, record.operation_id, record.plan.fingerprint,
                 guard=lambda: None, refresh=refresh)
         self.assertEqual(await runtime.journal.load(record.operation_id), unresolved)
+        if controller:
+            inspected = await runtime.recovery_inspect(hass, record.operation_id, record.plan.fingerprint,
+                guard=lambda: None, refresh=refresh)
+            self.assertEqual((inspected['state'], inspected['eligible']), ('UNKNOWN', False))
+            self.assertNotIn('change_summary', inspected)
+            self.assertEqual(await runtime.journal.load(record.operation_id), unresolved)
         await runtime.journal.save(record)
         edited = original + b'\n# synthetic foreign edit after accepted prefix\n'
         (root / 'template.yaml').write_bytes(edited)
@@ -82,6 +88,15 @@ class NativeTemplatePrefixRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 guard=lambda: None, refresh=refresh)
         self.assertEqual((root / 'template.yaml').read_bytes(), edited)
         self.assertEqual(await runtime.journal.load(record.operation_id), record)
+        if controller:
+            inspected = await runtime.recovery_inspect(hass, record.operation_id, record.plan.fingerprint,
+                guard=lambda: None, refresh=refresh)
+            self.assertEqual((inspected['state'], inspected['eligible']), ('UNKNOWN', False))
+            restored = await runtime.recovery_restore(hass, record.operation_id, record.plan.fingerprint,
+                guard=lambda: None, refresh=refresh)
+            self.assertEqual((restored['state'], restored['eligible']), ('UNKNOWN', False))
+            self.assertEqual((root / 'template.yaml').read_bytes(), edited)
+            self.assertEqual(await runtime.journal.load(record.operation_id), record)
         (root / 'template.yaml').write_bytes(original)
         with self.assertRaises(self.module('transaction').Refused):
             await runtime.native_yaml_reverse(hass, record.operation_id, '0' * 64,
