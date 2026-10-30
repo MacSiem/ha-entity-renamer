@@ -204,6 +204,10 @@ class DictDurationNative:
             'TemplateStateBase.__delitem__': '_readonly',
             '_HAS_ENTITY_SERVICE_FIELD': 'has_at_least_one_key.<locals>.validate',
             'extra': 'Extra', '_sort_item': '_compile_itemsort.<locals>.item_priority',
+            'Alpha.check': '_is_ascii_alpha',
+            'Alphanumeric.check': '_is_ascii_alnum',
+            'PrintableASCII.check': '_is_printable_ascii',
+            'NoWhitespace.check': '_has_no_whitespace',
         }
         for name, module in self.modules.items():
             owners = [(module, tuple(vars(module).items()))]
