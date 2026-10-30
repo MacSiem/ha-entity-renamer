@@ -106,7 +106,7 @@ class NativeScriptLateBusyTests(unittest.IsolatedAsyncioTestCase):
             if rollback:
                 self.assertEqual(await runtime.journal.load(applied['operation_id']), before_record)
             else:
-                self.assertEqual(await runtime.journal.all(), [], 'late busy target must not create a pending operation')
+                self.assertFalse(await runtime.journal.all(), 'late busy target must not create a pending operation')
             self.assertFalse(runtime.operation_lock.locked())
             for previous, proposed in mapping.items():
                 present, absent = (proposed, previous) if rollback else (previous, proposed)
