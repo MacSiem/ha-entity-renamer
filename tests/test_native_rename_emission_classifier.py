@@ -50,6 +50,8 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
             hooked._attr_unique_id = 'classifier-native-hook-source'
             hooked._attr_name = 'Classifier native hook source'
             await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([hooked])
+            await hass.async_block_till_done()
+            await self._flush_documents()
             old, new = hooked.entity_id, 'sensor.classifier_native_hook_next'
             uuids = {old: self.f.entity.async_get(old).id}
         # Import before any mutation. The observer must own the one genuine API
