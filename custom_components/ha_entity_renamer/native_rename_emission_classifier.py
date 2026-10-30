@@ -323,6 +323,7 @@ class NativeRenameEmissions:
         self.emissions, self.pending, self.dispatches, self.constructors = [], [], {}, {}
         self.keyed, self.tasks, self.source_runs = {}, {}, 0
         self.fire_monitor = self.occurrences = None
+        self.ingress = None
         self.wake = None
         self.preflight = None
         self.mutation = None
@@ -892,6 +893,11 @@ class NativeRenameEmissions:
 
     def _pending_dispatches(self):
         pending = bool(self.pending or self.dispatches or self.constructors or self.keyed)
+        if self.ingress is not None:
+            from .native_template_rename_ingress import NativeTemplateRenameIngress
+            _need(type(self.ingress) is NativeTemplateRenameIngress and self.ingress.witness is self,
+                  'owned_ingress_changed')
+            pending = pending or bool(self.ingress.deferred)
         # Only actual native keyed deliveries of our original Events count.
         # Never execute/cancel a Handle or retain the rest of the ready queue.
         count = 0

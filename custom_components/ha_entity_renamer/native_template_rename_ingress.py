@@ -32,6 +32,9 @@ class NativeTemplateRenameIngress:
         obj.transport, obj.witness = transport, witness
         obj.owner, obj.rows, obj.live = asyncio.current_task(), [], True
         obj.suppressed = 0
+        obj.deferred, obj.deferred_count = [], 0
+        _need(witness.ingress is None, 'template_ingress_already_installed')
+        witness.ingress = obj
         try:
             for row in transport.rows:
                 tracker = row['new']
@@ -49,6 +52,18 @@ class NativeTemplateRenameIngress:
                         if obj.live and witness.suppresses_template_boundary(event):
                             obj.suppressed += 1
                             return
+                        if (obj.live and witness.source_handoff is not None
+                                and witness.is_owned_rename(event) and event.data['new_state'] is not None):
+                            # New ADD precedes old namespace removal. Deliver
+                            # this original event exactly once after the sync
+                            # handoff, so broad native queries cannot count both
+                            # IDs. This is our own queued dispatch, not a native
+                            # Handle execution, fabricated Event or replay.
+                            token = [original, event, None]
+                            obj.deferred.append(token)
+                            obj.deferred_count += 1
+                            token[2] = transport.hass.loop.call_soon(obj._deliver, token)
+                            return
                         original(event)
                     return ingress
 
@@ -63,6 +78,32 @@ class NativeTemplateRenameIngress:
         except BaseException:
             obj.retire()
             raise
+
+    def _deliver(self, token):
+        try:
+            original, event, _ = token
+            _need(self.live and any(item is token for item in self.deferred)
+                  and self.witness.is_owned_rename(event), 'template_ingress_deferred_event_changed')
+            h = self.witness.source_handoff
+            _need(h is not None and h.attempted and h.old_retired and h.error is None
+                  and self.transport.hass.states.get(h.old) is None,
+                  'template_ingress_handoff_not_retired')
+            matching = [(filtered, action, wrapper) for filtered, action, wrapper, _ in self.rows
+                        if action is original]
+            _need(len(matching) == 1, 'template_ingress_deferred_action_changed')
+            filtered, action, wrapper = matching[0]
+            tracker = action.__self__
+            _need(filtered._action is wrapper and any(
+                row['new'] is tracker and row['entity']._template_result_info is tracker
+                and self.transport.runtime.graph(row['entity']) is tracker for row in self.transport.rows),
+                'template_ingress_deferred_tracker_changed')
+            self._jobs(filtered, wrapper)
+            original(event)
+        except BaseException:
+            self.witness._poison('deferred_template_delivery_uncertain')
+        finally:
+            self.deferred[:] = [item for item in self.deferred if item is not token]
+            self.witness._signal()
 
     def _jobs(self, filtered, expected):
         """Find exact current own jobs; native domain add remains untouched."""
@@ -114,6 +155,13 @@ class NativeTemplateRenameIngress:
         if not self.live:
             return
         _need(asyncio.current_task() is self.owner, 'template_ingress_owner_changed')
+        if self.deferred:
+            _need(self.witness.error is not None, 'template_ingress_deferred_delivery_pending')
+            # Terminal uncertain cleanup cancels only handles created by this
+            # adapter, never an integration/native producer or its timer.
+            for _, _, handle in self.deferred:
+                handle.cancel()
+            self.deferred.clear()
         for filtered, action, wrapper, original_jobs in reversed(self.rows):
             _need(filtered._action is wrapper, 'template_ingress_action_changed')
             current_jobs = self._jobs(filtered, wrapper)
@@ -123,6 +171,8 @@ class NativeTemplateRenameIngress:
             for job in (*original_jobs, *current_jobs):
                 job.target = action
         self.live = False
+        if self.witness.ingress is self:
+            self.witness.ingress = None
 
 
 class NativeTemplateProducerDelivery:
