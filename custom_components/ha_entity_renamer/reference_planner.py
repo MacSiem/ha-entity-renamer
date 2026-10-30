@@ -288,7 +288,11 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                 domain = (node.attr if isinstance(node, nodes.Getattr) else
                           node.arg.value if isinstance(node.arg, nodes.Const)
                           and type(node.arg.value) is str else None)
-                if type(domain) is str and re.fullmatch(r'[a-z_][a-z0-9_]*', domain):
+                # AllStates has private Python attributes and reserves these
+                # Jinja context probes; neither path returns DomainStates.
+                if (type(domain) is str and re.fullmatch(r'[a-z][a-z0-9_]*', domain)
+                        and domain not in ('contextfunction', 'environmentfunction',
+                                           'evalcontextfunction', 'jinja_pass_arg')):
                     return ()
                 return None
             if (not isinstance(node, nodes.Filter)
