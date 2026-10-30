@@ -53,6 +53,76 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
         self.producer.async_write_ha_state()
         await self.f.hass.async_block_till_done()
 
+    async def test_conditional_full_root_keeps_active_branch_and_native_dependency_switch(self):
+        from homeassistant.core import Context
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        runtime, mapping, uuids, _ = await self.data(variant='sensor')
+        hass = self.f.hass
+        old = next(iter(mapping))
+        producers = []
+        for label, value in (('branch_a', 3), ('branch_b', 7), ('control', 1)):
+            entity = type(self.producer)()
+            entity._attr_unique_id = 'conditional-root-' + label
+            entity._attr_name = 'Conditional root ' + label
+            entity._attr_native_value = value
+            producers.append(entity)
+        await hass.data[DATA_INSTANCES]['sensor'].async_add_entities(producers)
+        branch_a, branch_b, control_source = producers
+        def definition(uid, source):
+            return ('- unique_id: ' + uid + '\n  sensor:\n  - unique_id: value\n'
+                '    name: Conditional root ' + uid + '\n'
+                '    state: "{{ states(\'' + branch_a.entity_id + '\') | int(0) if states(\'' + source
+                + '\') | int(0) > 0 else states(\'' + branch_b.entity_id + '\') | int(0) }}"\n')
+        path = self.f.root / 'template.yaml'
+        original = (definition('scope', old) + definition('control', control_source.entity_id)).encode()
+        path.write_bytes(original)
+        await hass.services.async_call('template', 'reload', {}, blocking=True, context=Context())
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        entities = {entity.unique_id: entity for platform in async_get_platforms(hass, 'template')
+                    for entity in platform.entities.values()}
+        subject, control = entities['scope-value'], entities['control-value']
+        async def emit(entity, value):
+            entity._attr_native_value = value
+            entity.async_write_ha_state()
+            await hass.async_block_till_done()
+        def outputs(value):
+            self.assertEqual(hass.states.get(control.entity_id).state, str(value))
+            self.assertEqual(hass.states.get(subject.entity_id).state, str(value))
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        initial = hass.states.get(subject.entity_id)
+        outputs(3)
+        result = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+        try:
+            self.assertEqual(result['state'], 'applied')
+            self.assertIs(hass.states.get(subject.entity_id), initial)
+            await emit(branch_a, 5)
+            outputs(5)
+            await emit(branch_b, 9)
+            outputs(5)
+            await emit(self.producer, 0)
+            await emit(control_source, 0)
+            outputs(9)
+            held = [hass.states.get(entity.entity_id) for entity in (subject, control)]
+            await emit(branch_a, 11)
+            self.assertTrue(all(hass.states.get(entity.entity_id) is state
+                                for entity, state in zip((subject, control), held)))
+            await emit(branch_b, 13)
+            outputs(13)
+        finally:
+            if result['state'] == 'applied':
+                inverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
+                    guard=lambda: None, refresh=refresh)
+                self.assertEqual(inverse['state'], 'rolled_back')
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(mapping[old]))
+        for source in (self.producer, control_source):
+            await emit(source, 1)
+        outputs(11)
+
     async def test_unavailable_variables_snapshot_and_live_this_full_root(self):
         runtime, mapping, uuids, original, consumer = await self.configure()
         hass = self.f.hass
