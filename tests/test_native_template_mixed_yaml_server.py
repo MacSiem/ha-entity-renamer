@@ -196,6 +196,29 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_staging_preserves_disabled_with_yaml_initial_true(self):
         await self._native_staging_case(False)
 
+    async def test_template_values_have_no_synthetic_transition_during_rename(self):
+        runtime, mapping, _, _, _ = await self.data()
+        hass = self.f.hass
+        baseline = {entity_id: hass.states.get(entity_id).state
+                    for entity_id, _ in self.identities.values()}
+        events = []
+        def observed(event):
+            entity_id, state = event.data.get('entity_id'), event.data.get('new_state')
+            if entity_id in baseline:
+                events.append((entity_id, None if state is None else state.state))
+        self.addCleanup(hass.bus.async_listen('state_changed', observed))
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        result = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+        self.assertEqual(result['state'], 'applied')
+        self.assertEqual([row for row in events if row[1] != baseline[row[0]]], [],
+            'a stable real source must not create zero/unavailable/removal Template transitions')
+        events.clear()
+        reverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
+            guard=lambda: None, refresh=refresh)
+        self.assertEqual(reverse['state'], 'rolled_back')
+        self.assertEqual([row for row in events if row[1] != baseline[row[0]]], [])
+
     async def test_template_script_without_automation_forward_fresh_reverse(self):
         from homeassistant.core import Context
         runtime, mapping, uuids, _, original = await self.data(with_automation=False)
