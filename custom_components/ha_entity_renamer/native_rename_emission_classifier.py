@@ -104,7 +104,9 @@ class _Emission:
     context: object
     origin: object
     fire_id: int
+    binding: tuple = ()
     event: object = None
+    event_context: object = None
     dispatched: bool = False
 
 
@@ -120,7 +122,10 @@ class _Occurrences:
         monitor.use_tool_id(self.key, _MONITOR_NAME)
         self.masks = {}
         start = monitor.events.PY_START
-        end = monitor.events.PY_RETURN | monitor.events.PY_UNWIND
+        end = monitor.events.PY_RETURN
+        # PY_UNWIND is not a local event (CPython sys.monitoring API). Only
+        # this owned slot subscribes globally; unrelated code returns at once.
+        self.global_mask = monitor.events.PY_UNWIND
         for name in ('event', 'source', 'keyed', 'registry_keyed', 'dispatch'):
             self.masks[witness.codes[name]] = start | end
         # On min, dispatch IS fire: its start is deliberately unused. The
@@ -133,6 +138,7 @@ class _Occurrences:
             monitor.register_callback(self.key, start, self._start)
             monitor.register_callback(self.key, monitor.events.PY_RETURN, self._return)
             monitor.register_callback(self.key, monitor.events.PY_UNWIND, self._unwind)
+            monitor.set_events(self.key, self.global_mask)
             for code, mask in self.masks.items():
                 monitor.set_local_events(self.key, code, mask)
             self.check()
@@ -144,8 +150,8 @@ class _Occurrences:
         frame = sys._getframe(1)
         try:
             self.witness._started(frame)
-        except BaseException:
-            self.witness._poison('occurrence_observer_failed')
+        except BaseException as error:
+            self.witness._observer_error(error, 'occurrence_observer_failed')
         finally:
             del frame
 
@@ -153,24 +159,26 @@ class _Occurrences:
         frame = sys._getframe(1)
         try:
             self.witness._ended(frame, False)
-        except BaseException:
-            self.witness._poison('occurrence_return_failed')
+        except BaseException as error:
+            self.witness._observer_error(error, 'occurrence_return_failed')
         finally:
             del frame
 
     def _unwind(self, code, offset, exception):
+        if code not in self.masks:
+            return
         frame = sys._getframe(1)
         try:
             self.witness._ended(frame, True)
-        except BaseException:
-            self.witness._poison('occurrence_unwind_failed')
+        except BaseException as error:
+            self.witness._observer_error(error, 'occurrence_unwind_failed')
         finally:
             del frame
 
     def check(self):
         monitor = sys.monitoring
         _need(self.live and monitor.get_tool(self.key) == _MONITOR_NAME
-              and monitor.get_events(self.key) == 0
+              and monitor.get_events(self.key) == self.global_mask
               and all(monitor.get_local_events(self.key, code) == mask
                       for code, mask in self.masks.items()), 'occurrence_monitor_lost')
 
@@ -183,6 +191,7 @@ class _Occurrences:
             self.witness._poison('occurrence_monitor_lost')
             return
         # Explicit cleanup also supports 3.13, where free does not clear masks.
+        monitor.set_events(self.key, 0)
         for code in self.masks:
             monitor.set_local_events(self.key, code, 0)
         for event in (monitor.events.PY_START, monitor.events.PY_RETURN,
@@ -366,6 +375,18 @@ class NativeRenameEmissions:
             self.error = reason
         self._signal()
 
+    def _observer_error(self, error, fallback):
+        # Keep only this module's sanitized invariant code, never foreign
+        # exception text, paths, State values or authentication material.
+        reason = error.args[0] if type(error) is NativeRenameEmissionError and error.args else None
+        prefix = 'native_rename_emissions_'
+        if (type(reason) is str and reason.startswith(prefix)
+                and len(reason) < 160 and reason.isascii()
+                and reason.replace('_', '').isalnum()):
+            self._poison(reason[len(prefix):])
+        else:
+            self._poison(fallback)
+
     def _frame(self, frame, key, obj=None):
         return (frame is not None and frame.f_code is self.codes[key]
                 and frame.f_globals is self.globals[key][0]
@@ -396,7 +417,16 @@ class NativeRenameEmissions:
         return (type(raw) is dict and set(raw) == {'action', 'entity_id', 'old_entity_id', 'changes'}
                 and raw['action'] == 'update' and raw['entity_id'] == self.target_id
                 and raw['old_entity_id'] == self.source_id
+                and type(raw['changes']) is dict
                 and raw['changes'] == {'entity_id': self.source_id})
+
+    def _data_current(self, item):
+        if item.phase == 'registry':
+            return self._registry_data(item.raw)
+        return (type(item.raw) is dict and set(item.raw) == {'entity_id', 'old_state', 'new_state'}
+                and item.raw['entity_id'] == item.binding[0]
+                and item.raw['old_state'] is item.binding[1]
+                and item.raw['new_state'] is item.binding[2])
 
     def _registry_cause(self, fire, raw):
         frame = fire.f_back
@@ -483,6 +513,12 @@ class NativeRenameEmissions:
         return 'add' if self._source_frame(frame) else None
 
     def _fire(self, frame):
+        try:
+            self._observe_fire(frame)
+        except BaseException as error:
+            self._observer_error(error, 'emission_observer_failed')
+
+    def _observe_fire(self, frame):
         # No guard here: native child tasks do not own the caller's capability.
         if self.closed or self.error is not None or not self.attempted:
             return
@@ -503,6 +539,8 @@ class NativeRenameEmissions:
         if phase is not None:
             _need(not any(item.phase == phase for item in self.emissions), 'duplicate_native_phase')
             receipt = _Emission(phase, raw, values.get('context'), values.get('origin'), id(frame))
+            if phase != 'registry':
+                receipt.binding = (raw['entity_id'], raw['old_state'], raw['new_state'])
             self.emissions.append(receipt)
             if not self.queued:
                 self.dispatches[id(frame)] = receipt
@@ -601,11 +639,13 @@ class NativeRenameEmissions:
                 _need(not failed and type(event) is self.Event
                       and frame.f_locals.get('self') is event
                       and event.data is receipt.raw and event.origin is receipt.origin
+                      and self._data_current(receipt)
                       and event.event_type == ('entity_registry_updated' if receipt.phase == 'registry'
                                                else 'state_changed')
                       and (receipt.context is None or event.context is receipt.context),
                       'constructed_event_changed')
                 receipt.event = event
+                receipt.event_context = event.context
         if code is self.codes['source']:
             record = self.tasks.get(asyncio.current_task())
             if record is not None and record[1] == key:
@@ -632,9 +672,17 @@ class NativeRenameEmissions:
 
     def is_owned_rename(self, event):
         """Cause only; does not establish state/attribute neutrality."""
-        return self.error is None and any(item.phase in ('remove', 'add')
-            and item.event is event and event is not None and event.data is item.raw
-            for item in self.emissions)
+        if self.error is not None or event is None:
+            return False
+        for item in self.emissions:
+            if item.phase in ('remove', 'add') and item.event is event:
+                if (event.data is not item.raw or not self._data_current(item)
+                        or event.context is not item.event_context or event.origin is not item.origin
+                        or event.event_type != 'state_changed'):
+                    self._poison('owned_event_changed')
+                    return False
+                return True
+        return False
 
     def mutate(self):
         self._owner_guard()
