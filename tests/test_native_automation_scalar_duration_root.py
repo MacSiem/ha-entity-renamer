@@ -1,4 +1,4 @@
-"""DRAFT: owner-run full Root cases, actual Core, no worker execution.
+"""Owner-run full Root scalar duration cases on actual Core.
 
 Real producer/State/Event and independent native control. One fixture monitoring
 slot also records native API inputs/results. Nothing calls a renderer to verify
@@ -36,7 +36,16 @@ class NativeAutomationScalarDurationRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_scalar_meaningful_17_to_29_own_native_render_and_natural_expiry(self):
         await self._scalar_case(meaningful=True)
 
-    async def _scalar_case(self, *, meaningful):
+    async def test_scalar_render_error_after_genuine_pending_cancels_without_new_timer(self):
+        await self._scalar_case(meaningful=True, edge='render_error')
+
+    async def test_scalar_cv_error_after_genuine_pending_cancels_without_new_timer(self):
+        await self._scalar_case(meaningful=True, edge='cv_error')
+
+    async def test_scalar_computed_zero_native_api_natural_expiry_full_root_and_fresh_inverse(self):
+        await self._scalar_case(meaningful=True, edge='zero')
+
+    async def _scalar_case(self, *, meaningful, edge=None):
         from homeassistant.core import Context
         from homeassistant.helpers import template, config_validation as cv
         from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -44,10 +53,18 @@ class NativeAutomationScalarDurationRootTests(unittest.IsolatedAsyncioTestCase):
         runtime, mapping, uuids, _, original = await self.data()
         hass, root = self.f.hass, self.f.root
         old, new = next(iter(mapping.items()))
-        duration = 360 if meaningful else 300
+        error = edge in ('render_error', 'cv_error')
+        duration = 0 if edge == 'zero' else 360 if meaningful else 300
         first, last = ('17', '29') if meaningful else ('16', '17')
         body = "{{ 300 if trigger.to_state.state == '17' else 360 }}"
-        filters = '    from: "'+first+'"\n    to: "'+last+'"\n'
+        if edge == 'render_error':
+            body = "{{ 300 if trigger.to_state.state == '17' else 1 / 0 }}"
+        elif edge == 'cv_error':
+            body = "{{ 300 if trigger.to_state.state == '17' else 'invalid-duration' }}"
+        elif edge == 'zero':
+            body = "{{ 0 if trigger.to_state.state == '29' else 300 }}"
+        filters = ('    from: ["16", "17"]\n    to: ["17", "29"]\n' if error else
+                   '    from: "'+first+'"\n    to: "'+last+'"\n')
         path = root / 'mixed_automations.yaml'
         path.write_text(
             '- id: mixed_source\n  alias: Scalar native duration source\n  initial_state: true\n'
@@ -96,6 +113,7 @@ class NativeAutomationScalarDurationRootTests(unittest.IsolatedAsyncioTestCase):
         control_configured = control._trigger_config[0]['for']
         actions, scripts, controls, pairs, roots, handoffs = [], [], [], [], [], []
         renders, validations, template_calls = [], [], []
+        native_calls, failures, created, expiries, own_render_starts, render_attempts = [], [], [], [], [], []
         for name, events in (('duration_source_result', actions), ('duration_script_result', scripts),
                              ('duration_control_result', controls)):
             self.addCleanup(hass.bus.async_listen(name, events.append))
@@ -105,6 +123,11 @@ class NativeAutomationScalarDurationRootTests(unittest.IsolatedAsyncioTestCase):
         codes = (handoff_type.mutate.__code__, graph_type._action.__code__, root_type._install.__code__)
         render_codes = (template.render_complex.__code__, template.Template.async_render.__code__,
                         type(cv.positive_time_period).__call__.__code__)
+        duration_module = self.module('native_automation_duration_binding')
+        native_same = cap.native.event.async_track_same_state
+        scalar_render = self.module('native_automation_scalar_duration').ScalarDurationNative.render
+        extra_codes = (native_same.__code__, duration_module.NativeAutomationDurationCapability.start_pair.__code__,
+                       scalar_render.__code__, cap.expiry.expiry_code)
         tool = next(k for k in range(6) if sys.monitoring.get_tool(k) is None)
         sys.monitoring.use_tool_id(tool, 'actual Root scalar for acceptance')
         physical = None
@@ -112,7 +135,28 @@ class NativeAutomationScalarDurationRootTests(unittest.IsolatedAsyncioTestCase):
         def start(code, offset):
             frame = sys._getframe(1)
             actor = frame.f_locals.get('self')
-            if code is codes[0] and actor.hass is hass:
+            if code is render_codes[0] and frame.f_locals.get('value') is configured:
+                render_attempts.append(dict(frame.f_locals['variables']))
+            elif code is extra_codes[0] and frame.f_locals.get('hass') is hass:
+                local = frame.f_locals
+                if local['entity_ids'] in (old, new, 'sensor.duration_control'):
+                    native_calls.append((local['entity_ids'], local['period'], local['action']))
+            elif code is extra_codes[2] and frame.f_locals['binding'].entity is source:
+                own_render_starts.append(frame.f_locals['change'])
+                if error:
+                    self.assertTrue(saved[0]['handle'].cancelled(),
+                                    'earlier genuine pending must be cancelled before own render')
+                    self.assertEqual(cap.pending(frame.f_locals['binding'])[0], ())
+            elif code is extra_codes[3] and frame.f_locals.get('hass') is hass:
+                job = frame.f_locals.get('job')
+                if edge == 'zero' and any(p['same_job'] is job for p in created):
+                    live = [r for r in roots if r.consumers.phases.graph.live]
+                    self.assertEqual(len(live), 1, 'zero must expire inside the real active Root')
+                    graph = live[0].consumers.phases.graph
+                    record, = (r for r in graph.duration.expiry.records.values()
+                               if r.pending['same_job'] is job)
+                    expiries.append(record)
+            elif code is codes[0] and actor.hass is hass:
                 handoffs.append(actor)
                 if len(handoffs) == 1 and meaningful:
                     self.assertIs(hass.states.get(old), physical)
@@ -131,6 +175,8 @@ class NativeAutomationScalarDurationRootTests(unittest.IsolatedAsyncioTestCase):
         def returned(code, offset, value):
             frame = sys._getframe(1)
             local = frame.f_locals
+            if code is extra_codes[1] and getattr(local.get('self'), 'hass', None) is hass:
+                created.extend(cap.pending(local['route'].binding)[0])
             if code is render_codes[0] and any(local.get('value') is item for item in (configured, control_configured)):
                 renders.append((local['value'], dict(local['variables']), value))
             elif code is render_codes[1] and any(local.get('self') is item for item in (configured, control_configured)):
@@ -145,6 +191,13 @@ class NativeAutomationScalarDurationRootTests(unittest.IsolatedAsyncioTestCase):
                     owner_config = binding.config['for']
                 if any(owner_config is item for item in (configured, control_configured)):
                     validations.append((local.get('value', local.get('v')), value))
+
+        def unwound(code, offset, exception):
+            local = sys._getframe(1).f_locals
+            if ((code is render_codes[1] and local.get('self') is configured)
+                    or (code is render_codes[2] and local.get('self') is cv.positive_time_period
+                        and sys._getframe(1).f_back.f_code is scalar_render.__code__)):
+                failures.append((code, exception))
 
         def source_renders():
             return [row for row in renders if row[0] is configured]
@@ -172,26 +225,46 @@ class NativeAutomationScalarDurationRootTests(unittest.IsolatedAsyncioTestCase):
         try:
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, start)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, returned)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_UNWIND, unwound)
             for code in codes:
                 sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
             for code in render_codes:
-                sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_RETURN)
-            await self.stimulus(15 if meaningful else 16)
+                sys.monitoring.set_local_events(tool, code,
+                    sys.monitoring.events.PY_START | sys.monitoring.events.PY_RETURN | sys.monitoring.events.PY_UNWIND)
+            for code in extra_codes:
+                sys.monitoring.set_local_events(tool, code,
+                    sys.monitoring.events.PY_START | sys.monitoring.events.PY_RETURN)
+            await self.stimulus(16 if error else 15 if meaningful else 16)
             await self.stimulus(17)
             await hass.async_block_till_done()
             physical = hass.states.get(old)
             before = cap.capture(source)
             attach_vars = before.listener_cells['_variables']
-            self.assertEqual(len(source_renders()), 0 if meaningful else 1)
+            self.assertEqual(len(source_renders()), 0 if meaningful and not error else 1)
             saved = cap.pending(before)[0]
-            self.assertEqual(len(saved), 0 if meaningful else 1)
+            self.assertEqual(len(saved), 0 if meaningful and not error else 1)
             retained = pending_image(saved[0], before) if saved else None
-            hass.states.async_set('sensor.duration_control', first)
-            hass.states.async_set('sensor.duration_control', last)
+            hass.states.async_set('sensor.duration_control', '16' if error else first)
+            hass.states.async_set('sensor.duration_control', '17' if error else last)
             await hass.async_block_till_done()
             control_binding = cap.capture(control)
-            control_pending, = cap.pending(control_binding)[0]
-            control_image = pending_image(control_pending, control_binding)
+            control_pending_rows = cap.pending(control_binding)[0]
+            control_pending = control_pending_rows[0] if control_pending_rows else None
+            control_image = pending_image(control_pending, control_binding) if control_pending else None
+            if edge == 'zero':
+                self.assertEqual(len(controls), 1)
+                self.assertEqual(control_pending_rows, ())
+                self.assertEqual(float(controls[0].data['seconds']), 0)
+            else:
+                self.assertEqual(len(control_pending_rows), 1)
+            if error:
+                # Independent native main callback renders first; the genuine
+                # old native cancel callback then clears the earlier timer.
+                hass.states.async_set('sensor.duration_control', '29')
+                await hass.async_block_till_done()
+                self.assertTrue(control_pending['handle'].cancelled())
+                self.assertEqual(cap.pending(cap.capture(control))[0], ())
+                self.assertEqual(controls, [])
             strict = self.module('yaml_runtime_observer')._automation_registrations
             with self.assertRaises(ValueError):
                 strict(hass, source)
@@ -203,6 +276,95 @@ class NativeAutomationScalarDurationRootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(roots), 1)
                 await check_rows(roots[0], {old})
                 current = cap.capture(source)
+                if edge is not None:
+                    self.assertIs(current.config['for'], configured)
+                    self.assertIs(cells(current.listener)['_variables'], attach_vars)
+                    self.assertIs(duration_module._cell(current.listener, 'time_delta').cell_contents, configured)
+                    self.assertEqual(current.original_keys, [new])
+                    self.assertEqual(cap.pending(current)[0], ())
+                    self.assertEqual(len(own_render_starts), 1)
+                    self.assertIs(own_render_starts[0], pairs[0])
+                    self.assertEqual(len(render_attempts), 2 if error else 1)
+                    variables = render_attempts[-1]
+                    trigger = variables['trigger']
+                    self.assertEqual(set(trigger), {'platform', 'entity_id', 'from_state', 'to_state'})
+                    self.assertEqual(trigger['platform'], 'state')
+                    self.assertEqual(trigger['entity_id'], new)
+                    self.assertIs(trigger['from_state'], pairs[0].prior_state)
+                    self.assertIs(trigger['to_state'], pairs[0].new_state)
+                    self.assertEqual(set(variables) - {'trigger'}, set(attach_vars) - {'trigger'})
+                    for key in attach_vars:
+                        if key != 'trigger':
+                            self.assertIs(variables[key], attach_vars[key])
+                    self.assertNotIn('source', variables)
+                    self.assertNotIn('alias', variables)
+                    own_calls = [row for row in native_calls if row[0] == new]
+                    if error:
+                        self.assertTrue(saved[0]['handle'].cancelled())
+                        self.assertEqual(own_calls, [])
+                        self.assertEqual(created, [])
+                        self.assertEqual((actions, scripts, controls), ([], [], []))
+                        self.assertIs(current.listener_cells['period'][new], retained[14])
+                        self.assertIs(current.listener_cells['unsub_track_same'][new], saved[0]['clear'])
+                        expected = cap.scalar.template_error if edge == 'render_error' else cap.scalar.invalid
+                        self.assertTrue(any(isinstance(ex, expected) for _, ex in failures),
+                                        'the original native render/CV must really fail')
+                        self.assertEqual(len(source_renders()), 1 if edge == 'render_error' else 2)
+                    else:
+                        self.assertEqual(len(own_calls), 1)
+                        control_call, = [row for row in native_calls if row[0] == 'sensor.duration_control']
+                        self.assertEqual(control_call[1].total_seconds(), 0)
+                        self.assertIs(control_call[1], control_binding.listener_cells['period']['sensor.duration_control'])
+                        self.assertTrue(any(value == 0 and result is control_call[1]
+                                            for value, result in validations))
+                        self.assertEqual(len(created), 1)
+                        p = created[0]
+                        self.assertIs(own_calls[0][2], p['action'])
+                        self.assertEqual(own_calls[0][1].total_seconds(), 0)
+                        self.assertIs(own_calls[0][1], current.listener_cells['period'][new])
+                        self.assertTrue(any(value == 0 and result is own_calls[0][1]
+                                            for value, result in validations),
+                                        'computed zero must reach ORIGINAL timer API unchanged')
+                        self.assertEqual(len(expiries), 1)
+                        self.assertEqual(expiries[0].state, 'terminal')
+                        self.assertIs(expiries[0].pending['handle'], p['handle'])
+                        self.assertEqual(cap.expiry.membership(p['handle']), (0, 0))
+                        self.assertEqual((len(actions), len(scripts), len(controls)), (1, 1, 1))
+                        trigger = source_renders()[0][1]['trigger']
+                        self.assertIs(trigger['from_state'], pairs[0].prior_state)
+                        self.assertIs(trigger['to_state'], pairs[0].new_state)
+                        self.assertEqual(trigger['entity_id'], new)
+                        self.assertEqual(float(actions[0].data['seconds']), 0)
+                        self.assertEqual(str(actions[0].data['bound']), new)
+                        self.assertEqual((str(actions[0].data['previous']), str(actions[0].data['current'])), ('17', '29'))
+                        self.assertEqual((str(actions[0].data['from_id']), str(actions[0].data['to_id'])), (old, new))
+                        self.assertEqual(actions[0].context.parent_id, pairs[0].event.context.id)
+                        self.assertEqual(str(scripts[0].data['value']), '29')
+                    count = len(renders), len(template_calls), len(validations), len(native_calls), len(failures), len(render_attempts)
+                    reverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
+                        guard=lambda: None, refresh=refresh)
+                    self.assertEqual(reverse['state'], 'rolled_back')
+                    self.assertEqual(len(roots), 2)
+                    self.assertIsNot(roots[0], roots[1])
+                    self.assertIsNot(roots[0].chain, roots[1].chain)
+                    self.assertIs(roots[0].consumers.phases.graph.witness.error, None)
+                    self.assertIs(roots[1].consumers.phases.graph.witness.error, None)
+                    await check_rows(roots[1], set())
+                    self.assertEqual((len(renders), len(template_calls), len(validations), len(native_calls), len(failures), len(render_attempts)), count)
+                    back = cap.capture(source)
+                    self.assertEqual(back.original_keys, [old])
+                    self.assertIs(back.config['for'], configured)
+                    self.assertEqual(cap.pending(back)[0], ())
+                    if error:
+                        self.assertIs(back.listener_cells['period'][old], retained[14])
+                        self.assertIs(back.listener_cells['unsub_track_same'][old], saved[0]['clear'])
+                    self.assertEqual(cap.pending(cap.capture(control))[0], ())
+                    self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+                    self.assertIsNone(self.f.entity.async_get(new))
+                    for name, content in original.items():
+                        self.assertEqual((root/name).read_bytes(), content)
+                    self.assertEqual((len(actions), len(scripts), len(controls)), (0, 0, 0) if error else (1, 1, 1))
+                    return
                 pending, = cap.pending(current)[0]
                 self.assertIs(current.config['for'], configured)
                 self.assertIs(cells(current.listener)['_variables'], attach_vars)
@@ -300,8 +462,19 @@ class NativeAutomationScalarDurationRootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(future['handle'].cancelled())
                 self.assertEqual((len(actions), len(scripts), len(controls)), (1, 1, 1))
         finally:
-            for code in (*codes, *render_codes):
+            if edge is not None:
+                print('NATIVE_SCALAR_EDGE_PROOF', {
+                    'edge': edge,
+                    'native_periods': [(key, period.total_seconds()) for key, period, _ in native_calls],
+                    'created': len(created),
+                    'expiry_states': [record.state for record in expiries],
+                    'failures': [type(ex).__name__ for _, ex in failures],
+                    'witness_errors': [r.consumers.phases.graph.witness.error for r in roots],
+                    'actions': (len(actions), len(scripts), len(controls)),
+                })
+            for code in (*codes, *render_codes, *extra_codes):
                 sys.monitoring.set_local_events(tool, code, 0)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, None)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_UNWIND, None)
             sys.monitoring.free_tool_id(tool)
