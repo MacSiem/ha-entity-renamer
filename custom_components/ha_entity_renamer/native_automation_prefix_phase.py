@@ -216,13 +216,18 @@ class NativeAutomationPrefixPhase:
         self.unresolved = True
 
     def close(self):
-        if self.graph.live:
-            self.graph.retire(before_attempt=not self.graph.witness.attempted)
-        else:
-            self.graph.routes.clear()
-        self.graph.prepared = ()
-        if self.active is not None:
-            node = self.active[0]
-            self.unresolved = True
-            if node.witness is not None:
-                node.witness.close()
+        witness = self.active[0].witness if self.active is not None else self.graph.witness
+        try:
+            if self.graph.live:
+                self.graph.retire(before_attempt=not self.graph.witness.attempted)
+            else:
+                self.graph.routes.clear()
+            self.graph.prepared = ()
+        finally:
+            if self.active is not None:
+                self.unresolved = True
+            # A foreign conflict forbids restoring its graph, but cannot retain
+            # this request's monitoring slots. Keep the conflicting routes and
+            # unresolved effect intact; monitoring cleanup is not recovery.
+            if witness is not None:
+                witness.close()
