@@ -14,7 +14,7 @@ from .transaction import Refused, Plan, Step, Position
 from .native_template_yaml_server import NativeTemplateYAMLServer
 from .native_template_forward import _UnchangedConsumers
 from .native_input_baseline import _drained
-from .native_template_state_composition import TemplateStateComposition
+from .native_template_state_composition import TemplateStateComposition, MixedTemplateStateComposition
 from .native_registry_receipts import RegistryReceiptChain, native_registry_receipt_store
 from .prepared import encode_change, decode_change
 
@@ -41,9 +41,16 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             self.hass, yaml, self.mapping, root.parent, with_state_program=True)
         self.receipt, self.evidence, self.program = bundle.receipt, bundle.evidence, bundle.state_config_program
         self._scope()
-        _need(self.receipt.changed_domains == ('template',)
-              and bundle.original_sources.source_matched and bundle.candidate_sources.sources.source_matched,
-              'modern_template_state_sources_required')
+        domains = self.receipt.changed_domains
+        self.mixed_state = domains != ('template',)
+        if self.mixed_state:
+            from .yaml_transaction import _assert_mixed_state_scope
+            from .mixed_yaml_runtime import MixedYAMLConsumers
+            _assert_mixed_state_scope(self.receipt)
+            self.consumers = await MixedYAMLConsumers.capture(self.hass, self.mapping, guard=self._scope)
+            self._scope()
+        _need('template' in domains and bundle.original_sources.source_matched
+              and bundle.candidate_sources.sources.source_matched, 'modern_template_state_sources_required')
         await self.consumers.bind_sources(self.receipt, self.evidence, guard=self._scope)
         self._scope()
         baseline = await async_capture_native_input_baseline(self.hass, self.receipt, guard=self._scope)
@@ -62,9 +69,15 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             source = [row for row in rows if row['entity_id'] == old]
             _need(len(source) == 1 and source[0]['platform'] != 'template'
                   and not any(row['entity_id'] == new for row in rows), 'source_uuid_required')
+            _need(source[0]['platform'] not in ('automation', 'script'), 'dependent_source_identity_unsupported')
             registry.append(await bridge.prepare('entity', source[0]['id'], {'entity_id': new}, self._scope))
             self._scope()
-        change = await _drained(self.hass.async_add_executor_job, lambda: capture_template_state_yaml(bundle, yaml, self.mapping))
+        if self.mixed_state:
+            from .native_template_state_yaml import capture_mixed_template_state_yaml
+            capture = capture_mixed_template_state_yaml
+        else:
+            capture = capture_template_state_yaml
+        change = await _drained(self.hass.async_add_executor_job, lambda: capture(bundle, yaml, self.mapping))
         self._scope()
         self.registry_changes, self.change = tuple(registry), change
         self.operation_id, own = 'template-yaml-' + uuid.uuid4().hex, uuid.uuid4().hex
@@ -88,11 +101,14 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         consumer_ids = {r['entity_id']: r['entity_id']
             for r in rows if r['platform'] == 'template'}
         consumer_ids.update({entity_id: entity_id for _, _, entity_id in physical})
+        if self.mixed_state:
+            consumer_ids.update({row.entity_id: row.entity_id for row in self.consumers.phases.sample[0]})
         source_history = await self.history.capture(self.mapping)
         self._scope()
         consumer_history = await self.history.capture(consumer_ids)
         self._scope()
-        self.composition = TemplateStateComposition(self.evidence, bundle.original_sources,
+        composition_type = MixedTemplateStateComposition if self.mixed_state else TemplateStateComposition
+        self.composition = composition_type(self.evidence, bundle.original_sources,
             bundle.candidate_sources, self.program, yaml, tuple(sorted(self.mapping.items())),
             tuple(sorted(self.digests.items())), source_history, consumer_history,
             self.program.sha256, physical)
@@ -126,9 +142,13 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
 
     def _new_observer(self):
         from .native_template_state_yaml import NativeTemplateStateYAMLRuntimeReadback
-        _need(type(self.composition) is TemplateStateComposition, 'state_composition_required')
+        _need(type(self.composition) in (TemplateStateComposition, MixedTemplateStateComposition), 'state_composition_required')
         self.program = self.composition.state_config_program
         _need(self.composition.mapping == tuple(sorted(self.mapping.items())), 'original_mapping_changed')
+        if type(self.composition) is MixedTemplateStateComposition:
+            from .native_template_mixed_state_yaml import NativeMixedTemplateStateYAMLRuntimeReadback
+            return NativeMixedTemplateStateYAMLRuntimeReadback(self.hass, self.chain,
+                self.composition, self.consumers, guard=self._scope)
         return NativeTemplateStateYAMLRuntimeReadback(self.hass, self.chain,
                                                      self.composition, guard=self._scope)
 
@@ -147,6 +167,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         _need(position is wanted, 'runtime_unconfirmed')
         witness = self.observer.runtime_check(wanted)
+        if type(self.composition) is MixedTemplateStateComposition:
+            self.observer.assert_dependents_position(wanted)
         actual = await async_observe_accepted_state_bindings(self.hass, self.chain,
             self.program, guard=self._scope)
         self._scope()
@@ -187,8 +209,13 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             self.journal.load, self._scope, full_verify=lambda _: self._common(False),
             full_verify_rollback=lambda _: self._common(True))
         registry.bind_template_state_root(self)
-        yaml = ReceiptedTemplateStateYAMLTransactionAdapter(self.hass, resolver, self.locks,
+        adapter_type, compose = ReceiptedTemplateStateYAMLTransactionAdapter, compose_template_state_yaml_coordinator
+        if type(self.composition) is MixedTemplateStateComposition:
+            from .native_template_mixed_state_yaml import (ReceiptedMixedTemplateStateYAMLTransactionAdapter,
+                compose_mixed_template_state_yaml_coordinator)
+            adapter_type, compose = ReceiptedMixedTemplateStateYAMLTransactionAdapter, compose_mixed_template_state_yaml_coordinator
+        yaml = adapter_type(self.hass, resolver, self.locks,
             self.observer, self.chain, self._observe, self.journal.load, self._scope, context=Context(),
             full_verify=lambda _: self._full(False), full_verify_rollback=lambda _: self._full(True))
-        return compose_template_state_yaml_coordinator({'registry': registry, 'yaml': yaml},
+        return compose({'registry': registry, 'yaml': yaml},
             self.journal, self._scope, required_scopes=('registry', 'yaml'))

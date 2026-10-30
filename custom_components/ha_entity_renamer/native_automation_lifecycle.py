@@ -74,6 +74,7 @@ async def async_assert_no_pending_automation_lifecycle(hass, preparations, journ
     mixed records still get their full original composition and chain checked.
     """
     from .native_template_composition import MixedTemplateComposition
+    from .native_template_state_composition import MixedTemplateStateComposition
     from .native_registry_receipts import RegistryReceiptChain, native_registry_receipt_store
     candidates = []
     for record in await journal.all():
@@ -84,7 +85,7 @@ async def async_assert_no_pending_automation_lifecycle(hass, preparations, journ
         row = preparations.plans.get(reference[0])
         _need(row is not None and row['digest'] == reference[1])
         composition = row['payload'].get('composition')
-        if type(composition) is dict and composition.get('profile') == 'template_dependent_yaml_v1':
+        if type(composition) is dict and composition.get('profile') in ('template_dependent_yaml_v1', 'template_mixed_state_binding_v1'):
             candidates.append(record)
     if not candidates:
         return
@@ -92,7 +93,7 @@ async def async_assert_no_pending_automation_lifecycle(hass, preparations, journ
     await store.initialize()
     for record in candidates:
         baseline, composition = preparations.resolve_composition(record.plan.native_inputs)
-        _need(type(composition) is MixedTemplateComposition)
+        _need(type(composition) in (MixedTemplateComposition, MixedTemplateStateComposition))
         digests = dict(composition.prepared_digests)
         chain = RegistryReceiptChain.reopen(store, record.operation_id, record.plan, baseline.receipt, digests)
         _need(not chain.writable and chain.active is None)
@@ -124,16 +125,22 @@ def _affected_automations(session):
               and not session.evidence.ledger.keys_for_native_projection('automation'))
         return (), (), ()
     primary = set(session.mapping) | set(session.mapping.values())
-    original = session.evidence.template_sources.rows
-    candidate = session.evidence.template_candidate_sources.sources.rows
-    old, new = ({(domain, key): digest for domain, key, digest in rows}
-                for rows in (original, candidate))
-    _need(set(old) == set(new))
-    changed_template = {session.observer.identities[(domain.removeprefix('template.'), key)][0]
-        for domain, key in old if domain in ('template.sensor', 'template.binary_sensor')
-        and old[domain, key] != new[domain, key]}
-    if any(domain == 'template.state' and old[domain, key] != new[domain, key] for domain, key in old):
-        changed_template.update(value[0] for value in session.observer.identities.values())
+    from .native_template_state_composition import MixedTemplateStateComposition
+    if type(session.composition) is MixedTemplateStateComposition:
+        # This exact contract uses native prefix transport and never reloads or
+        # removes Template consumers. Their unrelated state triggers stay live.
+        changed_template = set()
+    else:
+        original = session.evidence.template_sources.rows
+        candidate = session.evidence.template_candidate_sources.sources.rows
+        old, new = ({(domain, key): digest for domain, key, digest in rows}
+                    for rows in (original, candidate))
+        _need(set(old) == set(new))
+        changed_template = {session.observer.identities[(domain.removeprefix('template.'), key)][0]
+            for domain, key in old if domain in ('template.sensor', 'template.binary_sensor')
+            and old[domain, key] != new[domain, key]}
+        if any(domain == 'template.state' and old[domain, key] != new[domain, key] for domain, key in old):
+            changed_template.update(value[0] for value in session.observer.identities.values())
     probe = {key: key.split('.')[0] + '.renamer_dependency_probe_' + hashlib.sha256(key.encode()).hexdigest()[:24]
              for key in primary}
     own_events = {'state_changed', 'entity_registry_updated', 'device_registry_updated',

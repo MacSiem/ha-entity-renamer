@@ -258,9 +258,9 @@ async def async_revalidate_accepted_candidate(hass, chain, phase_loader,
         if change.receipt != original:
             _fail('original_preparation')
         if _state_program is not None:
-            from .native_template_state_yaml import (PreparedTemplateStateYAML,
+            from .native_template_state_yaml import (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML,
                                                      assert_state_yaml_composition)
-            if type(change) is not PreparedTemplateStateYAML:
+            if type(change) not in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
                 _fail('state_preparation_required')
             composition = assert_state_yaml_composition(chain, change)
             if _state_program != composition.state_config_program:
@@ -286,7 +286,9 @@ async def async_revalidate_accepted_candidate(hass, chain, phase_loader,
             await checkpoint()
             await observe()
             runtime_hash = (_compare(result, original, reverse) if _state_program is None
-                            else _compare_state(result, original, reverse, _state_program))
+                            else (_compare_mixed_state(result, original, reverse, _state_program)
+                                  if type(change) is PreparedMixedTemplateStateYAML
+                                  else _compare_state(result, original, reverse, _state_program)))
             fence()
             arguments = (chain.operation_id, chain.plan.fingerprint, state.head,
                 record.direction, _sha(original_json), graph_hash, runtime_hash, original.version)
@@ -304,6 +306,18 @@ class _AcceptedStateCandidateProof(_AcceptedCandidateProof):
 
 
 def _compare_state(result, original, reverse, program):
+    if original.changed_domains != ('template',):
+        _fail('state_native_result_mismatch')
+    return _compare_state_full(result, original, reverse, program, ('template',))
+
+
+def _compare_mixed_state(result, original, reverse, program):
+    from .yaml_transaction import _assert_mixed_state_scope
+    _assert_mixed_state_scope(original)
+    return _compare_state_full(result, original, reverse, program, original.changed_domains)
+
+
+def _compare_state_full(result, original, reverse, program, domains):
     """Explicit full state mode; the legacy unsupported/None gate is unchanged.
 
     Actual native worker descriptors include every semantic field and inventory
@@ -320,9 +334,8 @@ def _compare_state(result, original, reverse, program):
                 for domain, old, new in original.runtime_expected]
     if (type(result) is not dict or result.get('status') != 'valid'
             or result.get('version') != original.version
-            or original.changed_domains != ('template',)
             or not set(original.unsupported_domains) <= {'template'}
-            or result.get('changed_domains') != ['template']
+            or result.get('changed_domains') != list(domains)
             or result.get('unsupported_domains') != list(original.unsupported_domains)
             or result.get('runtime_expected') != expected
             or result.get('template_state_config_program') != before
@@ -350,11 +363,11 @@ async def async_revalidate_accepted_template_state_candidate(hass, chain, phase_
     No ORIGINAL replacement or replay. Runtime acceptance remains the separate
     full prefix observer and its completion suffix. Every pending intent refuses.
     """
-    from .native_template_state_yaml import PreparedTemplateStateYAML, assert_state_yaml_composition
+    from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, assert_state_yaml_composition
     if type(chain) is not RegistryReceiptChain or chain.yaml_index != len(chain.plan.steps) - 1:
         _fail('chain_binding')
     change = chain._original_change(chain.yaml_index)
-    if type(change) is not PreparedTemplateStateYAML:
+    if type(change) not in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
         _fail('state_preparation_required')
     composition = assert_state_yaml_composition(chain, change)
     return await async_revalidate_accepted_candidate(hass, chain, phase_loader,

@@ -32,6 +32,11 @@ def _need(value, reason):
         raise Refused('template_yaml_server_' + reason) from None
 
 
+def _mixed_composition(value):
+    from .native_template_state_composition import MixedTemplateStateComposition
+    return type(value) in (MixedTemplateComposition, MixedTemplateStateComposition)
+
+
 def _baseline_stamp(value):
     """Full immutable ORIGINAL identity without repeated JSON/base64 decoding.
 
@@ -262,7 +267,7 @@ class NativeTemplateYAMLServer:
         self.bound = True
 
     def _new_observer(self):
-        if type(self.composition) is MixedTemplateComposition:
+        if _mixed_composition(self.composition):
             from .mixed_yaml_runtime import MixedTemplateYAMLRuntimeReadback
             return MixedTemplateYAMLRuntimeReadback(self.hass, self.chain, self.evidence,
                                                      self.consumers, guard=self._scope)
@@ -347,7 +352,7 @@ class NativeTemplateYAMLServer:
         managers = _Managers(self.hass, self.receipt)
         instance = self.recorder.instance
         _need(get_instance(self.hass) is instance, 'recorder_replaced')
-        if type(self.composition) is MixedTemplateComposition:
+        if _mixed_composition(self.composition):
             consumers = self.observer.history_consumers
         else:
             consumers = tuple(sorted(v[0] for v in self.observer.identities.values()))
@@ -418,7 +423,7 @@ class NativeTemplateYAMLServer:
         self._scope()
         await self._fresh_stores(None)
         await self._common(False, initial=True)
-        if type(self.composition) is MixedTemplateComposition:
+        if _mixed_composition(self.composition):
             from .journal import Record
             from .native_automation_lifecycle import NativeAutomationLifecycle
             # Persist the ordinary operation BEFORE any native detach, as in
@@ -482,7 +487,7 @@ class NativeTemplateYAMLServer:
             _need(len(set(obj.mapping.values())) == len(obj.mapping)
                   and not set(obj.mapping) & set(obj.mapping.values()), 'independent_mapping_required')
             consumer_type = _UnchangedConsumers
-            if type(obj.composition) is MixedTemplateComposition:
+            if _mixed_composition(obj.composition):
                 from .mixed_yaml_runtime import MixedYAMLConsumers
                 consumer_type = MixedYAMLConsumers
             obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope)
@@ -554,7 +559,7 @@ class NativeTemplateYAMLServer:
             _need(all(change.before['platform'] not in ('automation', 'script')
                       for change in obj.registry_changes), 'dependent_source_identity_unsupported')
             consumer_type = _UnchangedConsumers
-            if type(obj.composition) is MixedTemplateComposition:
+            if _mixed_composition(obj.composition):
                 from .mixed_yaml_runtime import MixedYAMLConsumers
                 consumer_type = MixedYAMLConsumers
             obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope)
@@ -598,7 +603,7 @@ class NativeTemplateYAMLServer:
         observed = await async_observe_discovery_inputs(self.hass, guard=self._scope)
         self._scope()
         sampler = _RuntimeSourceSampler.bind(self.evidence, observed)
-        if type(self.composition) is MixedTemplateComposition:
+        if _mixed_composition(self.composition):
             self.consumers.bind_phases(self.receipt, self.evidence, observed, Position.AFTER)
             self._scope()
             return
@@ -632,7 +637,7 @@ class NativeTemplateYAMLServer:
         self._scope()
         await self._fresh_stores(self.record)
         await self._terminal(self.record, rollback=False)
-        if type(self.composition) is MixedTemplateComposition:
+        if _mixed_composition(self.composition):
             from .native_automation_lifecycle import NativeAutomationLifecycle
             self.automation_lifecycle = NativeAutomationLifecycle(self, 'rollback')
             self.observer.automation_lifecycle = self.automation_lifecycle
