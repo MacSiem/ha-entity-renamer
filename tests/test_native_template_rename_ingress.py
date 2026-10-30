@@ -70,7 +70,9 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
         def guard():
             self.assertIs(asyncio.current_task(), owner)
 
+        forward = False
         async def move(source_id, target_id, target, before, desired):
+            nonlocal forward
             witness = await classifier.NativeRenameEmissions.prepare(io, change, target, guard=guard)
             self.addCleanup(witness.close)
             delivery = ingress_module.NativeTemplateProducerDelivery(
@@ -103,13 +105,18 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
             ingress = ingress_module.NativeTemplateRenameIngress.install(transport, witness, context)
             try:
                 transport.mark_registry_attempt(context)
-                witness.mutate()
+                mutation = witness.mutate()
                 proof = await witness.finish()
             finally:
                 ingress.retire()
+            from homeassistant.helpers.json import _orjson_bytes_default_encoder
+            row = self.f.entity.async_get(target_id)
+            self.assertEqual(_orjson_bytes_default_encoder(row.as_storage_fragment).decode('utf-8'),
+                             mutation.after_json, 'inverse requires the full confirmed owned row')
+            forward = source_id == self.old
             changed = producer_hook and source_id == self.old
             self.assertEqual(proof['neutral'], not changed)
-            if not changed:
+            if not changed and not domain:
                 self.assertGreater(ingress.suppressed, 0)
             self.assertFalse(ingress.live)
             self.assertIs(self.module._Runtime(self.f.hass).graph(self.consumer),
@@ -122,10 +129,8 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.f.entity.async_get(target_id).id, self.source_uuid)
             self.assertIsNone(self.f.hass.states.get(source_id))
 
-        forward = False
         try:
             await move(self.old, self.new, change.after, self.original, self.desired)
-            forward = True
             for value in (7, 11):
                 await self.emit(self.producer, value)
                 await self.emit(self.other, value)
