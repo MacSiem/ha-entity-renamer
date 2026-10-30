@@ -141,7 +141,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         partial = mode.startswith('partial_')
         active_expiry = mode=='active_expiry'
         foreign = mode in ('foreign','transient','multi_foreign')
-        meaningful = mode in ('meaningful','foreign','replace','multi','multi_foreign')
+        meaningful = active_expiry or mode in ('meaningful','foreign','replace','multi','multi_foreign')
         pending = partial or active_expiry or mode in ('pending','cancel','from_only','attribute','rollback','foreign_route','orphan','replace','transient')
         duration = 30 if active_expiry else 480 if pending or multi else 180 if meaningful else 2
         other_id = 'sensor.duration_other'
@@ -152,6 +152,8 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             filters = ''
         elif mode=='transient':
             filters = '    not_from: "0"\n'
+        elif active_expiry:
+            filters = '    from: "16"\n'
         elif mode=='replace':
             filters = '    from: ["16", "17"]\n    to: ["17", "29"]\n'
         elif meaningful:
@@ -187,6 +189,17 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 '  triggers:\n  - trigger: state\n    entity_id: '+old+'\n'
                 '    from: "16"\n    to: "17"\n    for: {seconds: '+str(duration)+'}\n'
                 '  actions:\n  - action: script.mixed_source\n')
+        if active_expiry:
+            # A genuine second Automation action keeps the native action drain
+            # active past the existing timer's deadline. Its literal delay is
+            # executed by Core; no clock, Handle or callback is manipulated.
+            path.write_text(path.read_text()+
+                '- id: duration_slow\n  alias: Native action expiry overlap\n  initial_state: true\n'
+                '  triggers:\n  - trigger: state\n    entity_id: '+old+'\n'
+                '    from: "17"\n    to: "29"\n'
+                '  actions:\n  - delay: {seconds: 40}\n'
+                '  - event: duration_slow_result\n    event_data:\n'
+                '      value: "{{ states(\''+old+'\') }}"\n')
         script_path = root/'mixed_scripts.yaml'
         script_path.write_text('mixed_source:\n  variables:\n    source: '+old+'\n  sequence:\n'
             '  - event: duration_script_result\n    event_data:\n      value: "{{ states(source) }}"\n')
@@ -211,9 +224,9 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         source = next(e for e in hass.data[DATA_INSTANCES]['automation'].entities if e.unique_id=='mixed_source')
         control = next(e for e in hass.data[DATA_INSTANCES]['automation'].entities if e.unique_id=='duration_control')
         cap = await self._capability()
-        actions,scripts,controls,pairs,roots,handoffs = [],[],[],[],[],[]
+        actions,scripts,controls,pairs,roots,handoffs,slow = [],[],[],[],[],[],[]
         for name,events in (('duration_source_result',actions),('duration_script_result',scripts),
-                            ('duration_control_result',controls)):
+                            ('duration_control_result',controls),('duration_slow_result',slow)):
             self.addCleanup(hass.bus.async_listen(name,events.append))
         if mode == 'attribute':
             self.producer._attr_extra_state_attributes={'phase':'16'}
@@ -394,6 +407,9 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIs(native_pending['handle'],native_tuple[4])
                     self.assertEqual(native_pending['handle'].when(),native_tuple[5])
                     self.assertIs(native_pending['handle']._context,native_tuple[6])
+                    self.assertEqual(len(slow),1)
+                    self.assertEqual(str(slow[0].data['value']),'29')
+                    self.assertEqual(str(scripts[0].data['value']),'29')
                     self.assertFalse(native_pending['handle'].cancelled())
                     if mode=='partial_foreign':
                         key,members,image,keys=foreign_partial
@@ -466,7 +482,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((kept['handle'],kept['handle'].when(),kept['handle']._context),other_tuple)
                     self.assertFalse(kept['handle'].cancelled())
                 current_pending=tuple(p for p in all_current if p['key']==new)
-                if meaningful:
+                if meaningful and not active_expiry:
                     own_created=[p for p in created if p['key']==new]
                     self.assertEqual(len(own_created),1)
                 if meaningful and foreign:
