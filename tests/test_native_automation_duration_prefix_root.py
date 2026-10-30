@@ -415,9 +415,6 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIs(native_pending['handle'],native_tuple[4])
                     self.assertEqual(native_pending['handle'].when(),native_tuple[5])
                     self.assertIs(native_pending['handle']._context,native_tuple[6])
-                    self.assertEqual(len(slow),1)
-                    self.assertEqual(str(slow[0].data['value']),'29')
-                    self.assertEqual(str(scripts[0].data['value']),'29')
                     self.assertFalse(native_pending['handle'].cancelled())
                     if mode=='partial_foreign':
                         key,members,image,keys=foreign_partial
@@ -482,6 +479,9 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(actions[0].context.parent_id,native_tuple[13].id)
                     self.assertEqual(native_pending['handle'].when(),native_tuple[5])
                     self.assertIs(native_pending['handle']._context,native_tuple[6])
+                    self.assertEqual(len(slow),1)
+                    self.assertEqual(str(slow[0].data['value']),'29')
+                    self.assertEqual(str(scripts[0].data['value']),'29')
                 else:
                     self.assertEqual((actions,scripts),([],[]),'No immediate duration action')
                 all_current=cap.pending(current)[0]
