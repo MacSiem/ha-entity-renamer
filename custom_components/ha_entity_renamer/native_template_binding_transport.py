@@ -41,6 +41,10 @@ _EXTRA_PINS = {
         'helpers/template/__init__.py': 'cb26b93a52a25160072ac7a987f79cc8c26534abf5522461850e8ca30dfe4bd4'},
 }
 
+# Installed staging readback is byte-identical to these audited bodies.
+# _Runtime still hashes/compiles the actual files for each native admission.
+_EXTRA_PINS['2026.10.2'] = dict(_EXTRA_PINS['2026.10.4'])
+
 # Binding-bearing fields only. Consumer outputs, state, delay owner/token and
 # self-reference limiter are deliberately not replaced or restored.
 _FIELDS = ('_config', '_template', '_availability_template', '_icon_template',

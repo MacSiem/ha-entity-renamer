@@ -305,7 +305,7 @@ class IconValidatorProof:
         import sys
         from .native_template_consumers import _need, _codes
         version = self.native.version
-        _need(version in ('2025.6.0', '2026.10.4'), 'native_icon_version_unverified')
+        _need(version in ('2025.6.0', '2026.10.2', '2026.10.4'), 'native_icon_version_unverified')
         pins = ({
             'voluptuous.validators': 'c29ddf98aafe282eec6b0f1a7945b0d422cea31c2b723f188ad79724df5e5084',
             'voluptuous.schema_builder': '403b79a3566d2dda93b4e779215cca7333413dfb4b28693bec2cf85052540f48',
