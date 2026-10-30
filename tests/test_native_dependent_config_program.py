@@ -63,7 +63,16 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
                 stream.write('  description: !env_var RENAMER_SYNTHETIC_DESCRIPTOR_ENV\n')
         mapping = {'sensor.original': 'sensor.changed', 'sensor.second': 'sensor.other'}
         plan = self.module('yaml_plan').plan_yaml(root, mapping)
-        self.assertTrue(plan.ready, plan.issues)
+        if environment:
+            # The existing planner already rejects this external resolver.
+            # The descriptor policy separately refuses before normalization.
+            self.assertFalse(plan.ready)
+            self.assertIn('unsupported_yaml_tag', {issue.code for issue in plan.issues})
+            with self.assertRaisesRegex(ValueError, 'secret_scope_unverified'):
+                self.module('dependent_config_program').assert_reference_only(
+                    root, tuple(row.path for row in plan.files))
+        else:
+            self.assertTrue(plan.ready, plan.issues)
         validate = self.module('yaml_validation')
         if mixed:
             result = await validate.async_validate_proposed_with_template_state_sources(
