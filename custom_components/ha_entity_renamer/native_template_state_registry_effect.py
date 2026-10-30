@@ -74,7 +74,9 @@ class NativeTemplateStateRegistryEffect:
             handoff = None
             # Dependent A/S lifecycle retains its existing source-event proof
             # until the separate full program/phase transport is integrated.
-            if not root.mixed_state and NativeSourceHandoff.supports_source(io, change, target_image):
+            from .native_template_state_composition import TemplateStateComposition
+            if (type(root.composition) is TemplateStateComposition
+                    and NativeSourceHandoff.supports_source(io, change, target_image)):
                 handoff = await NativeSourceHandoff.prepare(io, change, target_image, guard=guard)
             try:
                 obj.witness = await NativeRenameEmissions.prepare(io, change, target_image,
