@@ -8,12 +8,13 @@ Any failure after entering the registry API is uncertain and never retried.
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 from functools import partial
 import inspect
 from pathlib import Path
 import sys
 import threading
-from types import CodeType, FunctionType
+from types import CodeType, FunctionType, MethodType
 
 from .native_registry import NativeRegistryIO, NativeRegistryMutation
 from .native_rename_emission_classifier import NativeRenameEmissions, _EVENT_PINS
@@ -101,8 +102,10 @@ class NativeSourceHandoff:
         obj.info = obj.sources.get(obj.old)
         _need(type(obj.info) is dict and obj.info.get('domain') == obj.platform.platform_name,
               'source_info_unqualified')
+        obj.info_items = tuple(obj.info.items())
         obj.state_info, obj.remove_future = obj.source._state_info, obj.source._Entity__remove_future
         obj.callbacks = tuple(obj.source._on_remove)
+        obj.remove_callbacks = obj.source._on_remove
         _need(type(obj.source._on_remove) is list and len(obj.callbacks) == 2, 'extra_cleanup_unqualified')
         candidates = {code for method in audit.methods.values() for code in _nested(method.__code__)
                       if code.co_name == 'remove_entity_cb'}
@@ -144,6 +147,16 @@ class NativeSourceHandoff:
         self.guard()
         self.audit._native_check()
         unchanged(self.refs, self.methods, self.codes)
+        _need(type(self.source).__setattr__ is object.__setattr__
+              and all(inspect.getattr_static(type(self.source), name, None) is None
+                      for name in ('entity_id', 'registry_entry'))
+              and all(inspect.getattr_static(self.source, self.refs[index][1]) is self.methods[index]
+                      for index in range(3)), 'source_hook_changed')
+
+    def _callbacks_current(self):
+        return (self.source._on_remove is self.remove_callbacks
+                and len(self.remove_callbacks) == len(self.callbacks)
+                and all(actual is expected for actual, expected in zip(self.remove_callbacks, self.callbacks)))
 
     def _subscription(self, unsub, entity_id):
         from homeassistant.core import HassJob
@@ -151,8 +164,14 @@ class NativeSourceHandoff:
         _need(type(unsub) is partial and unsub.func is event_helper._remove_listener
               and not unsub.keywords and len(unsub.args) == 5, 'registry_subscription_unqualified')
         owner, tracker, keys, job, callbacks = unsub.args
+        _need(tracker is event_helper._KEYED_TRACK_ENTITY_REGISTRY_UPDATED
+              and type(keys) in (tuple, list, set, frozenset)
+              and all(type(key) is str for key in keys)
+              and type(callbacks) is defaultdict and callbacks.default_factory is list,
+              'registry_subscription_type_changed')
         data = self.hass.data.get(tracker.key)
         _need(owner is self.hass and tuple(keys) == (entity_id,) and type(job) is HassJob
+              and type(job.target) is MethodType
               and getattr(job.target, '__self__', None) is self.source
               and getattr(job.target, '__func__', None) is self.audit.methods['registry_callback']
               and type(data) is event_helper._KeyedEventData and data.callbacks is callbacks
@@ -169,7 +188,10 @@ class NativeSourceHandoff:
               and self.source.registry_entry is self.row and self.source.entity_id == self.old
               and self.source._platform_state is EntityPlatformState.ADDED
               and self.source._state_info is self.state_info and self.source._Entity__remove_future is self.remove_future
-              and tuple(self.source._on_remove) == self.callbacks
+              and self._callbacks_current()
+              and self.source.platform is self.platform and self.source.hass is self.hass
+              and all(actual is expected for actual, expected in zip(
+                  (self.platform.entities, self.platform.domain_entities, self.platform.domain_platform_entities), self.maps))
               and self.id_cell.cell_contents == self.old
               and self.sources.get(self.old) is self.info and self.new not in self.sources
               and all(mapping.get(self.old) is self.source and self.new not in mapping for mapping in self.maps)
@@ -192,7 +214,7 @@ class NativeSourceHandoff:
                 return
             if frame.f_locals.get('self') is not self.bus:
                 return
-            from homeassistant.const import EVENT_ENTITY_REGISTRY_UPDATED
+            from homeassistant.helpers.entity_registry import EVENT_ENTITY_REGISTRY_UPDATED
             if frame.f_locals.get('event_type') != EVENT_ENTITY_REGISTRY_UPDATED:
                 return
             parent = frame.f_back
@@ -218,7 +240,7 @@ class NativeSourceHandoff:
             new = parent.f_locals.get('new')
             _need(new is self.registry.async_get(self.new) and new is not None and new.id == self.row.id
                   and self.registry.async_get(self.old) is None and self.source.registry_entry is self.row
-                  and self.source.entity_id == self.old and tuple(self.source._on_remove) == self.callbacks
+                  and self.source.entity_id == self.old and self._callbacks_current()
                   and self.id_cell.cell_contents == self.old and self.sources.get(self.old) is self.info
                   and self.new not in self.sources
                   and all(mapping.get(self.old) is self.source and self.new not in mapping for mapping in self.maps),
@@ -267,7 +289,7 @@ class NativeSourceHandoff:
                   and self.registry.async_get(self.new) is self.new_row
                   and self.source.entity_id == self.new and self.source._state_info is self.state_info
                   and self.source._Entity__remove_future is self.remove_future
-                  and tuple(self.source._on_remove) == self.callbacks
+                  and self._callbacks_current()
                   and self.hass.states.get(self.old) is self.original_state,
                   'registry_attempt_uncertain')
             state = self.hass.states.get(self.new)
