@@ -379,6 +379,18 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
             result = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
             self.assertEqual(result['state'], 'applied')
             same_wait()
+            # Readable configuration does not authorize a generic reload of
+            # the running automation. Use the actual server preparation.
+            record = await runtime.journal.load(result['operation_id'])
+            step = next(item for item in record.plan.steps if item.adapter == 'yaml')
+            digest = runtime.preparations.plans[step.prepared_ref]['digest']
+            change = self.module('prepared').decode_change(runtime.preparations.resolve(step.prepared_ref, digest))
+            observer_module = self.module('yaml_runtime_observer')
+            observer = observer_module.NativeYAMLRuntimeReadback(hass)
+            rows, _ = observer._projection('automation')
+            self.assertIn('foreign_wait', [row[0] for row in rows])
+            self.assertFalse(observer_module._pending_native_work(hass, change.receipt.changed_domains))
+            self.assertEqual(observer._sample(change), (self.module('transaction').Position.UNKNOWN, ()))
             inverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
                 guard=lambda: None, refresh=refresh)
             self.assertEqual(inverse['state'], 'rolled_back')
