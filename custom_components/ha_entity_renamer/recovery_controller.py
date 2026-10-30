@@ -89,6 +89,24 @@ def _yaml_summary(session):
                             'domains': sorted({domain for domain, _ in consumers})}}
     if named:
         result['registry_changes'] = registry
+    from .native_script_program_composition import ScriptTemplateStateComposition
+    if type(session.composition) is ScriptTemplateStateComposition:
+        phases = session.consumers.phases
+        phases.check()
+        program = session.composition.dependent_config_program
+        before = {row[0]: row for row in dict(program.rows(frozenset()))['script']}
+        current = {row[0]: row for row in dict(program.rows(phases.mask))['script']}
+        if before.keys() != current.keys():
+            raise Refused('unsupported_recovery_script_inventory')
+        changed = {key for key in before if before[key] != current[key]}
+        rows = [row for row in phases.sample[0]
+                if row.domain == 'script' and row.native_key in changed]
+        if (len(rows) != len(changed) or any(row.disposition != 'loaded' for row in rows)
+                or len({row.native_key for row in rows}) != len(rows)):
+            raise Refused('unsupported_recovery_script_inventory')
+        # Actual current prefix, not every proposed/future change. The existing
+        # Template consumer field keeps its established meaning for old clients.
+        result['dependent_changes'] = {'script': sorted(row.entity_id for row in rows)}
     return result
 
 

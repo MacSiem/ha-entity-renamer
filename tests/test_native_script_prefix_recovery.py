@@ -1,4 +1,5 @@
 """Actual ACK-only Script-prefix inverse, reusing the full root fault harness."""
+import sys
 import unittest
 
 import test_native_template_prefix_recovery as prefix
@@ -64,3 +65,31 @@ class NativeScriptPrefixRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await self._prefix_reverse(2)
         self.assertEqual(self.script_events, ['34', '46'])
         self.assertEqual((self.f.root / 'prefix_scripts.yaml').read_bytes(), self.script_bytes)
+
+    async def _controller_prefix_reverse(self, *, retained):
+        code = self.module('recovery_controller')._yaml_summary.__code__
+        summaries = []
+        tool = next(index for index in range(6) if sys.monitoring.get_tool(index) is None)
+        sys.monitoring.use_tool_id(tool, 'actual Script prefix controller summary')
+        def returned(code_arg, offset, value):
+            if type(value) is dict:
+                summaries.append(value)
+        try:
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, returned)
+            sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_RETURN)
+            await self._prefix_reverse(1, controller=True, retained=retained)
+            self.assertEqual(self.script_events, ['34', '46'])
+            self.assertEqual((self.f.root / 'prefix_scripts.yaml').read_bytes(), self.script_bytes)
+            self.assertEqual(len(summaries), 2, 'inspect and restore must each bind freshly')
+            self.assertTrue(all(summary['dependent_changes'] == {'script': [self.script_entity.entity_id]}
+                                for summary in summaries))
+        finally:
+            sys.monitoring.set_local_events(tool, code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, None)
+            sys.monitoring.free_tool_id(tool)
+
+    async def test_script_acknowledged_prefix_controller_inspection_and_fresh_inverse(self):
+        await self._controller_prefix_reverse(retained=False)
+
+    async def test_script_leased_review_prefix_retention_controller_and_fresh_inverse(self):
+        await self._controller_prefix_reverse(retained=True)
