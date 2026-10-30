@@ -234,6 +234,10 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await history.verify(composition.consumer_history))
         self.assertIsNone(hass.data.get('automation'))
         self.assertFalse(runtime.operation_lock.locked())
+        async with runtime.operation_lock:
+            opened = await self.module('native_template_yaml_server').NativeTemplateYAMLServer._open(
+                hass, guard=lambda: None, refresh=refresh)
+            opened.close()
 
     async def test_unrelated_automation_remains_live_during_owned_transition(self):
         from homeassistant.core import Context
