@@ -35,6 +35,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             return {'executor': type(instance._db_executor).__name__,
                     'ready': instance.async_db_ready.done(),
                     'issue_count': len(issues.issues),
+                    'issue_keys': sorted(str(key) for key in issues.issues),
                     'issue_save_pending': any(x is not None for x in
                         (store._data, store._delay_handle, store._unsub_final_write_listener))}
         before = status()
@@ -62,6 +63,8 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         print('NATIVE_HISTORY_EXECUTOR_DIAGNOSTIC ' + json.dumps(
             {'before': before, 'reads': observations, 'after': status()}, sort_keys=True))
         self.assertTrue(observations)
+        self.assertTrue(all(row['recorder_worker'] and row['pool_worker'] and row['same_thread_set']
+                            for row in observations))
 
     async def _capability(self):
         native = await self.f.hass.async_add_executor_job(self.module('native_automation_state_binding')._Native, self.f.hass)
@@ -148,6 +151,19 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         for domain in ('script','automation'):
             await hass.services.async_call(domain,'reload',{},blocking=True,context=Context())
         await hass.async_block_till_done()
+        # Native setup already has a pending repairs Store before ORIGINAL
+        # (27734). Flush that actual data, as the cardinality fixture does;
+        # never create an empty Store or ignore later directory conflicts.
+        from homeassistant.helpers import issue_registry as ir
+        issues = ir.async_get(hass)
+        store = issues._store
+        if any(value is not None for value in
+               (store._data, store._delay_handle, store._unsub_final_write_listener)):
+            await store.async_save(issues._data_to_save())
+        await hass.async_block_till_done()
+        self.assertTrue(all(value is None for value in
+            (store._data, store._delay_handle, store._unsub_final_write_listener)))
+        await self._flush_documents()
         for name in ('mixed_automations.yaml','mixed_scripts.yaml'):
             original[name]=(root/name).read_bytes()
         source = next(e for e in hass.data[DATA_INSTANCES]['automation'].entities if e.unique_id=='mixed_source')
