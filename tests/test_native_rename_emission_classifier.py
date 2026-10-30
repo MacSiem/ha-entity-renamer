@@ -12,6 +12,17 @@ import test_native_template_yaml_server as server
 
 @unittest.skipUnless(server.activation.fixture.fixtures.HAS_HA, 'installed dependencies required')
 class SemanticSnapshotTests(unittest.TestCase):
+    def test_foreign_string_key_lookup_semantics_cannot_be_promoted_to_neutral(self):
+        import importlib
+        module = importlib.import_module(server.activation.fixture.fixtures.PACKAGE
+                                        + '.native_rename_emission_classifier')
+        class ForeignKey(str):
+            def __hash__(self):
+                return str.__hash__(self) + 1
+        attributes = {ForeignKey('friendly_name'): 'fixture'}
+        self.assertIsNone(attributes.get('friendly_name'))
+        self.assertIsNone(module._semantic_state(SimpleNamespace(state='1', attributes=attributes)))
+
     def test_source_snapshot_never_rehashes_or_compares_foreign_attribute_keys(self):
         import importlib
         module = importlib.import_module(server.activation.fixture.fixtures.PACKAGE
