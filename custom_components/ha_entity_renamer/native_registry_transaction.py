@@ -248,7 +248,7 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         audit = self._effect_audit(change, direction, source_raw, result_raw, mutation)
         if node is not None and self._template_state_root is None:
             extra['placeholder_stamp'] = node.finish()
-        if self._template_state_root is not None:
+        if self._template_state_root is not None and change.mapping:
             if node is None:
                 raise Refused('template_state_registry_effect_required')
             await node.verify_effect(mutation, after)
@@ -256,7 +256,7 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         await self.chain.complete(intent, context, before, after,
                                   mutation=mutation, audit=audit, **extra)
         guard()
-        if self._template_state_root is not None:
+        if self._template_state_root is not None and change.mapping:
             await node.accepted()
             guard()
         return mutation

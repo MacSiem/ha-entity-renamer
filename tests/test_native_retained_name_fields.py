@@ -129,8 +129,15 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         retained = runtime.reviews[review['operation_id']].plan
         self.assertEqual(tuple(step.adapter for step in retained.steps), ('registry',) * 3 + ('yaml',))
         names[old], names[extra_id] = 'Unreviewed source', 'Unreviewed extra'
-        result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
-            actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        from test_native_template_mixed_yaml_server import native_diagnostics
+        with native_diagnostics(self.module):
+            try:
+                result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                    actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+            finally:
+                outcome = await runtime.journal.load(review['operation_id'])
+                print('NAMESPACE_RESULT', None if outcome is None else
+                      (outcome.status, outcome.reason, outcome.direction, outcome.phases))
         self.assertEqual(result['state'], 'applied')
         self.assertEqual(self.f.entity.async_get(new).name, 'Reviewed source')
         self.assertEqual(self.f.entity.async_get(extra_id).name, 'Reviewed extra')
