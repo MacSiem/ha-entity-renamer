@@ -140,7 +140,13 @@ class ScalarDurationNative:
             for key, value in tuple(vars(module).items()):
                 if name == 'jinja2.filters' and key != 'do_int':
                     continue
-                if type(value) is FunctionType and value.__module__ == name:
+                # Native decorated exports (minimum attach, unrelated Voluptuous
+                # validators and raises) execute code owned by other modules.
+                # They are outside the closed render/scalar-CV path. Apply the
+                # same declared-source filter as for class descriptors below;
+                # reached render/CV/compiled protocols are checked explicitly.
+                if (type(value) is FunctionType and value.__module__ == name
+                        and value.__code__.co_filename == str(self.paths[name])):
                     self._retain(module, key, value)
                 elif isinstance(value, type) and value.__module__ == name:
                     for attr, descriptor in tuple(vars(value).items()):
