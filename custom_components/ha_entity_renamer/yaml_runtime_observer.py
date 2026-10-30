@@ -291,7 +291,7 @@ class NativeYAMLRuntimeReadback:
                 if type(entity) is not ScriptEntity:
                     raise ValueError('native_script_type')
                 script = entity.script
-                if (script.is_running or (script._unloaded if __version__ in ('2026.10.2', '2026.10.4') else False) or not script.enabled
+                if ((script._unloaded if __version__ in ('2026.10.2', '2026.10.4') else False) or not script.enabled
                         or script._hass is not self.hass or script.domain != domain
                         or entity._blueprint_inputs is not None
                         or not self.hass.services.has_service('script', entity.unique_id)
@@ -370,15 +370,15 @@ class NativeYAMLRuntimeReadback:
             old, new = expected[domain]
             if old is None or new is None:
                 return Position.UNKNOWN, ()
-            if domain == 'automation':
-                # Configuration/registration inventory remains readable while
-                # an action runs. This generic reload observer still requires
-                # ALL automation actions idle; only the separate selective
-                # lifecycle can preserve an unrelated running instance.
+            if domain in ('automation', 'script'):
+                # Configuration inventory stays readable while actions run.
+                # A generic domain reload still requires every action idle;
+                # the separate selective data plane checks its own targets.
                 from homeassistant.helpers.entity_component import DATA_INSTANCES
                 component = self.hass.data.get(DATA_INSTANCES, {}).get(domain)
-                if component is not None and any(entity.action_script.is_running
-                                                  for entity in component.entities):
+                if component is not None and any(
+                        (entity.action_script if domain == 'automation' else entity.script).is_running
+                        for entity in component.entities):
                     return Position.UNKNOWN, ()
             projection, identity = self._projection(domain)
             actual = _fingerprint(projection)

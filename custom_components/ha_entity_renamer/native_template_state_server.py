@@ -106,6 +106,9 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self.receipt, self.evidence, self.program = bundle.receipt, bundle.evidence, bundle.state_config_program
         self._scope()
         domains = self.receipt.changed_domains
+        if domains == ('script', 'template'):
+            from .native_script_config_transport import assert_idle_script_program_targets
+            assert_idle_script_program_targets(self.hass, bundle.dependent_config_program)
         self.mixed_state = domains != ('template',)
         _need(not ((self.entity_names or self.device_names) and self.mixed_state),
               'selected_names_mixed_lifecycle_unsupported')

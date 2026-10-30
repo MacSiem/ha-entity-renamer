@@ -30,6 +30,9 @@ class NativeScriptPrefixPhase:
             root.evidence, root.receipt, root.composition.yaml_plan)
         sample = self.observer.sample(root.chain, input_state=root.observation_state)
         self.mask = sample.prefix.active
+        from .native_script_config_transport import assert_idle_script_program_targets
+        assert_idle_script_program_targets(root.hass, self.program,
+            active=self.mask if self.mask else None)
         self.sample = sample.registry_rows, (), sample.native_tokens
         _need(self._read(self.mask) == self.sample)
 

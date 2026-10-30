@@ -129,6 +129,28 @@ def _idle_census(root):
     return tuple(result)
 
 
+def assert_idle_script_program_targets(hass, program, *, active=None):
+    """Read-only target admission; unrelated executions grant no write authority."""
+    from homeassistant.helpers.entity_component import DATA_INSTANCES, EntityComponent
+    from homeassistant.components.script import ScriptEntity
+    from .dependent_config_program import DependentConfigProgram
+    _need(type(program) is DependentConfigProgram
+          and (active is None or type(active) is frozenset))
+    mask = frozenset(program.source_order) if active is None else active
+    before = {row[0]: row for row in dict(program.rows(frozenset()))['script']}
+    after = {row[0]: row for row in dict(program.rows(mask))['script']}
+    _need(before.keys() == after.keys(), 'native_script_config_target_inventory_changed')
+    changed = {key for key in before if before[key] != after[key]}
+    component = hass.data.get(DATA_INSTANCES, {}).get('script')
+    _need(type(component) is EntityComponent and component.hass is hass)
+    entities = tuple(component.entities)
+    _need(all(type(entity) is ScriptEntity for entity in entities))
+    keyed = {entity.unique_id: entity for entity in entities}
+    _need(len(keyed) == len(entities) and changed <= keyed.keys())
+    for key in sorted(changed):
+        _idle_census(keyed[key].script)
+
+
 class NativeScriptConfigTransport:
     def __init__(self):
         _need(False, 'native_script_config_capture_required')
