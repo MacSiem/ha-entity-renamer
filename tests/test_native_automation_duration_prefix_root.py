@@ -1,7 +1,8 @@
-"""UNEXECUTED actual-Root duration acceptance, for both pinned Core images.
+"""Owner-run actual-Root duration acceptance, for both pinned Core images.
 
 Only fixture configuration/producer data and read-only sys.monitoring are used.
 Deadlines/contexts are observed, never changed. Pending expiry uses real time.
+Qualification belongs to each receipted native run, not this fixture's presence.
 """
 import asyncio
 import sys
@@ -143,7 +144,10 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         foreign = mode in ('foreign','transient','multi_foreign')
         meaningful = active_expiry or mode in ('meaningful','foreign','replace','multi','multi_foreign')
         pending = partial or active_expiry or mode in ('pending','cancel','from_only','attribute','rollback','foreign_route','orphan','replace','transient')
-        duration = 30 if active_expiry else 480 if pending or multi else 180 if meaningful else 2
+        # Normal whole Root roundtrips measured about 200–255 s. A literal
+        # 300 s retains a scheduled timer through both transports, then proves
+        # natural expiry. The separate 30 s case proves expiry inside Root.
+        duration = 30 if active_expiry else 300 if pending or multi or meaningful else 2
         other_id = 'sensor.duration_other'
         original_keys = [old,other_id] if multi else [old]
         target_keys = [new,other_id] if multi else [new]
@@ -274,7 +278,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         # pending, so the test waits one natural period rather than a second one.
         control_pending=None
         control_original=None
-        if pending or multi:
+        if pending or multi or meaningful:
             hass.states.async_set('sensor.duration_control','16')
             hass.states.async_set('sensor.duration_control','17')
             await hass.async_block_till_done()
