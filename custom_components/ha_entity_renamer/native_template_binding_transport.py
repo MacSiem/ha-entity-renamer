@@ -229,6 +229,11 @@ class _Runtime:
                   and sum(item is track for item in tracker._track_templates) == 1
                   and template in tracker._info and template in tracker._rate_limit._last_triggered,
                   'template_binding_rate_timer_template_changed')
+            # Native source-add events bypass rate limiting for explicit entity
+            # dependencies and cancel the pending replay. That handoff needs an
+            # independently qualified ingress classifier; do not admit it here.
+            _need(not tracker._info[template].entities,
+                  'template_binding_pending_explicit_rate_event_unqualified')
         return timers
 
     def update_rate_listeners(self, tracker):

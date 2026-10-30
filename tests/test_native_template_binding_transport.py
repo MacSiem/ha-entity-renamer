@@ -366,7 +366,8 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
     _flush_documents = server.NativeTemplateYAMLServerTests._flush_documents
     prepare = server.NativeTemplateYAMLServerTests.prepare
 
-    async def pair(self, *, variant='sensor', unavailable=False, time=False, broad=False, equal_attributes=False):
+    async def pair(self, *, variant='sensor', unavailable=False, time=False, broad=False,
+                   equal_attributes=False, broad_membership=False):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         from homeassistant.helpers.entity_platform import async_get_platforms
@@ -383,6 +384,8 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 else "{{ states('" + source + "') | int(0) * 2 }}")
             if broad:
                 state = "{{ (states | list | count) + (states('" + source + "') | int(0)) }}"
+            if broad_membership:
+                state = "{{ states | selectattr('entity_id', 'equalto', '" + source + "') | list | count }}"
             text = ('  - unique_id: ' + uid + '\n    name: ' + name + '\n    state: "' + state + '"\n')
             if variant == 'binary_sensor':
                 text += '    delay_on: "00:00:02"\n'
@@ -584,14 +587,27 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(old._rate_limit._rate_limit_timers, timers)
         self.assertTrue(all(not handle.cancelled() for handle in timers.values()))
 
-    async def test_pending_rate_keeps_timer_deadline_event_and_natural_native_expiry(self):
+    async def test_pending_explicit_rate_remains_refused_before_any_binding_effect(self):
         await self.pair(broad=True)
+        await self.emit(self.producer, 3)
+        old = self.consumer._template_result_info
+        timers = dict(old._rate_limit._rate_limit_timers)
+        self.assertTrue(timers)
+        with self.assertRaisesRegex(ValueError, 'pending_explicit_rate_event_unqualified'):
+            self.capture()
+        self.assertIs(self.consumer._template_result_info, old)
+        self.assertEqual(old._rate_limit._rate_limit_timers, timers)
+        self.assertTrue(all(not timer.cancelled() for timer in timers.values()))
+
+    async def test_pending_broad_rate_keeps_timer_deadline_event_and_natural_native_expiry(self):
+        await self.pair(broad_membership=True)
         hass, entity, control = self.f.hass, self.consumer, self.control
         await self.emit(self.producer, 3)
         await self.emit(self.other, 3)
         old = entity._template_result_info
         timers = dict(old._rate_limit._rate_limit_timers)
         self.assertTrue(timers)
+        self.assertTrue(all(not old._info[template].entities for template in timers))
         originals = {id(handle): (handle, handle.when(), handle._args[0], handle._context)
                      for handle in timers.values()}
         control_timers = dict(control._template_result_info._rate_limit._rate_limit_timers)
@@ -615,8 +631,13 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(handle._args[1]), 1)
             self.assertIs(handle._args[1][0].template, template)
             self.assertIs(handle._args[2], True)
-        await self.emit(self.producer, 5)
-        await self.emit(self.other, 5)
+        # Real source removals change the membership result from 1 to 0. Both
+        # unchanged control and transported group consume that change at their
+        # original native deadlines, not at the rename seam.
+        self.assertEqual(hass.states.get(entity.entity_id).state, '1')
+        await self.producer.async_remove()
+        await self.other.async_remove()
+        await hass.async_block_till_done()
         # Observe real native expiry; no callback invocation, clock alteration,
         # timer replacement, output seeding or expected value from a moved cache.
         fired = hass.loop.create_future()
@@ -645,6 +666,7 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
             monitor.register_callback(tool, monitor.events.PY_START, None)
             monitor.free_tool_id(tool)
         self.assertEqual(hass.states.get(entity.entity_id).state, hass.states.get(control.entity_id).state)
+        self.assertEqual(hass.states.get(entity.entity_id).state, '0')
         self.assertTrue(all(handle.cancelled() for handle in timers.values()))
         self.assertEqual(self.f.entity.async_get(self.new).id, self.source_uuid)
 
