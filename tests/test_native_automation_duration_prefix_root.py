@@ -412,7 +412,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             sys.monitoring.set_local_events(tool,codes[4],sys.monitoring.events.PY_RETURN)
             if partial:
                 sys.monitoring.set_local_events(tool,codes[5],sys.monitoring.events.PY_RETURN)
-            if foreign:
+            if foreign or history_context:
                 sys.monitoring.set_local_events(tool,codes[0],sys.monitoring.events.PY_START|sys.monitoring.events.PY_RETURN)
             with mixed.native_diagnostics(self.module):
                 if partial or mode in ('rollback','foreign_route','orphan'):
