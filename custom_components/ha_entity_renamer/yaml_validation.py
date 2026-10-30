@@ -63,6 +63,18 @@ class TemplateStateSourceValidation:
         return False
 
 
+@dataclass(frozen=True)
+class DependentConfigValidation:
+    """Private read-only adjunct of one original validation, no apply authority."""
+    receipt: ValidationReceipt
+    evidence: OriginalSourceEvidence
+    config_program: object
+
+    @property
+    def migration_ready(self):
+        return False
+
+
 # Ancillary runtime inputs used by the native checker (including blueprint refs).
 _STORAGE = {'core.config_entries', 'core.entity_registry', 'core.device_registry',
             'core.area_registry', 'repairs.issue_registry'}
@@ -323,7 +335,8 @@ async def _settled_executor(hass, function, *args):
 
 async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, with_sources=False,
                                    powercalc_bundle=None, powercalc_candidate_documents=None, native_helpers=(),
-                                   template_reference_mapping=None, template_state_program=False):
+                                   template_reference_mapping=None, template_state_program=False,
+                                   dependent_reference_mapping=None):
     """Return only after native validation of the entire proposed graph succeeds.
 
     scratch_parent must be private local storage OUTSIDE config_root. It contains
@@ -332,6 +345,12 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
     """
     if type(template_state_program) is not bool or template_state_program and template_reference_mapping is None:
         raise YAMLValidationError('template_state_source_profile_scope_required')
+    if dependent_reference_mapping is not None:
+        from .yaml_plan import _mapping
+        if (not with_sources or native_helpers or powercalc_bundle is not None
+                or template_reference_mapping is not None):
+            raise YAMLValidationError('dependent_config_program_scope_required')
+        dependent_reference_mapping = _mapping(dependent_reference_mapping)
     if template_reference_mapping is not None:
         from .yaml_plan import _mapping
         if not with_sources or native_helpers or powercalc_bundle is not None:
@@ -387,6 +406,13 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 request.chmod(0o600)
                 helper_args = ('--native-helpers',str(request))
             state_source_args = ()
+            dependent_args = ()
+            if dependent_reference_mapping is not None:
+                request = Path(stage) / 'dependent-reference-mapping.json'
+                request.write_text(json.dumps(dependent_reference_mapping,
+                    sort_keys=True, separators=(',', ':'), allow_nan=False))
+                request.chmod(0o600)
+                dependent_args = ('--dependent-config-program', '--dependent-reference-mapping', str(request))
             if template_reference_mapping is not None:
                 request = Path(stage) / 'template-reference-mapping.json'
                 request.write_text(json.dumps(template_reference_mapping,
@@ -401,6 +427,7 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 sys.executable, '-I', '-B', worker, str(before), str(after),
                 *helper_args,
                 *state_source_args,
+                *dependent_args,
                 *(('--source-evidence',) if with_sources else ()),
                 *(('--powercalc-profile-inputs',) if plan.powercalc_inputs is not None else ()),
                 *(('--powercalc-candidate-inputs',) if powercalc_candidate_documents is not None else ()),
@@ -445,6 +472,12 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 evidence = seal_original_sources(receipt, plan, staged[2], result['source_runtime'],
                     template_ledger=staged[3], template_native=result['template_sources'],
                     template_candidate_native=result['template_candidate_sources'])
+                if dependent_reference_mapping is not None:
+                    from .dependent_config_program import seal_dependent_config_program
+                    program = seal_dependent_config_program(receipt, evidence,
+                        result['dependent_config_program'], plan=plan,
+                        mapping=dependent_reference_mapping, source_order=tuple(sorted(dependent_reference_mapping)))
+                    return DependentConfigValidation(receipt, evidence, program)
                 if powercalc_bundle is not None:
                     from dataclasses import replace
                     from .powercalc_source_binding import seal_powercalc_sources
@@ -493,6 +526,12 @@ async def async_validate_proposed_with_sources(hass, plan, scratch_parent, *, ti
     """
     return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
                                          with_sources=True, native_helpers=native_helpers)
+
+
+async def async_validate_proposed_with_dependent_config_program(hass, plan, mapping, scratch_parent, *, timeout=120):
+    """Compile all frozen source prefixes without changing legacy receipt bytes."""
+    return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
+        with_sources=True, dependent_reference_mapping=mapping)
 
 
 async def async_validate_proposed_with_template_state_sources(

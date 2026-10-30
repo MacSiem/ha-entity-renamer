@@ -744,7 +744,8 @@ async def _expected_template_sources(hass, config, *, state_profile=None, with_s
 
 
 async def _expected_runtime(root, domains, *, source_rows=None, template_sources=None,
-                            template_state_profile=None, template_state_program=False, template_program_sources=()):
+                            template_state_profile=None, template_state_program=False, template_program_sources=(),
+                            dependent_descriptors=None):
     """Native schema projections in the isolated validator, without component setup.
 
     No scripts/actions/templates are run and no scene is activated. The trusted
@@ -778,6 +779,8 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
                     result[domain] = _fingerprint([])
                     if source_rows is not None:
                         source_rows[domain] = []
+                    if dependent_descriptors is not None:
+                        dependent_descriptors[domain] = []
                     continue
                 if domain == 'homeassistant':
                     from homeassistant.core_config import _CUSTOMIZE_CONFIG_SCHEMA
@@ -838,6 +841,8 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
                         raise ValueError('duplicate_runtime_id')
                     projection.sort(key=lambda row: row[0])
                 result[domain] = _fingerprint(projection)
+                if dependent_descriptors is not None and domain in ('automation', 'script'):
+                    dependent_descriptors[domain] = _normal(projection)
                 if source_rows is not None and domain in ('automation', 'script'):
                     source_rows[domain] = [[row[0], _fingerprint(row[1]), _fingerprint(row)]
                                            for row in projection]
@@ -846,6 +851,8 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
                 result[domain] = None
                 if source_rows is not None and domain in ('automation', 'script'):
                     source_rows[domain] = None
+                if dependent_descriptors is not None and domain in ('automation', 'script'):
+                    dependent_descriptors[domain] = None
         return result
     finally:
         await hass.async_stop(force=True)
@@ -1011,7 +1018,8 @@ def _check_template_entries(root, request, version):
 
 async def check(before_root, proposed_root, *, with_sources=False, powercalc_profiles=False,
                 powercalc_candidate=False, native_helpers=(), template_source_profile=None,
-                template_reference_mapping=None, template_state_program=False):
+                template_reference_mapping=None, template_state_program=False,
+                dependent_reference_mapping=None):
     from homeassistant.const import __version__
     from homeassistant.scripts.check_config import async_check_config
     if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4'):
@@ -1026,6 +1034,15 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
         raise ValueError('template_state_profile_request_invalid')
     reference_proof = (_template_reference_proof(before_root, proposed_root, template_reference_mapping)
                        if template_source_profile is not None else None)
+    dependent_proof = None
+    if dependent_reference_mapping is not None:
+        if not with_sources or native_helpers or powercalc_profiles or powercalc_candidate:
+            raise ValueError('dependent_config_program_rejected')
+        dependent_proof = _template_reference_proof(before_root, proposed_root, dependent_reference_mapping)
+        program_module = _source_module('dependent_config_program')
+        paths = tuple(row[0] for row in dependent_proof['files'])
+        program_module.assert_reference_only(before_root, paths)
+        program_module.assert_reference_only(proposed_root, paths)
     checked = await async_check_config(proposed_root)
     if checked.errors or checked.warnings:
         # Native diagnostics may contain expanded !secret values. Return counts only.
@@ -1041,15 +1058,20 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
     template_sources = {} if with_sources else None
     old_state_profile = {} if template_source_profile is not None else None
     new_state_profile = {} if template_source_profile is not None else None
+    old_dependent = {} if dependent_proof is not None else None
+    new_dependent = {} if dependent_proof is not None else None
     old_runtime = await _expected_runtime(before_root, original_domains,
         source_rows=source_rows, template_sources=template_sources,
         template_state_profile=old_state_profile, template_state_program=template_state_program,
-        template_program_sources=tuple(row[0] for row in reference_proof['files']) if template_state_program else ())
+        template_program_sources=tuple(row[0] for row in reference_proof['files']) if template_state_program else (),
+        dependent_descriptors=old_dependent)
     candidate_templates = {} if with_sources else None
-    new_runtime = await _expected_runtime(proposed_root, changed,
+    candidate_domains = sorted(set(changed) | {'automation', 'script'}) if dependent_proof is not None else changed
+    new_runtime = await _expected_runtime(proposed_root, candidate_domains,
         template_sources=candidate_templates, template_state_profile=new_state_profile,
         template_state_program=template_state_program,
-        template_program_sources=tuple(row[0] for row in reference_proof['files']) if template_state_program else ())
+        template_program_sources=tuple(row[0] for row in reference_proof['files']) if template_state_program else (),
+        dependent_descriptors=new_dependent)
     if (with_sources and 'template' in changed
             and set(changed) <= {'automation', 'script', 'template'}
             and all(old_runtime.get(domain) is not None and new_runtime.get(domain) is not None
@@ -1062,6 +1084,10 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
               'unsupported_domains': unsupported,
               'runtime_expected': [(domain, old_runtime.get(domain), new_runtime.get(domain))
                                    for domain in changed]}
+    if dependent_proof is not None:
+        result['dependent_config_program'] = await program_module.native_prefix_images(
+            before_root, dependent_reference_mapping, dependent_proof, old_dependent, new_dependent,
+            _expected_runtime)
     if template_source_profile is not None:
         if template_state_program:
             result['template_state_config_program'] = old_state_profile.pop('_config_program')
@@ -1098,10 +1124,8 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
     return result
 
 
-def _template_mapping_request(arguments):
+def _template_mapping_request(arguments, *, flag='--template-reference-mapping', selected='--template-state-source-v3'):
     """Strict bounded new CLI payload; the legacy command shape is unchanged."""
-    flag = '--template-reference-mapping'
-    selected = '--template-state-source-v3'
     if selected not in arguments and flag not in arguments:
         return None
     if arguments.count(selected) != 1 or arguments.count(flag) != 1:
@@ -1139,6 +1163,8 @@ def main():
                                            if '--template-state-source-v3' in sys.argv[3:] else None),
                                        template_reference_mapping=_template_mapping_request(sys.argv[3:]),
                                        template_state_program='--template-state-config-program' in sys.argv[3:],
+                                       dependent_reference_mapping=_template_mapping_request(sys.argv[3:],
+                                           flag='--dependent-reference-mapping', selected='--dependent-config-program'),
                                        native_helpers=(json.load(open(sys.argv[sys.argv.index('--native-helpers')+1]))
                                            if '--native-helpers' in sys.argv[3:] else ())),
                                  loop_factory=getattr(runner, 'create_event_loop', None))
