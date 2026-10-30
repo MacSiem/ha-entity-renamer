@@ -88,3 +88,30 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
         self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
         self.assertIsNone(self.f.entity.async_get(new))
+
+    async def test_invalid_or_unsupported_selection_preserves_native_inputs(self):
+        runtime, old, new, uuids, original, payload = await self.selection()
+        native = self.module('native_registry').NativeRegistryIO(self.f.hass)
+        before = (native.document('entity'), native.document('device'))
+        selections = [
+            ({**payload, 'actor_id': 'client-supplied'}, 'invalid_format'),
+            ({'entities': [{**payload['entities'][0], 'roots': []}]}, 'invalid_format'),
+            ({'entities': [payload['entities'][0]] * 2}, 'invalid_selection'),
+            ({'entities': [{'entity_id': old, 'new_entity_id': 'light.changed'}]}, 'invalid_selection'),
+            ({'entities': [{'entity_id': old, 'name': 'bad\nname'}]}, 'invalid_selection'),
+            ({'entities': [{'entity_id': old, 'name': 'Name only'}]}, 'unsupported_selection'),
+        ]
+        for selected, code in selections:
+            with self.subTest(code=code, keys=tuple(selected)):
+                connection, user, output = await self._connection(admin=True)
+                connection.async_handle({'id': 1, 'type': 'ha_entity_renamer/prepare', **selected})
+                response = await output
+                self.assertFalse(response['success'])
+                self.assertEqual(response['error']['code'], code, response)
+                self.assertNotIn('result', response)
+                self.assertFalse(runtime.reviews)
+                self.assertEqual(await runtime.journal.active(), ())
+                self.assertEqual((native.document('entity'), native.document('device')), before)
+                self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+                self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+                self.assertIsNone(self.f.entity.async_get(new))

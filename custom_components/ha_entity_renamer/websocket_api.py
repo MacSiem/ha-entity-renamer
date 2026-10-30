@@ -187,6 +187,17 @@ def _ordinary_selection(message):
         if identity in devices:
             raise _InvalidSelection()
         devices[identity] = row['name_by_user']
+    # Reuse the existing product validators for IDs, domains, collisions and
+    # names. This is an internal schema conversion, never a file/import API.
+    from .manifest import parse_manifest
+    try:
+        parse_manifest({'entities': [
+            {'entity_id': old, 'proposed_entity_id': mapping.get(old, old),
+             'proposed_name': names.get(old)} for old in sorted(seen)],
+            'devices': [{'device_id': key, 'proposed_name': value}
+                        for key, value in devices.items()]})
+    except ValueError:
+        raise _InvalidSelection() from None
     return mapping, names, devices
 
 
