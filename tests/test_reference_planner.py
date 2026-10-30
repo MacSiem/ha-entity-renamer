@@ -30,6 +30,7 @@ class ReferencePlannerTest(unittest.TestCase):
         for source in (
             "{{ states | selectattr('entity_id', 'equalto', 'sensor.a') | list | count }}",
             "{{ states.sensor | rejectattr('entity_id', 'eq', 'sensor.a') | list | length }}",
+            "{{ states['sensor'] | selectattr('entity_id', 'equalto', 'sensor.a') | list | count }}",
             "{{ (states | list | count) + (states | selectattr('entity_id', '==', 'sensor.a') | list | count) }}",
             "{% set source = 'sensor.a' %}{{ states | selectattr('entity_id', 'equalto', source) | list | count }}",
         ):
@@ -46,6 +47,10 @@ class ReferencePlannerTest(unittest.TestCase):
             "{{ states | selectattr('entity_id', custom_test, 'sensor.a') | list | count }}",
             "{{ states | selectattr('entity_id', 'search', 'sensor.a') | list | count }}",
             "{{ states | selectattr('entity_id', 'equalto', 'sensor.a', extra) | list | count }}",
+            "{{ states._hass | selectattr('entity_id', 'equalto', 'sensor.a') | list | count }}",
+            "{{ states.__class__ | selectattr('entity_id', 'equalto', 'sensor.a') | list | count }}",
+            "{{ states.contextfunction | selectattr('entity_id', 'equalto', 'sensor.a') | list | count }}",
+            "{{ states.jinja_pass_arg | selectattr('entity_id', 'equalto', 'sensor.a') | list | count }}",
             "{% set source = 'sensor.a' %}{{ states | selectattr('entity_id', 'equalto', source) | list | count }}{{ source }}",
         ):
             with self.subTest(source=source):
