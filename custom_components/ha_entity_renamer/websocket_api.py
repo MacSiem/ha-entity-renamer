@@ -12,6 +12,7 @@ def async_register(hass):
     websocket_api.async_register_command(hass, ws_status)
     websocket_api.async_register_command(hass, ws_discover)
     websocket_api.async_register_command(hass, ws_preview)
+    websocket_api.async_register_command(hass, ws_prepare)
     websocket_api.async_register_command(hass, ws_recovery_inspect)
     websocket_api.async_register_command(hass, ws_recovery_restore)
 
@@ -160,6 +161,80 @@ def _recovery_authority(hass, connection, runtime):
         native_source = (hass.auth, hass.auth._store)
         guard()
     return guard, refresh
+
+
+class _InvalidSelection(ValueError):
+    pass
+
+
+def _ordinary_selection(message):
+    """Copy only ordinary requested fields; clients never supply a Plan/root."""
+    mapping, names, devices, seen = {}, {}, {}, set()
+    if not message['entities'] or len(message['entities']) + len(message.get('devices', ())) > 10000:
+        raise _InvalidSelection()
+    for row in message['entities']:
+        old = row['entity_id']
+        new = row.get('new_entity_id', old)
+        if old in seen or (new == old and 'name' not in row):
+            raise _InvalidSelection()
+        seen.add(old)
+        if new != old:
+            mapping[old] = new
+        if 'name' in row:
+            names[old] = row['name']
+    for row in message.get('devices', ()):
+        identity = row['device_id']
+        if identity in devices:
+            raise _InvalidSelection()
+        devices[identity] = row['name_by_user']
+    return mapping, names, devices
+
+
+_SELECTION_TEXT = vol.All(str, vol.Length(min=1, max=255))
+_ENTITY_SELECTION = vol.Schema({
+    vol.Required('entity_id'): _SELECTION_TEXT,
+    vol.Optional('new_entity_id'): _SELECTION_TEXT,
+    vol.Optional('name'): _SELECTION_TEXT}, extra=vol.PREVENT_EXTRA)
+_DEVICE_SELECTION = vol.Schema({
+    vol.Required('device_id'): _SELECTION_TEXT,
+    vol.Required('name_by_user'): _SELECTION_TEXT}, extra=vol.PREVENT_EXTRA)
+
+
+@websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/prepare',
+    vol.Required('entities'): vol.All([_ENTITY_SELECTION], vol.Length(min=1, max=10000)),
+    vol.Optional('devices'): vol.All([_DEVICE_SELECTION], vol.Length(max=10000))})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_prepare(hass, connection, message):
+    """Read-only server review of an ordinary selection, with readiness false."""
+    from . import Runtime
+    from .transaction import Refused
+    runtime = hass.data.get(DATA_RUNTIME)
+    if type(runtime) is not Runtime or not runtime.loaded or runtime.unloading:
+        connection.send_error(message['id'], 'unavailable', 'Entity Renamer backend is not loaded')
+        return
+    guard, refresh = _recovery_authority(hass, connection, runtime)
+    try:
+        await refresh()
+        mapping, names, devices = _ordinary_selection(message)
+        result = await runtime.native_yaml_prepare(hass, mapping, entity_names=names,
+            device_names=devices, actor_id=connection.user.id, guard=guard, refresh=refresh)
+        # No additional await after the native source/history fence. This checks
+        # the actual backing AuthStore user and Runtime synchronously.
+        guard()
+    except PermissionError:
+        connection.send_error(message['id'], 'unauthorized', 'Administrator permissions are required')
+    except _InvalidSelection:
+        connection.send_error(message['id'], 'invalid_selection', 'The rename selection is invalid')
+    except Refused:
+        connection.send_error(message['id'], 'unsupported_selection',
+                              'This selection cannot be verified for migration')
+    except Exception as error:
+        unavailable = type(error) is ValueError and error.args == ('recovery_runtime_unavailable',)
+        connection.send_error(message['id'], 'unavailable' if unavailable else 'prepare_unavailable',
+                              'The rename review could not be verified')
+    else:
+        connection.send_result(message['id'], result)
 
 
 async def _read_recovery(hass, connection, message, *, action):

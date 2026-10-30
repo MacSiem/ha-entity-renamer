@@ -47,7 +47,7 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
         before = (native.document('entity'), native.document('device'))
         connection, user, output = await self._connection(admin=True)
         command = 'ha_entity_renamer/prepare'
-        self.assertIn(command, connection.handlers)
+        self.assertTrue(command in connection.handlers, 'installed prepare command missing')
         self.assertIs(connection.handlers[command][0], self.module('websocket_api').ws_prepare)
         connection.async_handle({'id': 1, 'type': command, **payload})
         response = await output
