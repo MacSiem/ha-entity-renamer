@@ -23,6 +23,12 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
     _runtime = server.NativeTemplateYAMLServerTests._runtime
 
     async def test_actual_forward_inverse_binds_original_native_events_and_completed_tasks(self):
+        await self.round_trip(reemit=False)
+
+    async def test_foreign_same_dictionary_reemission_keeps_its_distinct_original_event(self):
+        await self.round_trip(reemit=True)
+
+    async def round_trip(self, *, reemit):
         runtime, mapping, uuids, original = await self.data(variant='sensor')
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
@@ -34,9 +40,17 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
         bridge = native.NativeRegistryBridge(io, self.module('recorder_guard').NativeRecorderGuard(hass))
         change = await bridge.prepare('entity', uuids[old], {'entity_id': new}, lambda: None)
         received = []
+        reemitted = set()
         def collect(event):
             if event.data.get('entity_id') in (old, new):
                 received.append(event)
+                if reemit and id(event.data) not in reemitted:
+                    reemitted.add(id(event.data))
+                    # A real integration can emit another native bus Event
+                    # with the same dictionary. This synthetic foreign input
+                    # is not a replay of any private/denied operation or an
+                    # invocation of a consumer handler.
+                    hass.bus.async_fire_internal('state_changed', event.data, context=event.context)
         self.addCleanup(hass.bus.async_listen('state_changed', collect))
         owner = asyncio.current_task()
         def guard():
@@ -56,6 +70,17 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(proof['dispatches_complete'])
             own = [event for event in received if witness.is_owned_rename(event)]
             self.assertEqual(len(own), 2)
+            if reemit:
+                self.assertEqual(len(received), 4)
+                groups = {}
+                for event in received:
+                    groups.setdefault(id(event.data), []).append(event)
+                self.assertEqual(len(groups), 2)
+                for first, second in groups.values():
+                    self.assertIsNot(first, second)
+                    self.assertIs(first.data, second.data)
+                    self.assertTrue(witness.is_owned_rename(first))
+                    self.assertFalse(witness.is_owned_rename(second))
             removed = next(event for event in own if event.data['new_state'] is None)
             added = next(event for event in own if event.data['old_state'] is None)
             self.assertEqual((removed.data['entity_id'], added.data['entity_id']), (old, new))
