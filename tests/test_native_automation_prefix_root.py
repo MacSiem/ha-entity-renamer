@@ -34,7 +34,10 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_original_foreign_event_follows_meaningful_add_in_native_action_order(self):
         await self._root_case(meaningful=True, foreign_event=True)
 
-    async def _root_case(self, *, meaningful, foreign_service=False, foreign_event=False):
+    async def test_foreign_route_after_effect_is_preserved_by_refused_cleanup(self):
+        await self._root_case(meaningful=False, foreign_route=True)
+
+    async def _root_case(self, *, meaningful, foreign_service=False, foreign_event=False, foreign_route=False):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         from homeassistant.helpers.entity_platform import async_get_platforms
@@ -52,7 +55,7 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             '      current: "{{ trigger.to_state.state }}"\n'
             '      configured: "{{ states(alias) }}"\n'
             '  - action: script.mixed_source\n')
-        if not meaningful and not foreign_service:
+        if not meaningful and not foreign_service and not foreign_route:
             with automation_path.open('a') as stream:
                 stream.write('- id: prefix_unrelated\n  alias: Prefix unrelated observer\n'
                     '  initial_state: true\n  triggers:\n  - trigger: event\n'
@@ -106,6 +109,7 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         codes = (handoff_type.mutate.__code__, ingress_type._action.__code__, root_type._install.__code__,
                  phase_type.finish_native.__code__)
         replaced = []
+        foreign_route_image = []
         forwarded = []
         codes += (binding.listener.__code__,)
         tool = next(key for key in range(6) if sys.monitoring.get_tool(key) is None)
@@ -136,6 +140,14 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     schema=service.schema, supports_response=service.supports_response)
                 replaced.append(hass.services._services['script']['mixed_source'])
                 self.assertIsNot(replaced[0], service)
+            elif code is codes[3] and actor.root.hass is hass and foreign_route and not foreign_route_image:
+                # Fault injection changes the ACTUAL retained native routing
+                # containers, never an expected graph or verification return.
+                key = 'sensor.synthetic_foreign_route'
+                binding.original_keys.append(key)
+                binding.callbacks[key].append(binding.keyed_job)
+                foreign_route_image.append((tuple(binding.original_keys), binding.callbacks[key],
+                    tuple(binding.callbacks[key]), binding.keyed_job.target))
             elif code is codes[4] and foreign_event and frame.f_locals.get('config') is binding.config:
                 forwarded.append(frame.f_locals['event'])
         foreign_emitted = []
@@ -158,16 +170,23 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 sys.monitoring.set_local_events(tool, codes[0],
                     sys.monitoring.events.PY_START | sys.monitoring.events.PY_RETURN)
             with mixed.native_diagnostics(self.module):
-                if foreign_service:
+                if foreign_service or foreign_route:
                     with self.assertRaises(self.module('transaction').Refused):
                         await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
-                    self.assertEqual(len(replaced), 1)
+                    self.assertEqual(len(replaced) if foreign_service else len(foreign_route_image), 1)
                     self.assertEqual(len(handoffs), 1, 'uncertain effect must never be replayed')
                     records = await runtime.journal.active()
                     self.assertEqual(len(records), 1)
                     self.assertNotEqual(records[0].status, 'applied')
                     self.assertEqual(records[0].phases[0], 'intent')
-                    self.assertIs(hass.services._services['script']['mixed_source'], replaced[0])
+                    if foreign_service:
+                        self.assertIs(hass.services._services['script']['mixed_source'], replaced[0])
+                    else:
+                        keys, members, jobs, target = foreign_route_image[0]
+                        self.assertEqual(tuple(binding.original_keys), keys)
+                        self.assertIs(binding.callbacks.get('sensor.synthetic_foreign_route'), members)
+                        self.assertEqual(tuple(members), jobs)
+                        self.assertIs(binding.keyed_job.target, target)
                     self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
                     self.assertIsNone(self.f.entity.async_get(old))
                     for name, content in original.items():
