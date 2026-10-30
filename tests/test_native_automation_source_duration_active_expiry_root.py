@@ -100,6 +100,7 @@ class NativeAutomationSourceDurationActiveExpiryRootTests(unittest.IsolatedAsync
         original_configured_graph = configured_graph(configured)
         actions, scripts, controls, slow = [], [], [], []
         pairs, roots, handoffs, expiries, expiry_returns, terminal_records = [], [], [], [], [], []
+        pair_entities = []
         renders, template_calls, validations = [], [], []
         timer_attachments = []
         for name, events in (('duration_source_result', actions), ('duration_script_result', scripts),
@@ -153,6 +154,7 @@ class NativeAutomationSourceDurationActiveExpiryRootTests(unittest.IsolatedAsync
             elif code is codes[1] and actor.hass is hass:
                 change = frame.f_locals['change']
                 pairs.append(change)
+                pair_entities.append(frame.f_locals['b'].entity.unique_id)
                 self.assertIs(change.prior_state, physical)
                 self.assertIsNone(change.event.data['old_state'])
                 self.assertIs(change.new_state, change.event.data['new_state'])
@@ -319,7 +321,11 @@ class NativeAutomationSourceDurationActiveExpiryRootTests(unittest.IsolatedAsync
             self.assertEqual(tuple(str(controls[0].data[k]) for k in ('previous', 'current')), ('16', '17'))
             self.assertEqual(float(controls[0].data['seconds']), 180)
             self.assertEqual(controls[0].context.parent_id, control_image[12].context.id)
-            self.assertEqual(len(pairs), 1)
+            # The original bridge considers both source and slow-action routes.
+            # Only the slow route matches 17->29; both see the same owned pair.
+            self.assertEqual(len(pairs), 2)
+            self.assertCountEqual(pair_entities, ['mixed_source', 'duration_slow'])
+            self.assertIs(pairs[0], pairs[1])
             self.assertEqual((pairs[0].prior_state.state, pairs[0].new_state.state), ('17', '29'))
             self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
             self.assertIsNone(hass.states.get(old))
