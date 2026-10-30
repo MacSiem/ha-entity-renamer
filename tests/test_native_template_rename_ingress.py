@@ -134,7 +134,12 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
             for value in (7, 11):
                 await self.emit(self.producer, value)
                 await self.emit(self.other, value)
-                self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, str(value * 2))
+                self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, str(value * 2),
+                    {'native_control': self.f.hass.states.get(self.control.entity_id).state,
+                     'subject_listeners': self.consumer._template_result_info.listeners,
+                     'control_listeners': self.control._template_result_info.listeners,
+                     'subject_timers': len(self.consumer._template_result_info._rate_limit._rate_limit_timers),
+                     'control_timers': len(self.control._template_result_info._rate_limit._rate_limit_timers)})
                 self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state,
                                  self.f.hass.states.get(self.control.entity_id).state)
         finally:
