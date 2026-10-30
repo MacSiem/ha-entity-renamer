@@ -30,7 +30,10 @@ class NativeTemplatePrefixRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_registry_acknowledged_before_yaml_fresh_reverse(self):
         await self._prefix_reverse(2)
 
-    async def _prefix_reverse(self, count):
+    async def test_acknowledged_prefix_controller_inspection_and_inverse(self):
+        await self._prefix_reverse(1, controller=True)
+
+    async def _prefix_reverse(self, count, *, controller=False):
         runtime, mapping, uuids, original = await self.data(multiple=True)
         hass, root = self.f.hass, self.f.root
         journal_type = self.module('journal').DurableJournal
@@ -89,11 +92,28 @@ class NativeTemplatePrefixRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await runtime.native_yaml_reverse(hass, record.operation_id, record.plan.fingerprint,
                 guard=revoked, refresh=refresh)
         self.assertEqual(await runtime.journal.load(record.operation_id), record)
+        if controller:
+            async def status_refresh():
+                return None
+            status = await runtime.recovery_status(hass, guard=lambda: None, refresh=status_refresh)
+            operation = next(row for row in status['operations'] if row['operation_id'] == record.operation_id)
+            self.assertEqual(operation['reason'], 'inspection_available')
+            self.assertIs(operation['eligible'], False)
+            inspected = await runtime.recovery_inspect(hass, record.operation_id, record.plan.fingerprint,
+                guard=lambda: None, refresh=refresh)
+            self.assertEqual((inspected['state'], inspected['reason'], inspected['eligible']),
+                             ('recoverable_prefix', 'acknowledged_prefix', True))
+            self.assertEqual(inspected['change_summary']['sources'], [
+                {'current_entity_id': mapping[first], 'original_entity_id': first},
+                {'current_entity_id': second, 'original_entity_id': second}])
+            self.assertEqual(await runtime.journal.load(record.operation_id), record,
+                             'inspection must not acknowledge or advance any journal phase')
         previous_journal, previous_preparations = runtime.journal, runtime.preparations
         from test_native_template_mixed_yaml_server import native_diagnostics
         with native_diagnostics(self.module):
             try:
-                result = await runtime.native_yaml_reverse(hass, record.operation_id, record.plan.fingerprint,
+                reverse = runtime.recovery_restore if controller else runtime.native_yaml_reverse
+                result = await reverse(hass, record.operation_id, record.plan.fingerprint,
                     guard=lambda: None, refresh=refresh)
             finally:
                 final = await runtime.journal.load(record.operation_id)
