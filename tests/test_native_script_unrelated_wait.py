@@ -26,10 +26,13 @@ class NativeScriptUnrelatedWaitTests(unittest.IsolatedAsyncioTestCase):
     async def test_affected_script_actual_wait_refuses_before_operation_and_native_api(self):
         await self._wait_case(affected=True)
 
-    async def _wait_case(self, *, affected):
+    async def test_legacy_reload_profile_busy_script_refuses_prepare_before_operation(self):
+        await self._wait_case(affected=False, legacy=True)
+
+    async def _wait_case(self, *, affected, legacy=False):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
-        runtime, mapping, uuids, _, _ = await self.data(with_automation=False)
+        runtime, mapping, uuids, _, _ = await self.data(with_automation=legacy)
         hass, root = self.f.hass, self.f.root
         old = next(iter(mapping))
         path = root / 'mixed_scripts.yaml'
@@ -75,9 +78,13 @@ class NativeScriptUnrelatedWaitTests(unittest.IsolatedAsyncioTestCase):
         try:
             await asyncio.wait_for(witness.ready, 5)
             same_wait()
-            if affected:
+            if affected or legacy:
                 with self.assertRaises((ValueError, self.module('transaction').Refused)):
-                    await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+                    if legacy:
+                        await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                            guard=lambda: None, refresh=refresh)
+                    else:
+                        await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
                 self.assertEqual(calls, [])
                 self.assertFalse(await runtime.journal.active())
             else:
