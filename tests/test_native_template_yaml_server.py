@@ -217,6 +217,12 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         await self.flow(variant='mixed', source_consumers=True)
 
     async def test_handoff_root_last_guard_refusal_restores_bindings_and_monitors(self):
+        await self._handoff_root_guard_refusal('witness')
+
+    async def test_handoff_root_source_guard_refusal_restores_bindings_and_monitors(self):
+        await self._handoff_root_guard_refusal('source')
+
+    async def _handoff_root_guard_refusal(self, seam):
         from homeassistant.helpers.entity_platform import async_get_platforms
         runtime, mapping, uuids, original = await self.data(variant='sensor')
         hass = self.f.hass
@@ -226,7 +232,8 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         trackers = tuple(entity._template_result_info for entity in entities)
         witness_type = self.module('native_rename_emission_classifier').NativeRenameEmissions
         io_type = self.module('native_registry').NativeRegistryIO
-        codes = (witness_type.mutate.__code__, io_type.mutate.__code__)
+        source_type = self.module('native_source_handoff').NativeSourceHandoff
+        codes = (witness_type.mutate.__code__, source_type.mutate.__code__, io_type.mutate.__code__)
         witnesses, attempts = [], []
         revoked = False
         def guard():
@@ -243,7 +250,9 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
                 return
             if code is codes[0]:
                 witnesses.append(actor)
-                revoked = True
+                revoked = seam == 'witness'
+            elif code is codes[1]:
+                revoked = seam == 'source'
             else:
                 attempts.append(actor)
         try:
@@ -254,7 +263,8 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises((PermissionError, self.module('transaction').Refused)):
                 await runtime.native_forward(hass, mapping, guard=guard, refresh=refresh)
             self.assertEqual(len(witnesses), 1)
-            self.assertFalse(witnesses[0].attempted)
+            self.assertIs(witnesses[0].attempted, seam == 'source')
+            self.assertFalse(witnesses[0].source_handoff.attempted)
             self.assertEqual(attempts, [])
             for old, new in mapping.items():
                 self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
