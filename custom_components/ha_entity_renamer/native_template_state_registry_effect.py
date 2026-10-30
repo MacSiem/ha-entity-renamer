@@ -124,18 +124,23 @@ class NativeTemplateStateRegistryEffect:
 
     def abort_before_attempt(self):
         _need(self.phase in ('captured', 'failed_before_attempt'), 'attempt_cannot_be_aborted')
-        if self.ingress is not None:
-            self.ingress.retire()
-        # Reverse the installation order. Duration journals retain exact global
-        # callback slots; native Template teardown/setup is a separate owned
-        # operation and must run after those journals have been restored.
-        if (self.script_phase is not None and self.script_phase.active is not None
-                and self.script_phase.active[0] is self):
-            self.script_phase.abort(self)
-        self._restore_own_pre_attempt()
-        if self.witness is not None:
-            self.witness.close()
-        self.phase = 'failed_before_attempt'
+        try:
+            if self.ingress is not None:
+                self.ingress.retire()
+            # Reverse the installation order. Duration journals retain exact global
+            # callback slots; native Template teardown/setup is a separate owned
+            # operation and must run after those journals have been restored.
+            if (self.script_phase is not None and self.script_phase.active is not None
+                    and self.script_phase.active[0] is self):
+                self.script_phase.abort(self)
+            self._restore_own_pre_attempt()
+            self.phase = 'failed_before_attempt'
+        finally:
+            # A refused foreign-alias cleanup must preserve its unknown graph,
+            # but never retain this request's monitoring slots. Closing witness
+            # observation neither restores foreign data nor marks cleanup done.
+            if self.witness is not None:
+                self.witness.close()
 
     async def finish_native(self):
         if self.witness is not None:
