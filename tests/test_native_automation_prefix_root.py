@@ -37,7 +37,11 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_foreign_route_after_effect_is_preserved_by_refused_cleanup(self):
         await self._root_case(meaningful=False, foreign_route=True)
 
-    async def _root_case(self, *, meaningful, foreign_service=False, foreign_event=False, foreign_route=False):
+    async def test_post_add_authorization_loss_still_delivers_meaningful_native_action_once(self):
+        await self._root_case(meaningful=True, fault_after_add=True)
+
+    async def _root_case(self, *, meaningful, foreign_service=False, foreign_event=False,
+                         foreign_route=False, fault_after_add=False):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         from homeassistant.helpers.entity_platform import async_get_platforms
@@ -112,9 +116,15 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         foreign_route_image = []
         forwarded = []
         codes += (binding.listener.__code__,)
+        codes += (handoff_type._owner.__code__,)
+        revoked = False
+        def guard():
+            if revoked:
+                raise PermissionError('synthetic authorization loss after genuine ADD and OLD removal')
         tool = next(key for key in range(6) if sys.monitoring.get_tool(key) is None)
         sys.monitoring.use_tool_id(tool, 'whole Automation prefix native acceptance')
         def started(code, offset):
+            nonlocal revoked
             frame = sys._getframe(1)
             actor = frame.f_locals.get('self')
             if code is codes[0] and actor.hass is hass:
@@ -150,6 +160,9 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     tuple(binding.callbacks[key]), binding.keyed_job.target))
             elif code is codes[4] and foreign_event and frame.f_locals.get('config') is binding.config:
                 forwarded.append(frame.f_locals['event'])
+            elif (code is codes[5] and actor.hass is hass and fault_after_add
+                    and actor.old_retired and hass.states.get(old) is None):
+                revoked = True
         foreign_emitted = []
         def returned(code, offset, result):
             actor = sys._getframe(1).f_locals.get('self')
@@ -170,6 +183,28 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 sys.monitoring.set_local_events(tool, codes[0],
                     sys.monitoring.events.PY_START | sys.monitoring.events.PY_RETURN)
             with mixed.native_diagnostics(self.module):
+                if fault_after_add:
+                    with self.assertRaises((PermissionError, self.module('transaction').Refused)):
+                        await runtime.native_forward(hass, mapping, guard=guard, refresh=refresh)
+                    await hass.async_block_till_done()
+                    self.assertTrue(revoked)
+                    self.assertEqual(len(handoffs), 1)
+                    self.assertEqual([(str(event.data['previous']), str(event.data['current']))
+                        for event in actions], [('17', '29')])
+                    self.assertEqual([str(event.data['value']) for event in scripts], ['29'])
+                    self.assertEqual(len(pairs), 1)
+                    self.assertEqual(actions[0].context.parent_id, pairs[0].event.context.id)
+                    records = await runtime.journal.active()
+                    self.assertEqual(len(records), 1)
+                    self.assertNotEqual(records[0].status, 'applied')
+                    self.assertEqual(records[0].phases[0], 'intent')
+                    self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+                    self.assertIsNone(self.f.entity.async_get(old))
+                    self.assertEqual(hass.states.get(new).state, '29')
+                    for name, content in original.items():
+                        self.assertEqual((root / name).read_bytes(), content)
+                    self.assertFalse(runtime.operation_lock.locked())
+                    return
                 if foreign_service or foreign_route:
                     with self.assertRaises(self.module('transaction').Refused):
                         await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)

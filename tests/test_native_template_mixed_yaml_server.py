@@ -16,7 +16,7 @@ import test_native_template_yaml_server as server
 @contextmanager
 def native_diagnostics(module):
     """Observe sanitized product failures/positions without replacing a seam."""
-    failures, positions = [], []
+    failures, positions, graph_diffs = [], [], []
     tool = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
     sys.monitoring.use_tool_id(tool, 'mixed native YAML acceptance diagnosis')
     def raised(code, offset, error):
@@ -28,6 +28,16 @@ def native_diagnostics(module):
         if row not in failures:
             failures.append(row)
             del failures[:-30]
+        if code.co_name == '_fail' and str(error) == 'registry_receipt_input_graph_changed':
+            caller = sys._getframe(1).f_back
+            if caller is not None and caller.f_code.co_name == 'assert_current':
+                values = caller.f_locals
+                before = {row[0]: row[1:] for row in values.get('expected', ())}
+                after = {row[0]: row[1:] for row in values.get('current', ())}
+                graph_diffs.append({'directory': values.get('directory'), 'entries': [
+                    (name, before.get(name), after.get(name)) for name in sorted(before.keys() | after.keys())
+                    if before.get(name) != after.get(name)]})
+                del graph_diffs[:-3]
     def returned(code, offset, value):
         row = {'owner': code.co_qualname}
         if type(value).__name__ == 'RegistryEvidence':
@@ -55,6 +65,8 @@ def native_diagnostics(module):
         sys.monitoring.free_tool_id(tool)
         print('MIXED_NATIVE_FAILURES', json.dumps(failures))
         print('MIXED_NATIVE_POSITIONS', json.dumps(positions))
+        if graph_diffs:
+            print('MIXED_NATIVE_INPUT_GRAPH_DIFF', json.dumps(graph_diffs))
 
 
 class CompositeGuardThreadTests(unittest.IsolatedAsyncioTestCase):
