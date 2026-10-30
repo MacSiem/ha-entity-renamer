@@ -41,6 +41,13 @@ def _need(value, reason):
 _MONITOR_NAME = 'ha_entity_renamer.rename_event_occurrences'
 _MAX_OCCURRENCES = 32
 _MAX_DEPTH = 64
+# Existing qualified helper/event.py pins shared with NativeUtilitySourceGap
+# and NativeTemplateConsumers. Utility's base source table omits this file.
+_EVENT_PINS = {
+    '2025.6.0': 'd5e21c38afd9eafe566724b8db34ea2e87eaa8d6dc10c1719a82f5d90d43260e',
+    '2026.10.2': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
+    '2026.10.4': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
+}
 
 
 def _call_offsets(method, attribute, *, forced=False, first_argument=None):
@@ -276,7 +283,8 @@ class NativeRenameEmissions:
         # set_state has a second fire for state_reported. Select its own exact
         # state_changed call in the audit, never resolve source in a callback.
         self.methods, self.codes, self.sites, self.globals = await self.hass.async_add_executor_job(
-            _audit, homeassistant.__file__, _SOURCES[__version__], self.refs, edges)
+            _audit, homeassistant.__file__,
+            {**_SOURCES[__version__], 'helpers/event.py': _EVENT_PINS[__version__]}, self.refs, edges)
         self._owner_guard()
         self.registry = io.registries['entity']
         self.row = self.registry.async_get(self.source_id)
