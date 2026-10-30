@@ -95,7 +95,7 @@ class Runtime:
     async def recovery_restore(self, hass, operation_id, fingerprint, *, guard, refresh):
         return await self._recovery(hass, 'restore', operation_id, fingerprint, guard=guard, refresh=refresh)
 
-    async def native_yaml_prepare(self, hass, mapping, *, actor_id, guard, refresh):
+    async def native_yaml_prepare(self, hass, mapping, *, actor_id, guard, refresh, entity_names=None):
         """Private ordinary mapping -> server-owned immutable retained review.
 
         No mutation endpoint or family readiness is granted by this method.
@@ -114,14 +114,22 @@ class Runtime:
         async with self.operation_lock:
             await refresh()
             current()
-            session = await NativeTemplateStateServer.prepare(hass, mapping, guard=current, refresh=refresh)
+            session = await NativeTemplateStateServer.prepare(hass, mapping, guard=current, refresh=refresh,
+                entity_names=entity_names)
             try:
                 current()
                 plan, operation = session.plan, session.operation_id
                 count = len(session.registry_changes)
                 self.reviews[operation] = _PreparedReview(actor_id, plan, count)
+                changes = []
+                for change in session.registry_changes:
+                    before, after = change.before, change.after
+                    fields = {key: {'before': before.get(key), 'after': after.get(key)}
+                              for key in ('entity_id', 'name') if before.get(key) != after.get(key)}
+                    changes.append({'entity_id': before['entity_id'], 'fields': fields})
                 return {'operation_id': operation, 'fingerprint': plan.fingerprint,
-                    'entity_count': count, 'migration_ready': False, 'family_complete': False}
+                    'entity_count': count, 'changes': changes,
+                    'migration_ready': False, 'family_complete': False}
             finally:
                 session.close()
 

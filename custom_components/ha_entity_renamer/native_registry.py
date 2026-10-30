@@ -218,10 +218,16 @@ class NativeRegistryIO:
         if self.hass.states.get(other) is not None:
             return False
         state = self.hass.states.get(target["entity_id"])
-        return (state is None) if target.get("disabled_by") else (state is not None)
+        present = (state is None) if target.get("disabled_by") else (state is not None)
+        if present and prepared.before.get('name') != prepared.after.get('name'):
+            from .native_name_observers import NativeNameObserver
+            return NativeNameObserver(self).verify(prepared, target,
+                                                   expected_documents=expected_documents)
+        return present
 
     def capture_runtime(self, prepared):
-        if prepared.kind == "device" or not prepared.mapping:
+        if (prepared.kind == "device" or not prepared.mapping
+                or prepared.before.get('name') != prepared.after.get('name')):
             from .native_name_observers import NativeNameObserver
             return NativeNameObserver(self).capture(prepared)
         return ""

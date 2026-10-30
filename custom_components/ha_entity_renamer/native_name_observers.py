@@ -27,9 +27,12 @@ class NativeNameObserver:
         if change.kind == 'device':
             return er.async_entries_for_device(registry, change.identity,
                                                include_disabled_entities=True)
-        row = registry.async_get(change.before['entity_id'])
-        require(row is not None and row.id == change.identity, 'name_entity_missing')
-        return [row]
+        # A combined ID/name update retains this immutable native UUID. The
+        # original ID can legitimately be absent after the single native call.
+        rows = [row for row in registry.entities.values() if row.id == change.identity]
+        require(len(rows) == 1 and rows[0].entity_id in
+                (change.before['entity_id'], change.after['entity_id']), 'name_entity_missing')
+        return rows
 
     def _object(self, row):
         from homeassistant.helpers import entity_platform as ep

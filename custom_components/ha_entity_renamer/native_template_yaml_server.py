@@ -37,6 +37,16 @@ def _mixed_composition(value):
     return type(value) in (MixedTemplateComposition, MixedTemplateStateComposition)
 
 
+def _source_registry_fields(composition):
+    # Only the qualified selective Template route admits a selected name in
+    # the same native update as its source ID. Other profiles retain old scope.
+    from .native_template_state_composition import TemplateStateComposition
+    result = {'entity_id', 'modified_at'}
+    if type(composition) is TemplateStateComposition:
+        result.add('name')
+    return result
+
+
 def _baseline_stamp(value):
     """Full immutable ORIGINAL identity without repeated JSON/base64 decoding.
 
@@ -122,17 +132,24 @@ class NativeTemplateYAMLServer:
         return obj
 
     @classmethod
-    async def prepare(cls, hass, mapping, *, guard, refresh):
+    async def prepare(cls, hass, mapping, *, guard, refresh, entity_names=None):
         from .manifest import parse_manifest
         _need(type(mapping) is dict and bool(mapping)
               and all(type(k) is str and type(v) is str for k, v in mapping.items()), 'mapping_required')
+        from .native_template_state_server import NativeTemplateStateServer
+        names = {} if entity_names is None else entity_names
+        _need(type(names) is dict and set(names) <= set(mapping)
+              and all(type(value) is str for value in names.values())
+              and (not names or cls is NativeTemplateStateServer), 'selected_source_names_required')
+        names = dict(names)
         parsed = parse_manifest({'entities': [
-            {'entity_id': old, 'proposed_entity_id': new} for old, new in mapping.items()]})
+            {'entity_id': old, 'proposed_entity_id': new,
+             'proposed_name': names.get(old)} for old, new in mapping.items()]})
         _need(len(parsed.entities) == len(mapping)
               and len(set(mapping.values())) == len(mapping)
               and not set(mapping) & set(mapping.values()), 'independent_mapping_required')
         obj = await cls._open(hass, guard=guard, refresh=refresh)
-        obj.mapping = dict(mapping)
+        obj.mapping, obj.entity_names = dict(mapping), names
         try:
             async with obj.locks.hold(obj._scope):
                 await obj._prepare()
@@ -493,7 +510,7 @@ class NativeTemplateYAMLServer:
                 _need(change.kind == 'entity' and len(change.mapping) == 1
                       and change.before['platform'] != 'template'
                       and set(k for k in change.before if change.before.get(k) != change.after.get(k))
-                          <= {'entity_id', 'modified_at'}, 'source_mapping_required')
+                          <= _source_registry_fields(obj.composition), 'source_mapping_required')
                 _need(not set(obj.mapping) & set(change.mapping), 'duplicate_source')
                 obj.mapping.update(change.mapping)
             _need(len(set(obj.mapping.values())) == len(obj.mapping)
@@ -568,7 +585,7 @@ class NativeTemplateYAMLServer:
                 _need(change.kind == 'entity' and len(change.mapping) == 1
                       and change.before['platform'] != 'template'
                       and set(k for k in change.before if change.before.get(k) != change.after.get(k))
-                          <= {'entity_id', 'modified_at'}
+                          <= _source_registry_fields(obj.composition)
                       and not set(obj.mapping) & set(change.mapping), 'source_mapping_required')
                 obj.mapping.update(change.mapping)
             _need(len(set(obj.mapping.values())) == len(obj.mapping)

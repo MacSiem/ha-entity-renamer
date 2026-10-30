@@ -94,6 +94,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         domains = self.receipt.changed_domains
         self.mixed_state = domains != ('template',)
+        _need(not (self.entity_names and self.mixed_state), 'selected_names_mixed_lifecycle_unsupported')
         if self.mixed_state:
             from .yaml_transaction import _assert_mixed_state_scope
             from .mixed_yaml_runtime import MixedYAMLConsumers
@@ -121,7 +122,10 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             _need(len(source) == 1 and source[0]['platform'] != 'template'
                   and not any(row['entity_id'] == new for row in rows), 'source_uuid_required')
             _need(source[0]['platform'] not in ('automation', 'script'), 'dependent_source_identity_unsupported')
-            registry.append(await bridge.prepare('entity', source[0]['id'], {'entity_id': new}, self._scope))
+            fields = {'entity_id': new}
+            if old in self.entity_names:
+                fields['name'] = self.entity_names[old]
+            registry.append(await bridge.prepare('entity', source[0]['id'], fields, self._scope))
             self._scope()
         if self.mixed_state:
             from .native_template_state_yaml import capture_mixed_template_state_yaml
