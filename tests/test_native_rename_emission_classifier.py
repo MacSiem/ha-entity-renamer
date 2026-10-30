@@ -28,7 +28,10 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_foreign_same_dictionary_reemission_keeps_its_distinct_original_event(self):
         await self.round_trip(reemit=True)
 
-    async def round_trip(self, *, reemit):
+    async def test_real_producer_change_between_prepare_and_mutate_remains_a_producer_event(self):
+        await self.round_trip(reemit=False, producer_gap=True)
+
+    async def round_trip(self, *, reemit, producer_gap=False):
         runtime, mapping, uuids, original = await self.data(variant='sensor')
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
@@ -61,6 +64,13 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
         try:
             witness = await classifier.NativeRenameEmissions.prepare(io, change, change.after, guard=guard)
             self.addCleanup(witness.close)
+            ordinary = []
+            if producer_gap:
+                before_events = len(received)
+                await self.emit(7)
+                ordinary = received[before_events:]
+                self.assertTrue(ordinary)
+                self.assertEqual(hass.states.get(old).state, '7')
             mutation = witness.mutate()
             renamed = True
             self.assertIs(type(mutation), native.NativeRegistryMutation)
@@ -70,6 +80,7 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(proof['dispatches_complete'])
             own = [event for event in received if witness.is_owned_rename(event)]
             self.assertEqual(len(own), 2)
+            self.assertTrue(all(not witness.is_owned_rename(event) for event in ordinary))
             if reemit:
                 self.assertEqual(len(received), 4)
                 groups = {}
@@ -84,6 +95,8 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
             removed = next(event for event in own if event.data['new_state'] is None)
             added = next(event for event in own if event.data['old_state'] is None)
             self.assertEqual((removed.data['entity_id'], added.data['entity_id']), (old, new))
+            if producer_gap:
+                self.assertEqual((removed.data['old_state'].state, added.data['new_state'].state), ('7', '7'))
             self.assertIs(added.data['new_state'], hass.states.get(new))
             self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
         finally:
