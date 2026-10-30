@@ -28,7 +28,7 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_neutral_native_rename_has_no_actions_and_fresh_inverse(self):
         await self._root_case(meaningful=False)
 
-    async def test_foreign_native_script_service_replacement_after_effect_is_unknown(self):
+    async def test_foreign_native_script_service_replacement_after_effect_refuses_success(self):
         await self._root_case(meaningful=False, foreign_service=True)
 
     async def _root_case(self, *, meaningful, foreign_service=False):
@@ -49,6 +49,12 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             '      current: "{{ trigger.to_state.state }}"\n'
             '      configured: "{{ states(alias) }}"\n'
             '  - action: script.mixed_source\n')
+        if not meaningful and not foreign_service:
+            with automation_path.open('a') as stream:
+                stream.write('- id: prefix_unrelated\n  alias: Prefix unrelated observer\n'
+                    '  initial_state: true\n  triggers:\n  - trigger: event\n'
+                    '    event_type: automation_prefix_unrelated_input\n'
+                    '  actions:\n  - event: automation_prefix_unrelated_output\n')
         script_path = root / 'mixed_scripts.yaml'
         script_path.write_text(
             'mixed_source:\n  variables:\n    source: ' + old + '\n'
@@ -63,7 +69,22 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         await self._flush_documents()
         physical = hass.states.get(old)
         self.assertEqual(physical.state, '17')
-        automation, = hass.data[DATA_INSTANCES]['automation'].entities
+        automation = next(entity for entity in hass.data[DATA_INSTANCES]['automation'].entities
+                          if entity.unique_id == 'mixed_source')
+        unrelated = next((entity for entity in hass.data[DATA_INSTANCES]['automation'].entities
+                          if entity.unique_id == 'prefix_unrelated'), None)
+        unrelated_events = []
+        self.addCleanup(hass.bus.async_listen('automation_prefix_unrelated_output', unrelated_events.append))
+        registrations = self.module('yaml_runtime_observer')._automation_registrations
+        unrelated_tokens = registrations(hass, unrelated) if unrelated is not None else None
+        async def check_unrelated(count):
+            if unrelated is not None:
+                self.assertEqual(registrations(hass, unrelated), unrelated_tokens)
+                hass.bus.async_fire('automation_prefix_unrelated_input')
+                await hass.async_block_till_done()
+                self.assertEqual(len(unrelated_events), count)
+                self.assertEqual(registrations(hass, unrelated), unrelated_tokens)
+        await check_unrelated(1)
         script_entity, = hass.data[DATA_INSTANCES]['script'].entities
         action_script, root_script = automation.action_script, script_entity.script
         raw, config = automation.raw_config, automation._trigger_config
@@ -117,11 +138,15 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             for code in codes:
                 sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
             with mixed.native_diagnostics(self.module):
-                result = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
                 if foreign_service:
+                    with self.assertRaises(self.module('transaction').Refused):
+                        await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
                     self.assertEqual(len(replaced), 1)
-                    self.assertEqual(result['state'], 'unknown')
                     self.assertEqual(len(handoffs), 1, 'uncertain effect must never be replayed')
+                    records = await runtime.journal.active()
+                    self.assertEqual(len(records), 1)
+                    self.assertNotEqual(records[0].status, 'applied')
+                    self.assertEqual(records[0].phases[0], 'intent')
                     self.assertIs(hass.services._services['script']['mixed_source'], replaced[0])
                     self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
                     self.assertIsNone(self.f.entity.async_get(old))
@@ -129,7 +154,9 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual((root / name).read_bytes(), content)
                     self.assertFalse(runtime.operation_lock.locked())
                     return
+                result = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
                 self.assertEqual(result['state'], 'applied')
+                await check_unrelated(2)
                 record = await runtime.journal.load(result['operation_id'])
                 baseline, composition = runtime.preparations.resolve_composition(record.plan.native_inputs)
                 self.assertIs(type(composition), self.module('native_automation_program_composition').AutomationTemplateStateComposition)
@@ -168,6 +195,7 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 reverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
                     guard=lambda: None, refresh=refresh)
                 self.assertEqual(reverse['state'], 'rolled_back')
+                await check_unrelated(3)
                 self.assertEqual(len(handoffs), 2)
                 self.assertIsNot(handoffs[0], handoffs[1])
                 # The inverse is a fresh Root reader/writer, never same live chain replay.

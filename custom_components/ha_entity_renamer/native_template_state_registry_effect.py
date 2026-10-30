@@ -94,9 +94,15 @@ class NativeTemplateStateRegistryEffect:
             try:
                 graph = getattr(obj.script_phase, 'graph', None)
                 if graph is not None:
-                    from homeassistant.helpers.entity_component import DATA_INSTANCES
-                    component = root.hass.data.get(DATA_INSTANCES, {}).get('automation')
-                    await graph.prepare(tuple(component.entities) if component is not None else (), guard=guard)
+                    from .native_automation_config_transport import _call_scope
+                    program, mask = obj.script_phase.program, obj.script_phase.mask
+                    source = next(iter(change.mapping))
+                    target_mask = mask - {source} if reverse else mask | {source}
+                    actors, admitted, _ = _call_scope(root.hass,
+                        dict(program.rows(mask)), dict(program.rows(target_mask)))
+                    await graph.prepare(tuple(actors[key] for key in sorted(admitted)
+                        if key[0] == 'automation'), guard=guard,
+                        actors=tuple(actors[key] for key in sorted(admitted)))
                 obj.witness = await NativeRenameEmissions.prepare(io, change, target_image,
                     guard=guard, source_handoff=handoff, automation_graph=graph)
                 if graph is not None:

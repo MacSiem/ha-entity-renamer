@@ -59,22 +59,26 @@ class OwnedAutomationGraph:
         self.hass, self.routes, self.witness = hass, [], None
         self.live, self.overlap = False, False
         self.prepared = ()
+        self.actors = ()
         self.counts = dict(foreign_seen=0, foreign_forwarded=0, owned_remove=0,
             neutral_add=0, meaningful_seen=0, no_match=0, action_submitted=0,
             deferred_delivered=0)
 
-    async def prepare(self, entities, *, guard):
+    async def prepare(self, entities, *, guard, actors):
         from .native_automation_state_binding import async_capture_state_bindings
         _need(not self.live and not self.routes)
         prepared = []
         for entity in entities:
             prepared.extend(await async_capture_state_bindings(self.hass, entity, guard=guard))
         self.prepared = tuple(prepared)
+        self.actors = tuple(actors)
 
     def capture(self, entities, mapping):
         _need(not self.live and not self.routes)
         for entity in entities:
             previous = tuple(binding for binding in self.prepared if binding.entity is entity)
+            _need(previous or entity._is_enabled is False and entity._async_detach_triggers is None,
+                  'automation_prepared_trigger_owner_changed')
             # Fresh ORIGINAL graph after producer/action drain, with the SAME
             # already-audited native source refs; no source IO at this seam.
             fresh = capture_state_bindings(self.hass, entity, _native=previous[0]._native) if previous else ()

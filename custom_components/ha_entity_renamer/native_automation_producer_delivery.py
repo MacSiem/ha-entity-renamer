@@ -13,13 +13,10 @@ class NativeAutomationProducerDelivery:
         self.template = NativeTemplateProducerDelivery(runtime, entities, witness)
         self.witness, self.graph, self.live = witness, graph, True
         self.action_frames, self.action_tasks = set(), set()
-        from homeassistant.helpers.entity_component import DATA_INSTANCES
         self.owners, self.roots, self.jobs = [], [], []
-        for domain in ('automation', 'script'):
-            component = witness.hass.data.get(DATA_INSTANCES, {}).get(domain)
-            for entity in component.entities if component is not None else ():
-                self.owners.append(entity)
-                self.roots.append(entity.action_script if domain == 'automation' else entity.script)
+        for entity in graph.actors:
+            self.owners.append(entity)
+            self.roots.append(entity.action_script if entity.entity_id.startswith('automation.') else entity.script)
         # Capture actual keyed jobs before cutover; bindings are recaptured at
         # the final fence, and no await can separate that capture from install.
         self.jobs.extend(b.keyed_job for b in graph.prepared)

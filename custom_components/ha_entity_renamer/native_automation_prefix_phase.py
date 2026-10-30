@@ -36,7 +36,28 @@ class NativeAutomationPrefixPhase:
         assert_idle_automation_program_targets(root.hass, self.program,
             active=self.mask if self.mask else None)
         self.sample = sample.registry_rows, (), sample.native_tokens
+        self.edge_entities = frozenset()
         _need(self._read(self.mask) == self.sample)
+
+    def _advance_sample(self, actual):
+        """Admit only this edge's OWN registration-token change.
+
+        Population, components, entities, raw configs, registry entries and all
+        Script services remain the SAME physical objects. Unrelated Automation
+        registrations also remain exact; no fresh census becomes a new baseline.
+        """
+        _need(actual[:2] == self.sample[:2], 'automation_prefix_population_changed')
+        before, after = self.sample[2], actual[2]
+        _need(len(before) == len(after), 'automation_prefix_inventory_changed')
+        for old, new in zip(before, after, strict=True):
+            _need(old[:2] == new[:2] and len(old[2]) == len(new[2]),
+                  'automation_prefix_component_changed')
+            for old_row, new_row in zip(old[2], new[2], strict=True):
+                if old[0] == 'automation' and old_row[0] in self.edge_entities:
+                    _need(old_row[:5] == new_row[:5], 'automation_prefix_actor_changed')
+                else:
+                    _need(old_row == new_row, 'automation_prefix_foreign_native_identity_changed')
+        self.sample = actual
 
     def _read(self, mask):
         from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -132,6 +153,7 @@ class NativeAutomationPrefixPhase:
             transfer = NativeAutomationConfigTransport.capture(self.observer, self.root.chain,
                 source, reverse=reverse, guard=node.guard, input_state=node.state)
         self.graph.node, self.graph.transfer = node, transfer
+        self.edge_entities = frozenset(route.binding.entity.entity_id for route in self.graph.routes)
         self.active = node, transfer, target
 
     def install(self, node):
@@ -143,7 +165,7 @@ class NativeAutomationPrefixPhase:
             self.graph.install(node.witness)
         # Wrapper/route tokens change openly. Full rows and retained native
         # lineage are checked by the typed graph before accepting this image.
-        self.sample = self._read(self.active[2])
+        self._advance_sample(self._read(self.active[2]))
         self.check()
 
     def mark_attempt(self, node):
@@ -161,7 +183,7 @@ class NativeAutomationPrefixPhase:
         elif transfer is None:
             self.graph.retire(before_attempt=True)
         self.active = None
-        self.sample = self._read(self.mask)
+        self._advance_sample(self._read(self.mask))
         self.check()
 
     def accepted(self, node):
@@ -169,7 +191,7 @@ class NativeAutomationPrefixPhase:
               and node.phase == 'observed_effect' and self.root.chain.active is None)
         target = self.active[2]
         _need(not self.graph.live and not self.graph.routes)
-        self.sample = self._read(target)
+        _need(self._read(target) == self.sample, 'automation_prefix_native_identity_changed')
         sample = self.observer.sample(self.root.chain)
         _need(sample.prefix.active == target
               and (sample.registry_rows, (), sample.native_tokens) == self.sample)
@@ -182,10 +204,11 @@ class NativeAutomationPrefixPhase:
         if transfer is not None:
             transfer._rows(transfer.after)
         self.graph.check()
+        self.check()
         self.graph.retire()
         if transfer is not None:
             transfer._rows(transfer.after)
-        self.sample = self._read(self.active[2])
+        self._advance_sample(self._read(self.active[2]))
         self.check()
 
     def poison(self, node):
