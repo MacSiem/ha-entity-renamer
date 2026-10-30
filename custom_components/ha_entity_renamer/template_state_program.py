@@ -51,7 +51,7 @@ def native_state_descriptors(checked, root, *, source_paths):
     def secret(node, ancestry=()):
         if node is None or id(node) in ancestry:
             return False
-        if node.tag == '!secret':
+        if node.tag in ('!secret', '!env_var'):
             return True
         ancestry += (id(node),)
         if isinstance(node, MappingNode):

@@ -1,7 +1,9 @@
 """Real native schema prefix compilation; no live setup/reload/actions or apply."""
 import importlib
 import json
+import os
 import unittest
+from unittest.mock import patch
 
 import test_native_helper_quiescence as fixture
 
@@ -15,7 +17,7 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
     def module(self, name):
         return importlib.import_module(fixture.fixtures.PACKAGE + '.' + name)
 
-    async def compile(self, *, empty_automation=False, secret=False, mixed=False):
+    async def compile(self, *, empty_automation=False, secret=False, mixed=False, environment=False):
         root = self.f.root
         (root / 'configuration.yaml').write_text('script: !include scripts.yaml\n' +
             ('automation: []\n' if empty_automation else 'automation: !include automations.yaml\n'))
@@ -56,6 +58,9 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
             with (root / 'scripts.yaml').open('a') as stream:
                 stream.write('  description: !secret synthetic_description\n')
             (root / 'secrets.yaml').write_text('synthetic_description: local_synthetic_fixture\n')
+        if environment:
+            with (root / 'scripts.yaml').open('a') as stream:
+                stream.write('  description: !env_var RENAMER_SYNTHETIC_DESCRIPTOR_ENV\n')
         mapping = {'sensor.original': 'sensor.changed', 'sensor.second': 'sensor.other'}
         plan = self.module('yaml_plan').plan_yaml(root, mapping)
         self.assertTrue(plan.ready, plan.issues)
@@ -141,3 +146,10 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(legacy.evidence, result.evidence)
         self.assertEqual(legacy.state_config_program, result.state_config_program)
         self.assertIsNone(legacy.dependent_config_program)
+
+    async def test_environment_scope_refuses_without_returning_expanded_descriptors(self):
+        with patch.dict(os.environ, {'RENAMER_SYNTHETIC_DESCRIPTOR_ENV': 'synthetic_environment_fixture'}):
+            with self.assertRaises(self.module('yaml_validation').YAMLValidationError) as raised:
+                await self.compile(environment=True)
+        self.assertNotIn('synthetic_environment_fixture', str(raised.exception))
+        self.assertNotIn('synthetic_environment_fixture', str(getattr(raised.exception, '__notes__', ())))

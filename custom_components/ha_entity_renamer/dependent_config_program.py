@@ -36,7 +36,7 @@ def assert_reference_only(root, paths):
     def visit(node, ancestry=()):
         if node is None or id(node) in ancestry:
             return
-        _need(node.tag != '!secret', 'dependent_config_program_secret_scope_unverified')
+        _need(node.tag not in ('!secret', '!env_var'), 'dependent_config_program_secret_scope_unverified')
         ancestry += (id(node),)
         if isinstance(node, MappingNode):
             for key, value in node.value:
