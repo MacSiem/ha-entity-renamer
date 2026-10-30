@@ -62,6 +62,22 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(retained)
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
+        # A false availability group may contain only its genuine first slot.
+        # An empty/corrupt group remains a refusal before registry/YAML effects.
+        info = consumer._template_result_info
+        original_info = dict(info._info)
+        self.assertEqual(len(original_info), 1)
+        try:
+            info._info.clear()
+            with self.assertRaises((ValueError, self.module('transaction').Refused)):
+                await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+        finally:
+            info._info.update(original_info)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        for old, new in mapping.items():
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+            self.assertIsNone(self.f.entity.async_get(new))
+        self.assertFalse(await runtime.journal.active())
         result = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
         self.assertEqual(result['state'], 'applied')
         self.assertIs(hass.states.get(consumer.entity_id), initial)

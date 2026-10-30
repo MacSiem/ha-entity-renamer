@@ -414,8 +414,27 @@ def _graph(runtime, entity):
     from .yaml_runtime_observer import _registered_bus_remove
     info = runtime.graph(entity)
     event, native = runtime.event, runtime.native
-    _need(type(info._info) is dict and set(info._info) == set(entity._template_attrs),
-          'template_state_complete_render_group_required')
+    _need(type(info._info) is dict, 'template_state_complete_render_group_required')
+    complete = set(info._info) == set(entity._template_attrs)
+    if not complete:
+        # Native async_setup deliberately renders only the first availability
+        # template when it is false. No other slot has produced history yet.
+        # Authenticate that precise blocked group, not an arbitrary subset or
+        # an available entity with deleted RenderInfo. Full configured slot and
+        # track ownership has already been proved by runtime.graph above.
+        availability = entity._availability_template
+        first = info._track_templates[0].template
+        result = info._last_result.get(first)
+        complete = (availability is not None and first == availability
+            and info._has_super_template is True
+            and set(info._info) == {first}
+            and set(info._last_result) == {first}
+            and set(info._rate_limit._last_triggered) <= {first}
+            and type(result) in (bool, str)
+            and info._super_template_as_boolean(result) is False
+            and entity._attr_available is False
+            and native.hass.states.get(entity.entity_id).state == 'unavailable')
+    _need(complete, 'template_state_complete_render_group_required')
     tokens = []
     for template, render in info._info.items():
         _need(type(render) is RenderInfo and render.template is template,
