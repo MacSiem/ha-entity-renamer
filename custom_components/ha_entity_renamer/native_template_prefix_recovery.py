@@ -45,6 +45,8 @@ def unstarted_rollback_complete(chain, record):
             and record.phases == ('undone',) * count + ('pending',) * (len(record.phases) - count)):
         return False
     change = chain._original_change(chain.yaml_index)
+    if type(change) not in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
+        return False
     return (type(change), type(assert_state_yaml_composition(chain, change))) in (
         (PreparedTemplateStateYAML, TemplateStateComposition),
         (PreparedMixedTemplateStateYAML, ScriptTemplateStateComposition))
