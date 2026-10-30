@@ -1,0 +1,91 @@
+"""Actual interrupted accepted registry prefix; no replay or replacement input.
+
+Fault injection raises only after the genuine journal ACK of the first native
+registry step. Native execution, receipts and prefix observations are unmodified.
+"""
+import asyncio
+from dataclasses import replace
+import unittest
+from unittest.mock import patch
+
+import test_native_template_yaml_server as server
+
+
+@unittest.skipUnless(server.activation.fixture.fixtures.HAS_HA, 'actual pinned HA required')
+class NativeTemplatePrefixRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    with_yaml = True
+    asyncSetUp = server.NativeTemplateYAMLServerTests.asyncSetUp
+    _before_start = server.NativeTemplateYAMLServerTests._before_start
+    _flush_documents = server.NativeTemplateYAMLServerTests._flush_documents
+    prepare = server.NativeTemplateYAMLServerTests.prepare
+    emit = server.NativeTemplateYAMLServerTests.emit
+    _runtime = server.NativeTemplateYAMLServerTests._runtime
+    module = server.NativeTemplateYAMLServerTests.module
+    data = server.NativeTemplateYAMLServerTests.data
+    stimulus = server.NativeTemplateYAMLServerTests.stimulus
+
+    async def test_acknowledged_prefix_fresh_reverse_preserves_original(self):
+        runtime, mapping, uuids, original = await self.data(multiple=True)
+        hass, root = self.f.hass, self.f.root
+        journal_type = self.module('journal').DurableJournal
+        actual_save = journal_type.save
+        interrupted = []
+        async def stop_after_ack(journal, record):
+            await actual_save(journal, record)
+            if not interrupted and record.direction == 'forward' and record.phases == ('verified', 'pending', 'pending'):
+                interrupted.append(record)
+                raise asyncio.CancelledError('synthetic interruption after durable prefix ACK')
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        with patch.object(journal_type, 'save', stop_after_ack):
+            with self.assertRaises(asyncio.CancelledError):
+                await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+        self.assertEqual(len(interrupted), 1)
+        record = interrupted[0]
+        self.assertEqual(await runtime.journal.load(record.operation_id), record)
+        self.assertEqual((root / 'template.yaml').read_bytes(), original)
+        first, second = sorted(mapping)
+        self.assertIsNone(self.f.entity.async_get(first))
+        self.assertEqual(self.f.entity.async_get(mapping[first]).id, uuids[first])
+        self.assertEqual(self.f.entity.async_get(second).id, uuids[second])
+        self.assertIsNone(self.f.entity.async_get(mapping[second]))
+        # Real source output after interruption still reaches the same Template
+        # consumers through the accepted partial prefix, with original YAML.
+        await self.stimulus(17)
+        baseline, composition = runtime.preparations.resolve_composition(record.plan.native_inputs)
+        original_receipt = baseline.receipt_json
+        original_inputs = record.plan.native_inputs
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+        # A pending next intent is not an acknowledged prefix and cannot be
+        # promoted to a writer. This fixture changes only its own journal row.
+        unresolved = replace(record, phases=('verified', 'intent', 'pending'))
+        await runtime.journal.save(unresolved)
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_yaml_reverse(hass, record.operation_id, record.plan.fingerprint,
+                guard=lambda: None, refresh=refresh)
+        self.assertEqual(await runtime.journal.load(record.operation_id), unresolved)
+        await runtime.journal.save(record)
+        edited = original + b'\n# synthetic foreign edit after accepted prefix\n'
+        (root / 'template.yaml').write_bytes(edited)
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_yaml_reverse(hass, record.operation_id, record.plan.fingerprint,
+                guard=lambda: None, refresh=refresh)
+        self.assertEqual((root / 'template.yaml').read_bytes(), edited)
+        self.assertEqual(await runtime.journal.load(record.operation_id), record)
+        (root / 'template.yaml').write_bytes(original)
+        result = await runtime.native_yaml_reverse(hass, record.operation_id, record.plan.fingerprint,
+            guard=lambda: None, refresh=refresh)
+        self.assertEqual(result['state'], 'rolled_back')
+        final = await runtime.journal.load(record.operation_id)
+        self.assertEqual(final.phases, ('undone', 'pending', 'pending'))
+        self.assertEqual(final.plan, record.plan)
+        reopened, retained = runtime.preparations.resolve_composition(original_inputs)
+        self.assertEqual(reopened.receipt_json, original_receipt)
+        self.assertEqual(retained, composition)
+        self.assertEqual((root / 'template.yaml').read_bytes(), original)
+        for old, new in mapping.items():
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+            self.assertIsNone(self.f.entity.async_get(new))
+        await self.stimulus(23)
+        self.assertFalse(await runtime.journal.active())
