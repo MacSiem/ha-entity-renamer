@@ -44,8 +44,9 @@ class NativeSourceHandoffTests(emission.NativeRenameEmissionTests):
         sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
         mutation = None
         try:
-            # Baseline genuine native API: the RED test demonstrates remove/readd.
-            mutation = io.mutate(change, change.after)
+            handoff = await self.module('native_source_handoff').NativeSourceHandoff.prepare(
+                io, change, change.after, guard=lambda: None)
+            mutation = handoff.mutate()
             await io.settle(change)
             await self._flush_documents()
             self.assertEqual(source_removals, [], 'source was removed/re-added during entity-ID rename')
@@ -73,12 +74,17 @@ class NativeSourceHandoffTests(emission.NativeRenameEmissionTests):
                 self.assertIsNotNone(current)
                 self.assertEqual(json.loads(_orjson_bytes_default_encoder(current.as_storage_fragment)),
                                  json.loads(mutation.after_json))
-                io.mutate(change, change.before)
+                inverse = await self.module('native_source_handoff').NativeSourceHandoff.prepare(
+                    io, change, change.before, guard=lambda: None)
+                inverse.mutate()
                 await io.settle(change)
                 await self._flush_documents()
                 self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
                 self.assertIsNone(self.f.entity.async_get(new))
         # Normal actual unload must clean every CURRENT map and subscription.
+        from functools import partial
+        subscription = next(item for item in source._on_remove if type(item) is partial)
+        old_job, callbacks = subscription.args[3:5]
         await source.async_remove()
         await hass.async_block_till_done()
         for entries in (platform.entities, platform.domain_entities, platform.domain_platform_entities):
@@ -86,3 +92,4 @@ class NativeSourceHandoffTests(emission.NativeRenameEmissionTests):
             self.assertNotIn(new, entries)
         self.assertNotIn(old, entity_sources(hass))
         self.assertNotIn(new, entity_sources(hass))
+        self.assertFalse(any(job is old_job for members in callbacks.values() for job in members))
