@@ -21,6 +21,48 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
     stimulus = mixed.NativeTemplateMixedYAMLServerTests.stimulus
     data = mixed.NativeTemplateMixedYAMLServerTests.data
 
+    async def test_native_history_executor_and_pending_repairs_diagnostic(self):
+        import json
+        import threading
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.helpers import issue_registry as ir
+        _, mapping, _, _, _ = await self.data()
+        hass = self.f.hass
+        instance = get_instance(hass)
+        issues = ir.async_get(hass)
+        def status():
+            store = issues._store
+            return {'executor': type(instance._db_executor).__name__,
+                    'ready': instance.async_db_ready.done(),
+                    'issue_count': len(issues.issues),
+                    'issue_save_pending': any(x is not None for x in
+                        (store._data, store._delay_handle, store._unsub_final_write_listener))}
+        before = status()
+        observations = []
+        history = self.module('history_guard')
+        code = history._read_session.__code__
+        tool = next(k for k in range(6) if sys.monitoring.get_tool(k) is None)
+        sys.monitoring.use_tool_id(tool, 'read-only history executor diagnostic')
+        def started(actual, offset):
+            frame = sys._getframe(1)
+            pool = frame.f_locals['session'].get_bind().pool
+            thread = threading.get_ident()
+            observations.append({'recorder_worker': thread in instance.recorder_and_worker_thread_ids,
+                'pool_worker': thread in pool.recorder_and_worker_thread_ids,
+                'same_thread_set': pool.recorder_and_worker_thread_ids is instance.recorder_and_worker_thread_ids,
+                'executor': type(instance._db_executor).__name__})
+        try:
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, started)
+            sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
+            await history.NativeHistoryGuard(self.module('recorder_guard').NativeRecorderGuard(hass)).capture(mapping)
+        finally:
+            sys.monitoring.set_local_events(tool, code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
+            sys.monitoring.free_tool_id(tool)
+        print('NATIVE_HISTORY_EXECUTOR_DIAGNOSTIC ' + json.dumps(
+            {'before': before, 'reads': observations, 'after': status()}, sort_keys=True))
+        self.assertTrue(observations)
+
     async def _capability(self):
         native = await self.f.hass.async_add_executor_job(self.module('native_automation_state_binding')._Native, self.f.hass)
         return await self.f.hass.async_add_executor_job(
