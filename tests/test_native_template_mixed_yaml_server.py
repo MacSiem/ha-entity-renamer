@@ -304,6 +304,94 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events, ['ok', 'ok'])
         self.assertIs(foreign._is_enabled, True)
 
+    async def test_unrelated_running_automation_keeps_native_wait_and_deadline(self):
+        from homeassistant.core import Context, callback
+        from homeassistant.helpers.script import _ScriptRun
+        runtime, mapping, _, _, _ = await self.data()
+        hass, root = self.f.hass, self.f.root
+        path = root / 'mixed_automations.yaml'
+        path.write_text(path.read_text() +
+            '- id: foreign_wait\n  alias: Foreign native wait\n  initial_state: true\n'
+            '  triggers:\n  - trigger: event\n    event_type: renamer_foreign_wait_start\n'
+            '  actions:\n  - event: renamer_foreign_wait_started\n'
+            '  - wait_for_trigger:\n    - trigger: event\n      event_type: renamer_foreign_wait_release\n'
+            '    timeout: "00:05:00"\n    continue_on_timeout: false\n'
+            '  - event: renamer_foreign_wait_finished\n')
+        await hass.services.async_call('automation', 'reload', {}, blocking=True, context=Context())
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        foreign = next(entity for entity in hass.data['automation'].entities if entity.unique_id == 'foreign_wait')
+        script, detach = foreign.action_script, foreign._async_detach_triggers
+        ready, finished = hass.loop.create_future(), hass.loop.create_future()
+        events = []
+        @callback
+        def actual_event(event):
+            events.append(event.event_type)
+            if event.event_type == 'renamer_foreign_wait_finished' and not finished.done():
+                finished.set_result(None)
+        for kind in ('renamer_foreign_wait_started', 'renamer_foreign_wait_finished'):
+            self.addCleanup(hass.bus.async_listen(kind, actual_event))
+        code = _ScriptRun._async_wait_with_optional_timeout.__code__
+        monitor = sys.monitoring
+        tool = next(key for key in range(6) if monitor.get_tool(key) is None)
+        monitor.use_tool_id(tool, 'unrelated actual native wait')
+        held = {}
+        def started(code_arg, offset):
+            frame = sys._getframe(1)
+            run = frame.f_locals.get('self')
+            if getattr(run, '_script', None) is script and not ready.done():
+                held.update(run=run, task=asyncio.current_task(), stop=run._stop,
+                    handle=frame.f_locals['timeout_handle'], future=frame.f_locals['timeout_future'],
+                    unsub=frame.f_locals['unsub'])
+                held['deadline'], held['context'] = held['handle'].when(), held['handle']._context
+                ready.set_result(None)
+        monitor.register_callback(tool, monitor.events.PY_START, started)
+        monitor.set_local_events(tool, code, monitor.events.PY_START)
+        def same_wait():
+            self.assertIs(foreign.action_script, script)
+            self.assertIs(foreign._async_detach_triggers, detach)
+            self.assertTrue(script.is_running)
+            self.assertTrue(any(run is held['run'] for run in script._runs))
+            self.assertIs(held['run']._stop, held['stop'])
+            self.assertFalse(held['task'].done())
+            self.assertFalse(held['handle'].cancelled())
+            self.assertFalse(held['future'].done())
+            self.assertEqual(held['handle'].when(), held['deadline'])
+            self.assertIs(held['handle']._context, held['context'])
+            node = held['task'].get_coro()
+            for _ in range(128):
+                frame = getattr(node, 'cr_frame', None)
+                if frame is not None and frame.f_code is code and frame.f_locals.get('self') is held['run']:
+                    self.assertIs(frame.f_locals['timeout_handle'], held['handle'])
+                    self.assertIs(frame.f_locals['timeout_future'], held['future'])
+                    self.assertIs(frame.f_locals['unsub'], held['unsub'])
+                    return
+                node = getattr(node, 'cr_await', None) or getattr(node, 'gi_yieldfrom', None)
+                if node is None:
+                    break
+            self.fail('original native wait frame is no longer suspended')
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        try:
+            hass.bus.async_fire('renamer_foreign_wait_start')
+            await asyncio.wait_for(ready, 5)
+            same_wait()
+            result = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+            self.assertEqual(result['state'], 'applied')
+            same_wait()
+            inverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
+                guard=lambda: None, refresh=refresh)
+            self.assertEqual(inverse['state'], 'rolled_back')
+            same_wait()
+        finally:
+            monitor.set_local_events(tool, code, 0)
+            monitor.register_callback(tool, monitor.events.PY_START, None)
+            monitor.free_tool_id(tool)
+            hass.bus.async_fire('renamer_foreign_wait_release')
+            if held:
+                await asyncio.wait_for(finished, 5)
+        self.assertEqual(events, ['renamer_foreign_wait_started', 'renamer_foreign_wait_finished'])
+
     async def test_real_source_change_in_detached_interval_never_succeeds(self):
         from attr import asdict
         runtime, mapping, _, _, original = await self.data()
