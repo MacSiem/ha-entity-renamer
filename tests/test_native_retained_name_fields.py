@@ -117,7 +117,8 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         await self._flush_documents()
         io = self.module('native_registry').NativeRegistryIO(hass)
         before_entities, before_devices = io.document('entity'), io.document('device')
-        before_entries = hass.config_entries._data_to_save()
+        from homeassistant.helpers.json import _orjson_bytes_default_encoder
+        before_entries = json.loads(_orjson_bytes_default_encoder(hass.config_entries._data_to_save()))
         names = {old: 'Reviewed source', extra_id: 'Reviewed extra'}
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
@@ -157,10 +158,25 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
                     row.pop('modified_at', None)
             return document
         owned = {uuids[old], self.f.entity.async_get(extra_id).id}
-        self.assertEqual(normalized(io.document('entity'), 'entities', owned),
-                         normalized(before_entities, 'entities', owned))
+        actual_entities = normalized(io.document('entity'), 'entities', owned)
+        expected_entities = normalized(before_entities, 'entities', owned)
+        if actual_entities != expected_entities:
+            baseline, _ = runtime.preparations.resolve_composition(retained.native_inputs)
+            baseline_entities = json.loads(next(row.manager_json for row in baseline.files
+                                               if row.key == 'core.entity_registry'))
+            def differences(before, after):
+                old = {row['id']: row for row in before['entities']}
+                new = {row['id']: row for row in after['entities']}
+                return [(identity, key, old.get(identity, {}).get(key), new.get(identity, {}).get(key))
+                        for identity in sorted(set(old) | set(new))
+                        for key in sorted(set(old.get(identity, {})) | set(new.get(identity, {})))
+                        if old.get(identity, {}).get(key) != new.get(identity, {}).get(key)]
+            print('NAMESPACE_BEFORE_TO_ORIGINAL', differences(before_entities, baseline_entities))
+            print('NAMESPACE_BEFORE_TO_FINAL', differences(expected_entities, actual_entities))
+        self.assertEqual(actual_entities, expected_entities)
         self.assertEqual(normalized(io.document('device'), 'devices', {device.id}),
                          normalized(before_devices, 'devices', {device.id}))
-        self.assertEqual(hass.config_entries._data_to_save(), before_entries)
+        self.assertEqual(json.loads(_orjson_bytes_default_encoder(hass.config_entries._data_to_save())),
+                         before_entries)
         self.assertEqual((await runtime.journal.load(review['operation_id'])).plan, retained)
         await self.stimulus(11)
