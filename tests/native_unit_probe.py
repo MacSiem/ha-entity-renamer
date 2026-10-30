@@ -20,6 +20,8 @@ parser.add_argument('--pattern', default='test*.py')
 parser.add_argument('--repeat', type=int, default=1)
 parser.add_argument('--timeout', type=int, default=600, help='Container suite timeout in seconds')
 parser.add_argument('--test-filter', default='', help='Only discovered test IDs containing this string')
+parser.add_argument('--wait-for-interruption', action='store_true',
+                    help='Qualify guardian cleanup only; child waits without running tests')
 parser.add_argument('--powercalc-component-dir', type=Path, help='Full public Powercalc fixture copied only to the isolated suite directory')
 parser.add_argument('--powercalc-profile-dir', type=Path, help='Exact public binary profile inputs copied only into the isolated suite directory')
 parser.add_argument('--owned-ha-sources', action='store_true',
@@ -111,6 +113,10 @@ if child:
             time.sleep(0.05)
     raise SystemExit(124 if stopping else os.waitstatus_to_exitcode(status))
 signal.signal(signal.SIGTERM, signal.SIG_DFL)
+if WAIT_FOR_INTERRUPTION:
+    print(json.dumps({'probe_waiting_for_interruption': True}), flush=True)
+    while True:
+        time.sleep(1)
 with tempfile.TemporaryDirectory(prefix='renamer-unit-' + PROBE_TOKEN + '-', dir='/config') as directory:
     root = pathlib.Path(directory)
     for name, source in SOURCES.items():
@@ -267,7 +273,7 @@ def interrupt_probe(signum, frame):
 for handled in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
     signal.signal(handled, interrupt_probe)
 
-payload = 'SOURCES = '+repr(sources)+'\nBINARY_SOURCES = '+repr(binary_sources)+'\nPROFILE_FIXTURE = '+repr(args.powercalc_profile_dir is not None)+'\nPATTERN = '+repr(args.pattern)+'\nREPEAT = '+repr(args.repeat)+'\nTEST_FILTER = '+repr(args.test_filter)+'\nVENDOR_FIXTURE = '+repr(args.powercalc_component_dir is not None)+'\nOWNED_HA_SOURCES = '+repr(args.owned_ha_sources)+'\nPROBE_TOKEN = '+repr(probe_token)+'\nPIDFILE = '+repr(pidfile)+'\n'+program
+payload = 'WAIT_FOR_INTERRUPTION = '+repr(args.wait_for_interruption)+'\nSOURCES = '+repr(sources)+'\nBINARY_SOURCES = '+repr(binary_sources)+'\nPROFILE_FIXTURE = '+repr(args.powercalc_profile_dir is not None)+'\nPATTERN = '+repr(args.pattern)+'\nREPEAT = '+repr(args.repeat)+'\nTEST_FILTER = '+repr(args.test_filter)+'\nVENDOR_FIXTURE = '+repr(args.powercalc_component_dir is not None)+'\nOWNED_HA_SOURCES = '+repr(args.owned_ha_sources)+'\nPROBE_TOKEN = '+repr(probe_token)+'\nPIDFILE = '+repr(pidfile)+'\n'+program
 try:
     completed = subprocess.run(['docker','exec','-i',args.container,'python','-X','faulthandler','-B','-',probe_token],
         input=payload, text=True, capture_output=True, timeout=args.timeout)
