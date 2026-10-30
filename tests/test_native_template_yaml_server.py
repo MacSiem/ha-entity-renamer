@@ -216,6 +216,35 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_nonempty_source_corpus_mixed_forward_and_fresh_reverse(self):
         await self.flow(variant='mixed', source_consumers=True)
 
+    async def test_selective_root_native_source_handoff_forward_and_fresh_inverse(self):
+        from homeassistant.helpers.entity import Entity
+        handoff = self.module('native_source_handoff').NativeSourceHandoff
+        codes = (handoff.mutate.__code__, Entity.async_remove.__code__)
+        calls, removed = [], []
+        tool = next(index for index in range(6) if sys.monitoring.get_tool(index) is None)
+        sys.monitoring.use_tool_id(tool, 'full root native source handoff acceptance')
+        def started(code, offset):
+            frame = sys._getframe(1)
+            actor = frame.f_locals.get('self')
+            if code is codes[0] and actor.hass is self.f.hass:
+                calls.append((actor.source, actor.old, actor.new))
+            elif code is codes[1] and any(actor is source for source, _, _ in calls):
+                removed.append(frame.f_locals.get('force_remove'))
+        try:
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, started)
+            for code in codes:
+                sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
+            await self.flow(variant='sensor')
+            self.assertEqual(len(calls), 2)
+            self.assertIs(calls[0][0], calls[1][0])
+            self.assertEqual(calls[0][1:], tuple(reversed(calls[1][1:])))
+            self.assertEqual(removed, [])
+        finally:
+            for code in codes:
+                sys.monitoring.set_local_events(tool, code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
+            sys.monitoring.free_tool_id(tool)
+
     async def test_uidless_numeric_server_owned_forward_and_fresh_reverse_history(self):
         await self.flow(variant='sensor', uidless=True)
 
