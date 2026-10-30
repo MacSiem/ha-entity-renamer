@@ -113,7 +113,7 @@ class NativeScriptConfigTransportTests(binding.NativeDependentConfigBindingTests
         foreign = Template(owned.template, owned.hass)
         container[key] = foreign
         try:
-            with self.assertRaisesRegex(self.module('transaction').Refused, 'cleanup_slot_replaced'):
+            with self.assertRaisesRegex(self.module('transaction').Refused, 'cleanup_(slot_replaced|live_edges_changed)'):
                 transport.restore_before_attempt()
             self.assertIs(container[key], foreign)
             self.assertEqual(transport.phase, 'installed')
