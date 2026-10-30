@@ -547,7 +547,9 @@ class NativeTemplateYAMLServer:
             if obj.prefix_recovery:
                 from .native_template_state_composition import TemplateStateComposition
                 from .native_template_state_server import NativeTemplateStateServer
-                _need(cls is NativeTemplateStateServer and type(obj.composition) is TemplateStateComposition,
+                from .native_script_program_composition import ScriptTemplateStateComposition
+                _need(cls is NativeTemplateStateServer
+                      and type(obj.composition) in (TemplateStateComposition, ScriptTemplateStateComposition),
                       'prefix_profile_unsupported')
             obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
             obj.digests = dict(obj.composition.prepared_digests)

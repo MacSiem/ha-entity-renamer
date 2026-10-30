@@ -21,13 +21,15 @@ def acknowledged_registry_prefix(record):
 def unstarted_rollback_complete(chain, record):
     """Coordinator leaves genuinely unstarted steps pending after compensation.
 
-    Only the exact selective Template profile has prefix admission. Its matching
+    Only exact selective Template and Script-prefix profiles have admission. Matching
     full receipts are still mandatory in each caller's actual chain check.
     """
     from .transaction import Record
     from .native_registry_receipts import RegistryReceiptChain
-    from .native_template_state_yaml import PreparedTemplateStateYAML, assert_state_yaml_composition
+    from .native_template_state_yaml import (PreparedTemplateStateYAML,
+        PreparedMixedTemplateStateYAML, assert_state_yaml_composition)
     from .native_template_state_composition import TemplateStateComposition
+    from .native_script_program_composition import ScriptTemplateStateComposition
     if (type(chain) is not RegistryReceiptChain or type(record) is not Record
             or record.plan != chain.plan or record.operation_id != chain.operation_id
             or record.direction != 'rollback' or record.status not in ('rolling_back', 'rolled_back')
@@ -43,5 +45,6 @@ def unstarted_rollback_complete(chain, record):
             and record.phases == ('undone',) * count + ('pending',) * (len(record.phases) - count)):
         return False
     change = chain._original_change(chain.yaml_index)
-    return (type(change) is PreparedTemplateStateYAML
-            and type(assert_state_yaml_composition(chain, change)) is TemplateStateComposition)
+    return (type(change), type(assert_state_yaml_composition(chain, change))) in (
+        (PreparedTemplateStateYAML, TemplateStateComposition),
+        (PreparedMixedTemplateStateYAML, ScriptTemplateStateComposition))

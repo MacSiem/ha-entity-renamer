@@ -40,7 +40,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         from .native_template_state_binding import async_observe_accepted_state_bindings
         from .native_template_state_composition import TemplateStateComposition
         from .transaction import PhaseContext
-        _need(type(self.composition) is TemplateStateComposition
+        _need(type(self.composition) in (TemplateStateComposition, ScriptTemplateStateComposition)
               and _acknowledged_registry_prefix(record) and record.plan == self.plan
               and await self.journal.load(self.operation_id) == record,
               'acknowledged_prefix_required')
