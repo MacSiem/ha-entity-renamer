@@ -107,15 +107,26 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_foreign_native_main_and_existing_cancel_share_one_dispatch(self):
         await self._duration_case(mode='transient')
 
+    async def test_multi_id_pair_preserves_other_pending_and_rejects_retired_binding_drift(self):
+        await self._duration_case(mode='multi')
+
+    async def test_multi_id_queued_foreign_event_preserves_other_pending(self):
+        await self._duration_case(mode='multi_foreign')
+
     async def _duration_case(self, *, mode):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         runtime,mapping,uuids,_,original = await self.data()
         hass,root = self.f.hass,self.f.root
         old,new = next(iter(mapping.items()))
-        meaningful = mode in ('meaningful','foreign','replace')
+        multi = mode in ('multi','multi_foreign')
+        foreign = mode in ('foreign','transient','multi_foreign')
+        meaningful = mode in ('meaningful','foreign','replace','multi','multi_foreign')
         pending = mode in ('pending','cancel','from_only','attribute','rollback','foreign_route','orphan','replace','transient')
-        duration = 480 if pending else 180 if meaningful else 2
+        duration = 480 if pending or multi else 180 if meaningful else 2
+        other_id = 'sensor.duration_other'
+        original_keys = [old,other_id] if multi else [old]
+        target_keys = [new,other_id] if multi else [new]
         # Every duration below is literal YAML, validated by ORIGINAL Core.
         if mode=='orphan':
             filters = ''
@@ -135,7 +146,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         path.write_text(
             '- id: mixed_source\n  alias: Literal duration source\n  initial_state: true\n'
             '  variables:\n    source: '+old+'\n    alias: "{{ source }}"\n'
-            '  triggers:\n  - trigger: state\n    entity_id: '+old+'\n'+filters+
+            '  triggers:\n  - trigger: state\n    entity_id: ['+', '.join(original_keys)+']\n'+filters+
             '    for: {seconds: '+str(duration)+'}\n'
             '  actions:\n  - event: duration_source_result\n    event_data:\n'
             '      bound: "{{ trigger.entity_id }}"\n'
@@ -185,10 +196,19 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             self.producer._attr_extra_state_attributes={'phase':'17'}
         await self.stimulus(17)
         await hass.async_block_till_done()
+        if multi:
+            hass.states.async_set(other_id,'17')
+            hass.states.async_set(other_id,'29')
+            await hass.async_block_till_done()
         physical=hass.states.get(old)
         self.assertEqual(physical.state,'17')
         before=cap.capture(source)
-        saved=cap.pending(before)[0]
+        all_saved=cap.pending(before)[0]
+        other_pending=next((p for p in all_saved if p['key']==other_id),None)
+        saved=tuple(p for p in all_saved if p['key']==old)
+        if multi:
+            self.assertIsNotNone(other_pending)
+            other_tuple=(other_pending['handle'],other_pending['handle'].when(),other_pending['handle']._context)
         if pending:
             self.assertEqual(len(saved),1)
             native_pending=saved[0]
@@ -207,7 +227,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         # pending, so the test waits one natural period rather than a second one.
         control_pending=None
         control_original=None
-        if pending:
+        if pending or multi:
             hass.states.async_set('sensor.duration_control','16')
             hass.states.async_set('sensor.duration_control','17')
             await hass.async_block_till_done()
@@ -274,7 +294,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             actor=frame.f_locals.get('self')
             if code is codes[4] and actor.hass is hass:
                 created.extend(actor.pending(frame.f_locals['route'].binding)[0])
-            if code is codes[0] and actor.hass is hass and mode in ('foreign','transient') and not emitted:
+            if code is codes[0] and actor.hass is hass and foreign and not emitted:
                 self.producer._attr_native_value=31
                 self.producer.async_write_ha_state()
                 emitted.append(hass.states.get(new))
@@ -295,7 +315,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             for code in codes:
                 sys.monitoring.set_local_events(tool,code,sys.monitoring.events.PY_START)
             sys.monitoring.set_local_events(tool,codes[4],sys.monitoring.events.PY_RETURN)
-            if mode in ('foreign','transient'):
+            if foreign:
                 sys.monitoring.set_local_events(tool,codes[0],sys.monitoring.events.PY_START|sys.monitoring.events.PY_RETURN)
             with mixed.native_diagnostics(self.module):
                 if mode in ('rollback','foreign_route','orphan'):
@@ -342,16 +362,22 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((current.keyed_job,current.listener,current.action_job,current.unsubscribe,
                     current.detach,current.remove,current.original_keys,current.config_ids,current.callbacks,source.action_script),
                     original_objects)
-                self.assertEqual(current.original_keys,[new])
+                self.assertEqual(current.original_keys,target_keys)
                 self.assertIsNot(current.original_keys,current.config_ids)
                 self.assertEqual(self.f.entity.async_get(new).id,uuids[old])
                 self.assertIsNone(hass.states.get(old))
                 self.assertEqual((actions,scripts),([],[]),'No immediate duration action')
-                current_pending=cap.pending(current)[0]
+                all_current=cap.pending(current)[0]
+                if multi:
+                    kept=next(p for p in all_current if p['key']==other_id)
+                    self.assertEqual((kept['handle'],kept['handle'].when(),kept['handle']._context),other_tuple)
+                    self.assertFalse(kept['handle'].cancelled())
+                current_pending=tuple(p for p in all_current if p['key']==new)
                 if meaningful:
-                    self.assertEqual(len(created),1)
-                if mode=='foreign':
-                    self.assertTrue(created[0]['handle'].cancelled())
+                    own_created=[p for p in created if p['key']==new]
+                    self.assertEqual(len(own_created),1)
+                if meaningful and foreign:
+                    self.assertTrue(own_created[0]['handle'].cancelled())
                     self.assertEqual(len(emitted),1)
                 if mode=='transient':
                     self.assertEqual(len(emitted),1)
@@ -366,7 +392,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     a=self.module('native_automation_duration_binding')._cells(actual['action'])
                     self.assertEqual((a['from_s'],a['to_s'],a['event'],a['event'].context),native_tuple[10:])
                     self.assertEqual(a['entity'],new)
-                elif meaningful and mode!='foreign':
+                elif meaningful and not foreign:
                     if mode=='replace':
                         self.assertTrue(native_pending['handle'].cancelled())
                     self.assertEqual(len(current_pending),1)
@@ -376,9 +402,17 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIs(own.change,pairs[0])
                     self.assertIs(own.binding.action_job,before.action_job)
                     native_tuple=(own_pending['handle'],own_pending['handle'].when(),own_pending['handle']._context)
+                    if multi:
+                        approved=own.entity_cell.cell_contents
+                        own.entity_cell.cell_contents=other_id
+                        try:
+                            with self.assertRaisesRegex(ValueError,'duration_own_current_binding_changed'):
+                                own.check()
+                        finally:
+                            own.entity_cell.cell_contents=approved
                 else:
                     self.assertEqual(current_pending,())
-                if meaningful and mode!='foreign' and control_pending is None:
+                if meaningful and not foreign and control_pending is None:
                     hass.states.async_set('sensor.duration_control','16')
                     hass.states.async_set('sensor.duration_control','17')
                     await hass.async_block_till_done()
@@ -399,14 +433,19 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNot(roots[0].chain,roots[1].chain)
                 await check_rows(roots[1],set())
                 back=cap.capture(source)
-                self.assertEqual(back.original_keys,[old])
+                self.assertEqual(back.original_keys,original_keys)
                 self.assertEqual((actions,scripts),([],[]))
                 self.assertEqual(self.f.entity.async_get(old).id,uuids[old])
                 self.assertIsNone(self.f.entity.async_get(new))
                 for name,content in original.items():
                     self.assertEqual((root/name).read_bytes(),content)
-                remaining=cap.pending(back)[0]
-                if mode in ('cancel','foreign','transient'):
+                all_remaining=cap.pending(back)[0]
+                if multi:
+                    kept=next(p for p in all_remaining if p['key']==other_id)
+                    self.assertEqual((kept['handle'],kept['handle'].when(),kept['handle']._context),other_tuple)
+                    self.assertFalse(kept['handle'].cancelled())
+                remaining=tuple(p for p in all_remaining if p['key']==old)
+                if mode in ('cancel','foreign','transient','multi_foreign'):
                     if mode!='transient':
                         self.assertEqual(remaining,())
                     return
@@ -444,7 +483,10 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 # One normal-clock expiry wait, not a loop polling pending away.
                 await asyncio.sleep(max(0,deadline-hass.loop.time())+0.05)
                 await hass.async_block_till_done()
-                self.assertEqual((len(actions),len(scripts),len(controls)),(1,1,1))
+                self.assertEqual((len(actions),len(scripts),len(controls)),(2 if multi else 1,2 if multi else 1,1))
+                if multi:
+                    self.assertEqual(sum(str(e.data['bound'])==other_id for e in actions),1)
+                    actions[:]=[e for e in actions if str(e.data['bound'])==old]
                 self.assertEqual(str(actions[0].data['bound']),old)
                 self.assertEqual(float(actions[0].data['seconds']),duration)
                 expected_event=(pairs[0].event if meaningful else
