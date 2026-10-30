@@ -53,7 +53,15 @@ def _record(chain, record):
             or record.direction not in ('forward', 'rollback')):
         _fail('phase_binding')
     reverse = record.direction == 'rollback'
-    if (record.phases != (('undone' if reverse else 'verified'),) * len(chain.plan.steps)
+    complete = record.phases == (('undone' if reverse else 'verified'),) * len(chain.plan.steps)
+    if reverse and not complete and set(record.phases) <= {'pending', 'undone'} and 'undone' in record.phases:
+        # Unstarted steps are left pending by Coordinator.rollback. Only this
+        # exact selective profile has native prefix admission; the full actual
+        # original input/runtime/candidate checks below are still mandatory.
+        from .native_template_state_yaml import PreparedTemplateStateYAML
+        complete = (chain.yaml_index is not None
+                    and type(chain._original_change(chain.yaml_index)) is PreparedTemplateStateYAML)
+    if (not complete
             or record.status not in (('rolling_back', 'rolled_back', 'ready') if reverse
                                       else ('applying', 'applied', 'ready'))):
         _fail('phase_incomplete')

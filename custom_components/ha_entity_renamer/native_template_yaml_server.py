@@ -68,7 +68,7 @@ class NativeTemplateYAMLServer:
         _need(False, 'installed_factory_required')
 
     @classmethod
-    async def _open(cls, hass, *, guard, refresh):
+    async def _open(cls, hass, *, guard, refresh, recovering_operation=None):
         from . import Runtime
         from homeassistant.core import HomeAssistant
         from .native_template_state_server import NativeTemplateStateServer
@@ -105,7 +105,10 @@ class NativeTemplateYAMLServer:
         scope()
         await obj.journal.initialize()
         scope()
-        _need(not await obj.journal.active(), 'other_operation_unresolved')
+        active = await obj.journal.active()
+        _need(not active or (cls is NativeTemplateStateServer and type(recovering_operation) is str
+              and len(active) == 1 and active[0].operation_id == recovering_operation),
+              'other_operation_unresolved')
         scope()
         from .native_automation_lifecycle import async_assert_no_pending_automation_lifecycle
         await async_assert_no_pending_automation_lifecycle(hass, obj.preparations, obj.journal)
@@ -293,7 +296,7 @@ class NativeTemplateYAMLServer:
         self._scope()
         return value
 
-    async def _fresh_stores(self, expected):
+    async def _fresh_stores(self, expected, *, allow_active=False):
         preps, journal = native_prepared_store(self.hass), native_journal(self.hass)
         await preps.initialize()
         self._scope()
@@ -308,7 +311,8 @@ class NativeTemplateYAMLServer:
         self._scope()
         active = await journal.active()
         self._scope()
-        _need(actual == expected and not active, 'operation_changed')
+        _need(actual == expected and (not active or (allow_active and active == (expected,))),
+              'operation_changed')
 
     async def _common(self, rollback, *, initial=False):
         """Independent UUID/runtime/metadata plus full physical/history continuation."""
@@ -456,16 +460,24 @@ class NativeTemplateYAMLServer:
     @classmethod
     async def bind_reverse(cls, hass, operation_id, fingerprint, *, guard, refresh):
         """Fresh read-only reopen, actual admission, then a DIFFERENT live chain."""
-        obj = await cls._open(hass, guard=guard, refresh=refresh)
+        obj = await cls._open(hass, guard=guard, refresh=refresh, recovering_operation=operation_id)
         try:
             record = await obj.journal.load(operation_id)
             obj._scope()
+            from .native_template_state_server import _acknowledged_registry_prefix
+            obj.prefix_recovery = _acknowledged_registry_prefix(record)
             _need(record is not None and record.operation_id == operation_id
-                  and record.plan.fingerprint == fingerprint and record.status == 'applied'
-                  and record.direction == 'forward'
-                  and record.phases == ('verified',) * len(record.plan.steps), 'terminal_applied_required')
+                  and record.plan.fingerprint == fingerprint and record.direction == 'forward'
+                  and ((record.status == 'applied'
+                        and record.phases == ('verified',) * len(record.plan.steps))
+                       or obj.prefix_recovery), 'terminal_or_acknowledged_prefix_required')
             obj.operation_id, obj.plan, obj.record = operation_id, record.plan, record
             baseline, obj.composition = obj.preparations.resolve_composition(obj.plan.native_inputs)
+            if obj.prefix_recovery:
+                from .native_template_state_composition import TemplateStateComposition
+                from .native_template_state_server import NativeTemplateStateServer
+                _need(cls is NativeTemplateStateServer and type(obj.composition) is TemplateStateComposition,
+                      'prefix_profile_unsupported')
             obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
             obj.digests = dict(obj.composition.prepared_digests)
             _need(obj.plan.coverage_evidence == obj.composition.coverage_sha256
@@ -503,11 +515,16 @@ class NativeTemplateYAMLServer:
             # Runtime automation/script sources must also match SAME ORIGINAL.
             # Only accepted physical state differs; no replacement receipt is made.
             await obj._bind_accepted_sources()
-            await obj._terminal(record, rollback=False)
+            async def admit():
+                if obj.prefix_recovery:
+                    await obj._prefix_current(record)
+                else:
+                    await obj._terminal(record, rollback=False)
+            await admit()
             await refresh()
             obj._scope()
-            await obj._fresh_stores(record)
-            await obj._terminal(record, rollback=False)
+            await obj._fresh_stores(record, allow_active=obj.prefix_recovery)
+            await admit()
             state = readonly.reconstruct_inputs()
             # Same separated admission pattern as NativeTemplateReverse: the
             # reopened reader remains readonly. Never set readonly.writable.
@@ -635,8 +652,12 @@ class NativeTemplateYAMLServer:
         self.used = True
         await self.refresh()
         self._scope()
-        await self._fresh_stores(self.record)
-        await self._terminal(self.record, rollback=False)
+        prefix = getattr(self, 'prefix_recovery', False)
+        await self._fresh_stores(self.record, allow_active=prefix)
+        if prefix:
+            await self._prefix_current(self.record)
+        else:
+            await self._terminal(self.record, rollback=False)
         if _mixed_composition(self.composition):
             from .native_automation_lifecycle import NativeAutomationLifecycle
             self.automation_lifecycle = NativeAutomationLifecycle(self, 'rollback')

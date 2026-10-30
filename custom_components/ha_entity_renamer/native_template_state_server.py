@@ -24,7 +24,70 @@ def _need(value, reason):
         raise Refused('template_state_server_' + reason)
 
 
+def _acknowledged_registry_prefix(record):
+    """Shape only; a fresh full chain/native admission must still prove it.
+
+    No pending intent, YAML effect or rollback prefix is admitted by this slice.
+    It accepts only a nonempty contiguous set of acknowledged registry effects.
+    """
+    from .transaction import Record
+    if (type(record) is not Record or record.direction != 'forward'
+            or record.status not in ('applying', 'unknown', 'ready')
+            or len(record.plan.steps) < 2 or len(record.phases) != len(record.plan.steps)
+            or tuple(step.adapter for step in record.plan.steps)
+               != ('registry',) * (len(record.plan.steps) - 1) + ('yaml',)):
+        return False
+    count = record.phases.count('verified')
+    return (0 < count < len(record.phases)
+            and record.phases == ('verified',) * count + ('pending',) * (len(record.phases) - count))
+
+
 class NativeTemplateStateServer(NativeTemplateYAMLServer):
+    async def _prefix_current(self, record):
+        """Read-only classification of the exact acknowledged physical prefix.
+
+        The original YAML is still installed. Each registry UUID/metadata,
+        accepted full-three input, live Template binding, source, consumer and
+        finite-history fence is independently checked; no journal is advanced.
+        """
+        from .native_registry import NativeRegistryBridge, NativeRegistryIO
+        from .native_template_state_binding import async_observe_accepted_state_bindings
+        from .native_template_state_composition import TemplateStateComposition
+        from .transaction import PhaseContext
+        _need(type(self.composition) is TemplateStateComposition
+              and _acknowledged_registry_prefix(record) and record.plan == self.plan
+              and await self.journal.load(self.operation_id) == record,
+              'acknowledged_prefix_required')
+        self._scope()
+        bridge = NativeRegistryBridge(NativeRegistryIO(self.hass), self.recorder,
+                                       native_images=self.chain.accepted_documents)
+        for index, change in enumerate(self.registry_changes):
+            actual = await bridge.inspect(change)
+            self._scope()
+            wanted = 'after' if record.phases[index] == 'verified' else 'before'
+            _need(actual.position == wanted, 'prefix_source_identity_or_history_changed')
+        state = self.chain.reconstruct_inputs()
+        position = await self.observer.position_at_inputs(self.change, state)
+        self._scope()
+        _need(position is Position.BEFORE, 'prefix_yaml_or_runtime_changed')
+        witness = self.observer.runtime_check(Position.BEFORE)
+        actual = await async_observe_accepted_state_bindings(self.hass, self.chain,
+            self.program, guard=self._scope)
+        self._scope()
+        active = frozenset(next(iter(change.mapping)) for index, change in enumerate(self.registry_changes)
+                           if record.phases[index] == 'verified')
+        _need(actual.prefix.active == active and actual.yaml_position == 'original'
+              and all((row.entity.entity_id, row.registry_id) in set(self.observer.identities.values())
+                      for row in actual.rows), 'prefix_consumer_identity_changed')
+        await self._final_history(state, witness)
+        observed = await self._observe()
+        self.chain.expected(PhaseContext(record, len(record.plan.steps) - 1), tuple(
+            RegistryRawObservation(row.key, row.raw, row.identity) for row in observed.files))
+        _need(await self.journal.load(self.operation_id) == record, 'prefix_phase_changed')
+        self._scope()
+        witness.check()
+        return True
+
     async def _prepare(self):
         from .yaml_plan import plan_yaml
         from .yaml_validation import async_validate_proposed_with_template_state_sources
