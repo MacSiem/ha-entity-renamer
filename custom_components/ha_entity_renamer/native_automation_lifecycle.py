@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 import threading
+import hashlib
+import json
 
 from .native_automation_transition import NativeAutomationTransition
 from .prepared import canonical
@@ -107,20 +109,87 @@ async def async_assert_no_pending_automation_lifecycle(hass, preparations, journ
             _need(False)
 
 
+def _affected_automations(session):
+    """Select from proved native programs; never pause an unrelated consumer.
+
+    Cross-output and broad native-event transitions are not qualified by this
+    idle slice. Refuse those before effects rather than muting a whole domain.
+    """
+    from .reference_planner import Context, Consumer, Scope, Syntax, plan_references
+    component = session.hass.data.get('automation')
+    _need(component is not None)
+    primary = set(session.mapping) | set(session.mapping.values())
+    original = session.evidence.template_sources.rows
+    candidate = session.evidence.template_candidate_sources.sources.rows
+    old, new = ({(domain, key): digest for domain, key, digest in rows}
+                for rows in (original, candidate))
+    _need(set(old) == set(new))
+    changed_template = {session.observer.identities[(domain.removeprefix('template.'), key)][0]
+        for domain, key in old if domain in ('template.sensor', 'template.binary_sensor')
+        and old[domain, key] != new[domain, key]}
+    if any(domain == 'template.state' and old[domain, key] != new[domain, key] for domain, key in old):
+        changed_template.update(value[0] for value in session.observer.identities.values())
+    probe = {key: key.split('.')[0] + '.renamer_dependency_probe_' + hashlib.sha256(key.encode()).hexdigest()[:24]
+             for key in primary}
+    own_events = {'state_changed', 'entity_registry_updated', 'device_registry_updated',
+        'call_service', 'service_registered', 'service_removed', 'automation_reloaded',
+        'script_reloaded', 'event_template_reloaded', 'template_reloaded'}
+    targets, watched, events, triggers = [], set(), set(), {}
+    def scopes(value, path=()):
+        if type(value) is dict:
+            return tuple(scope for key, item in value.items() for scope in scopes(item, path + (key,)))
+        if type(value) is list:
+            return tuple(scope for i, item in enumerate(value) for scope in scopes(item, path + (i,)))
+        if type(value) is str:
+            return (Scope(path, Syntax.JINJA if '{{' in value or '{%' in value else Syntax.ENTITY_TREE),)
+        return ()
+    for entity in component.entities:
+        raw = json.loads(json.dumps(entity.raw_config, allow_nan=False))
+        report = plan_references(raw, probe, Context(Consumer.AUTOMATION, scopes(raw)))
+        _need(not report.markers)
+        inputs, kinds = set(), set()
+        for config in entity._trigger_config:
+            if config['platform'] == 'state':
+                _need('for' not in config)
+                inputs.update(config['entity_id'])
+            elif config['platform'] == 'event':
+                _need(all(value.is_static for value in config['event_type']))
+                kinds.update(value.template for value in config['event_type'])
+            else:
+                _need(False)
+        _need(not inputs & changed_template and not kinds & own_events
+              and not ('script' in session.receipt.changed_domains
+                       and any(key.startswith('script.') for key in inputs)))
+        triggers[entity.unique_id] = inputs
+        if report.changes or inputs & primary:
+            targets.append(entity.unique_id)
+            watched.update(inputs - primary)
+            events.update(kinds)
+    target_entities = {entity.entity_id for entity in component.entities if entity.unique_id in targets}
+    _need(not any(inputs & target_entities for inputs in triggers.values()))
+    return tuple(sorted(targets)), tuple(sorted(watched)), tuple(sorted(events))
+
+
 class NativeAutomationLifecycle:
     def __init__(self, session, direction):
         _need(direction in ('forward', 'rollback'))
         self.session, self.direction = session, direction
-        self.native = NativeAutomationTransition(session.hass)
+        targets, watched, events = _affected_automations(session)
+        self.native = NativeAutomationTransition(session.hass, targets=targets)
+        self.watched_events = events
         self.phases = session.consumers.phases
-        self.root, self.remove, self.changed = None, None, False
+        self.root, self.removes, self.changed = None, [], False
         self.stage_done = False
         self.expectations = {}
+        self.primary = set(session.mapping) | set(session.mapping.values())
         for old, new in session.mapping.items():
             current = session.hass.states.get(old if direction == 'forward' else new)
             _need(current is not None)
             expected = (current.state, deepcopy(dict(current.attributes)))
             self.expectations[old] = self.expectations[new] = expected
+        for key in watched:
+            current = session.hass.states.get(key)
+            self.expectations[key] = None if current is None else (current.state, deepcopy(dict(current.attributes)))
 
     def check_live(self):
         # Physical workers retain their own file guards; HA runtime is sampled
@@ -153,10 +222,16 @@ class NativeAutomationLifecycle:
         def event(observed):
             key = observed.data.get('entity_id')
             state = observed.data.get('new_state')
-            if key in self.expectations and state is not None:
-                if (state.state, dict(state.attributes)) != self.expectations[key]:
-                    self.changed = True
-        self.remove = s.hass.bus.async_listen('state_changed', event)
+            if key not in self.expectations or (key in self.primary and state is None):
+                return
+            actual = None if state is None else (state.state, dict(state.attributes))
+            if actual != self.expectations[key]:
+                self.changed = True
+        self.removes.append(s.hass.bus.async_listen('state_changed', event))
+        def external_event(observed):
+            self.changed = True
+        for kind in self.watched_events:
+            self.removes.append(s.hass.bus.async_listen(kind, external_event))
         await self._effect('quiesce', self.native.quiesce)
 
     async def _effect(self, stage, effect):
@@ -194,7 +269,7 @@ class NativeAutomationLifecycle:
         # YAML activation is drained in a native child task. Give that exact
         # task its own staging capability; the parent retains enabled baselines
         # and its separate restore capability. No shared task pin is reassigned.
-        activation = NativeAutomationTransition(self.session.hass)
+        activation = NativeAutomationTransition(self.session.hass, targets=self.native.targets)
         activation.assert_disabled()
         await self._effect('stage', activation.stage)
         self.stage_done = True
@@ -218,6 +293,6 @@ class NativeAutomationLifecycle:
         self.close()
 
     def close(self):
-        if self.remove is not None:
-            self.remove()
-            self.remove = None
+        for remove in self.removes:
+            remove()
+        self.removes.clear()

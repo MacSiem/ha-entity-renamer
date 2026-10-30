@@ -30,7 +30,7 @@ def _codes(code):
 
 class NativeAutomationTransition:
     """Live native capability; callers supply no constructor/config callbacks."""
-    def __init__(self, hass):
+    def __init__(self, hass, *, targets=None):
         import homeassistant.components.automation as native
         from homeassistant.const import __version__
         from homeassistant.core import HomeAssistant
@@ -41,7 +41,13 @@ class NativeAutomationTransition:
         self.hass, self.native, self.component = hass, native, component
         self.task, self.thread = asyncio.current_task(), threading.get_ident()
         self.original = self._entities()
-        self.enabled = tuple((key, entity._is_enabled) for key, entity in self.original)
+        all_keys = {key for key, _ in self.original}
+        _need(targets is None or (type(targets) is tuple
+              and all(type(key) is str for key in targets) and len(set(targets)) == len(targets)
+              and set(targets) <= all_keys))
+        self.targets = tuple(sorted(all_keys if targets is None else targets))
+        self.foreign = tuple(self._pin(key, entity) for key, entity in self.original if key not in self.targets)
+        self.enabled = tuple((key, entity._is_enabled) for key, entity in self.original if key in self.targets)
         _need(all(type(value) is bool for _, value in self.enabled))
         path = Path(native.__file__)
         self.source = path.read_bytes()
@@ -60,9 +66,17 @@ class NativeAutomationTransition:
                                 for code in _codes(compile(source, str(path), 'exec', dont_inherit=True)))
         self.check_native()
 
+    @staticmethod
+    def _pin(key, entity):
+        return (key, id(entity), id(entity.action_script), id(entity.raw_config),
+                id(entity.registry_entry), entity._is_enabled, id(entity._async_detach_triggers))
+
     def check_native(self):
         _need(threading.get_ident() == self.thread and self.path.read_bytes() == self.source
               and self.hass.data.get('automation') is self.component)
+        live = {entity.unique_id: entity for entity in self.component.entities}
+        _need(all(row[0] in live for row in self.foreign)
+              and tuple(self._pin(row[0], live[row[0]]) for row in self.foreign) == self.foreign)
         _need(all(path.read_bytes() == source for path, source in self.other_sources))
         for owner, name, function in self.functions:
             _need(getattr(owner, name) is function and type(function.__code__) is CodeType)
@@ -85,7 +99,7 @@ class NativeAutomationTransition:
         rows = self._entities()
         _need(tuple(key for key, _ in rows) == tuple(key for key, _ in self.original)
               and all(entity._is_enabled is False and entity._async_detach_triggers is None
-                      for _, entity in rows))
+                      for key, entity in rows if key in self.targets))
         return rows
 
     async def quiesce(self):
@@ -94,7 +108,9 @@ class NativeAutomationTransition:
         _need(self._entities() == self.original)
         # No stop/cancel of running or queued actions is admitted. Native disable
         # with stop_actions=False detaches triggers without a synthetic state write.
-        for _, entity in self.original:
+        for key, entity in self.original:
+            if key not in self.targets:
+                continue
             self.check_native()
             _need(not entity.action_script.is_running and not entity.action_script.runs)
             await entity._async_disable(stop_actions=False)
@@ -120,6 +136,7 @@ class NativeAutomationTransition:
             and len({item.config_block['id'] for item in configs}) == len(configs))
         changed = [item for item in configs
                    if current[item.config_block['id']].raw_config != item.raw_config]
+        _need(all(item.config_block['id'] in self.targets for item in changed))
         for item in changed:
             await current[item.config_block['id']].async_remove()
             self.check_native()
