@@ -28,7 +28,10 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_neutral_native_rename_has_no_actions_and_fresh_inverse(self):
         await self._root_case(meaningful=False)
 
-    async def _root_case(self, *, meaningful):
+    async def test_foreign_native_script_service_replacement_after_effect_is_unknown(self):
+        await self._root_case(meaningful=False, foreign_service=True)
+
+    async def _root_case(self, *, meaningful, foreign_service=False):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         from homeassistant.helpers.entity_platform import async_get_platforms
@@ -75,7 +78,10 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         handoff_type = self.module('native_source_handoff').NativeSourceHandoff
         ingress_type = self.module('native_automation_owned_graph').OwnedAutomationGraph
         root_type = self.module('native_template_state_server').NativeTemplateStateServer
-        codes = (handoff_type.mutate.__code__, ingress_type._action.__code__, root_type._install.__code__)
+        phase_type = self.module('native_automation_prefix_phase').NativeAutomationPrefixPhase
+        codes = (handoff_type.mutate.__code__, ingress_type._action.__code__, root_type._install.__code__,
+                 phase_type.finish_native.__code__)
+        replaced = []
         tool = next(key for key in range(6) if sys.monitoring.get_tool(key) is None)
         sys.monitoring.use_tool_id(tool, 'whole Automation prefix native acceptance')
         def started(code, offset):
@@ -97,6 +103,13 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(hass.states.get(old), 'OLD namespace removed before own delivery')
             elif code is codes[2] and actor.hass is hass:
                 roots.append(actor)
+            elif code is codes[3] and actor.root.hass is hass and foreign_service and not replaced:
+                # Real native ServiceRegistry API, same legitimate handler and
+                # schema, different Service/HassJob. No verification substitute.
+                hass.services.async_register('script', 'mixed_source', script_entity._service_handler,
+                    schema=service.schema, supports_response=service.supports_response)
+                replaced.append(hass.services._services['script']['mixed_source'])
+                self.assertIsNot(replaced[0], service)
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
         try:
@@ -105,6 +118,17 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
             with mixed.native_diagnostics(self.module):
                 result = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+                if foreign_service:
+                    self.assertEqual(len(replaced), 1)
+                    self.assertEqual(result['state'], 'unknown')
+                    self.assertEqual(len(handoffs), 1, 'uncertain effect must never be replayed')
+                    self.assertIs(hass.services._services['script']['mixed_source'], replaced[0])
+                    self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+                    self.assertIsNone(self.f.entity.async_get(old))
+                    for name, content in original.items():
+                        self.assertEqual((root / name).read_bytes(), content)
+                    self.assertFalse(runtime.operation_lock.locked())
+                    return
                 self.assertEqual(result['state'], 'applied')
                 record = await runtime.journal.load(result['operation_id'])
                 baseline, composition = runtime.preparations.resolve_composition(record.plan.native_inputs)
