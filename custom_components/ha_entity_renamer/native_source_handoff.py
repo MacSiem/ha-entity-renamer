@@ -234,8 +234,10 @@ class NativeSourceHandoff:
             self.id_cell.cell_contents = self.new
             self.source.entity_id = self.new
             self.source.registry_entry = new
-        except BaseException:
-            self.error = 'native_dispatch_uncertain'
+        except BaseException as error:
+            if self.error is None:
+                self.error = (error.args[0] if type(error) is NativeSourceHandoffError
+                              else 'native_source_handoff_native_dispatch_uncertain')
         finally:
             del frame
 
@@ -255,6 +257,10 @@ class NativeSourceHandoff:
         self.attempted, self.in_native = True, True
         try:
             mutation = self.io.mutate(self.change, self.target)
+            if self.error is not None:
+                raise NativeSourceHandoffError(self.error)
+            _need(self.registry_calls == 1, 'registry_dispatch_not_observed')
+            _need(self.handler_calls == 1 and self.handler_done, 'native_handler_not_completed')
             _need(type(mutation) is NativeRegistryMutation and self.error is None
                   and self.registry_calls == self.handler_calls == 1 and self.handler_done
                   and self.source.registry_entry is self.new_row
