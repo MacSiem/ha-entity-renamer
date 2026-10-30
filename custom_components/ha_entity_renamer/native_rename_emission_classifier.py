@@ -512,10 +512,16 @@ class NativeRenameEmissions:
         values = frame.f_locals
         old, new = values.get('old'), values.get('registry_entry')
         registry_event = self._registry_emission()
+        if self.source_handoff is None:
+            binding = old is self.row and old.entity_id == self.source_id
+        else:
+            h = self.source_handoff
+            binding = (old is new is h.new_row and values.get('event') is h.registry_event
+                       and h.new_row is not None and h.attempted)
         return (registry_event is not None and values.get('event') is registry_event.event
                 and values.get('data') is registry_event.raw and self._registry_data(registry_event.raw)
-                and old is self.row and new is not None and new.id == self.change.identity
-                and old.entity_id == self.source_id and new.entity_id == self.target_id
+                and binding and new is not None and new.id == self.change.identity
+                and new.entity_id == self.target_id
                 and self.source.registry_entry is new
                 and self.registry.async_get(self.target_id) is new)
 
