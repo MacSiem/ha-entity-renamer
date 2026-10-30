@@ -190,3 +190,30 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.f.entity.async_get(new))
         await hass.async_add_executor_job((self.f.root / 'template.yaml').write_bytes, original)
         await self.stimulus(7)
+
+    async def test_unrecognized_chain_evidence_without_journal_survives_reclaim(self):
+        """Unknown sidecar data is protected; this is not an actual intent/effect."""
+        import hashlib
+        runtime, old, new, uuids, original, payload = await self.selection()
+        hass = self.f.hass
+        connection, user, output = await self._connection(admin=True)
+        connection.async_handle({'id': 1, 'type': 'ha_entity_renamer/prepare', **payload})
+        response = await output
+        self.assertTrue(response['success'], response)
+        receipts = self.module('native_registry_receipts').native_registry_receipt_store(hass, runtime.preparations)
+        await receipts.initialize()
+        self.assertEqual(len(receipts.rows), 1)
+        root = next(iter(receipts.rows))
+        await receipts.create('rr-' + hashlib.sha256(b'synthetic-retention-unknown').hexdigest(),
+            {'kind': 'synthetic_unrecognized_evidence', 'chain': root})
+        keys = ('ha_entity_renamer.prepared', 'ha_entity_renamer.registry_receipts')
+        before = {key: (self.f.root / '.storage' / key).read_bytes() for key in keys}
+        runtime.reviews.clear()  # An abandoned handle does not authorize evidence deletion.
+        async with runtime.operation_lock:
+            runtime.preparations, runtime.journal = await self.module('review_retention').async_reclaim_reviews(
+                hass, guard=lambda: None)
+        self.assertEqual(await runtime.journal.all(), ())
+        self.assertEqual({key: (self.f.root / '.storage' / key).read_bytes() for key in keys}, before)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
