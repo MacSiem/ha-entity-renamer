@@ -27,7 +27,7 @@ class NativeAutomationPrefixPhase:
         self.root, self.active, self.unresolved = root, None, False
         self.program = root.composition.dependent_config_program
         from .native_automation_owned_graph import OwnedAutomationGraph
-        self.graph = OwnedAutomationGraph(root.hass)
+        self.graph = getattr(root.consumers, "owned_automation", None) or OwnedAutomationGraph(root.hass)
         self.observer = NativeDependentConfigReadback(root.hass, self.program,
             root.evidence, root.receipt, root.composition.yaml_plan, owned_automation=self.graph)
         sample = self.observer.sample(root.chain, input_state=root.observation_state)

@@ -30,7 +30,12 @@ class MixedYAMLConsumers(_UnchangedConsumers):
         # No domain reload ticket even during private prefix preparation.
         # Keep the full ORIGINAL sampler until the actual chain is bound.
         _need(getattr(self, 'phases', None) is None)
-        await super().bind_sources(receipt, evidence, guard=guard)
+        owned = None
+        if 'automation' in receipt.changed_domains:
+            from .native_automation_owned_graph import OwnedAutomationGraph
+            owned = await OwnedAutomationGraph.with_duration(self.hass, guard=guard)
+            self.owned_automation = owned
+        await super().bind_sources(receipt, evidence, guard=guard, owned_automation=owned)
 
     def bind_phases(self, receipt, evidence, observed, position):
         phases = DependentYAMLRuntime(self.hass, evidence, observed, receipt, position=position)

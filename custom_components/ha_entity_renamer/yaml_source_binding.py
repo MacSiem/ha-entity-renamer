@@ -256,13 +256,13 @@ class _RuntimeSourceSampler:
             expected_projections=tuple(overrides), owned_automation=owned_automation)
 
 
-def _runtime_sample(hass, evidence, observed):
+def _runtime_sample(hass, evidence, observed, *, owned_automation=None):
     """Default full-document path, with the same live verifier as bound samples."""
     def rows():
         import json
         native = next(row for row in observed.files if row.key == 'core.entity_registry')
         yield from json.loads(native.manager_json)['entities']
-    return _runtime_rows_sample(hass, evidence, rows())
+    return _runtime_rows_sample(hass, evidence, rows(), owned_automation=owned_automation)
 
 
 def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=(), owned_automation=None):
@@ -344,7 +344,7 @@ def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=
     return tuple(rows), tuple(sorted(blockers)), tuple(tokens)
 
 
-async def async_bind_original_runtime(hass, receipt, evidence, *, guard):
+async def async_bind_original_runtime(hass, receipt, evidence, *, guard, owned_automation=None):
     """Detached source/runtime observation before preparation; never a write fence.
 
     The exact ORIGINAL receipt guards all staging/auxiliary inputs. Existing
@@ -382,13 +382,13 @@ async def async_bind_original_runtime(hass, receipt, evidence, *, guard):
     except ValueError:
         return result(blockers=('runtime_source_inputs_changed',))
     try:
-        first = _runtime_sample(hass, evidence, observed)
+        first = _runtime_sample(hass, evidence, observed, owned_automation=owned_automation)
         await asyncio.sleep(0)
         check()
         await _settled_executor(hass, assert_validation_current, receipt)
         check()
         assert_discovery_managers_current(hass, observed, guard=check)
-        last = _runtime_sample(hass, evidence, observed)
+        last = _runtime_sample(hass, evidence, observed, owned_automation=owned_automation)
         if first != last:
             return result(blockers=('runtime_source_observation_changed',))
         return result(*last)

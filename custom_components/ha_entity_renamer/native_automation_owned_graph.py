@@ -38,6 +38,10 @@ class _Route:
     added_keys: object = None
     keys_written: bool = False
     wrapper_written: bool = False
+    duration_snapshot: tuple = ()
+    duration_transported: bool = False
+    duration_operations: object = None
+    duration_events: object = None
 
 
 def _stable(binding):
@@ -53,7 +57,8 @@ def _stable(binding):
         (id(b.action_job), id(b.action_job.target.__self__), id(b.action_job.target.__func__),
          b.action_job.name, b.action_job._cancel_on_shutdown, id(b.action_job._cache)),
         _value(b.match_from), _value(b.match_to),
-        tuple((key, _value(value)) for key, value in cells.items() if key != 'config'))
+        (b._duration.stable(b) if hasattr(b, '_duration') else
+         tuple((key, _value(value)) for key, value in cells.items() if key != 'config')))
 
 
 class OwnedAutomationGraph:
@@ -63,16 +68,33 @@ class OwnedAutomationGraph:
         self.live, self.overlap = False, False
         self.prepared = ()
         self.actors = ()
+        self.duration = None
         self.counts = dict(foreign_seen=0, foreign_forwarded=0, owned_remove=0,
             neutral_add=0, meaningful_seen=0, no_match=0, action_submitted=0,
             deferred_delivered=0)
+
+    @classmethod
+    async def with_duration(cls, hass, *, guard):
+        from .native_automation_duration_binding import NativeAutomationDurationCapability
+        from .native_automation_state_binding import _Native
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        obj = cls(hass)
+        component = hass.data.get(DATA_INSTANCES, {}).get('automation')
+        if component is not None and any(e._is_enabled and any('for' in c for c in e._trigger_config)
+                                        for e in component.entities):
+            guard()
+            native = await hass.async_add_executor_job(_Native, hass)
+            guard()
+            obj.duration = await hass.async_add_executor_job(NativeAutomationDurationCapability, hass, native)
+            guard()
+        return obj
 
     async def prepare(self, entities, *, guard, actors):
         from .native_automation_state_binding import async_capture_state_bindings
         _need(not self.live and not self.routes)
         prepared = []
         for entity in entities:
-            prepared.extend(await async_capture_state_bindings(self.hass, entity, guard=guard))
+            prepared.extend(await async_capture_state_bindings(self.hass, entity, guard=guard, _duration=self.duration))
         self.prepared = tuple(prepared)
         self.actors = tuple(actors)
 
@@ -84,7 +106,7 @@ class OwnedAutomationGraph:
                   'automation_prepared_trigger_owner_changed')
             # Fresh ORIGINAL graph after producer/action drain, with the SAME
             # already-audited native source refs; no source IO at this seam.
-            fresh = capture_state_bindings(self.hass, entity, _native=previous[0]._native) if previous else ()
+            fresh = capture_state_bindings(self.hass, entity, _native=previous[0]._native, _duration=self.duration) if previous else ()
             for binding in fresh:
                 if binding.entity is not entity:
                     continue
@@ -94,6 +116,9 @@ class OwnedAutomationGraph:
                 _need(len(set(target)) == len(target), 'automation_route_collision')
                 self.routes.append(_Route(binding, old, target, _stable(binding),
                     queue=deque(), seen=set(), added_keys=[]))
+                if hasattr(binding, '_duration'):
+                    self.routes[-1].duration_events = {}
+                    self.duration.lock(self.routes[-1])
 
     def install(self, witness):
         from homeassistant.core import callback, HassJobType
@@ -124,14 +149,21 @@ class OwnedAutomationGraph:
                         route.added_keys.append(key)
                 b.original_keys[:] = keys
                 route.keys_written = True
+                if hasattr(b, '_duration'):
+                    self.duration.transport(route, route.target)
+                    route.duration_transported = True
                 b.keyed_job.target = route.wrapper
                 route.wrapper_written = True
+                if hasattr(b, '_duration'):
+                    self.duration.wrap(self, route)
             self.check()
         except BaseException:
             self.retire(before_attempt=True)
             raise
 
     def _receive(self, route, event):
+        if hasattr(route.binding, '_duration'):
+            return self._receive_duration(route, event, None)
         try:
             _need(self.live and route.binding.keyed_job.target is route.wrapper)
             change = self.witness.owned_state_change(event)
@@ -158,6 +190,53 @@ class OwnedAutomationGraph:
         except BaseException:
             self.witness._poison('automation_ingress_uncertain')
 
+    def _receive_duration(self, route, event, cancel):
+        try:
+            _need(self.live and route.binding.keyed_job.target is route.wrapper)
+            self.duration.check_route(route)
+            change = self.witness.owned_state_change(event)
+            token = (id(event), id(None if cancel is None else cancel['cancel_job']))
+            _need(token not in route.seen, 'automation_duration_duplicate_role')
+            route.seen.add(token)
+            route.duration_events[id(event)] = event  # Pin authentic foreign Event identity.
+            if change is not None and (change.phase == 'remove' or change.disposition == 'neutral'):
+                return
+            _need(change is None or change.disposition == 'meaningful',
+                  'automation_duration_owned_state_unknown')
+            if change is None and not route.queue:
+                original = route.binding.listener if cancel is None else cancel['cancel_listener']
+                original(event)
+                self.duration.lock(route)
+                return
+            route.queue.append((event, change, cancel))
+            if route.handle is None:
+                route.handle = self.hass.loop.call_soon(self._deliver, route)
+        except BaseException:
+            self.witness._poison('automation_duration_ingress_uncertain')
+
+    def _deliver_duration(self, route):
+        while route.queue:
+            self.duration.check_route(route)
+            event, change, cancel = route.queue.popleft()
+            if change is None:
+                pending_before = self.duration.pending(route.binding)[0] if cancel is None else ()
+                original = route.binding.listener if cancel is None else cancel['cancel_listener']
+                original(event)
+                # The OWN timer was absent from dispatch.copy() for this queued
+                # foreign Event. Deliver that SAME Event once, in the shared FIFO.
+                for pending in pending_before:
+                    token = (id(event), id(pending['cancel_job']))
+                    if token not in route.seen:
+                        pending['cancel_listener'](event)
+                        route.seen.add(token)
+            else:
+                _need(self.witness.owned_state_change(event) == change, 'automation_owned_pair_changed')
+                if cancel is None:
+                    self._action(route.binding, change)
+                elif not cancel['predicate'](event.data['entity_id'], change.prior_state, change.new_state):
+                    cancel['clear']()
+            self.duration.lock(route)
+
     def _deliver(self, route):
         route.handle = None
         try:
@@ -174,6 +253,9 @@ class OwnedAutomationGraph:
                 _need(self.transfer._actor_graph() == self.transfer.installed,
                       'automation_live_program_changed')
                 self.transfer._rows(self.transfer.after)
+            if hasattr(route.binding, '_duration'):
+                self._deliver_duration(route)
+                return
             while route.queue:
                 event, change = route.queue.popleft()
                 if change is None:
@@ -200,6 +282,14 @@ class OwnedAutomationGraph:
                 or not b.match_all and old_value == new_value):
             self.counts['no_match'] += 1
             return
+        if hasattr(b, '_duration'):
+            route, = (r for r in self.routes if r.binding is b)
+            for pending in self.duration.pending(b)[0]:
+                if not pending['predicate'](event.data['entity_id'], prior, new):
+                    pending['clear']()
+            self.duration.lock(route)
+            self.duration.start_pair(self, route, change)
+            return
         payload = {'trigger': {**b.trigger_data, 'platform': b.platform_type,
             'entity_id': event.data['entity_id'], 'from_state': prior,
             'to_state': new, 'for': None, 'attribute': attribute,
@@ -209,7 +299,14 @@ class OwnedAutomationGraph:
 
     def registrations(self, hass, entity):
         """Return explicit actual graph tokens; caller never unwraps job.target."""
-        _need(hass is self.hass and self.live)
+        _need(hass is self.hass)
+        if self.duration is not None:
+            from .native_automation_duration_binding import NativeAutomationDurationCapability
+            _need(type(self.duration) is NativeAutomationDurationCapability
+                  and self.duration.hass is self.hass, 'typed_duration_capability_required')
+        if self.duration is not None and any('for' in c for c in entity._trigger_config) and (not self.live or not any(r.binding.entity is entity for r in self.routes)):
+            return self.duration.tokens(entity)
+        _need(self.live)
         owned = tuple(route for route in self.routes if route.binding.entity is entity)
         _need(entity._is_enabled is True and entity.hass is hass)
         _need(len(owned) == len(entity._trigger_config) and owned,
@@ -226,7 +323,9 @@ class OwnedAutomationGraph:
                   and entity._async_detach_triggers is b.detach
                   and b.removes[b.index] is b.remove)
             rc = _closure(b.remove, b._native.state.__name__, 'async_attach_trigger.<locals>.async_remove')
-            _need(rc['unsub'] is b.unsubscribe and not rc['unsub_track_same']
+            if hasattr(b, '_duration'):
+                self.duration.check_route(route)
+            _need(rc['unsub'] is b.unsubscribe and (hasattr(b, '_duration') or not rc['unsub_track_same'])
                   and b.unsubscribe.func is b._native.event._remove_listener
                   and not b.unsubscribe.keywords
                   and all(actual is expected for actual, expected in zip(b.unsubscribe.args,
@@ -254,7 +353,9 @@ class OwnedAutomationGraph:
         return tuple(tokens)
 
     def owns(self, entity):
-        return self.live and any(route.binding.entity is entity for route in self.routes)
+        return (self.live and any(route.binding.entity is entity for route in self.routes)
+                or self.duration is not None and entity._is_enabled is True
+                and any('for' in c for c in entity._trigger_config))
 
     def check(self):
         for entity in {route.binding.entity for route in self.routes}:
@@ -294,7 +395,9 @@ class OwnedAutomationGraph:
                   and b.data.callbacks is b.callbacks and b.data.listener is b.bus_remove,
                   'automation_retire_callback_owner_changed')
             rc = _closure(b.remove, b._native.state.__name__, 'async_attach_trigger.<locals>.async_remove')
-            _need(rc['unsub'] is b.unsubscribe and not rc['unsub_track_same']
+            if hasattr(b, '_duration'):
+                self.duration.check_route(route)
+            _need(rc['unsub'] is b.unsubscribe and (hasattr(b, '_duration') or not rc['unsub_track_same'])
                   and b.unsubscribe.func is b._native.event._remove_listener
                   and not b.unsubscribe.keywords
                   and all(actual is retained for actual, retained in zip(b.unsubscribe.args,
@@ -306,9 +409,13 @@ class OwnedAutomationGraph:
                       == (1 if key in expected else 0) for key, members in b.callbacks.items())
                   and all(key in b.callbacks for key in expected),
                   'automation_retire_route_membership_changed')
+            if hasattr(b, '_duration'):
+                self.duration.validate_retire(route)
             plans.append((route, expected, route.before if before_attempt else route.target))
         for route, expected, target in reversed(plans):
             b = route.binding
+            if hasattr(b, '_duration') and route.duration_transported:
+                self.duration.retire(route, before_attempt)
             if route.handle is not None:
                 route.handle.cancel()  # only this OWN handle, never native ready work
             for key in expected:

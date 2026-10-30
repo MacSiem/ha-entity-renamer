@@ -570,6 +570,10 @@ class NativeTemplateYAMLServer:
                 from .mixed_yaml_runtime import MixedYAMLConsumers
                 consumer_type = MixedYAMLConsumers
             obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope)
+            from .native_automation_program_composition import AutomationTemplateStateComposition
+            if type(obj.composition) is AutomationTemplateStateComposition:
+                from .native_automation_owned_graph import OwnedAutomationGraph
+                obj.consumers.owned_automation = await OwnedAutomationGraph.with_duration(hass, guard=obj._scope)
             obj._scope()
             obj.receipt_store = native_registry_receipt_store(hass, obj.preparations)
             await obj.receipt_store.initialize()
@@ -673,7 +677,8 @@ class NativeTemplateYAMLServer:
         from .discovery import _runtime_family
         for domain in ('automation', 'script'):
             if domain in self.consumers.loaded or self.evidence.ledger.keys_for_native_projection(domain):
-                family, token = _runtime_family(self.hass, domain)
+                family, token = _runtime_family(self.hass, domain,
+                    owned_automation=getattr(self.consumers, "owned_automation", None))
                 _need(family.status == 'COMPLETE' and token is not None, 'source_runtime_unqualified')
         observed = await async_observe_discovery_inputs(self.hass, guard=self._scope)
         self._scope()

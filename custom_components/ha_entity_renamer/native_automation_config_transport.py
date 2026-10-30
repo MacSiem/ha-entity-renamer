@@ -95,7 +95,9 @@ def _call_scope(hass, before, after):
         script = entity.action_script if key[0] == 'automation' else entity.script
         _idle_census(script)
         if key[0] == 'automation' and entity._is_enabled:
-            _need(all(cfg.get('platform') == 'state' and 'for' not in cfg
+            from datetime import timedelta
+            _need(all(cfg.get('platform') == 'state'
+                      and ('for' not in cfg or type(cfg['for']) is timedelta and cfg['for'] > timedelta(0))
                       and cfg.get('enabled', True) is True and 'variables' not in cfg
                       for cfg in entity._trigger_config), 'automation_opaque_caller_unsupported')
     return entities, frozenset(admitted), frozenset(changed)

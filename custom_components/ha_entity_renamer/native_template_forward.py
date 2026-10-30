@@ -76,7 +76,7 @@ class _UnchangedConsumers:
         obj.check()
         return obj
 
-    async def bind_sources(self, receipt, evidence, *, guard):
+    async def bind_sources(self, receipt, evidence, *, guard, owned_automation=None):
         from .yaml_source_binding import async_bind_original_runtime, _RuntimeSourceSampler
         from .native_discovery_inputs import async_observe_discovery_inputs
         from .discovery import _runtime_family
@@ -84,16 +84,16 @@ class _UnchangedConsumers:
         # _runtime_sample's absent-component path cannot prove loaded emptiness.
         for domain in ('automation', 'script'):
             if domain in self.loaded or evidence.ledger.keys_for_native_projection(domain):
-                family, token = _runtime_family(self.hass, domain)
+                family, token = _runtime_family(self.hass, domain, owned_automation=owned_automation)
                 _need(family.status == 'COMPLETE' and token is not None,
                       domain + '_runtime_unqualified')
-        bound = await async_bind_original_runtime(self.hass, receipt, evidence, guard=guard)
+        bound = await async_bind_original_runtime(self.hass, receipt, evidence, guard=guard, owned_automation=owned_automation)
         guard()
         _need(bound.verified, 'source_runtime_unqualified')
         observed = await async_observe_discovery_inputs(self.hass, guard=guard)
         guard()
         sampler = _RuntimeSourceSampler.bind(evidence, observed)
-        sample = sampler.sample(self.hass, evidence, observed)
+        sample = sampler.sample(self.hass, evidence, observed, owned_automation=owned_automation)
         _need(not sample[1] and sample[0] == bound.rows and sample[2] == bound.tokens,
               'source_runtime_changed')
         self.evidence, self.observed, self.runtime_sample, self.runtime_sampler = (
@@ -113,7 +113,8 @@ class _UnchangedConsumers:
         if self.runtime_sample is not None:
             from .yaml_source_binding import _RuntimeSourceSampler
             _need(type(self.runtime_sampler) is _RuntimeSourceSampler
-                  and self.runtime_sampler.sample(self.hass, self.evidence, self.observed)
+                  and self.runtime_sampler.sample(self.hass, self.evidence, self.observed,
+                      owned_automation=getattr(self, "owned_automation", None))
                       == self.runtime_sample, 'source_runtime_changed')
 
     def physical(self):
