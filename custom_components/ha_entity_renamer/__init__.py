@@ -95,7 +95,7 @@ class Runtime:
     async def recovery_restore(self, hass, operation_id, fingerprint, *, guard, refresh):
         return await self._recovery(hass, 'restore', operation_id, fingerprint, guard=guard, refresh=refresh)
 
-    async def native_yaml_prepare(self, hass, mapping, *, actor_id, guard, refresh, entity_names=None):
+    async def native_yaml_prepare(self, hass, mapping, *, actor_id, guard, refresh, entity_names=None, device_names=None):
         """Private ordinary mapping -> server-owned immutable retained review.
 
         No mutation endpoint or family readiness is granted by this method.
@@ -115,20 +115,24 @@ class Runtime:
             await refresh()
             current()
             session = await NativeTemplateStateServer.prepare(hass, mapping, guard=current, refresh=refresh,
-                entity_names=entity_names)
+                entity_names=entity_names, device_names=device_names)
             try:
                 current()
                 plan, operation = session.plan, session.operation_id
-                count = len(session.registry_changes)
+                count = sum(change.kind == 'entity' for change in session.registry_changes)
+                devices = sum(change.kind == 'device' for change in session.registry_changes)
                 self.reviews[operation] = _PreparedReview(actor_id, plan, count)
                 changes = []
                 for change in session.registry_changes:
                     before, after = change.before, change.after
+                    keys = ('entity_id', 'name') if change.kind == 'entity' else ('name_by_user',)
                     fields = {key: {'before': before.get(key), 'after': after.get(key)}
-                              for key in ('entity_id', 'name') if before.get(key) != after.get(key)}
-                    changes.append({'entity_id': before['entity_id'], 'fields': fields})
+                              for key in keys if before.get(key) != after.get(key)}
+                    target = ({'entity_id': before['entity_id']} if change.kind == 'entity'
+                              else {'device_id': change.identity})
+                    changes.append({**target, 'fields': fields})
                 return {'operation_id': operation, 'fingerprint': plan.fingerprint,
-                    'entity_count': count, 'changes': changes,
+                    'entity_count': count, 'device_count': devices, 'changes': changes,
                     'migration_ready': False, 'family_complete': False}
             finally:
                 session.close()

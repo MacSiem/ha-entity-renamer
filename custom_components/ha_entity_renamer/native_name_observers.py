@@ -29,9 +29,9 @@ class NativeNameObserver:
                                                include_disabled_entities=True)
         # A combined ID/name update retains this immutable native UUID. The
         # original ID can legitimately be absent after the single native call.
-        rows = [row for row in registry.entities.values() if row.id == change.identity]
-        require(len(rows) == 1 and rows[0].entity_id in
-                (change.before['entity_id'], change.after['entity_id']), 'name_entity_missing')
+        rows = [row for entity_id in {change.before['entity_id'], change.after['entity_id']}
+                if (row := registry.async_get(entity_id)) is not None]
+        require(len(rows) == 1 and rows[0].id == change.identity, 'name_entity_missing')
         return rows
 
     def _object(self, row):

@@ -205,7 +205,7 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
             before = await self._read(guard)
             self.chain.verify_intent_source(intent, context, before)
             guard()
-            if self._template_state_root is not None:
+            if self._template_state_root is not None and change.mapping:
                 if binding is not None:
                     raise Refused('template_state_helper_effect_composition_unqualified')
                 from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect

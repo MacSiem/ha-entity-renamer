@@ -11,7 +11,7 @@ from pathlib import Path
 import uuid
 
 from .transaction import Refused, Plan, Step, Position
-from .native_template_yaml_server import NativeTemplateYAMLServer
+from .native_template_yaml_server import NativeTemplateYAMLServer, _registry_history_mapping
 from .native_template_forward import _UnchangedConsumers
 from .native_input_baseline import _drained
 from .native_template_state_composition import TemplateStateComposition, MixedTemplateStateComposition
@@ -60,7 +60,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             self.program, guard=self._scope)
         self._scope()
         active = frozenset(next(iter(change.mapping)) for index, change in enumerate(self.registry_changes)
-                           if record.phases[index] == 'verified')
+                           if change.mapping and record.phases[index] == 'verified')
         identities = set(self.observer.identities.values())
         _need(actual.prefix.active == active and actual.yaml_position == 'original'
               and len(actual.rows) == len(identities)
@@ -94,7 +94,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         domains = self.receipt.changed_domains
         self.mixed_state = domains != ('template',)
-        _need(not (self.entity_names and self.mixed_state), 'selected_names_mixed_lifecycle_unsupported')
+        _need(not ((self.entity_names or self.device_names) and self.mixed_state),
+              'selected_names_mixed_lifecycle_unsupported')
         if self.mixed_state:
             from .yaml_transaction import _assert_mixed_state_scope
             from .mixed_yaml_runtime import MixedYAMLConsumers
@@ -105,6 +106,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
               and bundle.candidate_sources.sources.source_matched, 'modern_template_state_sources_required')
         await self.consumers.bind_sources(self.receipt, self.evidence, guard=self._scope)
         self._scope()
+        if self.entity_names or self.device_names:
+            _need(not self.consumers.runtime_sample[0], 'selected_names_dependent_lifecycle_unsupported')
         baseline = await async_capture_native_input_baseline(self.hass, self.receipt, guard=self._scope)
         self._scope()
         documents = {f.key: json.loads(f.raw) for f in baseline.files}
@@ -127,6 +130,22 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 fields['name'] = self.entity_names[old]
             registry.append(await bridge.prepare('entity', source[0]['id'], fields, self._scope))
             self._scope()
+        for entity_id, name in sorted(self.entity_names.items()):
+            if entity_id in self.mapping:
+                continue
+            source = [row for row in rows if row['entity_id'] == entity_id]
+            _need(len(source) == 1 and source[0]['platform'] not in ('automation', 'script'),
+                  'selected_name_source_required')
+            if source[0].get('name') != name:
+                registry.append(await bridge.prepare('entity', source[0]['id'], {'name': name}, self._scope))
+                self._scope()
+        device_rows = documents['core.device_registry']['data']['devices']
+        for identity, name in sorted(self.device_names.items()):
+            source = [row for row in device_rows if row['id'] == identity]
+            _need(len(source) == 1, 'selected_device_source_required')
+            if source[0].get('name_by_user') != name:
+                registry.append(await bridge.prepare('device', identity, {'name_by_user': name}, self._scope))
+                self._scope()
         if self.mixed_state:
             from .native_template_state_yaml import capture_mixed_template_state_yaml
             capture = capture_mixed_template_state_yaml
@@ -148,7 +167,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         prefix = StateBindingPrefix(self.program.sha256, self.operation_id,
             'source-preflight', baseline.digest, frozenset(),
-            tuple(sorted((c.identity, next(iter(c.mapping))) for c in self.registry_changes)))
+            tuple(sorted((c.identity, next(iter(c.mapping))) for c in self.registry_changes if c.mapping)))
         observed = sample_state_bindings(native, self.program, prefix, 'original', documents)
         # Registry and physical consumers retain their actual original IDs.
         physical = tuple(sorted((r.domain.removeprefix('template.'), r.source_key, r.entity.entity_id)
@@ -158,7 +177,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         consumer_ids.update({entity_id: entity_id for _, _, entity_id in physical})
         if self.mixed_state:
             consumer_ids.update({row.entity_id: row.entity_id for row in self.consumers.phases.sample[0]})
-        source_history = await self.history.capture(self.mapping)
+        source_history = await self.history.capture(_registry_history_mapping(self.registry_changes))
         self._scope()
         consumer_history = await self.history.capture(consumer_ids)
         self._scope()

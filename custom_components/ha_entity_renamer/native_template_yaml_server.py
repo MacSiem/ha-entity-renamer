@@ -37,14 +37,47 @@ def _mixed_composition(value):
     return type(value) in (MixedTemplateComposition, MixedTemplateStateComposition)
 
 
-def _source_registry_fields(composition):
-    # Only the qualified selective Template route admits a selected name in
-    # the same native update as its source ID. Other profiles retain old scope.
+def _registry_mapping(changes, composition):
+    """Decode only the immutable server-selected registry field scope."""
     from .native_template_state_composition import TemplateStateComposition
-    result = {'entity_id', 'modified_at'}
-    if type(composition) is TemplateStateComposition:
-        result.add('name')
-    return result
+    names = type(composition) is TemplateStateComposition
+    mapping = {}
+    for change in changes:
+        before, after = change.before, change.after
+        delta = {key for key in set(before) | set(after) if before.get(key) != after.get(key)}
+        _need(before.get('id') == after.get('id') == change.identity, 'source_uuid_required')
+        if change.kind == 'entity':
+            allowed = {'entity_id', 'modified_at'} | ({'name'} if names else set())
+            _need(delta <= allowed, 'source_mapping_required')
+            if change.mapping:
+                _need(len(change.mapping) == 1 and before['platform'] not in ('template', 'automation', 'script')
+                      and not set(mapping) & set(change.mapping), 'source_mapping_required')
+                mapping.update(change.mapping)
+            else:
+                _need(names and 'name' in delta and before['platform'] not in ('automation', 'script')
+                      and bool(change.runtime_before_json), 'selected_name_scope_required')
+            if 'name' in delta:
+                _need(names and bool(change.runtime_before_json), 'selected_name_runtime_required')
+        else:
+            _need(names and change.kind == 'device' and 'name_by_user' in delta
+                  and delta <= {'name_by_user', 'modified_at'} and bool(change.runtime_before_json),
+                  'selected_device_name_scope_required')
+    _need(bool(mapping) and len(set(mapping.values())) == len(mapping)
+          and not set(mapping) & set(mapping.values()), 'independent_mapping_required')
+    return mapping
+
+
+def _registry_history_mapping(changes):
+    """Whole selected source/name population from ORIGINAL preparations only."""
+    ids = set()
+    for change in changes:
+        if change.kind == 'entity':
+            ids.update((change.before['entity_id'], change.after['entity_id']))
+        else:
+            # NativeNameObserver captured every associated row before effects.
+            baseline = json.loads(change.runtime_before_json)
+            ids.update(item['row']['entity_id'] for item in baseline['entities'].values())
+    return {key: key for key in sorted(ids)}
 
 
 def _baseline_stamp(value):
@@ -132,24 +165,30 @@ class NativeTemplateYAMLServer:
         return obj
 
     @classmethod
-    async def prepare(cls, hass, mapping, *, guard, refresh, entity_names=None):
+    async def prepare(cls, hass, mapping, *, guard, refresh, entity_names=None, device_names=None):
         from .manifest import parse_manifest
         _need(type(mapping) is dict and bool(mapping)
               and all(type(k) is str and type(v) is str for k, v in mapping.items()), 'mapping_required')
         from .native_template_state_server import NativeTemplateStateServer
         names = {} if entity_names is None else entity_names
-        _need(type(names) is dict and set(names) <= set(mapping)
-              and all(type(value) is str for value in names.values())
-              and (not names or cls is NativeTemplateStateServer), 'selected_source_names_required')
-        names = dict(names)
+        devices = {} if device_names is None else device_names
+        _need(type(names) is dict and type(devices) is dict
+              and all(type(key) is str and type(value) is str for key, value in names.items())
+              and all(type(key) is str and type(value) is str for key, value in devices.items())
+              and (not (names or devices) or cls is NativeTemplateStateServer),
+              'selected_registry_names_required')
+        names, devices = dict(names), dict(devices)
+        selected = set(mapping) | set(names)
         parsed = parse_manifest({'entities': [
-            {'entity_id': old, 'proposed_entity_id': new,
-             'proposed_name': names.get(old)} for old, new in mapping.items()]})
-        _need(len(parsed.entities) == len(mapping)
+            {'entity_id': old, 'proposed_entity_id': mapping.get(old, old),
+             'proposed_name': names.get(old)} for old in sorted(selected)],
+            'devices': [{'device_id': identity, 'proposed_name': name}
+                        for identity, name in sorted(devices.items())]})
+        _need(len(parsed.entities) == len(selected) and len(parsed.devices) == len(devices)
               and len(set(mapping.values())) == len(mapping)
               and not set(mapping) & set(mapping.values()), 'independent_mapping_required')
         obj = await cls._open(hass, guard=guard, refresh=refresh)
-        obj.mapping, obj.entity_names = dict(mapping), names
+        obj.mapping, obj.entity_names, obj.device_names = dict(mapping), names, devices
         try:
             async with obj.locks.hold(obj._scope):
                 await obj._prepare()
@@ -377,7 +416,7 @@ class NativeTemplateYAMLServer:
             consumers = self.observer.history_consumers
         else:
             consumers = tuple(sorted(v[0] for v in self.observer.identities.values()))
-        source_ids = tuple(sorted(set(self.mapping) | set(self.mapping.values())))
+        source_ids = tuple(_registry_history_mapping(self.registry_changes))
         def physical():
             self.consumers.physical()
             self.observer.native.sources()
@@ -394,6 +433,8 @@ class NativeTemplateYAMLServer:
                           and sorted({r['id'] for r in metadata['statistics'].values()}) == snapshot['statistic_ids'],
                           'history_identity_changed')
                 for change in self.registry_changes:
+                    if not change.mapping:
+                        continue
                     metadata = read_metadata(sql, tuple(sorted(set(change.mapping) | set(change.mapping.values()))))
                     check = verify_rollback if next(iter(change.mapping)) in metadata['states'] else verify
                     _need(check(change.mapping, json.loads(change.recorder_before_json), metadata),
@@ -505,16 +546,7 @@ class NativeTemplateYAMLServer:
                        for s in obj.plan.steps]
             obj.registry_changes, obj.change = tuple(changes[:-1]), changes[-1]
             _need(set(obj.digests) == {s.prepared_ref for s in obj.plan.steps}, 'preparation_scope')
-            obj.mapping = {}
-            for change in obj.registry_changes:
-                _need(change.kind == 'entity' and len(change.mapping) == 1
-                      and change.before['platform'] != 'template'
-                      and set(k for k in change.before if change.before.get(k) != change.after.get(k))
-                          <= _source_registry_fields(obj.composition), 'source_mapping_required')
-                _need(not set(obj.mapping) & set(change.mapping), 'duplicate_source')
-                obj.mapping.update(change.mapping)
-            _need(len(set(obj.mapping.values())) == len(obj.mapping)
-                  and not set(obj.mapping) & set(obj.mapping.values()), 'independent_mapping_required')
+            obj.mapping = _registry_mapping(obj.registry_changes, obj.composition)
             consumer_type = _UnchangedConsumers
             if _mixed_composition(obj.composition):
                 from .mixed_yaml_runtime import MixedYAMLConsumers
@@ -580,18 +612,7 @@ class NativeTemplateYAMLServer:
             changes = [decode_change(obj.preparations.resolve(s.prepared_ref, obj.digests[s.prepared_ref]))
                        for s in plan.steps]
             obj.registry_changes, obj.change = tuple(changes[:-1]), changes[-1]
-            obj.mapping = {}
-            for change in obj.registry_changes:
-                _need(change.kind == 'entity' and len(change.mapping) == 1
-                      and change.before['platform'] != 'template'
-                      and set(k for k in change.before if change.before.get(k) != change.after.get(k))
-                          <= _source_registry_fields(obj.composition)
-                      and not set(obj.mapping) & set(change.mapping), 'source_mapping_required')
-                obj.mapping.update(change.mapping)
-            _need(len(set(obj.mapping.values())) == len(obj.mapping)
-                  and not set(obj.mapping) & set(obj.mapping.values()), 'independent_mapping_required')
-            _need(all(change.before['platform'] not in ('automation', 'script')
-                      for change in obj.registry_changes), 'dependent_source_identity_unsupported')
+            obj.mapping = _registry_mapping(obj.registry_changes, obj.composition)
             consumer_type = _UnchangedConsumers
             if _mixed_composition(obj.composition):
                 from .mixed_yaml_runtime import MixedYAMLConsumers
