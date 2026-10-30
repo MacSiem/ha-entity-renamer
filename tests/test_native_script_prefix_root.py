@@ -177,3 +177,103 @@ class NativeScriptPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 sys.monitoring.set_local_events(tool, code, 0)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
             sys.monitoring.free_tool_id(tool)
+
+    async def test_script_prefix_two_sources_full_forward_and_fresh_inverse(self):
+        from homeassistant.core import Context
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        runtime, mapping, uuids, _, original = await self.data(with_automation=False)
+        hass, root = self.f.hass, self.f.root
+        first = next(iter(mapping))
+        other = type(self.producer)()
+        other._attr_unique_id = 'script-prefix-second-native-producer'
+        other._attr_name = 'Script prefix other source'
+        other._attr_native_value = 7
+        await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([other])
+        second = other.entity_id
+        mapping[second] = 'sensor.script_prefix_other_next'
+        uuids[second] = self.f.entity.async_get(second).id
+        template_path = root / 'template.yaml'
+        template_path.write_text(template_path.read_text() +
+            '- unique_id: script_prefix_other\n  sensor:\n  - unique_id: value\n' +
+            '    name: Script prefix other consumer\n' +
+            '    state: "{{ states(' + repr(second) + ') | int(0) * 3 }}"\n')
+        script_path = root / 'mixed_scripts.yaml'
+        script_path.write_text('mixed_source:\n  sequence:\n' +
+            '  - event: mixed_yaml_script_result\n    event_data:\n' +
+            '      value: "{{ (states(' + repr(first) + ') | int(0)) + (states(' +
+            repr(second) + ') | int(0)) }}"\n')
+        for domain in ('template', 'script'):
+            await hass.services.async_call(domain, 'reload', {}, blocking=True, context=Context())
+        await hass.async_block_till_done()
+        for name in ('template.yaml', 'mixed_scripts.yaml'):
+            original[name] = (root / name).read_bytes()
+        self.identities = {(platform.domain, entity.unique_id):
+            (entity.entity_id, None if (row := self.f.entity.async_get(entity.entity_id)) is None else row.id)
+            for platform in async_get_platforms(hass, 'template') for entity in platform.entities.values()}
+        await self.stimulus(17)
+        await self._flush_documents()
+        events = []
+        self.addCleanup(hass.bus.async_listen('mixed_yaml_script_result',
+            lambda event: events.append(str(event.data['value']))))
+        await hass.services.async_call('script', 'mixed_source', {}, blocking=True, context=Context())
+        self.assertEqual(events, ['24'])
+        entity = next(iter(hass.data[DATA_INSTANCES]['script'].entities))
+        script, service = entity.script, hass.services._services['script']['mixed_source']
+        history = self.module('history_guard').NativeHistoryGuard(self.module('recorder_guard').NativeRecorderGuard(hass))
+        before_history = await history.capture(mapping)
+        phase_type = self.module('native_script_prefix_phase').NativeScriptPrefixPhase
+        code, prefixes = phase_type.accepted.__code__, []
+        tool = next(index for index in range(6) if sys.monitoring.get_tool(index) is None)
+        sys.monitoring.use_tool_id(tool, 'actual accepted Script source prefixes')
+        def accepted(code_arg, offset, result):
+            phase = sys._getframe(1).f_locals.get('self')
+            if type(phase) is phase_type and phase.root.hass is hass:
+                prefixes.append(frozenset(phase.mask))
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        try:
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, accepted)
+            sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_RETURN)
+            result = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+            self.assertEqual(result['state'], 'applied')
+            self.assertEqual(events, ['24'])
+            record = await runtime.journal.load(result['operation_id'])
+            baseline, composition = runtime.preparations.resolve_composition(record.plan.native_inputs)
+            program = composition.dependent_config_program
+            order = tuple(sorted(mapping))
+            self.assertEqual(program.source_order, order)
+            self.assertNotEqual(program.rows(frozenset()), program.rows(frozenset(order[:1])))
+            self.assertNotEqual(program.rows(frozenset(order[:1])), program.rows(frozenset(order)))
+            self.assertIs(entity.script, script)
+            self.assertIs(hass.services._services['script']['mixed_source'], service)
+            other._attr_native_value = 19
+            other.async_write_ha_state()
+            await self.stimulus(13)
+            self.assertEqual(hass.states.get(other.entity_id).state, '19')
+            await hass.services.async_call('script', 'mixed_source', {}, blocking=True, context=Context())
+            self.assertEqual(events, ['24', '32'])
+            reverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
+                guard=lambda: None, refresh=refresh)
+            self.assertEqual(reverse['state'], 'rolled_back')
+            self.assertEqual(prefixes, [frozenset(order[:1]), frozenset(order), frozenset(order[:1]), frozenset()])
+            self.assertIs(entity.script, script)
+            self.assertIs(hass.services._services['script']['mixed_source'], service)
+            self.assertEqual(events, ['24', '32'])
+            for old, new in mapping.items():
+                self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+                self.assertIsNone(self.f.entity.async_get(new))
+            for path, contents in original.items():
+                self.assertEqual((root / path).read_bytes(), contents)
+            other._attr_native_value = 29
+            other.async_write_ha_state()
+            await self.stimulus(23)
+            await hass.services.async_call('script', 'mixed_source', {}, blocking=True, context=Context())
+            self.assertEqual(events, ['24', '32', '52'])
+            self.assertTrue(await history.verify(before_history))
+            self.assertTrue(await history.verify(composition.consumer_history))
+            self.assertFalse(runtime.operation_lock.locked())
+        finally:
+            sys.monitoring.set_local_events(tool, code, 0)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, None)
+            sys.monitoring.free_tool_id(tool)
