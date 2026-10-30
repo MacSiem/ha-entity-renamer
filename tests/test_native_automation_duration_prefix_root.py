@@ -132,6 +132,9 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_pending_expiry_during_active_root_keeps_one_action_and_fresh_inverse(self):
         await self._duration_case(mode='active_expiry')
 
+    async def test_native_pending_context_drift_cannot_acknowledge_active_expiry(self):
+        await self._duration_case(mode='history_context')
+
     async def _duration_case(self, *, mode):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -140,7 +143,8 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         old,new = next(iter(mapping.items()))
         multi = mode in ('multi','multi_foreign')
         partial = mode.startswith('partial_')
-        active_expiry = mode=='active_expiry'
+        history_context = mode=='history_context'
+        active_expiry = mode in ('active_expiry','history_context')
         foreign = mode in ('foreign','transient','multi_foreign')
         meaningful = active_expiry or mode in ('meaningful','foreign','replace','multi','multi_foreign')
         pending = partial or active_expiry or mode in ('pending','cancel','from_only','attribute','rollback','foreign_route','orphan','replace','transient')
@@ -268,6 +272,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 native_pending['cancel_job'],native_pending['handle'],native_pending['handle'].when(),
                 native_pending['handle']._context,native_pending['timer_job'],native_pending['same_job'],
                 native_pending['action'],history['from_s'],history['to_s'],history['event'],history['event'].context)
+            original_context_id=history['event'].context.id
         else:
             self.assertEqual(saved,())
             native_tuple=None
@@ -325,6 +330,8 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         faulted=False
         foreign_partial=None
         expiries=[]
+        context_drift=[]
+        drift_result=[]
         def guard():
             if revoked:
                 raise PermissionError('fixture pre-effect authorization loss')
@@ -381,6 +388,11 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 self.producer._attr_native_value=31
                 self.producer.async_write_ha_state()
                 emitted.append(hass.states.get(new))
+            if code is codes[0] and actor.hass is hass and history_context and len(handoffs)==1:
+                def foreign_context_edit():
+                    context_drift.append(native_tuple[13].id)
+                    native_tuple[13].id=Context().id
+                hass.loop.call_later(0.01,foreign_context_edit)
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
         async def check_rows(bound,active):
@@ -463,6 +475,20 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     for name,content in original.items():
                         self.assertEqual((root/name).read_bytes(),content)
                     return
+                if history_context:
+                    with self.assertRaises((self.module('transaction').Refused,ValueError)):
+                        unexpected=await runtime.native_forward(hass,mapping,guard=lambda:None,refresh=refresh)
+                        drift_result.append({'state':unexpected['state'],
+                            'parent_unchanged':bool(actions) and actions[0].context.parent_id==original_context_id})
+                    self.assertEqual(context_drift,[original_context_id])
+                    self.assertEqual(len(handoffs),1)
+                    self.assertEqual(handoffs[0].api_calls,1)
+                    witness=roots[0].consumers.phases.graph.witness
+                    self.assertFalse(witness.finished)
+                    self.assertIsNotNone(witness.error)
+                    self.assertFalse(any(record.state=='terminal'
+                        for record in roots[0].consumers.phases.graph.duration.expiry.records.values()))
+                    return
                 result=await runtime.native_forward(hass,mapping,guard=lambda:None,refresh=refresh)
                 self.assertEqual(result['state'],'applied')
                 self.assertIs(result['family_complete'],False)
@@ -480,7 +506,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((len(actions),len(scripts)),(1,1))
                     self.assertEqual(expiries,[(True,)],'Expiry must run in the actual active Root')
                     self.assertEqual(str(actions[0].data['bound']),new)
-                    self.assertEqual(actions[0].context.parent_id,native_tuple[13].id)
+                    self.assertEqual(actions[0].context.parent_id,original_context_id)
                     self.assertEqual(native_pending['handle'].when(),native_tuple[5])
                     self.assertIs(native_pending['handle']._context,native_tuple[6])
                     self.assertEqual(len(slow),1)
@@ -629,6 +655,8 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         finally:
             if active_expiry:
                 print('NATIVE_DURATION_ACTIVE_EXPIRIES',expiries)
+            if history_context:
+                print('NATIVE_DURATION_CONTEXT_DRIFT_RESULT',drift_result)
             for code in codes:
                 sys.monitoring.set_local_events(tool,code,0)
             sys.monitoring.register_callback(tool,sys.monitoring.events.PY_START,None)
