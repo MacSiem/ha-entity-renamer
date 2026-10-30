@@ -329,6 +329,11 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             frame=sys._getframe(1);actor=frame.f_locals.get('self')
             if active_expiry and code is codes[5] and frame.f_locals.get('job') is native_pending['same_job']:
                 expiries.append(tuple(root.consumers.phases.graph.live for root in roots))
+                live=[root for root in roots if root.consumers.phases.graph.live]
+                self.assertEqual(len(live),1)
+                node=live[0].consumers.phases.active[0]
+                self.assertIs(live[0].chain.active,node.intent)
+                self.assertEqual(node.phase,'registry_attempted')
             if code is codes[0] and actor.hass is hass:
                 handoffs.append(actor)
                 if len(handoffs)==1 and meaningful:
@@ -618,6 +623,8 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(actions[0].data['to_id']),new if meaningful else old)
                 self.assertEqual(cap.pending(cap.capture(source))[0],())
         finally:
+            if active_expiry:
+                print('NATIVE_DURATION_ACTIVE_EXPIRIES',expiries)
             for code in codes:
                 sys.monitoring.set_local_events(tool,code,0)
             sys.monitoring.register_callback(tool,sys.monitoring.events.PY_START,None)

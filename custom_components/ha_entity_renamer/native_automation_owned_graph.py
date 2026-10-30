@@ -262,9 +262,9 @@ class OwnedAutomationGraph:
               and sum(j is job for j in b.callbacks.get(pending['key'], ())) == 1
               and not any(j is job for key, members in b.callbacks.items()
                           if key != pending['key'] for j in members)
-              and not handle.cancelled() and handle._loop is self.hass.loop
-              and sum(h is handle for h in self.hass.loop._scheduled) == 1,
+              and not handle.cancelled() and handle._loop is self.hass.loop,
               'automation_duration_dispatch_retained_edges')
+        self.duration.expiry.location(handle,b)
         return (_value(pending['clear']), _value(pending['cancel']),
                 _value(pending['cancel_listener']), _value(pending['predicate']),
                 _value(wrapper), shape, handle.when(), id(handle._context),
@@ -436,8 +436,9 @@ class OwnedAutomationGraph:
             self.registrations(self.hass, entity)
 
     def pending(self):
-        return any(route.queue or route.handle is not None or route.duration_dispatch is not None
-                   for route in self.routes)
+        return (any(route.queue or route.handle is not None or route.duration_dispatch is not None
+                    for route in self.routes)
+                or self.duration is not None and self.duration.expiry.pending())
 
     def retire(self, *, before_attempt=False):
         if not self.live:
@@ -519,3 +520,9 @@ class OwnedAutomationGraph:
             b.keyed_job.target = b.listener
         self.live, self.overlap = False, False
         self.routes.clear()
+        # Successful witness.finish keeps its original monitor until this
+        # final synchronous native retirement has actually completed.
+        if self.duration is not None:
+            self.duration.expiry.detach(witness)
+        if witness.finished:
+            witness.close()

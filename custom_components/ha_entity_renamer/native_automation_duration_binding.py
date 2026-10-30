@@ -167,10 +167,13 @@ class NativeAutomationDurationCapability:
             '_run_async_call_action','async_track_state_change_event')]
         self.methods,self.codes = prove_methods(native.root,native.pins,self.refs)
         self.functions = tuple(_value(f) for f in self.methods)
+        from .native_automation_duration_expiry import NativeDurationExpiry
+        self.expiry = NativeDurationExpiry(self)
         self.check_sources()
 
     def check_sources(self):
         self.native.check()
+        self.expiry.check_sources()
         unchanged(self.refs,self.methods,self.codes)
         _need(tuple(_value(getattr(o,n)) for o,n in self.refs) == self.functions
               and self.native.state.async_track_same_state is self.native.event.async_track_same_state,
@@ -245,7 +248,7 @@ class NativeAutomationDurationCapability:
             ('period',id(c['period'])),('unsub_track_same',id(c['unsub_track_same'])))
 
     def pending(self,b):
-        """Full native U/F/A/H and cancel-job census; orphan or ready => refusal."""
+        """Full native census; only registered active-route H may enter ready."""
         from homeassistant.core import Event,State,Context,HassJobType
         self.check_sources()
         from contextvars import Context as TimerContext
@@ -260,6 +263,12 @@ class NativeAutomationDurationCapability:
             _need(set(u)=={'async_remove_state_for_cancel','async_remove_state_for_listener'},'duration_clear_cells')
             cancel,timer=u['async_remove_state_for_cancel'],u['async_remove_state_for_listener']
             _need(type(period[key]) is timedelta and period[key]==literal_duration(b.config),'duration_period_changed')
+            occurrence = self.expiry.for_clear(b,key,clear)
+            if occurrence is not None and occurrence.state == 'active':
+                if self.expiry.active(occurrence):
+                    pending.append(occurrence.pending)
+                rows.append(occurrence.row)
+                continue
             if cancel is None and timer is None:
                 rows.append((key,id(clear),None));continue
             _need(type(cancel) is partial and cancel.func is e._remove_listener
@@ -280,9 +289,9 @@ class NativeAutomationDurationCapability:
             _need(type(handle) is asyncio.TimerHandle and handle._loop is b.hass.loop
                   and getattr(timer,'__func__',None) is asyncio.TimerHandle.cancel and not handle.cancelled()
                   and handle._callback is e._run_async_call_action and len(handle._args)==2
-                  and handle._args[0] is b.hass and type(handle._context) is TimerContext
-                  and sum(h is handle for h in b.hass.loop._scheduled)==1
-                  and not any(h is handle for h in b.hass.loop._ready),'duration_timer_not_scheduled')
+                  and handle._args[0] is b.hass and type(handle._context) is TimerContext,
+                  'duration_timer_edges_changed')
+            self.expiry.location(handle,b)
             tj=handle._args[1]
             _need(type(tj) is n.HassJob and tj.job_type is HassJobType.Callback,'duration_timer_job')
             f=_nested(tj.target,e.async_track_same_state,'state_for_listener')
@@ -331,7 +340,9 @@ class NativeAutomationDurationCapability:
             rows.append((key,id(clear),id(handle),handle.when(),id(handle._context),_job(tj),_job(sj),
                 _value(action),_value(predicate),id(a['event'].context),id(a['from_s']),id(a['to_s']),
                 id(cancel),id(keys),tuple(keys),id(job),_shape(target)))
-        expected_jobs={id(p['cancel_job']):p for p in pending};found=set()
+        expected_jobs={id(p['cancel_job']):p for p in pending
+            if (occurrence := self.expiry.for_clear(b,p['key'],p['clear'])) is None
+            or occurrence.state != 'active' or self.expiry.active(occurrence)};found=set()
         # Cancel-route census detects native match_all overwrites/orphans.
         for key,members in b.callbacks.items():
             _need(type(members) is list and len({id(j) for j in members})==len(members),'duration_duplicate_route')
@@ -386,10 +397,13 @@ class NativeAutomationDurationCapability:
             _shape(b.listener),tuple((k,id(b.callbacks[k])) for k in b.original_keys),self.stable(b))
 
     def lock(self,route):
-        route.duration_snapshot=self.pending(route.binding)[1]
+        pending, rows = self.pending(route.binding)
+        self.expiry.admit(route,pending,rows)
+        route.duration_snapshot=rows
 
     def check_route(self,route):
         _need(self.pending(route.binding)[1]==route.duration_snapshot,'duration_pending_changed_during_root')
+        self.expiry.check_route(route)
 
     def transport(self,route,target):
         b=route.binding;mapping=dict(zip(route.before,target,strict=True))
@@ -481,8 +495,7 @@ class NativeAutomationDurationCapability:
             rows.append(tuple(_retained_value(v,omitted) for _,v in before))
         for p in route.duration_pending:
             handle=p['handle']
-            _need(not handle.cancelled() and sum(h is handle for h in self.hass.loop._scheduled)==1
-                  and not any(h is handle for h in self.hass.loop._ready), 'duration_rollback_timer_changed')
+            self.expiry.location(handle,route.binding)
             rows.append((id(handle),handle.when(),id(handle._loop),id(handle._context),
                 id(handle._callback),tuple(map(id,handle._args)),
                 tuple(_retained_value(p[n],omitted) for n in
@@ -498,6 +511,7 @@ class NativeAutomationDurationCapability:
 
     def validate_retire(self,route,before_attempt=False,shadow=None):
         if before_attempt and route.duration_operations is not None:
+            self.expiry.before_rollback(route)
             self.check_sources()
             for p in route.duration_pending:
                 if p['cancel_job'] in self.wrappers:

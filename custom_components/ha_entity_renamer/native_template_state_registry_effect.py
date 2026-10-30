@@ -141,6 +141,9 @@ class NativeTemplateStateRegistryEffect:
                 if self.script_phase is not None and hasattr(self.script_phase, 'graph'):
                     self.script_phase.finish_native(self)
             finally:
+                # Duration occurrence observation stays live through the final
+                # synchronous phase graph retirement, including its checks.
+                self.witness.close()
                 if self.ingress is not None:
                     self.ingress.retire()
 

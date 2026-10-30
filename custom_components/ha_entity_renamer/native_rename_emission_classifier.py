@@ -202,6 +202,10 @@ class _Occurrences:
         self.key = available[0]
         monitor.use_tool_id(self.key, _MONITOR_NAME)
         self.masks = {}
+        self.duration = None
+        graph = witness.automation_graph
+        if graph is not None and graph.duration is not None:
+            self.duration = graph.duration.expiry
         start = monitor.events.PY_START
         end = monitor.events.PY_RETURN
         # PY_UNWIND is not a local event (CPython sys.monitoring API). Only
@@ -212,6 +216,8 @@ class _Occurrences:
             names += ('automation_action', 'automation_run', 'script_run')
         for name in names:
             self.masks[witness.codes[name]] = start | end
+        if self.duration is not None:
+            self.masks[self.duration.expiry_code] = start | end
         # On min, dispatch IS fire: its start is deliberately unused. The
         # fanout supplies the authoritative fire-frame identity, independently
         # of monitoring-tool callback ordering.
@@ -219,6 +225,8 @@ class _Occurrences:
             self.masks[witness.codes['fire']] = end
         self.live = True
         try:
+            if self.duration is not None:
+                self.duration.attach(witness)
             monitor.register_callback(self.key, start, self._start)
             monitor.register_callback(self.key, monitor.events.PY_RETURN, self._return)
             monitor.register_callback(self.key, monitor.events.PY_UNWIND, self._unwind)
@@ -233,6 +241,8 @@ class _Occurrences:
     def _start(self, code, offset):
         frame = sys._getframe(1)
         try:
+            if self.duration is not None and code is self.duration.expiry_code:
+                self.duration.started(frame,offset)
             self.witness._started(frame)
         except BaseException as error:
             self.witness._observer_error(error, 'occurrence_observer_failed')
@@ -242,6 +252,8 @@ class _Occurrences:
     def _return(self, code, offset, value):
         frame = sys._getframe(1)
         try:
+            if self.duration is not None and code is self.duration.expiry_code:
+                self.duration.ended(frame,False)
             self.witness._ended(frame, False)
         except BaseException as error:
             self.witness._observer_error(error, 'occurrence_return_failed')
@@ -253,6 +265,11 @@ class _Occurrences:
             return
         frame = sys._getframe(1)
         try:
+            if self.duration is not None and code is self.duration.expiry_code:
+                try:
+                    self.duration.ended(frame,True)
+                finally:
+                    self.witness._signal()
             self.witness._ended(frame, True)
         except BaseException as error:
             self.witness._observer_error(error, 'occurrence_unwind_failed')
@@ -1110,7 +1127,12 @@ class NativeRenameEmissions:
             self._poison('finish_uncertain')
             raise
         finally:
-            self.close()
+            # The owning phase's next operation is synchronous graph.retire.
+            # Retain BOTH original monitors across that final graph check and
+            # retirement; OwnedAutomationGraph.retire closes them afterwards.
+            if not (self.finished and self.automation_graph is not None
+                    and self.automation_graph.live and self.error is None):
+                self.close()
 
     def close(self):
         """Idempotent monitoring cleanup; neither source cancellation nor proof."""
@@ -1125,4 +1147,8 @@ class NativeRenameEmissions:
         finally:
             if self.occurrences is not None:
                 self.occurrences.close()
+            graph = self.automation_graph
+            if (graph is not None and graph.duration is not None and not graph.live
+                    and graph.duration.expiry.witness is self):
+                graph.duration.expiry.detach(self)
             self._signal()
