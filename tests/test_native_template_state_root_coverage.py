@@ -213,9 +213,11 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
         extra = type(self.producer)()
         extra._attr_unique_id = None
         extra._attr_name = 'Rate root population stimulus'
+        population_before = len(hass.states.async_all())
         await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([extra])
         self.assertIsNone(self.f.entity.async_get(extra.entity_id))
         await hass.async_block_till_done()
+        self.assertEqual(len(hass.states.async_all()), population_before + 1)
         self.assertIs(hass.states.get(subject.entity_id), initial)
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
@@ -233,7 +235,10 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
             monitor.register_callback(tool, monitor.events.PY_START, None)
             monitor.free_tool_id(tool)
         self.assertEqual(hass.states.get(subject.entity_id).state, hass.states.get(control.entity_id).state)
-        self.assertEqual(int(hass.states.get(subject.entity_id).state), int(initial.state) + 1)
+        # The held pre-expiry cache can predate another native Template entity's
+        # initial addition. Its numeric value is not an oracle for population.
+        self.assertEqual(len(hass.states.async_all()), population_before + 1)
+        self.assertEqual(int(hass.states.get(subject.entity_id).state), len(hass.states.async_all()) + 1)
         self.assertEqual(path.read_bytes(), original)
         for source, target in mapping.items():
             self.assertEqual(self.f.entity.async_get(source).id, uuids[source])
