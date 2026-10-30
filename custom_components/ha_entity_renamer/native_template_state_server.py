@@ -120,7 +120,9 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             self._scope()
         _need('template' in domains and bundle.original_sources.source_matched
               and bundle.candidate_sources.sources.source_matched, 'modern_template_state_sources_required')
-        await self.consumers.bind_sources(self.receipt, self.evidence, guard=self._scope)
+        bind_sources = (self.consumers.bind_prefix_sources if domains == ('script', 'template')
+                        else self.consumers.bind_sources)
+        await bind_sources(self.receipt, self.evidence, guard=self._scope)
         self._scope()
         if self.entity_names or self.device_names:
             _need(not self.consumers.runtime_sample[0], 'selected_names_dependent_lifecycle_unsupported')
@@ -193,7 +195,9 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             for r in rows if r['platform'] == 'template'}
         consumer_ids.update({entity_id: entity_id for _, _, entity_id in physical})
         if self.mixed_state:
-            consumer_ids.update({row.entity_id: row.entity_id for row in self.consumers.phases.sample[0]})
+            dependent_sample = (self.consumers.runtime_sample if domains == ('script', 'template')
+                                else self.consumers.phases.sample)
+            consumer_ids.update({row.entity_id: row.entity_id for row in dependent_sample[0]})
         source_history = await self.history.capture(_registry_history_mapping(self.registry_changes))
         self._scope()
         consumer_history = await self.history.capture(consumer_ids)

@@ -634,7 +634,9 @@ class NativeTemplateYAMLServer:
                 consumer_type = MixedYAMLConsumers
             obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope)
             obj._scope()
-            await obj.consumers.bind_sources(obj.receipt, obj.evidence, guard=obj._scope)
+            bind_sources = (obj.consumers.bind_prefix_sources if _script_prefix_composition(obj.composition)
+                            else obj.consumers.bind_sources)
+            await bind_sources(obj.receipt, obj.evidence, guard=obj._scope)
             obj._scope()
             obj.receipt_store = native_registry_receipt_store(hass, obj.preparations)
             await obj.receipt_store.initialize()

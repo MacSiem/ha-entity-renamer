@@ -24,6 +24,7 @@ class DependentYAMLRuntime:
         self.sampler = _RuntimeSourceSampler.bind(evidence, observed)
         self.positions = tuple((domain, position) for domain in ('automation', 'script'))
         self.active, self.unresolved = None, False
+        self._assert_reload_idle()
         self.sample = self._sample(self.positions)
         _need(not self.sample[1])
 
@@ -31,8 +32,17 @@ class DependentYAMLRuntime:
         return self.sampler.sample_at_positions(self.hass, self.evidence, self.observed,
                                                 self.receipt, positions)
 
+    def _assert_reload_idle(self):
+        # Readable inventory is not permission to reload every Script.
+        if 'script' in self.receipt.changed_domains:
+            from homeassistant.helpers.entity_component import DATA_INSTANCES
+            component = self.hass.data.get(DATA_INSTANCES, {}).get('script')
+            _need(component is None or all(not entity.script.is_running
+                                          for entity in component.entities))
+
     def check(self):
         _need(not self.unresolved and self.active is None)
+        self._assert_reload_idle()
         _need(self._sample(self.positions) == self.sample)
 
     def begin_reload(self, domain, direction):

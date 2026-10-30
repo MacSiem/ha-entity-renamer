@@ -26,6 +26,12 @@ class MixedYAMLConsumers(_UnchangedConsumers):
         await super().bind_sources(receipt, evidence, guard=guard)
         self.bind_phases(receipt, evidence, self.observed, Position.BEFORE)
 
+    async def bind_prefix_sources(self, receipt, evidence, *, guard):
+        # No domain reload ticket even during private prefix preparation.
+        # Keep the full ORIGINAL sampler until the actual chain is bound.
+        _need(getattr(self, 'phases', None) is None)
+        await super().bind_sources(receipt, evidence, guard=guard)
+
     def bind_phases(self, receipt, evidence, observed, position):
         phases = DependentYAMLRuntime(self.hass, evidence, observed, receipt, position=position)
         self.evidence, self.observed = evidence, observed
