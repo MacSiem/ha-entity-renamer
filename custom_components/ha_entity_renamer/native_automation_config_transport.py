@@ -249,10 +249,26 @@ class NativeAutomationConfigTransport:
             edges.append(edge)
         # Every installed duration consumer of a shared replacement must be in
         # the authenticated call scope. Never silently alter another listener.
-        self._check_duration_aliases(entities, edges)
         self.duration_edges = tuple(edges)
+        self.duration_alias_entities = tuple(entities.items())
+        # Retain authentic history references before writes. An alias scan at a
+        # partial journal prefix must not invoke a live AFTER pending census.
+        from .native_automation_duration_binding import _cells
+        history = []
+        for route in self.graph.routes:
+            binding = route.binding
+            if not hasattr(binding, '_duration'):
+                continue
+            pending, _ = binding._duration.pending(binding)
+            rows = []
+            for item in pending:
+                actual = item['own'].history() if item['own'] is not None else _cells(item['action'])
+                rows.append((item['clear'], actual['from_s'], actual['to_s'], actual['event']))
+            history.append((binding, tuple(rows)))
+        self.duration_alias_history = tuple(history)
+        self.duration_alias_inventory = self._duration_aliases(entities, edges)
 
-    def _check_duration_aliases(self, entities, edges):
+    def _duration_aliases(self, entities, edges):
         """Bounded inventory of configured consumers and foreign mutable aliases.
 
         Shared Template leaves are transported once, but every configured
@@ -282,8 +298,7 @@ class NativeAutomationConfigTransport:
                         _need(not any(id(value) in changed_leaves for value in leaves)
                               or id(cfg) in configured,
                               'automation_duration_shared_consumer_unaccounted')
-            self.duration_alias_inventory = ()
-            return
+            return ()
         allowed = {((id(edge.binding.entity), 'native', edge.binding.index, 'for'),
                     id(edge.binding.config), 'for', id(edge.before)) for edge in edges}
         inventories = []
@@ -351,26 +366,21 @@ class NativeAutomationConfigTransport:
                     touched = id(root) in mutable or any(id(value) in changed_leaves for value in leaves)
                     _need(not touched or id(cfg) in configured,
                           'automation_duration_shared_consumer_unaccounted')
-        for route in self.graph.routes:
-            b = route.binding
-            if not hasattr(b, '_duration'):
-                continue
-            pending, _ = b._duration.pending(b)
+        for b, pending in self.duration_alias_history:
             scan(b.listener_cells.get('_variables'), path=(id(b), 'attach_variables'))
-            for p in pending:
-                history = p['own'].history() if p['own'] is not None else _cells(p['action'])
-                for name in ('from_s', 'to_s'):
-                    state = history[name]
+            for clear, from_state, to_state, event in pending:
+                for name, state in (('from_s', from_state), ('to_s', to_state)):
                     if state is not None:
-                        # Exact native State and semantic attributes were already
-                        # authenticated by pending(). Bypass ReadOnlyDict methods.
                         scan(state.attributes, native_dict=True,
-                             path=(id(b), 'history', id(p['clear']), name, 'attributes'))
-                # Event data contains native State objects, visited explicitly
-                # above; scan its finite container portion for a direct alias.
-                scan(history['event'].data, native_dict=True,
-                     path=(id(b), 'history', id(p['clear']), 'event_data'))
-        self.duration_alias_inventory = tuple(inventories)
+                             path=(id(b), 'history', id(clear), name, 'attributes'))
+                scan(event.data, native_dict=True,
+                     path=(id(b), 'history', id(clear), 'event_data'))
+        return tuple(inventories)
+
+    def _check_duration_aliases(self):
+        actual = self._duration_aliases(dict(self.duration_alias_entities), self.duration_edges)
+        _need(actual == self.duration_alias_inventory,
+              'automation_duration_alias_inventory_changed')
 
     def _actor_graph(self, *, slots=None):
         return tuple((id(a.entity), id(a.script), _graph(a.entity.raw_config, slots=slots),
@@ -381,6 +391,7 @@ class NativeAutomationConfigTransport:
     def check_before(self):
         _need(asyncio.current_task() is self.task and self.phase == 'captured')
         self.guard()
+        self._check_duration_aliases()
         for edge in self.duration_edges:
             edge.check_pins()
             for owner, before, _ in edge.owners:
@@ -458,6 +469,7 @@ class NativeAutomationConfigTransport:
                 log.retain('dict',cache)
                 saved.append((actor.script,name,cache,items,cache_token(items)))
         def cleanup_plan():
+            self._check_duration_aliases()  # global negative proof BEFORE any undo
             _need(self._actor_graph(slots=slots)==self.original, 'automation_cleanup_root_changed')
             _need(all(cache_token(value)==token for value,token in projected),
                   'automation_cleanup_projected_value_changed')
