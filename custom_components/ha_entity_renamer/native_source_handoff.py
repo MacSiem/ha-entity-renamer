@@ -164,6 +164,10 @@ class NativeSourceHandoff:
         _need(asyncio.current_task() is self.owner and threading.get_ident() == self.thread
               and asyncio.get_running_loop() is self.loop, 'owner_changed')
         self.guard()
+        self._native_check()
+
+    def _native_check(self):
+        """Reference/code proof also usable by an owning native event witness."""
         self.audit._native_check()
         unchanged(self.refs, self.methods, self.codes)
         _need(all(method.__globals__ is namespace and all(namespace.get(name) is value for name, value in bindings)
@@ -327,7 +331,7 @@ class NativeSourceHandoff:
             self.new_unsub = self.subscribe(self.hass, self.new, self.source._async_registry_updated,
                                            job_type=HassJobType.Callback)
             self.source.async_on_remove(self.new_unsub)
-            # Genuine row is already committed by native registry. No callback,
+            # Genuine row is already committed by native registry. No consumer callback,
             # State write/remove, API replay or await runs inside this monitor.
             for mapping in self.maps:
                 del mapping[self.old]

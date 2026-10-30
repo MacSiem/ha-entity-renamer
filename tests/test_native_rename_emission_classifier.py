@@ -147,7 +147,20 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_unemitted_value_change_in_remove_hook_is_not_a_neutral_rename(self):
         await self.round_trip(reemit=False, producer_hook=True)
 
-    async def round_trip(self, *, reemit, producer_gap=False, producer_hook=False):
+    async def test_handoff_mode_original_native_events_and_fresh_inverse(self):
+        await self.round_trip(reemit=False, source_handoff=True)
+
+    async def test_handoff_mode_foreign_same_dictionary_stays_foreign(self):
+        await self.round_trip(reemit=True, source_handoff=True)
+
+    async def test_handoff_mode_real_producer_before_api_is_not_rename(self):
+        await self.round_trip(reemit=False, source_handoff=True, producer_gap=True)
+
+    async def test_handoff_mode_unemitted_physical_value_is_meaningful(self):
+        await self.round_trip(reemit=False, source_handoff=True, unemitted=29)
+
+    async def round_trip(self, *, reemit, producer_gap=False, producer_hook=False,
+                         source_handoff=False, unemitted=None):
         from homeassistant.core import callback
         runtime, mapping, uuids, original = await self.data(variant='sensor')
         hass = self.f.hass
@@ -175,11 +188,15 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
         bridge = native.NativeRegistryBridge(io, self.module('recorder_guard').NativeRecorderGuard(hass))
         change = await bridge.prepare('entity', uuids[old], {'entity_id': new}, lambda: None)
         received = []
+        early = []
+        witness = None
         reemitted = set()
         @callback
         def collect(event):
             if event.data.get('entity_id') in (old, new):
                 received.append(event)
+                if witness is not None and witness.is_owned_rename(event):
+                    early.append((event, witness.suppresses_template_boundary(event)))
                 if reemit and id(event.data) not in reemitted:
                     reemitted.add(id(event.data))
                     # A real integration can emit another native bus Event
@@ -195,7 +212,13 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
         renamed = False
         mutation = None
         try:
-            witness = await classifier.NativeRenameEmissions.prepare(io, change, change.after, guard=guard)
+            handoff = None
+            if source_handoff:
+                handoff = await self.module('native_source_handoff').NativeSourceHandoff.prepare(
+                    io, change, change.after, guard=guard)
+                self.addCleanup(handoff.close)
+            witness = await classifier.NativeRenameEmissions.prepare(io, change, change.after, guard=guard,
+                source_handoff=handoff)
             self.addCleanup(witness.close)
             ordinary = []
             if producer_gap:
@@ -204,6 +227,8 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
                 ordinary = received[before_events:]
                 self.assertTrue(ordinary)
                 self.assertEqual(hass.states.get(old).state, '7')
+            if unemitted is not None:
+                self.producer._attr_native_value = unemitted
             mutation = witness.mutate()
             renamed = True
             self.assertIs(type(mutation), native.NativeRegistryMutation)
@@ -211,7 +236,7 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((proof['rename_remove'], proof['rename_add']), (1, 1))
             self.assertTrue(proof['source_tasks_complete'])
             self.assertTrue(proof['dispatches_complete'])
-            if not producer_hook:
+            if not producer_hook and unemitted is None:
                 self.assertTrue(proof['neutral'])
             own = [event for event in received if witness.is_owned_rename(event)]
             self.assertEqual(len(own), 2)
@@ -237,6 +262,12 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(witness.is_owned_rename(second))
             removed = next(event for event in own if event.data['new_state'] is None)
             added = next(event for event in own if event.data['old_state'] is None)
+            if source_handoff:
+                self.assertEqual(next(value for event, value in early if event is added), unemitted is None)
+                self.assertIs(own[0], added)  # genuine ADD precedes structural REMOVE
+            if unemitted is not None:
+                self.assertFalse(proof['neutral'])
+                self.assertEqual(added.data['new_state'].state, str(unemitted))
             self.assertEqual((removed.data['entity_id'], added.data['entity_id']), (old, new))
             if producer_gap:
                 self.assertEqual((removed.data['old_state'].state, added.data['new_state'].state), ('7', '7'))
@@ -253,7 +284,13 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
                 row = self.f.entity.async_get(new)
                 self.assertEqual(_orjson_bytes_default_encoder(row.as_storage_fragment).decode('utf-8'),
                                  mutation.after_json, 'inverse needs exact confirmed owned effect')
-                inverse = await classifier.NativeRenameEmissions.prepare(io, change, change.before, guard=guard)
+                reverse_handoff = None
+                if source_handoff:
+                    reverse_handoff = await self.module('native_source_handoff').NativeSourceHandoff.prepare(
+                        io, change, change.before, guard=guard)
+                    self.addCleanup(reverse_handoff.close)
+                inverse = await classifier.NativeRenameEmissions.prepare(io, change, change.before, guard=guard,
+                    source_handoff=reverse_handoff)
                 self.addCleanup(inverse.close)
                 inverse.mutate()
                 inverse_proof = await inverse.finish()

@@ -273,11 +273,19 @@ class NativeRenameEmissions:
     """One source, one attempt, one genuine IO call, original Events only."""
 
     @classmethod
-    async def prepare(cls, io, change, target, *, guard):
+    async def prepare(cls, io, change, target, *, guard, source_handoff=None):
         _need(type(io) is NativeRegistryIO and type(change) is PreparedRegistryChange,
               'trusted_io_required')
         _need(callable(guard), 'guard_required')
         guard()
+        if source_handoff is not None:
+            from .native_source_handoff import NativeSourceHandoff
+            _need(type(source_handoff) is NativeSourceHandoff
+                  and source_handoff.io is io and source_handoff.change is change
+                  and not source_handoff.attempted and not source_handoff.closed
+                  and target == source_handoff.target, 'source_handoff_binding_required')
+            # The driver detached this exact target before its first await.
+            target = source_handoff.target
         _need(change.kind == 'entity' and change.mapping and type(target) is dict
               and target in (change.before, change.after), 'rename_required')
         before, after = change.before, change.after
@@ -296,6 +304,9 @@ class NativeRenameEmissions:
               and __version__ in ('2025.6.0', '2026.10.2', '2026.10.4'), 'runtime_unavailable')
         self = cls()
         self.io, self.change, self.destination, self.guard = io, change, target, guard
+        self.source_handoff = source_handoff
+        self.handoff_state = self.handoff_semantic = None
+        self.handoff_methods = self.handoff_codes = self.handoff_sites = None
         self.target_row = deepcopy(target)
         source = after if target == before else before
         self.source_id, self.target_id = source['entity_id'], target['entity_id']
@@ -366,6 +377,14 @@ class NativeRenameEmissions:
         self.methods, self.codes, self.sites, self.globals = await self.hass.async_add_executor_job(
             _audit, homeassistant.__file__,
             {**_SOURCES[__version__], 'helpers/event.py': _EVENT_PINS[__version__]}, self.refs, edges)
+        if source_handoff is not None:
+            from .native_source_handoff import NativeSourceHandoff
+            self.handoff_methods = (NativeSourceHandoff.mutate, NativeSourceHandoff._native_check)
+            self.handoff_codes = tuple(method.__code__ for method in self.handoff_methods)
+            def audit_handoff_sites():
+                return (_call_offsets(self.methods['source'], 'async_write_ha_state'),
+                        _call_offsets(self.handoff_methods[0], 'async_remove'))
+            self.handoff_sites = await self.hass.async_add_executor_job(audit_handoff_sites)
         self._owner_guard()
         self.registry = io.registries['entity']
         self.row = self.registry.async_get(self.source_id)
@@ -380,6 +399,11 @@ class NativeRenameEmissions:
                     candidates.append((entity, platform))
         _need(len(candidates) == 1, 'source_graph_unavailable')
         self.source, self.platform = candidates[0]
+        if source_handoff is not None:
+            _need(source_handoff.source is self.source and source_handoff.platform is self.platform
+                  and source_handoff.row is self.row and source_handoff.owner is self.owner
+                  and source_handoff.old == self.source_id and source_handoff.new == self.target_id,
+                  'source_handoff_actor_changed')
         _need(isinstance(self.source, Entity) and type(self.platform) is entity_platform.EntityPlatform
               and self.source.platform is self.platform and self.source.hass is self.hass
               and self.hass.states.get(self.source_id) is not None
@@ -433,6 +457,17 @@ class NativeRenameEmissions:
                          ('create_task', self.hass), ('run_job', self.hass)):
             _need(getattr(getattr(obj, self.refs[key][1]), '__func__', None)
                   is self.methods[key], 'native_instance_binding_changed')
+        if self.source_handoff is not None:
+            from .native_source_handoff import NativeSourceHandoff
+            h = self.source_handoff
+            _need(type(h) is NativeSourceHandoff and h.io is self.io and h.change is self.change
+                  and h.source is self.source and h.platform is self.platform
+                  and h.target is self.destination and h.target == self.target_row
+                  and all(actual is expected for actual, expected in zip(
+                      (NativeSourceHandoff.mutate, NativeSourceHandoff._native_check), self.handoff_methods, strict=True))
+                  and all(method.__code__ is code for method, code in zip(
+                      self.handoff_methods, self.handoff_codes, strict=True)), 'source_handoff_reference_changed')
+            h._native_check()
 
     def _check(self):
         _need(not self.closed and self.error is None, self.error or 'closed')
@@ -523,6 +558,13 @@ class NativeRenameEmissions:
                 and frame.f_locals.get('target') is self.destination):
             return False
         frame = frame.f_back
+        if self.source_handoff is not None:
+            if not (frame is not None and frame.f_code is self.handoff_codes[0]
+                    and frame.f_globals is self.handoff_methods[0].__globals__
+                    and frame.f_locals.get('self') is self.source_handoff
+                    and self.source_handoff.in_native and self.source_handoff.attempted):
+                return False
+            frame = frame.f_back
         return (frame is not None and frame.f_code is self.mutate_code
                 and frame.f_locals.get('self') is self and self.in_mutate
                 and asyncio.current_task() is self.owner
@@ -541,6 +583,16 @@ class NativeRenameEmissions:
                     and self.hass.states.get(self.source_id) is None):
                 return None
             frame = frame.f_back
+            if self.source_handoff is not None:
+                h = self.source_handoff
+                return ('remove' if frame is not None and frame.f_code is self.handoff_codes[0]
+                    and frame.f_globals is self.handoff_methods[0].__globals__
+                    and frame.f_lasti in self.handoff_sites[1] and frame.f_locals.get('self') is h
+                    and h.in_native and h.attempted and h.old_retired
+                    and raw['old_state'] is h.original_state is self.handoff_state
+                    and self.source.registry_entry is h.new_row and self.registry.async_get(self.target_id) is h.new_row
+                    and self.hass.states.get(self.target_id) is frame.f_locals.get('state')
+                    and self.in_mutate else None)
             if not self._edge(frame, 'remove_impl', 'remove_state', self.source):
                 return None
             if frame.f_locals.get('force_remove') is not True:
@@ -569,6 +621,22 @@ class NativeRenameEmissions:
                  ('platform_add_many', 'platform_add_one', self.platform),
                  ('platform_add', 'platform_add_many', self.platform),
                  ('source', 'source_add', self.source))
+        if self.source_handoff is not None:
+            # New ADD is a real write in the SAME native registry handler's
+            # same-id branch, without platform add/remove ancestry.
+            for key, site, obj in chain[:2]:
+                frame = frame.f_back
+                if not self._edge(frame, key, site, obj):
+                    return None
+            frame = frame.f_back
+            h = self.source_handoff
+            return ('add' if self._frame(frame, 'source', self.source)
+                and frame.f_lasti in self.handoff_sites[0] and self._source_frame(frame)
+                and frame.f_locals.get('old') is h.new_row and frame.f_locals.get('registry_entry') is h.new_row
+                and h.in_native and h.attempted and self.source.registry_entry is h.new_row
+                and self.registry.async_get(self.target_id) is h.new_row
+                and self.hass.states.get(self.source_id) is h.original_state is self.handoff_state
+                and self.in_mutate else None)
         for key, site, obj in chain:
             frame = frame.f_back
             if not self._edge(frame, key, site, obj):
@@ -777,6 +845,12 @@ class NativeRenameEmissions:
         if item.phase == 'remove':
             return True
         removed = next((row for row in self.emissions if row.phase == 'remove'), None)
+        if self.source_handoff is not None and removed is None:
+            # ADD arrives before REMOVE in this driver. The genuine current
+            # physical old State was captured at the exact owning API boundary;
+            # it is not installed as a new State or treated as a render result.
+            return (self.handoff_semantic is not None and item.semantic is not None
+                    and self.handoff_semantic == item.semantic)
         return (removed is not None and removed.semantic is not None
                 and item.semantic is not None and removed.semantic == item.semantic)
 
@@ -794,7 +868,13 @@ class NativeRenameEmissions:
         try:
             # This is the ONLY real mutation. The fire witness verifies this
             # exact frame and the SAME prepared/target objects inside the IO.
-            self.mutation = self.io.mutate(self.change, self.destination)
+            if self.source_handoff is None:
+                self.mutation = self.io.mutate(self.change, self.destination)
+            else:
+                self.handoff_state = self.hass.states.get(self.source_id)
+                _need(type(self.handoff_state) is self.State, 'source_handoff_state_missing')
+                self.handoff_semantic = _semantic_state(self.handoff_state, attribute_key_type=self.attribute_key)
+                self.mutation = self.source_handoff.mutate()
             _need(type(self.mutation) is NativeRegistryMutation, 'native_mutation_return')
             return self.mutation
         except BaseException:
@@ -883,6 +963,8 @@ class NativeRenameEmissions:
         if self.closed:
             return
         self.closed = True
+        if self.source_handoff is not None:
+            self.source_handoff.close()
         try:
             if self.fire_monitor is not None:
                 self.fire_monitor.close()
