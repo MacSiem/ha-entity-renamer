@@ -102,7 +102,7 @@ def _call_scope(hass, before, after):
                     configured_duration(cfg, hass)
             _need(all(cfg.get('platform') == 'state'
                       and ('for' not in cfg or type(cfg['for']) is timedelta and cfg['for'] > timedelta(0)
-                           or type(cfg['for']) is Template)
+                           or type(cfg['for']) in (Template, dict))
                       and cfg.get('enabled', True) is True and 'variables' not in cfg
                       for cfg in entity._trigger_config), 'automation_opaque_caller_unsupported')
     return entities, frozenset(admitted), frozenset(changed)
@@ -166,12 +166,25 @@ class NativeAutomationConfigTransport:
                         if a.get('for') != b.get('for'):
                             from .native_automation_scalar_duration import configured_duration
                             from homeassistant.helpers.template import Template
-                            _need(type(configured_duration(cfg, observer.hass)) is Template,
+                            from datetime import timedelta
+                            _need(type(configured_duration(cfg, observer.hass)) is not timedelta,
                                   'automation_literal_duration_edit_unsupported')
-                            _need(type(b.get('for')) is dict and set(b['for']) == {'$template'},
-                                  'automation_duration_after_scalar_required')
-                            probe = Template(b['for']['$template'], observer.hass)
-                            configured_duration({'for': probe}, observer.hass)
+                            # Validate the target's closed typed tree without
+                            # rendering or copying the actual native root.
+                            def target(value):
+                                if type(value) is dict and set(value) == {'$template'}:
+                                    _need(type(value['$template']) is str)
+                                    return Template(value['$template'], observer.hass)
+                                if type(value) is dict and set(value) == {'$map'}:
+                                    pairs = value['$map']
+                                    _need(type(pairs) is list and 0 < len(pairs) <= 5
+                                          and all(type(pair) is list and len(pair) == 2
+                                                  and type(pair[0]) is str for pair in pairs)
+                                          and len({pair[0] for pair in pairs}) == len(pairs))
+                                    return {key: target(child) for key, child in pairs}
+                                _need(type(value) in (str, int, float, bool))
+                                return value
+                            configured_duration({'for': target(b.get('for'))}, observer.hass)
                             allowed.add('for')
                         _need({k:v for k,v in a.items() if k not in allowed}
                               == {k:v for k,v in b.items() if k not in allowed},
@@ -207,8 +220,7 @@ class NativeAutomationConfigTransport:
               'automation_duration_program_config_changed')
 
     def _capture_duration_edges(self, entities):
-        from .native_automation_configured_duration import ConfiguredEdge
-        from homeassistant.helpers.template import Template
+        from .native_automation_configured_duration import ConfiguredEdge, _frozen
         from .yaml_validation_worker import _normal
         edges = []
         for route in self.graph.routes:
@@ -220,26 +232,145 @@ class NativeAutomationConfigTransport:
             new = next(row for row in self.after['automation'] if row[0] == b.entity.unique_id)
             before = dict(old[2][b.index]['$map'])['for']
             after = dict(new[2][b.index]['$map'])['for']
-            if before == after:
+            if _frozen(before) == _frozen(after):
                 continue  # existing exact Template/cell and no metadata rewrite
             replacement = self._project(b.config['for'], before, after)
-            _need(type(replacement) is Template and _normal(replacement) == after)
-            b._duration.scalar.check_template(replacement)
+            # For dict, the actual root is unchanged until the authorized
+            # projector operation writes its leaves. Edge.capture proves the
+            # predicted normal form and graphs before that first write.
+            b._duration.scalar.check_configured(replacement)
+            if type(replacement) is not dict:
+                _need(_normal(replacement) == after)
             pending, rows = b._duration.pending(b)
             _need(rows == route.duration_snapshot, 'automation_duration_before_changed')
-            edge = ConfiguredEdge.capture(b, replacement, pending)
+            edge = ConfiguredEdge.capture(b, replacement, pending,
+                before_normal=before, after_normal=after, operations=self.operations,
+                projected=self._projected)
             edges.append(edge)
         # Every installed duration consumer of a shared replacement must be in
         # the authenticated call scope. Never silently alter another listener.
-        replacements = {id(edge.before): edge for edge in edges if edge.before is not edge.after}
-        admitted = {id(route.binding.config) for route in self.graph.routes}
-        for (domain, _), entity in entities.items():
-            if domain != 'automation' or not entity._is_enabled:
-                continue
-            for cfg in entity._trigger_config:
-                _need(id(cfg.get('for')) not in replacements or id(cfg) in admitted,
-                      'automation_duration_shared_consumer_unaccounted')
+        self._check_duration_aliases(entities, edges)
         self.duration_edges = tuple(edges)
+
+    def _check_duration_aliases(self, entities, edges):
+        """Bounded inventory of configured consumers and foreign mutable aliases.
+
+        Shared Template leaves are transported once, but every configured
+        consumer needs an authenticated route. A shared mutable root additionally
+        needs every occurrence to be a known native/raw trigger-for edge. History,
+        variables, action/config siblings and lazy caches cannot become aliases
+        merely because their object id is already authorized somewhere else.
+        """
+        from homeassistant.helpers.template import Template
+        from homeassistant.helpers.script_variables import ScriptVariables
+        from homeassistant.helpers.script import Script
+        from homeassistant.util.yaml.objects import NodeDictClass, NodeListClass
+        from .native_automation_duration_binding import _cells
+        changed_leaves = {path[-4] for edge in edges for path in edge.paths
+                          if path[-3] != path[-2]}
+        mutable = {id(edge.before) for edge in edges if type(edge.before) is dict}
+        configured = {id(edge.binding.config) for edge in edges}
+        if not mutable:
+            # Preserve the original scalar flow: no mutable-origin traversal
+            # or new broad census is needed for immutable root replacements.
+            for (domain, _), entity in entities.items():
+                if domain == 'automation':
+                    for cfg in entity._trigger_config:
+                        root = cfg.get('for')
+                        leaves = ((root,) if type(root) is Template else
+                                  tuple(root.values()) if type(root) is dict else ())
+                        _need(not any(id(value) in changed_leaves for value in leaves)
+                              or id(cfg) in configured,
+                              'automation_duration_shared_consumer_unaccounted')
+            self.duration_alias_inventory = ()
+            return
+        allowed = {((id(edge.binding.entity), 'native', edge.binding.index, 'for'),
+                    id(edge.binding.config), 'for', id(edge.before)) for edge in edges}
+        inventories = []
+        # Actual raw/native topology is inventory, not a guessed global omit.
+        for edge in edges:
+            b = edge.binding
+            raw = b.entity.raw_config
+            if type(raw) in (dict, NodeDictClass):
+                for name in ('trigger', 'triggers'):
+                    trigger = raw.get(name)
+                    candidates = trigger if type(trigger) in (list, NodeListClass) else (trigger,)
+                    if b.index < len(candidates):
+                        cfg = candidates[b.index]
+                        if type(cfg) in (dict, NodeDictClass) and id(cfg.get('for')) in mutable:
+                            # This parent/root was visited by the same sealed
+                            # program projector with a consistent target row.
+                            record = self._projected.get(id(cfg))
+                            _need(record is not None, 'automation_duration_raw_alias_not_projected')
+                            path = ((id(b.entity), 'raw', name, b.index, 'for')
+                                    if type(trigger) in (list, NodeListClass) else
+                                    (id(b.entity), 'raw', name, 'for'))
+                            allowed.add((path, id(cfg), 'for', id(cfg['for'])))
+        budget = [100_000]
+        def scan(value, parent=None, key=None, ancestry=(), *, path=(), native_dict=False):
+            budget[0] -= 1
+            _need(budget[0] >= 0 and len(ancestry) <= 64,
+                  'automation_duration_alias_inventory_limit')
+            if id(value) in mutable:
+                _need((path, id(parent), key, id(value)) in allowed,
+                      'automation_duration_foreign_mutable_alias')
+                inventories.append((path, id(parent), key, id(value)))
+            if id(value) in ancestry:
+                _need(id(value) not in mutable, 'automation_duration_alias_cycle')
+                return
+            ancestry = (*ancestry, id(value))
+            if type(value) in (dict, NodeDictClass) or native_dict:
+                for name, child in dict.items(value):
+                    scan(child, value, name, ancestry, path=(*path, name))
+            elif type(value) in (list, tuple, NodeListClass):
+                for index, child in enumerate(value):
+                    scan(child, value, index, ancestry, path=(*path, index))
+            elif type(value) is ScriptVariables:
+                scan(value.variables, value, 'variables', ancestry, path=(*path, 'variables'))
+            elif type(value) is Script:
+                scan(value.sequence, value, 'sequence', ancestry, path=(*path, 'sequence'))
+                scan(value.variables, value, 'variables', ancestry, path=(*path, 'variables'))
+                for name in _cache_names():
+                    scan(getattr(value, name), value, name, ancestry, path=(*path, name))
+        for (domain, _), entity in entities.items():
+            script = entity.action_script if domain == 'automation' else entity.script
+            for name, value in (('raw', entity.raw_config), ('sequence', script.sequence),
+                                ('script_variables', script.variables),
+                                ('entity_variables', getattr(entity, '_variables', None)),
+                                ('native', getattr(entity, '_trigger_config', None))):
+                scan(value, path=(id(entity), name))
+            for name in _cache_names():
+                # include_scripts graph keeps native lazy Script cache contents
+                # pinned independently; a direct foreign root alias is rejected.
+                scan(getattr(script, name), path=(id(entity), 'cache', name))
+            if domain == 'automation':
+                for cfg in entity._trigger_config:
+                    root = cfg.get('for')
+                    leaves = ((root,) if type(root) is Template else
+                              tuple(root.values()) if type(root) is dict else ())
+                    touched = id(root) in mutable or any(id(value) in changed_leaves for value in leaves)
+                    _need(not touched or id(cfg) in configured,
+                          'automation_duration_shared_consumer_unaccounted')
+        for route in self.graph.routes:
+            b = route.binding
+            if not hasattr(b, '_duration'):
+                continue
+            pending, _ = b._duration.pending(b)
+            scan(b.listener_cells.get('_variables'), path=(id(b), 'attach_variables'))
+            for p in pending:
+                history = p['own'].history() if p['own'] is not None else _cells(p['action'])
+                for name in ('from_s', 'to_s'):
+                    state = history[name]
+                    if state is not None:
+                        # Exact native State and semantic attributes were already
+                        # authenticated by pending(). Bypass ReadOnlyDict methods.
+                        scan(state.attributes, native_dict=True,
+                             path=(id(b), 'history', id(p['clear']), name, 'attributes'))
+                # Event data contains native State objects, visited explicitly
+                # above; scan its finite container portion for a direct alias.
+                scan(history['event'].data, native_dict=True,
+                     path=(id(b), 'history', id(p['clear']), 'event_data'))
+        self.duration_alias_inventory = tuple(inventories)
 
     def _actor_graph(self, *, slots=None):
         return tuple((id(a.entity), id(a.script), _graph(a.entity.raw_config, slots=slots),
@@ -340,10 +471,11 @@ class NativeAutomationConfigTransport:
                       for script,name,cache,items,token in saved), 'automation_cleanup_cache_changed')
             for edge in self.duration_edges:
                 edge.check_pins()
-            config_plan = log.plan()
+            shadow = {}
+            config_plan = log.plan(shadow)
             # All graph plans are read-only and precede the first undo write.
             from .native_automation_configured_duration import ConfiguredRollbackView
-            view = ConfiguredRollbackView(self.duration_edges) if not self.graph.live else None
+            view = ConfiguredRollbackView(self.duration_edges, shadow) if not self.graph.live else None
             graph_plan = self.graph.plan_retire(before_attempt=True, configured_view=view)
             return config_plan, graph_plan
         self._config_log,self._config_cleanup_plan=log,cleanup_plan

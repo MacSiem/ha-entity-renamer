@@ -156,11 +156,18 @@ class _PreEffectLog:
                 setattr(owner, kind, before)
 
 
-def _retained_value(value, omitted, seen=(), *, configured=None, view=None, entry_edge=False):
+def _retained_value(value, omitted, seen=(), *, configured=None, view=None, entry_edge=False, canonical_edge=False):
     """Pin closure topology while separately journaled slots change values."""
     from homeassistant.util.yaml.objects import NodeDictClass, NodeListClass
     from homeassistant.helpers.template import Template
     from .native_script_config_transport import _graph
+    from .native_automation_configured_duration import ConfiguredCanonical
+    if type(value) is ConfiguredCanonical:
+        # An exact cell/entry callback has already checked the approved side.
+        # Do not send this terminal through mutable origin recursion.
+        _need(canonical_edge and configured is not None and value is configured.canonical,
+              'duration_configured_terminal_without_edge')
+        return ('configured_duration_origin', value.root_id, value.graph, value.normal)
     if type(value) is Template:
         return _graph(value)
     if id(value) in seen or id(value) in omitted:
@@ -168,7 +175,7 @@ def _retained_value(value, omitted, seen=(), *, configured=None, view=None, entr
     seen = (*seen, id(value))
     if type(value) is FunctionType:
         return (id(value), id(value.__code__), id(value.__globals__),
-            tuple((id(c), None if id(c) in omitted else _retained_value(configured.cell_value(c, view) if configured is not None else c.cell_contents, omitted, seen, configured=configured, view=view, entry_edge=configured is not None and c is configured.config_cell))
+            tuple((id(c), None if id(c) in omitted else _retained_value(configured.cell_value(c, view) if configured is not None else c.cell_contents, omitted, seen, configured=configured, view=view, entry_edge=configured is not None and c is configured.config_cell, canonical_edge=configured is not None and c is configured.cell))
                   for c in value.__closure__ or ()),
             tuple((name, id(value.__globals__[name])) for name in value.__code__.co_names
                   if name in value.__globals__), _value(value.__dict__))
@@ -178,9 +185,18 @@ def _retained_value(value, omitted, seen=(), *, configured=None, view=None, entr
     if type(value) in (list, tuple, NodeListClass):
         return id(value), tuple(_retained_value(v, omitted, seen, configured=configured, view=view) for v in value)
     if type(value) in (dict, NodeDictClass):
-        return id(value), tuple((_retained_value(k, omitted, seen, configured=configured, view=view), _retained_value(configured.entry_value(value, k, v, view) if configured is not None and entry_edge else v, omitted, seen, configured=configured, view=view))
+        return id(value), tuple((_retained_value(k, omitted, seen, configured=configured, view=view), _retained_value(configured.entry_value(value, k, v, view) if configured is not None and entry_edge else v, omitted, seen, configured=configured, view=view, canonical_edge=configured is not None and entry_edge and configured.is_entry(value, k)))
                                for k, v in value.items())
     return _value(value)
+
+
+def _own_edges(own):
+    """Retain the full tuple/period/history proof; project only its cfg entry."""
+    holder = getattr(own.binding, '_duration_config_owner', None)
+    return (type(own.edges), id(own.edges), tuple(
+        _retained_value(edge, set(), configured=holder, entry_edge=True)
+        if edge is own.binding.config and holder is not None else _value(edge)
+        for edge in own.edges))
 
 
 def literal_duration(cfg):
@@ -195,7 +211,7 @@ class NativeAutomationDurationBinding(NativeAutomationStateBinding):
 
 
 class NativeAutomationDurationCapability:
-    def __init__(self, hass, native, scalar=False):
+    def __init__(self, hass, native, scalar=False, structured=False):
         _need(type(native) is _Native and native.hass is hass, 'duration_source_owner')
         self.hass, self.native, self.wrappers = hass, native, {}
         self.configured_owners, self.configured_images = {}, {}
@@ -208,8 +224,9 @@ class NativeAutomationDurationCapability:
         from .native_automation_scalar_duration import ScalarDurationNative
         # Runtime inventory is read on the HA loop by with_duration(). Only
         # native source/protocol qualification runs in this executor lane.
-        _need(type(scalar) is bool, 'duration_scalar_preparation_flag')
-        self.scalar = ScalarDurationNative(native) if scalar else None
+        _need(type(scalar) is bool and type(structured) is bool and (not structured or scalar),
+              'duration_scalar_preparation_flag')
+        self.scalar = ScalarDurationNative(native, structured=structured) if scalar else None
         self.check_sources()
 
     def check_sources(self):
@@ -290,7 +307,7 @@ class NativeAutomationDurationCapability:
         if hasattr(b, '_duration_scalar_image'):
             from .native_automation_configured_duration import ConfiguredOwner
             object.__setattr__(b, '_duration_config_owner', ConfiguredOwner(b))
-            self.scalar.check_template(cfg['for'])
+            self.scalar.check_configured(cfg['for'])
         object.__setattr__(b,'_original',b._read())
         b.assert_original()
         return b
@@ -302,16 +319,17 @@ class NativeAutomationDurationCapability:
               'duration_map_identity_changed')
         image = getattr(b, '_duration_scalar_image', None)
         if image is not None:
-            from .native_script_config_transport import _graph
             cell, configured, graph, variables, values = image
             holder = b._duration_config_owner
             holder.check(configured_view)
             _need(_cell(b.listener, 'time_delta') is cell
-                  and holder.origin is configured and _graph(configured) == graph
+                  and holder.origin is configured and holder.canonical.graph == graph
                   and c['_variables'] is variables
                   and _value(variables) == values,
                   'duration_scalar_config_or_attach_variables_changed')
-        return tuple((k,_value(configured if image is not None and k == 'time_delta' else v)) for k,v in c.items() if k not in ('config','period','unsub_track_same'))+(
+        return tuple((k,('configured_duration_origin', holder.canonical.root_id,
+                        holder.canonical.graph, holder.canonical.normal)
+                       if image is not None and k == 'time_delta' else _value(v)) for k,v in c.items() if k not in ('config','period','unsub_track_same'))+(
             ('period',id(c['period'])),('unsub_track_same',id(c['unsub_track_same'])))
 
     def pending(self,b, *, configured_view=None):
@@ -597,7 +615,8 @@ class NativeAutomationDurationCapability:
                  p['cancel_job']._cancel_on_shutdown,_value(p['cancel_job']._cache)),
                 None if p.get('own') is None else
                 (id(p['own'].binding),id(p['own'].change),id(p['own'].entity_cell),
-                 id(p['own'].action),id(p['own'].predicate),id(p['own'].clear),_value(p['own'].edges)),
+                 id(p['own'].action),id(p['own'].predicate),id(p['own'].clear),
+                 _own_edges(p['own'])),
                 _history_signature(history['event'],history['from_s'],history['to_s'])))
         return tuple(rows)
 

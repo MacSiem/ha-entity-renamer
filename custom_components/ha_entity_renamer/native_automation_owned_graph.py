@@ -93,13 +93,16 @@ class OwnedAutomationGraph:
         component = hass.data.get(DATA_INSTANCES, {}).get('automation')
         if component is not None and any(e._is_enabled and any('for' in c for c in e._trigger_config)
                                         for e in component.entities):
-            from homeassistant.helpers.template import Template
-            scalar = any(e._is_enabled and any(type(c.get('for')) is Template
+            from datetime import timedelta
+            scalar = any(e._is_enabled and any('for' in c and type(c['for']) is not timedelta
                          for c in e._trigger_config) for e in component.entities)
+            from .native_automation_scalar_duration import structured_duration
+            structured = any(e._is_enabled and any(structured_duration(c.get('for'))
+                             for c in e._trigger_config) for e in component.entities)
             guard()
             native = await hass.async_add_executor_job(_Native, hass)
             guard()
-            obj.duration = await hass.async_add_executor_job(NativeAutomationDurationCapability, hass, native, scalar)
+            obj.duration = await hass.async_add_executor_job(NativeAutomationDurationCapability, hass, native, scalar, structured)
             guard()
         return obj
 
@@ -128,7 +131,9 @@ class OwnedAutomationGraph:
                 if hasattr(binding, '_duration_scalar_image'):
                     transfer = getattr(self, 'transfer', None)
                     from jinja2 import Environment, nodes
-                    source_bearing = tuple(Environment().parse(binding.config['for'].template).find_all(nodes.Call))
+                    from .native_automation_scalar_duration import configured_templates
+                    source_bearing = any(tuple(Environment().parse(value.template).find_all(nodes.Call))
+                                         for value in configured_templates(binding.config['for']))
                     _need(not source_bearing or transfer is not None, 'automation_duration_program_edge_required')
                     if transfer is not None:
                         transfer.scalar_edge(binding)

@@ -47,13 +47,26 @@ _PINS = {
 _PINS['2026.10.2'] = dict(_PINS['2026.10.4'])
 
 
-def configured_duration(config, hass):
-    """Separate configured shape from the occurrence's already computed value."""
+DURATION_UNITS = ('days', 'hours', 'minutes', 'seconds', 'milliseconds')
+
+
+def configured_templates(value):
+    """Only the admitted shallow native unit dictionary or one Template root."""
     from homeassistant.helpers.template import Template
-    value = config.get('for')
-    if type(value) is timedelta:
-        _need(value > timedelta(0), 'literal_duration_required')
-        return value
+    return (value,) if type(value) is Template else tuple(
+        child for child in value.values() if type(child) is Template)
+
+
+def structured_duration(value):
+    """Preparation selector only, never source/shape admission or a render."""
+    from homeassistant.helpers.template import Template
+    from jinja2 import Environment, nodes
+    return type(value) is dict or (type(value) is Template and bool(tuple(
+        Environment().parse(value.template).find_all(nodes.Dict))))
+
+
+def _configured_template(value, hass):
+    from homeassistant.helpers.template import Template
     _need(type(value) is Template and value.hass is hass and not value.is_static
           and type(value.template) is str, 'duration_scalar_template_required')
     # Closed expressions over native trigger/this and literal states('id')|int.
@@ -65,12 +78,31 @@ def configured_duration(config, hass):
                nodes.Getattr, nodes.Getitem, nodes.CondExpr, nodes.Compare,
                nodes.Operand, nodes.And, nodes.Or, nodes.Not, nodes.Add,
                nodes.Sub, nodes.Mul, nodes.Div, nodes.FloorDiv, nodes.Mod,
-               nodes.Pow, nodes.Neg, nodes.Pos, nodes.Tuple, nodes.List, nodes.Call, nodes.Filter)
+               nodes.Pow, nodes.Neg, nodes.Pos, nodes.Tuple, nodes.List, nodes.Call, nodes.Filter, nodes.Dict, nodes.Pair)
     _need(all(type(node) in allowed for node in (tree, *tree.find_all(nodes.Node)))
           and all(node.name in ('trigger', 'this', 'states') and node.ctx == 'load'
                   for node in tree.find_all(nodes.Name))
           and all(not node.attr.startswith('_') for node in tree.find_all(nodes.Getattr)),
           'duration_scalar_expression_unsupported')
+    dictionaries = tuple(tree.find_all(nodes.Dict))
+    if dictionaries:
+        def dict_expression(node):
+            if type(node) is nodes.Dict:
+                return all(
+                    type(pair) is nodes.Pair and type(pair.key) is nodes.Const
+                    and type(pair.key.value) is str and pair.key.value in DURATION_UNITS
+                    and not any(type(child) in (nodes.Dict, nodes.Pair)
+                                for child in pair.value.find_all(nodes.Node))
+                    and type(pair.value) not in (nodes.Dict, nodes.Pair)
+                    for pair in node.items)
+            return (type(node) is nodes.CondExpr and node.expr2 is not None
+                    and not tuple(node.test.find_all(nodes.Dict))
+                    and type(node.test) is not nodes.Dict
+                    and dict_expression(node.expr1) and dict_expression(node.expr2))
+        _need(len(tree.body) == 1 and type(tree.body[0]) is nodes.Output
+              and len(tree.body[0].nodes) == 1
+              and dict_expression(tree.body[0].nodes[0]),
+              'duration_dict_expression_unsupported')
     calls = tuple(tree.find_all(nodes.Call))
     filters = tuple(tree.find_all(nodes.Filter))
     import re
@@ -88,6 +120,31 @@ def configured_duration(config, hass):
           and all(any(name is call.node for call in calls)
                   for name in tree.find_all(nodes.Name) if name.name == 'states'),
           'duration_scalar_source_expression_unsupported')
+
+
+def configured_duration(config, hass):
+    """Native configured input, separate from its computed occurrence period.
+
+    No Mapping/subclass, templated key, nested container or caller conversion.
+    A plain static dictionary is accepted as a shape only; native schema/program
+    readback must still prove that this is the actual attached configuration.
+    """
+    from homeassistant.helpers.template import Template
+    value = config.get('for')
+    if type(value) is timedelta:
+        _need(value > timedelta(0), 'literal_duration_required')
+        return value
+    if type(value) is Template:
+        _configured_template(value, hass)
+        return value
+    _need(type(value) is dict and 0 < len(value) <= len(DURATION_UNITS)
+          and all(type(key) is str and key in DURATION_UNITS for key in value),
+          'duration_configured_unit_tree_required')
+    for child in value.values():
+        _need(type(child) in (str, int, float, bool, Template),
+              'duration_configured_unit_leaf_required')
+        if type(child) is Template:
+            _configured_template(child, hass)
     return value
 
 
@@ -98,10 +155,11 @@ class ScalarDurationNative:
     All/Any calls create genuine fresh Schema instances and may update their
     `_compiled`/`schema` compilation bookkeeping. Authenticate active compiled
     closures structurally instead of freezing that legal native bookkeeping.
-    This first profile accepts scalar render results; a dict/list result is
-    explicitly unsupported before period assignment or timer creation.
+    Scalar source proof stays closed. The separate dict authenticator must
+    qualify the entire reachable native CV and actual result-wrapper protocol
+    before the unchanged native renderer/positive-period pair may consume it.
     """
-    def __init__(self, native):
+    def __init__(self, native, *, structured=False):
         from .native_automation_duration_binding import _codes
         self.native = native
         _need(native.version in _PINS, 'duration_scalar_core_unqualified')
@@ -128,6 +186,7 @@ class ScalarDurationNative:
         self.expected[name] = tuple(_codes(compile(raw, str(path), 'exec',
             dont_inherit=True, optimize=sys.flags.optimize)))
         self.source_envs = {}
+        self.dict_native = None
         from homeassistant.core import StateMachine
         from .native_unload_code_proof import prove_methods
         self.state_machine = StateMachine
@@ -173,6 +232,12 @@ class ScalarDurationNative:
         self._authenticate(self.cached_body)
         self.cached_shape = self._function_shape(self.cached_body)
         self.check()
+        _need(type(structured) is bool, 'duration_structured_preparation_flag')
+        if structured:
+            # Native capability construction is already in the executor lane.
+            from .native_automation_dict_duration import DictDurationNative
+            self.dict_native = DictDurationNative(self)
+            self.dict_native.check()
 
     @staticmethod
     def _function_descriptor(value):
@@ -247,10 +312,27 @@ class ScalarDurationNative:
             _need(type(validator.validators) is list and validator._extra == 0,
                   'duration_scalar_validator_mode_changed')
 
+    def _dict_support(self):
+        # Prepared by __init__ in the original native source executor lane.
+        # The sibling implementation owns the entire source/CV/wrapper proof.
+        _need(self.dict_native is not None, 'duration_dict_source_not_prepared')
+        self.dict_native.check()
+
+    def check_configured(self, value):
+        configured_duration({'for': value}, self.native.hass)
+        if type(value) is dict:
+            self._dict_support()
+        for template in configured_templates(value):
+            self.check_template(template)
+        return structured_duration(value)
+
     def check_template(self, value):
         from jinja2 import Environment, nodes
-        configured_duration({'for': value}, self.native.hass)
-        if not tuple(Environment().parse(value.template).find_all(nodes.Call)):
+        _configured_template(value, self.native.hass)
+        tree = Environment().parse(value.template)
+        if tuple(tree.find_all(nodes.Dict)):
+            self._dict_support()
+        if not tuple(tree.find_all(nodes.Call)):
             return
         _need(self.native.version in ('2025.6.0', '2026.10.2', '2026.10.4'),
               'duration_scalar_source_core_unqualified')
@@ -357,17 +439,24 @@ class ScalarDurationNative:
                   and self.dict_period._compiled[0]._expected == 'dict',
                   'duration_scalar_native_type_guard_changed')
 
+        if self.dict_native is not None:
+            self.dict_native.check()
+
     def render(self, binding, change):
         self.check()
-        self.check_template(binding.config['for'])
+        structured = self.check_configured(binding.config['for'])
         cells = binding.listener_cells
         variables = {**cells['_variables'], 'trigger': {
             'platform': 'state', 'entity_id': change.event.data['entity_id'],
             'from_state': change.prior_state, 'to_state': change.new_state}}
         try:
             rendered = self.template.render_complex(cells['time_delta'], variables)
-            _need(type(rendered) in (str, int, float, bool, timedelta),
-                  'duration_scalar_result_unsupported')
+            if not structured:
+                _need(type(rendered) in (str, int, float, bool, timedelta),
+                      'duration_scalar_result_unsupported')
+            else:
+                # Authenticate the actual native wrapper without copying it.
+                self.dict_native.admit_result(rendered)
             return self.positive(rendered)
         except (self.template_error, self.invalid) as ex:
             # Same native failure semantics: log, no new period/U/timer. Any
