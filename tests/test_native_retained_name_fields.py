@@ -31,6 +31,10 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         review = await runtime.native_yaml_prepare(hass, mapping, entity_names=names,
             actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
         retained = runtime.reviews[review['operation_id']].plan
+        self.assertEqual(review['entity_count'], 1)
+        self.assertEqual(review['changes'], [{'entity_id': old, 'fields': {
+            'entity_id': {'before': old, 'after': new},
+            'name': {'before': before['name'], 'after': 'Reviewed synthetic source'}}}])
         # Editing the original request after review cannot alter the server Plan.
         names[old] = 'Unreviewed client edit'
         await self.stimulus(7)
