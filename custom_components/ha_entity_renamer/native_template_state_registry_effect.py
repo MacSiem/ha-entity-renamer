@@ -69,12 +69,22 @@ class NativeTemplateStateRegistryEffect:
         if transition.entities and pure:
             from .native_rename_emission_classifier import NativeRenameEmissions
             from .native_template_rename_ingress import NativeTemplateProducerDelivery
-            obj.witness = await NativeRenameEmissions.prepare(io, change,
-                change.before if reverse else change.after, guard=guard)
+            from .native_source_handoff import NativeSourceHandoff
+            target_image = change.before if reverse else change.after
+            handoff = None
+            # Dependent A/S lifecycle retains its existing source-event proof
+            # until the separate full program/phase transport is integrated.
+            if not root.mixed_state and NativeSourceHandoff.supports_source(io, change, target_image):
+                handoff = await NativeSourceHandoff.prepare(io, change, target_image, guard=guard)
             try:
+                obj.witness = await NativeRenameEmissions.prepare(io, change, target_image,
+                    guard=guard, source_handoff=handoff)
                 obj.delivery = NativeTemplateProducerDelivery(obj.runtime, transition.entities, obj.witness)
             except BaseException:
-                obj.witness.close()
+                if obj.witness is not None:
+                    obj.witness.close()
+                if handoff is not None:
+                    handoff.close()
                 raise
         return obj
 

@@ -58,6 +58,37 @@ class NativeSourceHandoff:
         _need(False, 'native_capture_required')
 
     @classmethod
+    def supports_source(self, io, change, target):
+        """Select this narrow adapter from actual native inventory, not a flag.
+
+        This read-only predicate grants no capability; prepare still proves
+        all native code, bindings and ownership before the real API attempt.
+        Other existing source profiles retain their qualified legacy adapter.
+        """
+        from homeassistant.const import __version__
+        from homeassistant.components.sensor import SensorEntity
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        from homeassistant.helpers.entity import Entity
+        if __version__ not in _SENSOR_PINS or type(io) is not NativeRegistryIO:
+            return False
+        source_image = change.after if target == change.before else change.before
+        row = io.registries['entity'].async_get(source_image['entity_id'])
+        if row is None or row.device_id is not None:
+            return False
+        candidates = [entity for platform in async_get_platforms(io.hass, row.platform)
+                      for entity in platform.entities.values()
+                      if entity.registry_entry is row and entity.entity_id == row.entity_id]
+        if len(candidates) != 1:
+            return False
+        source = candidates[0]
+        return (isinstance(source, SensorEntity) and getattr(source, 'group', None) is None
+            and getattr(source, '_Entity__group', None) is None and len(source._on_remove) == 2
+            and all(inspect.getattr_static(source, name) is getattr(SensorEntity, name)
+                    for name in ('async_registry_entry_updated', '_async_read_entity_options',
+                                 '_update_suggested_precision', 'async_internal_added_to_hass'))
+            and inspect.getattr_static(source, 'async_on_remove') is Entity.async_on_remove)
+
+    @classmethod
     async def prepare(cls, io, change, target, *, guard):
         import homeassistant
         from homeassistant.const import __version__
