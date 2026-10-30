@@ -873,7 +873,7 @@ class NativeRenameEmissions:
             else:
                 self.handoff_state = self.hass.states.get(self.source_id)
                 _need(type(self.handoff_state) is self.State, 'source_handoff_state_missing')
-                self.handoff_semantic = _semantic_state(self.handoff_state, attribute_key_type=self.attribute_key)
+                self.handoff_semantic = _semantic_state(self.handoff_state, native_attribute_key=self.attribute_key)
                 self.mutation = self.source_handoff.mutate()
             _need(type(self.mutation) is NativeRegistryMutation, 'native_mutation_return')
             return self.mutation
