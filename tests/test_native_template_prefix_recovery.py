@@ -74,8 +74,14 @@ class NativeTemplatePrefixRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((root / 'template.yaml').read_bytes(), edited)
         self.assertEqual(await runtime.journal.load(record.operation_id), record)
         (root / 'template.yaml').write_bytes(original)
-        result = await runtime.native_yaml_reverse(hass, record.operation_id, record.plan.fingerprint,
-            guard=lambda: None, refresh=refresh)
+        from test_native_template_mixed_yaml_server import native_diagnostics
+        with native_diagnostics(self.module):
+            try:
+                result = await runtime.native_yaml_reverse(hass, record.operation_id, record.plan.fingerprint,
+                    guard=lambda: None, refresh=refresh)
+            finally:
+                final = await runtime.journal.load(record.operation_id)
+                print('PREFIX_RECOVERY_RESULT', final.status, final.reason, final.direction, final.phases)
         self.assertEqual(result['state'], 'rolled_back')
         final = await runtime.journal.load(record.operation_id)
         self.assertEqual(final.phases, ('undone', 'pending', 'pending'))
