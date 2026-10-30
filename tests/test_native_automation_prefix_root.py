@@ -31,7 +31,10 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_foreign_native_script_service_replacement_after_effect_refuses_success(self):
         await self._root_case(meaningful=False, foreign_service=True)
 
-    async def _root_case(self, *, meaningful, foreign_service=False):
+    async def test_original_foreign_event_follows_meaningful_add_in_native_action_order(self):
+        await self._root_case(meaningful=True, foreign_event=True)
+
+    async def _root_case(self, *, meaningful, foreign_service=False, foreign_event=False):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         from homeassistant.helpers.entity_platform import async_get_platforms
@@ -43,7 +46,7 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             '- id: mixed_source\n  alias: Prefix synthetic observer\n  initial_state: true\n'
             '  variables:\n    source: ' + old + '\n    alias: "{{ source }}"\n'
             '  triggers:\n  - trigger: state\n    id: physical_pair\n    entity_id: ' + old + '\n'
-            '    from: "17"\n    to: "29"\n'
+            + ('' if foreign_event else '    from: "17"\n    to: "29"\n') +
             '  actions:\n  - event: automation_prefix_pair\n    event_data:\n'
             '      previous: "{{ trigger.from_state.state }}"\n'
             '      current: "{{ trigger.to_state.state }}"\n'
@@ -103,6 +106,8 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         codes = (handoff_type.mutate.__code__, ingress_type._action.__code__, root_type._install.__code__,
                  phase_type.finish_native.__code__)
         replaced = []
+        forwarded = []
+        codes += (binding.listener.__code__,)
         tool = next(key for key in range(6) if sys.monitoring.get_tool(key) is None)
         sys.monitoring.use_tool_id(tool, 'whole Automation prefix native acceptance')
         def started(code, offset):
@@ -131,12 +136,27 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     schema=service.schema, supports_response=service.supports_response)
                 replaced.append(hass.services._services['script']['mixed_source'])
                 self.assertIsNot(replaced[0], service)
+            elif code is codes[4] and foreign_event and frame.f_locals.get('config') is binding.config:
+                forwarded.append(frame.f_locals['event'])
+        foreign_emitted = []
+        def returned(code, offset, result):
+            actor = sys._getframe(1).f_locals.get('self')
+            if code is codes[0] and actor.hass is hass and foreign_event and not foreign_emitted:
+                # Ordinary producer emission after the genuine handoff, before
+                # deferred own delivery. Both Events are created by native HA.
+                self.producer._attr_native_value = 31
+                self.producer.async_write_ha_state()
+                foreign_emitted.append(hass.states.get(new))
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
         try:
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, started)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, returned)
             for code in codes:
                 sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
+            if foreign_event:
+                sys.monitoring.set_local_events(tool, codes[0],
+                    sys.monitoring.events.PY_START | sys.monitoring.events.PY_RETURN)
             with mixed.native_diagnostics(self.module):
                 if foreign_service:
                     with self.assertRaises(self.module('transaction').Refused):
@@ -177,8 +197,18 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(old, current.callbacks)
                 self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
                 self.assertIsNone(self.f.entity.async_get(old))
-                self.assertEqual(hass.states.get(new).state, '29' if meaningful else '17')
-                if meaningful:
+                self.assertEqual(hass.states.get(new).state, '31' if foreign_event else '29' if meaningful else '17')
+                if foreign_event:
+                    self.assertEqual([(str(event.data['previous']), str(event.data['current']),
+                        str(event.data['configured'])) for event in actions], [('17', '29', '31'), ('29', '31', '31')])
+                    self.assertEqual([str(event.data['value']) for event in scripts], ['31', '31'])
+                    self.assertEqual(len(pairs), 1)
+                    self.assertEqual(len(forwarded), 1)
+                    self.assertIs(forwarded[0].data['old_state'], pairs[0].new_state)
+                    self.assertIs(forwarded[0].data['new_state'], foreign_emitted[0])
+                    self.assertEqual(actions[0].context.parent_id, pairs[0].event.context.id)
+                    self.assertEqual(actions[1].context.parent_id, forwarded[0].context.id)
+                elif meaningful:
                     self.assertEqual(len(actions), 1)
                     self.assertEqual({key: str(value) for key, value in actions[0].data.items()},
                         dict(previous='17', current='29', configured='29'))
@@ -189,7 +219,7 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((actions, scripts, pairs), ([], [], []))
                 for platform in async_get_platforms(hass, 'template'):
                     for entity in platform.entities.values():
-                        expected = 'off' if platform.domain == 'binary_sensor' else str((29 if meaningful else 17) * 2)
+                        expected = 'off' if platform.domain == 'binary_sensor' else str((31 if foreign_event else 29 if meaningful else 17) * 2)
                         self.assertEqual(hass.states.get(entity.entity_id).state, expected)
                 original_ref, receipt_json = record.plan.native_inputs, baseline.receipt_json
                 reverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
@@ -204,7 +234,7 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNot(roots[0].chain, roots[1].chain)
                 reopened, restored = runtime.preparations.resolve_composition(original_ref)
                 self.assertEqual((reopened.receipt_json, restored), (receipt_json, composition))
-                self.assertEqual((len(actions), len(scripts)), (1, 1) if meaningful else (0, 0))
+                self.assertEqual((len(actions), len(scripts)), (2, 2) if foreign_event else (1, 1) if meaningful else (0, 0))
                 self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
                 self.assertIsNone(self.f.entity.async_get(new))
                 self.assertIs(automation.action_script, action_script)
@@ -216,6 +246,7 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             for code in codes:
                 sys.monitoring.set_local_events(tool, code, 0)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
+            sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, None)
             sys.monitoring.free_tool_id(tool)
 
     async def test_opaque_service_call_is_refused_before_registry_effect(self):
