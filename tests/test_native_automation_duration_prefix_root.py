@@ -122,6 +122,12 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_partial_duration_wrapper_registration_restores_before_native_api(self):
         await self._duration_case(mode='partial_wrapper')
 
+    async def test_partial_retained_foreign_route_conflict_is_preserved_before_any_cleanup(self):
+        await self._duration_case(mode='partial_foreign')
+
+    async def test_partial_retained_two_routes_restore_shared_native_callback_lists(self):
+        await self._duration_case(mode='partial_multi')
+
     async def _duration_case(self, *, mode):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -171,6 +177,12 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             '  triggers:\n  - trigger: state\n    entity_id: sensor.duration_control\n'
             '    from: "16"\n    to: "17"\n    for: {seconds: '+str(duration)+'}\n'
             '  actions:\n  - event: duration_control_result\n')
+        if mode=='partial_multi':
+            path.write_text(path.read_text()+
+                '- id: duration_second\n  alias: Second affected native duration\n  initial_state: true\n'
+                '  triggers:\n  - trigger: state\n    entity_id: '+old+'\n'
+                '    from: "16"\n    to: "17"\n    for: {seconds: '+str(duration)+'}\n'
+                '  actions:\n  - action: script.mixed_source\n')
         script_path = root/'mixed_scripts.yaml'
         script_path.write_text('mixed_source:\n  variables:\n    source: '+old+'\n  sequence:\n'
             '  - event: duration_script_result\n    event_data:\n      value: "{{ states(source) }}"\n')
@@ -216,6 +228,14 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         all_saved=cap.pending(before)[0]
         other_pending=next((p for p in all_saved if p['key']==other_id),None)
         saved=tuple(p for p in all_saved if p['key']==old)
+        second_before=second_pending=None
+        if mode=='partial_multi':
+            second=next(e for e in hass.data[DATA_INSTANCES]['automation'].entities
+                        if e.unique_id=='duration_second')
+            second_before=cap.capture(second)
+            second_pending=cap.pending(second_before)[0][0]
+            second_image=(second_pending['handle'],second_pending['handle'].when(),
+                          second_pending['handle']._context,second_pending['cancel_job'].target)
         if multi:
             self.assertIsNotNone(other_pending)
             other_tuple=(other_pending['handle'],other_pending['handle'].when(),other_pending['handle']._context)
@@ -280,6 +300,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         created=[]
         revoked=False
         faulted=False
+        foreign_partial=None
         def guard():
             if revoked:
                 raise PermissionError('fixture pre-effect authorization loss')
@@ -303,17 +324,25 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(actor.attempted)
                 revoked=True
         def returned(code,offset,value):
-            nonlocal faulted
+            nonlocal faulted,foreign_partial
             frame=sys._getframe(1)
             actor=frame.f_locals.get('self')
             if partial and code is codes[5] and not faulted:
                 kind,owner=frame.f_locals['kind'],frame.f_locals['owner']
                 selected=(mode=='partial_keys' and kind=='list' and owner is native_pending['keys']
-                    or mode=='partial_map' and kind=='dict' and owner is before.listener_cells['period']
+                    or mode in ('partial_map','partial_foreign') and kind=='dict' and owner is before.listener_cells['period']
                     and not owner
                     or mode=='partial_wrapper' and kind=='entry' and owner[1] is native_pending['cancel_job'])
+                selected=selected or (mode=='partial_multi' and kind=='dict'
+                    and owner is second_before.listener_cells['period'] and not owner)
                 if selected:
                     faulted=True
+                    if mode=='partial_foreign':
+                        key='sensor.foreign_partial_duration'
+                        native_pending['keys'].append(key)
+                        members=before.callbacks[key]
+                        members.append(native_pending['cancel_job'])
+                        foreign_partial=(key,members,tuple(members),tuple(native_pending['keys']))
                     raise RuntimeError('fixture after actual duration write')
             if code is codes[4] and actor.hass is hass:
                 created.extend(actor.pending(frame.f_locals['route'].binding)[0])
@@ -357,6 +386,19 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(native_pending['handle'].when(),native_tuple[5])
                     self.assertIs(native_pending['handle']._context,native_tuple[6])
                     self.assertFalse(native_pending['handle'].cancelled())
+                    if mode=='partial_foreign':
+                        key,members,image,keys=foreign_partial
+                        self.assertIs(before.callbacks[key],members)
+                        self.assertEqual(tuple(members),image)
+                        self.assertEqual(tuple(native_pending['keys']),keys)
+                        self.assertEqual(roots[0].consumers.phases.graph.transfer.phase,
+                                         'failed_before_attempt_cleanup_unknown')
+                        self.assertEqual(before.config_ids,[new],
+                                         'No config undo may precede the conflicting graph preflight')
+                        self.assertEqual((actions,scripts),([],[]))
+                        for name,content in original.items():
+                            self.assertEqual((root/name).read_bytes(),content)
+                        return
                     if mode=='foreign_route':
                         self.assertEqual(tuple(native_pending['keys']),foreign_image[0])
                         self.assertIs(before.callbacks['sensor.foreign_duration_route'],foreign_image[1])
@@ -371,6 +413,13 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(native_pending['keys'],[old])
                         self.assertIs(restored.keyed_job.target,before.listener)
                         self.assertIs(native_pending['cancel_job'].target,native_pending['cancel_listener'])
+                        if mode=='partial_multi':
+                            restored_second=cap.capture(second)
+                            self.assertEqual(restored_second.original_keys,[old])
+                            self.assertEqual(restored_second.config_ids,[old])
+                            self.assertEqual(second_pending['keys'],[old])
+                            self.assertEqual((second_pending['handle'],second_pending['handle'].when(),
+                                second_pending['handle']._context,second_pending['cancel_job'].target),second_image)
                         phase=roots[0].consumers.phases
                         normal=self.module('yaml_validation_worker')._normal
                         observer=self.module('yaml_runtime_observer').NativeYAMLRuntimeReadback(hass,owned_automation=phase.graph)
