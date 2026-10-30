@@ -150,6 +150,18 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
                     # delivery or advance a clock/call a native handler.
                     await asyncio.wait_for(fired, max([0] + [deadline - self.f.hass.loop.time()
                                                            for deadline in deadlines]) + 5)
+                except TimeoutError:
+                    self.fail({'value': value, 'groups': [
+                        {'state': self.f.hass.states.get(entity.entity_id).state,
+                         'listeners': entity._template_result_info.listeners,
+                         'infos': [(sorted(info.entities), sorted(info.domains), sorted(info.domains_lifecycle),
+                                    info.all_states, info.all_states_lifecycle)
+                                   for info in entity._template_result_info._info.values()],
+                         'timers': [(handle.when() - self.f.hass.loop.time(), handle._args[0].data['entity_id'],
+                                     handle._args[0].data['old_state'] is None,
+                                     handle._args[0].data['new_state'] is None)
+                                    for handle in entity._template_result_info._rate_limit._rate_limit_timers.values()]}
+                        for entity in (self.consumer, self.control)]})
                 finally:
                     remove()
                 self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, str(value * 2))
