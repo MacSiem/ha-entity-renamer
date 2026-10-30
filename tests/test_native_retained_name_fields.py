@@ -120,16 +120,23 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.helpers.json import _orjson_bytes_default_encoder
         before_entries = json.loads(_orjson_bytes_default_encoder(hass.config_entries._data_to_save()))
         names = {old: 'Reviewed source', extra_id: 'Reviewed extra'}
+        devices = {device.id: 'Reviewed device'}
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
         review = await runtime.native_yaml_prepare(hass, mapping,
-            entity_names=names, device_names={device.id: 'Reviewed device'},
+            entity_names=names, device_names=devices,
             actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
         self.assertEqual((review['entity_count'], review['device_count']), (2, 1))
-        self.assertEqual(len(review['changes']), 3)
+        self.assertEqual(review['changes'], [
+            {'entity_id': old, 'fields': {
+                'entity_id': {'before': old, 'after': new},
+                'name': {'before': None, 'after': 'Reviewed source'}}},
+            {'entity_id': extra_id, 'fields': {'name': {'before': None, 'after': 'Reviewed extra'}}},
+            {'device_id': device.id, 'fields': {'name_by_user': {'before': None, 'after': 'Reviewed device'}}}])
         retained = runtime.reviews[review['operation_id']].plan
         self.assertEqual(tuple(step.adapter for step in retained.steps), ('registry',) * 3 + ('yaml',))
         names[old], names[extra_id] = 'Unreviewed source', 'Unreviewed extra'
+        devices[device.id] = 'Unreviewed device'
         from test_native_template_mixed_yaml_server import native_diagnostics
         with native_diagnostics(self.module):
             try:
