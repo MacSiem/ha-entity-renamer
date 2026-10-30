@@ -1,5 +1,4 @@
 """Real native schema prefix compilation; no live setup/reload/actions or apply."""
-import copy
 import importlib
 import json
 import unittest
@@ -20,10 +19,10 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
         root = self.f.root
         (root / 'configuration.yaml').write_text('script: !include scripts.yaml\n' +
             ('automation: []\n' if empty_automation else 'automation: !include automations.yaml\n'))
-        # Literal producer, alias, nested action and an equal ordinary label:
+        # Literal producer, alias, nested action and ordinary metadata:
         # only source-planner-accounted references may change.
         (root / 'scripts.yaml').write_text('''probe:
-  alias: sensor.original
+  alias: Unchanged script metadata
   sequence:
     - variables:
         source: sensor.original
@@ -71,7 +70,7 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
                 (masks[1], masks[0], 'sensor.original')]:
             p.assert_edge(before, after, source)
         self.assertEqual(p.rows(frozenset()), images[0])
-        self.assertIn('sensor.original', json.dumps(images[-1]))  # ordinary alias label retained
+        self.assertIn('Unchanged script metadata', json.dumps(images[-1]))
         for invalid in (frozenset({'sensor.second'}), frozenset({'sensor.foreign'})):
             with self.assertRaises(ValueError):
                 p.rows(invalid)
