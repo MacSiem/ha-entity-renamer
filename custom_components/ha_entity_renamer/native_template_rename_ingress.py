@@ -95,7 +95,8 @@ class NativeTemplateRenameIngress:
             tracker = action.__self__
             _need(filtered._action is wrapper and any(
                 row['new'] is tracker and row['entity']._template_result_info is tracker
-                and self.transport.runtime.graph(row['entity']) is tracker for row in self.transport.rows),
+                and self.transport.runtime.graph_with_ingress(row['entity'], self) is tracker
+                for row in self.transport.rows),
                 'template_ingress_deferred_tracker_changed')
             self._jobs(filtered, wrapper)
             original(event)
@@ -104,6 +105,18 @@ class NativeTemplateRenameIngress:
         finally:
             self.deferred[:] = [item for item in self.deferred if item is not token]
             self.witness._signal()
+
+    def assert_native_action(self, tracker, filtered):
+        """Audit the actual wrapper and its original native downstream owner."""
+        matching = [(action, wrapper) for owner, action, wrapper, _ in self.rows if owner is filtered]
+        _need(self.live and self.witness.ingress is self and len(matching) == 1,
+              'template_ingress_native_action_owner_changed')
+        action, wrapper = matching[0]
+        _need(tracker._track_state_changes is filtered
+              and _bound(action, tracker, self.transport.runtime.event.TrackTemplateResultInfo._refresh)
+              and filtered._action is wrapper and filtered._action_as_hassjob.target is wrapper,
+              'template_ingress_native_action_changed')
+        self._jobs(filtered, wrapper)
 
     def _jobs(self, filtered, expected):
         """Find exact current own jobs; native domain add remains untouched."""

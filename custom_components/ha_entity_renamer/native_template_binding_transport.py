@@ -312,6 +312,17 @@ class _Runtime:
               and type(cells['state']) is bool, 'template_binding_delay_closure_unqualified')
 
     def graph(self, entity):
+        return self._graph(entity, None)
+
+    def graph_with_ingress(self, entity, ingress):
+        """Same full census, with an exact live owned action wrapper."""
+        from .native_template_rename_ingress import NativeTemplateRenameIngress
+        _need(type(ingress) is NativeTemplateRenameIngress and ingress.live
+              and ingress.transport.runtime is self and ingress.witness.ingress is ingress,
+              'template_binding_owned_ingress_required')
+        return self._graph(entity, ingress)
+
+    def _graph(self, entity, ingress):
         native, event, te = self.native, self.event, self.te
         _need(type(entity) in (native.sensor, native.binary)
               and entity.hass is native.hass and entity._preview_callback is None
@@ -332,10 +343,14 @@ class _Runtime:
               'template_binding_tracker_required')
         filtered = tracker._track_state_changes
         _need(type(filtered) is event._TrackStateChangeFiltered and filtered.hass is native.hass
-              and _bound(filtered._action, tracker, event.TrackTemplateResultInfo._refresh)
-              and type(filtered._action_as_hassjob) is self.HassJob
-              and _bound(filtered._action_as_hassjob.target, tracker, event.TrackTemplateResultInfo._refresh),
+              and type(filtered._action_as_hassjob) is self.HassJob,
               'template_binding_filtered_owner_changed')
+        if ingress is None:
+            _need(_bound(filtered._action, tracker, event.TrackTemplateResultInfo._refresh)
+                  and _bound(filtered._action_as_hassjob.target, tracker, event.TrackTemplateResultInfo._refresh),
+                  'template_binding_filtered_owner_changed')
+        else:
+            ingress.assert_native_action(tracker, filtered)
         _need(type(tracker._rate_limit) is self.RateLimit
               and tracker._rate_limit.hass is native.hass,
               'template_binding_rate_owner_changed')
