@@ -37,7 +37,7 @@ class NativeAutomationTransition:
         from homeassistant.helpers.entity_component import EntityComponent
         _need(type(hass) is HomeAssistant and __version__ in ('2025.6.0', '2026.10.2', '2026.10.4'))
         component = hass.data.get('automation')
-        _need(type(component) is EntityComponent and component.hass is hass)
+        _need(component is None or (type(component) is EntityComponent and component.hass is hass))
         self.hass, self.native, self.component = hass, native, component
         self.task, self.thread = asyncio.current_task(), threading.get_ident()
         self.original = self._entities()
@@ -74,7 +74,11 @@ class NativeAutomationTransition:
     def check_native(self):
         _need(threading.get_ident() == self.thread and self.path.read_bytes() == self.source
               and self.hass.data.get('automation') is self.component)
-        live = {entity.unique_id: entity for entity in self.component.entities}
+        if self.component is None:
+            from homeassistant.helpers.entity_component import DATA_INSTANCES
+            _need('automation' not in self.hass.config.components
+                  and self.hass.data.get(DATA_INSTANCES, {}).get('automation') is None)
+        live = {entity.unique_id: entity for entity in self.component.entities} if self.component is not None else {}
         _need(all(row[0] in live for row in self.foreign)
               and tuple(self._pin(row[0], live[row[0]]) for row in self.foreign) == self.foreign)
         _need(all(path.read_bytes() == source for path, source in self.other_sources))
@@ -87,6 +91,9 @@ class NativeAutomationTransition:
 
     def _entities(self):
         native = self.native
+        if self.component is None:
+            _need(self.hass.data.get('automation') is None and 'automation' not in self.hass.config.components)
+            return ()
         rows = tuple(sorted((entity.unique_id, entity) for entity in self.component.entities))
         _need(all(type(key) is str and bool(key) and type(entity) is native.AutomationEntity
                   and entity.hass is self.hass and not entity.action_script.is_running
@@ -123,7 +130,7 @@ class NativeAutomationTransition:
         confined to a fresh prepared config_block; raw_config remains native and
         unchanged for the independent source/projection observer.
         """
-        _need(asyncio.current_task() is self.task)
+        _need(asyncio.current_task() is self.task and self.component is not None)
         self.assert_disabled()
         config = await self.component.async_prepare_reload(skip_reset=True)
         self.assert_disabled()

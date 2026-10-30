@@ -25,7 +25,7 @@ def _key(operation, fingerprint, direction, stage):
     return 'rr-' + canonical(['automation_lifecycle', operation, fingerprint, direction, stage])[1]
 
 
-def _completed(store, operation, plan, digests, direction, status, head):
+def _completed(store, operation, plan, digests, direction, status, head, *, stage_required):
     row = store.read(_key(operation, plan.fingerprint, direction, 'completed'))
     _need(row is not None and row['digest'] == canonical(row['payload'])[1])
     _need(row['payload'] == {'kind': 'automation_lifecycle_completed', 'schema': 1,
@@ -46,7 +46,7 @@ def _completed(store, operation, plan, digests, direction, status, head):
             type(row) is list and len(row) == 2 and type(row[0]) is str and bool(row[0])
             and type(row[1]) is bool for row in binding['enabled'])
         and len({row[0] for row in binding['enabled']}) == len(binding['enabled']))
-    for stage in ('quiesce', 'stage', 'restore'):
+    for stage in (('quiesce', 'stage', 'restore') if stage_required else ('quiesce', 'restore')):
         intent = store.read(_key(operation, plan.fingerprint, direction, stage + '_intent'))
         receipt = store.read(_key(operation, plan.fingerprint, direction, stage + '_receipt'))
         _need(intent is not None and receipt is not None
@@ -61,7 +61,8 @@ def _completed(store, operation, plan, digests, direction, status, head):
 
 def assert_forward_completed(session):
     root = _completed(session.receipt_store, session.operation_id, session.plan,
-        session.digests, 'forward', 'applied', session.chain.reconstruct_inputs().head)
+        session.digests, 'forward', 'applied', session.chain.reconstruct_inputs().head,
+        stage_required='automation' in session.receipt.changed_domains)
     _need(root['head'] == session.chain.root_digest)
 
 
@@ -96,14 +97,15 @@ async def async_assert_no_pending_automation_lifecycle(hass, preparations, journ
         chain = RegistryReceiptChain.reopen(store, record.operation_id, record.plan, baseline.receipt, digests)
         _need(not chain.writable and chain.active is None)
         head = chain.reconstruct_inputs().head
+        staged = 'automation' in baseline.receipt.changed_domains
         if record.status == 'applied' and record.direction == 'forward':
             _need(record.phases == ('verified',) * len(record.plan.steps))
-            root = _completed(store, record.operation_id, record.plan, digests, 'forward', 'applied', head)
+            root = _completed(store, record.operation_id, record.plan, digests, 'forward', 'applied', head, stage_required=staged)
             _need(root['head'] == chain.root_digest)
         elif record.status == 'rolled_back' and record.direction == 'rollback':
             _need(record.phases == ('undone',) * len(record.plan.steps))
-            reverse = _completed(store, record.operation_id, record.plan, digests, 'rollback', 'rolled_back', head)
-            root = _completed(store, record.operation_id, record.plan, digests, 'forward', 'applied', reverse['head'])
+            reverse = _completed(store, record.operation_id, record.plan, digests, 'rollback', 'rolled_back', head, stage_required=staged)
+            root = _completed(store, record.operation_id, record.plan, digests, 'forward', 'applied', reverse['head'], stage_required=staged)
             _need(root['head'] == chain.root_digest)
         else:
             _need(False)
@@ -117,7 +119,10 @@ def _affected_automations(session):
     """
     from .reference_planner import Context, Consumer, Scope, Syntax, plan_references
     component = session.hass.data.get('automation')
-    _need(component is not None)
+    if component is None:
+        _need('automation' not in session.receipt.changed_domains
+              and not session.evidence.ledger.keys_for_native_projection('automation'))
+        return (), (), ()
     primary = set(session.mapping) | set(session.mapping.values())
     original = session.evidence.template_sources.rows
     candidate = session.evidence.template_candidate_sources.sources.rows
@@ -163,7 +168,7 @@ def _affected_automations(session):
         triggers[entity.unique_id] = inputs
         if report.changes or inputs & primary:
             targets.append(entity.unique_id)
-            watched.update(inputs - primary)
+            watched.update(inputs)
             events.update(kinds)
     target_entities = {entity.entity_id for entity in component.entities if entity.unique_id in targets}
     _need(not any(inputs & target_entities for inputs in triggers.values()))
@@ -179,17 +184,19 @@ class NativeAutomationLifecycle:
         self.watched_events = events
         self.phases = session.consumers.phases
         self.root, self.removes, self.changed = None, [], False
-        self.stage_done = False
+        self.stage_done = 'automation' not in session.receipt.changed_domains
         self.expectations = {}
         self.primary = set(session.mapping) | set(session.mapping.values())
         for old, new in session.mapping.items():
+            if old not in watched and new not in watched:
+                continue
             current = session.hass.states.get(old if direction == 'forward' else new)
-            _need(current is not None)
-            expected = (current.state, deepcopy(dict(current.attributes)))
+            expected = None if current is None else (current.state, deepcopy(dict(current.attributes)))
             self.expectations[old] = self.expectations[new] = expected
         for key in watched:
-            current = session.hass.states.get(key)
-            self.expectations[key] = None if current is None else (current.state, deepcopy(dict(current.attributes)))
+            if key not in self.expectations:
+                current = session.hass.states.get(key)
+                self.expectations[key] = None if current is None else (current.state, deepcopy(dict(current.attributes)))
 
     def check_live(self):
         # Physical workers retain their own file guards; HA runtime is sampled
@@ -227,7 +234,8 @@ class NativeAutomationLifecycle:
             actual = None if state is None else (state.state, dict(state.attributes))
             if actual != self.expectations[key]:
                 self.changed = True
-        self.removes.append(s.hass.bus.async_listen('state_changed', event))
+        if self.expectations:
+            self.removes.append(s.hass.bus.async_listen('state_changed', event))
         def external_event(observed):
             self.changed = True
         for kind in self.watched_events:
