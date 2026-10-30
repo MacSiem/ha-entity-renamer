@@ -162,7 +162,8 @@ class NativeTemplateStateRegistryEffect:
         transfer = self.transport
         if transfer is None or transfer.phase not in ('installed', 'registry_attempted'):
             return
-        _need(self.phase == 'captured' and (self.witness is None or not self.witness.attempted),
+        _need(self.phase in ('captured', 'failed_before_attempt')
+              and (self.witness is None or not self.witness.attempted),
               'cleanup_after_attempt_forbidden')
         # Revoked request authorization cannot prevent restoring our own
         # unpublished synchronous cutover. No await/reentry happened since it.
@@ -200,7 +201,16 @@ class NativeTemplateStateRegistryEffect:
             return self.io.mutate(self.change,
                 self.change.before if self.context.record.direction == 'rollback' else self.change.after)
         except BaseException:
-            if self.ingress is not None:
+            if self.witness is not None and not self.witness.attempted:
+                # The final owning guard can refuse after installing bindings
+                # but before the witness starts any registry attempt. Only that
+                # proven pre-attempt branch may restore our exact own graph.
+                self.phase = 'failed_before_attempt'
+                try:
+                    self.abort_before_attempt()
+                finally:
+                    self.witness.close()
+            elif self.ingress is not None:
                 self.ingress.retire()
             raise
 

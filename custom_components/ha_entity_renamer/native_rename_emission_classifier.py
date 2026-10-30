@@ -862,15 +862,21 @@ class NativeRenameEmissions:
                 and item.semantic is not None and removed.semantic == item.semantic)
 
     def mutate(self):
-        self._owner_guard()
-        _need(not self.attempted, 'attempt_already_consumed')
-        self._check()
-        _need(self.destination == self.target_row and self.source.registry_entry is self.row
-              and self.registry.async_get(self.source_id) is self.row
-              and self.registry.async_get(self.target_id) is None
-              and self.source.entity_id == self.source_id
-              and self.platform.entities.get(self.source_id) is self.source,
-              'pre_mutation_binding_changed')
+        try:
+            self._owner_guard()
+            _need(not self.attempted, 'attempt_already_consumed')
+            self._check()
+            _need(self.destination == self.target_row and self.source.registry_entry is self.row
+                  and self.registry.async_get(self.source_id) is self.row
+                  and self.registry.async_get(self.target_id) is None
+                  and self.source.entity_id == self.source_id
+                  and self.platform.entities.get(self.source_id) is self.source,
+                  'pre_mutation_binding_changed')
+        except BaseException:
+            # Monitoring is owned even when authorization or native binding
+            # admission refuses before the registry attempt has started.
+            self.close()
+            raise
         self.attempted = self.in_mutate = True
         try:
             # This is the ONLY real mutation. The fire witness verifies this
