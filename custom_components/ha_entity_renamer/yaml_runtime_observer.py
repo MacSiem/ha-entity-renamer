@@ -325,7 +325,7 @@ class NativeYAMLRuntimeReadback:
                 script = entity.action_script
                 if ((entity._condition if __version__ in ('2026.10.2', '2026.10.4') else entity._cond_func) is not None or entity._trigger_variables is not None
                         or entity._blueprint_inputs is not None
-                        or script.is_running or (script._unloaded if __version__ in ('2026.10.2', '2026.10.4') else False)
+                        or (script._unloaded if __version__ in ('2026.10.2', '2026.10.4') else False)
                         or script._hass is not self.hass or script.domain != domain
                         or getattr(script.change_listener, '__self__', None) is not entity
                         or getattr(script.change_listener, '__func__', None)
@@ -370,6 +370,16 @@ class NativeYAMLRuntimeReadback:
             old, new = expected[domain]
             if old is None or new is None:
                 return Position.UNKNOWN, ()
+            if domain == 'automation':
+                # Configuration/registration inventory remains readable while
+                # an action runs. This generic reload observer still requires
+                # ALL automation actions idle; only the separate selective
+                # lifecycle can preserve an unrelated running instance.
+                from homeassistant.helpers.entity_component import DATA_INSTANCES
+                component = self.hass.data.get(DATA_INSTANCES, {}).get(domain)
+                if component is not None and any(entity.action_script.is_running
+                                                  for entity in component.entities):
+                    return Position.UNKNOWN, ()
             projection, identity = self._projection(domain)
             actual = _fingerprint(projection)
             before = before and actual == old

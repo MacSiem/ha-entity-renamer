@@ -46,6 +46,8 @@ class NativeAutomationTransition:
               and all(type(key) is str for key in targets) and len(set(targets)) == len(targets)
               and set(targets) <= all_keys))
         self.targets = tuple(sorted(all_keys if targets is None else targets))
+        _need(all(not entity.action_script.is_running and not entity.action_script.runs
+                  for key, entity in self.original if key in self.targets))
         self.foreign = tuple(self._pin(key, entity) for key, entity in self.original if key not in self.targets)
         self.enabled = tuple((key, entity._is_enabled) for key, entity in self.original if key in self.targets)
         _need(all(type(value) is bool for _, value in self.enabled))
@@ -96,8 +98,7 @@ class NativeAutomationTransition:
             return ()
         rows = tuple(sorted((entity.unique_id, entity) for entity in self.component.entities))
         _need(all(type(key) is str and bool(key) and type(entity) is native.AutomationEntity
-                  and entity.hass is self.hass and not entity.action_script.is_running
-                  and not entity.action_script.runs for key, entity in rows)
+                  and entity.hass is self.hass for key, entity in rows)
               and len({key for key, _ in rows}) == len(rows))
         return rows
 
@@ -106,6 +107,7 @@ class NativeAutomationTransition:
         rows = self._entities()
         _need(tuple(key for key, _ in rows) == tuple(key for key, _ in self.original)
               and all(entity._is_enabled is False and entity._async_detach_triggers is None
+                      and not entity.action_script.is_running and not entity.action_script.runs
                       for key, entity in rows if key in self.targets))
         return rows
 
