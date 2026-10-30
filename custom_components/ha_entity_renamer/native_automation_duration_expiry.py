@@ -22,13 +22,20 @@ from .native_unload_code_proof import prove_methods, unchanged
 # still compiles and compares the actual source, methods and exact callsites.
 # Other stdlib bodies are unsupported; no version-only admission.
 _PYTHON_PINS = {
-    (3, 13): {
+    (3, 13, 3): {
         'asyncio/events.py': '43e8ff927e11361081edc622bb0f0173c0d8c8a1145f9bdd813e8848d5147224',
         'asyncio/base_events.py': 'a3c1e1a008f559a328c44ebfa5d7925845307018d96ee4f4ec0666ec89bd5641',
     },
-    (3, 14): {
+    (3, 14, 9): {
         'asyncio/events.py': '62e2c619c38407309c0d2c98638642174ee7be5b874676c0225392fed4a00b0f',
         'asyncio/base_events.py': '3e54aa78ed18af0ee5a93384a63fd522496d1805b56ab6561e54c4fdb0869127',
+    },
+    # Installed staging Core 2026.10.2: whole base_events.py differs, but the
+    # three audited method bodies and loop primitive globals are identical.
+    # Qualification still compiles/checks the actual pinned local file.
+    (3, 14, 6): {
+        'asyncio/events.py': '62e2c619c38407309c0d2c98638642174ee7be5b874676c0225392fed4a00b0f',
+        'asyncio/base_events.py': '02a3fb293559af5e053396d47a4090f009b0746bf1df25462736657c1663495d',
     },
 }
 
@@ -83,7 +90,7 @@ class NativeDurationExpiry:
         self.capability, self.witness, self.records = capability, None, {}
         self.refs = [(asyncio.Handle, '_run'), (asyncio.BaseEventLoop, '_run_once'),
                      (asyncio.TimerHandle, 'cancel')]
-        pins = _PYTHON_PINS.get(sys.version_info[:2])
+        pins = _PYTHON_PINS.get(sys.version_info[:3])
         _need(pins is not None, 'duration_expiry_python_unqualified')
         root = Path(inspect.getsourcefile(asyncio.Handle)).resolve().parent.parent
         self.methods, self.codes = prove_methods(root, pins, self.refs)
