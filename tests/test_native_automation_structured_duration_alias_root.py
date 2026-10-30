@@ -234,7 +234,9 @@ class NativeAutomationStructuredDurationAliasRootTests(unittest.IsolatedAsyncioT
             for code in codes.values():
                 sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
             sys.monitoring.set_local_events(tool, write_code, sys.monitoring.events.PY_RETURN)
-            sys.monitoring.set_local_events(tool, alias_check_code, sys.monitoring.events.RAISE)
+            # Exception events are global-only; the callback filters the exact
+            # original guard code, transfer identity and caller boundary.
+            sys.monitoring.set_events(tool, sys.monitoring.events.RAISE)
             with mixed.native_diagnostics(self.module):
                 monitors = tuple(sys.monitoring.get_tool(k) for k in range(6))
                 try:
@@ -295,6 +297,7 @@ class NativeAutomationStructuredDurationAliasRootTests(unittest.IsolatedAsyncioT
                 self.assertIs(configured['seconds'], leaf)
                 self.assertEqual(graph(configured), before_root)
         finally:
+            sys.monitoring.set_events(tool, 0)
             for code in (*codes.values(), write_code, alias_check_code):
                 sys.monitoring.set_local_events(tool, code, 0)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
