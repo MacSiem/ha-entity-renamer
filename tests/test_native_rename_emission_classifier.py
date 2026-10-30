@@ -12,6 +12,52 @@ import test_native_template_yaml_server as server
 
 @unittest.skipUnless(server.activation.fixture.fixtures.HAS_HA, 'installed dependencies required')
 class SemanticSnapshotTests(unittest.TestCase):
+    def snapshot(self, attributes):
+        import importlib
+        module = importlib.import_module(server.activation.fixture.fixtures.PACKAGE
+                                        + '.native_rename_emission_classifier')
+        return module._semantic_state(SimpleNamespace(state='1', attributes=attributes))
+
+    def test_source_foreign_metaclass_hooks_are_never_executed(self):
+        calls = []
+        class ForeignMeta(type):
+            def __eq__(cls, other):
+                calls.append('metaclass equality')
+                raise AssertionError('snapshot compared a foreign type')
+            def __getattribute__(cls, name):
+                calls.append('metaclass attribute')
+                raise AssertionError('snapshot inspected a foreign type')
+        class Foreign(metaclass=ForeignMeta):
+            pass
+        self.assertIsNone(self.snapshot({'fixture': Foreign()}))
+        self.assertEqual(calls, [])
+
+    def test_source_pretend_primitive_never_retains_live_foreign_reference(self):
+        class PretendMeta(type):
+            def __eq__(cls, other):
+                return True
+        class MutableValue(metaclass=PretendMeta):
+            value = 1
+        value = MutableValue()
+        before = self.snapshot({'fixture': value})
+        value.value = 7
+        after = self.snapshot({'fixture': value})
+        self.assertIsNone(before)
+        self.assertIsNone(after)
+
+    def test_source_unknown_key_class_hook_is_never_executed(self):
+        calls = []
+        class UnknownKey:
+            @property
+            def __class__(self):
+                calls.append('class hook')
+                raise AssertionError('snapshot accessed foreign key class hook')
+        self.assertIsNone(self.snapshot({UnknownKey(): 'fixture'}))
+        self.assertEqual(calls, [])
+
+    def test_source_signed_float_zero_is_a_meaningful_attribute_change(self):
+        self.assertNotEqual(self.snapshot({'fixture': 0.0}), self.snapshot({'fixture': -0.0}))
+
     def test_foreign_string_key_lookup_semantics_cannot_be_promoted_to_neutral(self):
         import importlib
         module = importlib.import_module(server.activation.fixture.fixtures.PACKAGE
