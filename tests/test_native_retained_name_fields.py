@@ -87,3 +87,73 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         self.f.entity.async_update_entity(old, name=original_name)
         await hass.async_block_till_done()
         await self._flush_documents()
+
+    async def test_id_name_name_only_and_device_in_one_retained_plan(self):
+        from types import MappingProxyType
+        from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        runtime, mapping, uuids, original = await self.data(variant='sensor')
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        extra = type(self.producer)()
+        extra._attr_unique_id = 'review-namespace-extra'
+        extra._attr_name = 'Namespace extra'
+        await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([extra])
+        extra_id = extra.entity_id
+        # A real unrelated native entry provides the device's HA ownership.
+        # Its actual source is outside the ID mapping and must stay unchanged.
+        entry = ConfigEntry(domain='threshold', title='Namespace device owner', data={},
+            options={'name': 'Namespace helper', 'entity_id': extra_id,
+                     'lower': 20, 'upper': None, 'hysteresis': 0},
+            discovery_keys=MappingProxyType({}), source='user', version=1,
+            minor_version=1, subentries_data=[], unique_id='namespace-device-owner')
+        await hass.config_entries.async_add(entry)
+        await hass.async_block_till_done()
+        self.assertIs(entry.state, ConfigEntryState.LOADED)
+        device = self.f.device.async_get_or_create(config_entry_id=entry.entry_id,
+            identifiers={('threshold', 'namespace-device')}, name='Namespace device')
+        self.f.entity.async_update_entity(extra_id, device_id=device.id)
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        io = self.module('native_registry').NativeRegistryIO(hass)
+        before_entities, before_devices = io.document('entity'), io.document('device')
+        before_entries = hass.config_entries._data_to_save()
+        names = {old: 'Reviewed source', extra_id: 'Reviewed extra'}
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        review = await runtime.native_yaml_prepare(hass, mapping,
+            entity_names=names, device_names={device.id: 'Reviewed device'},
+            actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        self.assertEqual((review['entity_count'], review['device_count']), (2, 1))
+        self.assertEqual(len(review['changes']), 3)
+        retained = runtime.reviews[review['operation_id']].plan
+        self.assertEqual(tuple(step.adapter for step in retained.steps), ('registry',) * 3 + ('yaml',))
+        names[old], names[extra_id] = 'Unreviewed source', 'Unreviewed extra'
+        result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+            actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        self.assertEqual(result['state'], 'applied')
+        self.assertEqual(self.f.entity.async_get(new).name, 'Reviewed source')
+        self.assertEqual(self.f.entity.async_get(extra_id).name, 'Reviewed extra')
+        self.assertEqual(self.f.device.async_get(device.id).name_by_user, 'Reviewed device')
+        self.assertEqual(hass.states.get(new).attributes['friendly_name'], 'Reviewed source')
+        self.assertEqual(hass.states.get(extra_id).attributes['friendly_name'], 'Reviewed extra')
+        inverse = await runtime.native_yaml_reverse(hass, review['operation_id'], review['fingerprint'],
+            guard=lambda: None, refresh=refresh)
+        self.assertEqual(inverse['state'], 'rolled_back')
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        def normalized(document, family, owned):
+            document = json.loads(json.dumps(document))
+            for row in document[family]:
+                if row['id'] in owned:
+                    row.pop('modified_at', None)
+            return document
+        owned = {uuids[old], self.f.entity.async_get(extra_id).id}
+        self.assertEqual(normalized(io.document('entity'), 'entities', owned),
+                         normalized(before_entities, 'entities', owned))
+        self.assertEqual(normalized(io.document('device'), 'devices', {device.id}),
+                         normalized(before_devices, 'devices', {device.id}))
+        self.assertEqual(hass.config_entries._data_to_save(), before_entries)
+        self.assertEqual((await runtime.journal.load(review['operation_id'])).plan, retained)
+        await self.stimulus(11)
