@@ -24,22 +24,7 @@ def _need(value, reason):
         raise Refused('template_state_server_' + reason)
 
 
-def _acknowledged_registry_prefix(record):
-    """Shape only; a fresh full chain/native admission must still prove it.
-
-    No pending intent, YAML effect or rollback prefix is admitted by this slice.
-    It accepts only a nonempty contiguous set of acknowledged registry effects.
-    """
-    from .transaction import Record
-    if (type(record) is not Record or record.direction != 'forward'
-            or record.status not in ('applying', 'unknown', 'ready')
-            or len(record.plan.steps) < 2 or len(record.phases) != len(record.plan.steps)
-            or tuple(step.adapter for step in record.plan.steps)
-               != ('registry',) * (len(record.plan.steps) - 1) + ('yaml',)):
-        return False
-    count = record.phases.count('verified')
-    return (0 < count < len(record.phases)
-            and record.phases == ('verified',) * count + ('pending',) * (len(record.phases) - count))
+from .native_template_prefix_recovery import acknowledged_registry_prefix as _acknowledged_registry_prefix
 
 
 class NativeTemplateStateServer(NativeTemplateYAMLServer):
@@ -81,13 +66,14 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
               and len(actual.rows) == len(identities)
               and {(row.entity.entity_id, row.registry_id) for row in actual.rows} == identities,
               'prefix_consumer_identity_changed')
-        await self._final_history(state, witness)
         observed = await self._observe()
         self.chain.expected(PhaseContext(record, len(record.plan.steps) - 1), tuple(
             RegistryRawObservation(row.key, row.raw, row.identity) for row in observed.files))
         _need(await self.journal.load(self.operation_id) == record, 'prefix_phase_changed')
         self._scope()
-        witness.check()
+        # Last awaited physical worker includes the finite SQL content. Only
+        # synchronous input/runtime/manager suffix checks follow it.
+        await self._final_history(state, witness)
         return True
 
     async def _prepare(self):

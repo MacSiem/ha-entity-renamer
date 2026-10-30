@@ -277,9 +277,13 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         self.guard()
         record = await self.phase_loader(self.chain.operation_id)
         self.guard()
-        if (record is None or record.plan != plan or record.direction != direction
-                or record.phases != (('verified' if direction == 'forward' else 'undone'),)
-                                    * len(plan.steps)):
+        if record is None or record.plan != plan or record.direction != direction:
+            return False
+        complete = record.phases == (('verified' if direction == 'forward' else 'undone'),) * len(plan.steps)
+        if not complete and direction == 'rollback':
+            from .native_template_prefix_recovery import unstarted_rollback_complete
+            complete = unstarted_rollback_complete(self.chain, record)
+        if not complete:
             return False
         observations = await self._read(self.guard)
         self.chain.expected(PhaseContext(record, 0), observations)

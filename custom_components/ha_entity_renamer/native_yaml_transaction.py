@@ -322,8 +322,13 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
         record = await self.phase_loader(self.chain.operation_id)
         self._assert(state, guard)
         direction = 'rollback' if rollback else 'forward'
-        if (record is None or record.plan != plan or record.direction != direction
-                or record.phases != (('undone' if rollback else 'verified'),) * len(plan.steps)):
+        if record is None or record.plan != plan or record.direction != direction:
+            return False
+        complete = record.phases == (('undone' if rollback else 'verified'),) * len(plan.steps)
+        if not complete and rollback:
+            from .native_template_prefix_recovery import unstarted_rollback_complete
+            complete = unstarted_rollback_complete(self.chain, record)
+        if not complete:
             return False
         steps = [i for i, row in enumerate(plan.steps) if row.adapter == 'yaml']
         if steps != [len(plan.steps) - 1]:
