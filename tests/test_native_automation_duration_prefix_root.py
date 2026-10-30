@@ -306,6 +306,9 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             self.producer._attr_extra_state_attributes={'orphan_fixture':1}
             self.producer.async_write_ha_state()
             await hass.async_block_till_done()
+            # The genuine attribute event has a new current State. The older
+            # pending timer still retains its original historical State/Event.
+            physical=hass.states.get(old)
             orphan_map=before.listener_cells['unsub_track_same']
             replacement=orphan_map[old]
             self.assertIsNot(replacement,native_pending['clear'])
@@ -327,6 +330,8 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
             codes+= (self.module('native_automation_duration_binding')._PreEffectLog.write.__code__,)
         elif active_expiry:
             codes+= (native_pending['timer_job'].target.__code__,)
+        elif mode=='rollback':
+            codes+= (self.module('native_automation_state_binding')._need.__code__,)
         tool=next(k for k in range(6) if sys.monitoring.get_tool(k) is None)
         sys.monitoring.use_tool_id(tool,'actual Root literal for acceptance')
         emitted=[]
@@ -343,6 +348,28 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         def start(code,offset):
             nonlocal revoked
             frame=sys._getframe(1);actor=frame.f_locals.get('self')
+            if (mode=='rollback' and code is codes[5]
+                    and frame.f_locals.get('reason')=='duration_rollback_slot_changed'
+                    and not frame.f_locals.get('value')):
+                caller=frame.f_back
+                local=caller.f_locals
+                kind,owner,key=local['kind'],local['owner'],local['key']
+                log=local['self']
+                expected=local['expected'][key]
+                actual=(local['shadow'][key] if key in local['shadow']
+                        else tuple(owner.items()) if kind=='dict'
+                        else tuple(owner) if kind=='list'
+                        else owner[0].get(owner[1],log.ABSENT) if kind=='entry'
+                        else getattr(owner,kind))
+                def shape(value):
+                    if kind=='dict':
+                        return [(str(k),id(k),id(v),type(v).__name__) for k,v in value]
+                    if kind=='list':
+                        return [(id(v),type(v).__name__,getattr(v,'name',None)) for v in value]
+                    return (id(value),type(value).__name__)
+                print('NATIVE_DURATION_ROLLBACK_SLOT',dict(kind=kind,key=key,
+                    callbacks=owner is before.callbacks,
+                    expected=shape(expected),actual=shape(actual)))
             if active_expiry and code is codes[5] and frame.f_locals.get('job') is native_pending['same_job']:
                 expiries.append(tuple(root.consumers.phases.graph.live for root in roots))
                 live=[root for root in roots if root.consumers.phases.graph.live]
