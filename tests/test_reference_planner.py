@@ -26,6 +26,34 @@ requires_jinja = unittest.skipUnless(importlib.util.find_spec('jinja2'), 'native
 
 class ReferencePlannerTest(unittest.TestCase):
     @requires_jinja
+    def test_state_collection_entity_id_predicates_use_reference_origins(self):
+        for source in (
+            "{{ states | selectattr('entity_id', 'equalto', 'sensor.a') | list | count }}",
+            "{{ states.sensor | rejectattr('entity_id', 'eq', 'sensor.a') | list | length }}",
+            "{{ (states | list | count) + (states | selectattr('entity_id', '==', 'sensor.a') | list | count) }}",
+            "{% set source = 'sensor.a' %}{{ states | selectattr('entity_id', 'equalto', source) | list | count }}",
+        ):
+            with self.subTest(source=source):
+                plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+                self.assertFalse(plan.markers, plan.markers)
+                self.assertEqual(plan.value, source.replace('sensor.a', 'sensor.b'))
+
+    @requires_jinja
+    def test_state_collection_lookalikes_and_dynamic_tests_are_not_rewritten(self):
+        for source in (
+            "{{ labels | selectattr('entity_id', 'equalto', 'sensor.a') | list | count }}",
+            "{{ states | selectattr('name', 'equalto', 'sensor.a') | list | count }}",
+            "{{ states | selectattr('entity_id', custom_test, 'sensor.a') | list | count }}",
+            "{{ states | selectattr('entity_id', 'search', 'sensor.a') | list | count }}",
+            "{{ states | selectattr('entity_id', 'equalto', 'sensor.a', extra) | list | count }}",
+            "{% set source = 'sensor.a' %}{{ states | selectattr('entity_id', 'equalto', source) | list | count }}{{ source }}",
+        ):
+            with self.subTest(source=source):
+                plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+                self.assertEqual(plan.value, source)
+                self.assertTrue(plan.markers)
+
+    @requires_jinja
     def test_split_static_state_access(self):
         for source in ("{{ states.sensor['a'].state }}", "{{ states['sensor']['a'].state }}",
                        '''{{ states [ "sensor" ] [ 'a' ] }}'''):
