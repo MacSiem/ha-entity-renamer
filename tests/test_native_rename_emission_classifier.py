@@ -31,7 +31,7 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_producer_change_between_prepare_and_mutate_remains_a_producer_event(self):
         await self.round_trip(reemit=False, producer_gap=True)
 
-    async def test_real_producer_write_in_native_remove_hook_is_not_a_rename_event(self):
+    async def test_unemitted_value_change_in_remove_hook_is_not_a_neutral_rename(self):
         await self.round_trip(reemit=False, producer_hook=True)
 
     async def round_trip(self, *, reemit, producer_gap=False, producer_hook=False):
@@ -104,9 +104,11 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
             if producer_hook:
                 updates = [event for event in received
                            if event.data['old_state'] is not None and event.data['new_state'] is not None]
-                self.assertEqual(len(updates), 1)
-                self.assertEqual((updates[0].data['old_state'].state, updates[0].data['new_state'].state), ('1', '7'))
-                self.assertFalse(witness.is_owned_rename(updates[0]))
+                # Native Entity ignores writes after entering REMOVED. The
+                # physical value reaches HA only in final native re-add. It is
+                # an owned rename emission, with a non-neutral value delta.
+                self.assertEqual(updates, [])
+                self.assertFalse(proof['neutral'])
             if reemit:
                 self.assertEqual(len(received), 4)
                 groups = {}
@@ -121,8 +123,10 @@ class NativeRenameEmissionTests(unittest.IsolatedAsyncioTestCase):
             removed = next(event for event in own if event.data['new_state'] is None)
             added = next(event for event in own if event.data['old_state'] is None)
             self.assertEqual((removed.data['entity_id'], added.data['entity_id']), (old, new))
-            if producer_gap or producer_hook:
+            if producer_gap:
                 self.assertEqual((removed.data['old_state'].state, added.data['new_state'].state), ('7', '7'))
+            elif producer_hook:
+                self.assertEqual((removed.data['old_state'].state, added.data['new_state'].state), ('1', '7'))
             self.assertIs(added.data['new_state'], hass.states.get(new))
             self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
         finally:
