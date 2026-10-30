@@ -54,6 +54,12 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
         await self.f.hass.async_block_till_done()
 
     async def test_conditional_full_root_keeps_active_branch_and_native_dependency_switch(self):
+        await self._conditional_full_root(with_time=False)
+
+    async def test_conditional_time_full_root_keeps_physical_owner_and_natural_tick(self):
+        await self._conditional_full_root(with_time=True)
+
+    async def _conditional_full_root(self, *, with_time):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         from homeassistant.helpers.entity_platform import async_get_platforms
@@ -70,10 +76,14 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
         await hass.data[DATA_INSTANCES]['sensor'].async_add_entities(producers)
         branch_a, branch_b, control_source = producers
         def definition(uid, source):
-            return ('- unique_id: ' + uid + '\n  sensor:\n  - unique_id: value\n'
+            text = ('- unique_id: ' + uid + '\n  sensor:\n  - unique_id: value\n'
                 '    name: Conditional root ' + uid + '\n'
                 '    state: "{{ states(\'' + branch_a.entity_id + '\') | int(0) if states(\'' + source
                 + '\') | int(0) > 0 else states(\'' + branch_b.entity_id + '\') | int(0) }}"\n')
+            if with_time:
+                text += ('    attributes:\n      minute: "{{ now().strftime(\'%Y-%m-%d %H:%M\') '
+                         'if states(\'' + source + '\') | int(0) > 0 else \'inactive\' }}"\n')
+            return text
         path = self.f.root / 'template.yaml'
         original = (definition('scope', old) + definition('control', control_source.entity_id)).encode()
         path.write_bytes(original)
@@ -94,10 +104,62 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(runtime.operation_lock.locked())
         initial = hass.states.get(subject.entity_id)
         outputs(3)
-        result = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+        if with_time:
+            node_code = self.module('native_template_state_registry_effect').NativeTemplateStateRegistryEffect.mutate.__code__
+            mutate_code = self.module('native_rename_emission_classifier').NativeRenameEmissions.mutate.__code__
+            refresh_code = subject._template_result_info._refresh.__func__.__code__
+            original_remove = next(iter(subject._template_result_info._time_listeners.values()))
+            time_code = original_remove.__self__.job.target.__code__
+            fired = hass.loop.create_future()
+            observed, cutovers = {}, []
+            carry, attempted = None, False
+            def time_fields():
+                removes = list(subject._template_result_info._time_listeners.values())
+                self.assertEqual(len(removes), 1)
+                remove = removes[0]
+                owner = remove.__self__
+                handle = owner._cancel_callback.__self__._cancel_callback
+                return remove, owner.job, handle, handle.when(), handle._context
+            def started(code, offset):
+                nonlocal carry, attempted
+                frame = sys._getframe(1)
+                obj = frame.f_locals.get('self')
+                if code is node_code and obj.source == old:
+                    carry = time_fields()
+                elif code is mutate_code and obj.source_id == old and obj.change.identity == uuids[old]:
+                    current = time_fields()
+                    cutovers.append((current[0] is carry[0] is original_remove, current[1] is not carry[1],
+                                     current[2] is carry[2], current[3] == carry[3], current[4] is carry[4]))
+                    attempted = True
+            def returned(code, offset, result):
+                frame = sys._getframe(1)
+                if (not attempted or frame.f_locals.get('event') is not None
+                        or frame.f_back.f_code is not time_code):
+                    return
+                for entity in (subject, control):
+                    if frame.f_locals.get('self') is entity._template_result_info:
+                        observed[entity.entity_id] = hass.states.get(entity.entity_id).attributes['minute']
+                if len(observed) == 2 and not fired.done():
+                    fired.set_result(None)
+            monitor = sys.monitoring
+            tool = next(key for key in range(6) if monitor.get_tool(key) is None)
+            monitor.use_tool_id(tool, 'actual conditional root time transport')
+            monitor.register_callback(tool, monitor.events.PY_START, started)
+            monitor.register_callback(tool, monitor.events.PY_RETURN, returned)
+            for code in (node_code, mutate_code):
+                monitor.set_local_events(tool, code, monitor.events.PY_START)
+            monitor.set_local_events(tool, refresh_code, monitor.events.PY_RETURN)
+        result = None
         try:
+            result = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
             self.assertEqual(result['state'], 'applied')
-            self.assertIs(hass.states.get(subject.entity_id), initial)
+            if with_time:
+                self.assertEqual(cutovers, [(True,) * 5])
+                await asyncio.wait_for(fired, 65)
+                self.assertEqual(observed[subject.entity_id], observed[control.entity_id])
+                self.assertNotEqual(observed[subject.entity_id], initial.attributes['minute'])
+            else:
+                self.assertIs(hass.states.get(subject.entity_id), initial)
             await emit(branch_a, 5)
             outputs(5)
             await emit(branch_b, 9)
@@ -112,10 +174,18 @@ class NativeTemplateStateRootCoverageTests(unittest.IsolatedAsyncioTestCase):
             await emit(branch_b, 13)
             outputs(13)
         finally:
-            if result['state'] == 'applied':
-                inverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
-                    guard=lambda: None, refresh=refresh)
-                self.assertEqual(inverse['state'], 'rolled_back')
+            try:
+                if result is not None and result['state'] == 'applied':
+                    inverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
+                        guard=lambda: None, refresh=refresh)
+                    self.assertEqual(inverse['state'], 'rolled_back')
+            finally:
+                if with_time:
+                    for code in (node_code, mutate_code, refresh_code):
+                        monitor.set_local_events(tool, code, 0)
+                    monitor.register_callback(tool, monitor.events.PY_START, None)
+                    monitor.register_callback(tool, monitor.events.PY_RETURN, None)
+                    monitor.free_tool_id(tool)
         self.assertEqual(path.read_bytes(), original)
         self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
         self.assertIsNone(self.f.entity.async_get(mapping[old]))
