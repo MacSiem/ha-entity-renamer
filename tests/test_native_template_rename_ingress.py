@@ -25,8 +25,40 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
     async def test_queued_producer_event_reaches_old_tracker_before_cutover(self):
         await self.round_trip(preflight_gap=True)
 
-    async def round_trip(self, *, preflight_gap=False):
-        await self.pair()
+    async def test_meaningful_value_first_published_by_native_readd_reaches_consumer(self):
+        await self.round_trip(producer_hook=True)
+
+    async def test_native_domain_add_keeps_bookkeeping_and_subsequent_producer_delivery(self):
+        await self.round_trip(domain=True)
+
+    async def round_trip(self, *, preflight_gap=False, producer_hook=False, domain=False):
+        await self.pair(domain=domain)
+        if producer_hook:
+            from homeassistant.core import Context
+            from homeassistant.helpers.entity_component import DATA_INSTANCES
+            from homeassistant.helpers.entity_platform import async_get_platforms
+            class HookSource(type(self.producer)):
+                change_on_remove = True
+                async def async_will_remove_from_hass(source):
+                    await super().async_will_remove_from_hass()
+                    if source.change_on_remove:
+                        source.change_on_remove = False
+                        source._attr_native_value = 7
+                        source.async_write_ha_state()
+            source = HookSource()
+            source._attr_unique_id = 'ingress-hook-native-source'
+            source._attr_name = 'Ingress hook native source'
+            await self.f.hass.data[DATA_INSTANCES]['sensor'].async_add_entities([source])
+            self.original = self.original.replace(self.old.encode(), source.entity_id.encode())
+            self.old, self.producer = source.entity_id, source
+            self.desired = self.original.replace(self.old.encode(), self.new.encode())
+            self.source_uuid = self.f.entity.async_get(self.old).id
+            self.path.write_bytes(self.original)
+            await self.f.hass.services.async_call('template', 'reload', {}, blocking=True, context=Context())
+            await self.f.hass.async_block_till_done()
+            entities = {e.unique_id: e for p in async_get_platforms(self.f.hass, 'template')
+                        if p.domain == 'sensor' for e in p.entities.values()}
+            self.consumer, self.control = entities['scope-value'], entities['scope-control']
         await self._flush_documents()
         native = self.module_named('native_registry')
         classifier = self.module_named('native_rename_emission_classifier')
@@ -62,9 +94,9 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
                 return (row is not None and row.id == self.source_uuid and sources == pairs
                         and entities == (self.consumer,) and self.path.read_bytes() in (before, desired))
             context = self.module._BindingCallerContext(owner, fence)
-            transport = self.module.NativeTemplateBindingTransport.capture(self.f.hass, (self.consumer,),
-                source_pairs=pairs, caller_context=context)
             delivery.retire_at_final_fence()
+            transport = self.module.NativeTemplateBindingTransport.capture(self.f.hass, (self.consumer,),
+                source_pairs=pairs, caller_context=context, rename_witness=witness)
             physical = self.f.hass.states.get(self.consumer.entity_id)
             self.path.write_bytes(desired)
             transport.install_before_registry(context)
@@ -75,12 +107,17 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
                 proof = await witness.finish()
             finally:
                 ingress.retire()
-            self.assertTrue(proof['neutral'])
-            self.assertGreater(ingress.suppressed, 0)
+            changed = producer_hook and source_id == self.old
+            self.assertEqual(proof['neutral'], not changed)
+            if not changed:
+                self.assertGreater(ingress.suppressed, 0)
             self.assertFalse(ingress.live)
             self.assertIs(self.module._Runtime(self.f.hass).graph(self.consumer),
                           self.consumer._template_result_info)
-            self.assertIs(self.f.hass.states.get(self.consumer.entity_id), physical)
+            if changed:
+                self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, '14')
+            else:
+                self.assertIs(self.f.hass.states.get(self.consumer.entity_id), physical)
             self.assertEqual(self.producer.entity_id, target_id)
             self.assertEqual(self.f.entity.async_get(target_id).id, self.source_uuid)
             self.assertIsNone(self.f.hass.states.get(source_id))

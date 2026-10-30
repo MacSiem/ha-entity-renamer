@@ -367,7 +367,7 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
     prepare = server.NativeTemplateYAMLServerTests.prepare
 
     async def pair(self, *, variant='sensor', unavailable=False, time=False, broad=False,
-                   equal_attributes=False, broad_membership=False):
+                   equal_attributes=False, broad_membership=False, domain=False):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         from homeassistant.helpers.entity_platform import async_get_platforms
@@ -386,6 +386,9 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 state = "{{ (states | list | count) + (states('" + source + "') | int(0)) }}"
             if broad_membership:
                 state = "{{ states | selectattr('entity_id', 'equalto', '" + source + "') | list | count }}"
+            if domain:
+                state = ("{{ (states.sensor | selectattr('entity_id', 'equalto', '" + source
+                         + "') | map(attribute='state') | first | default('0')) | int(0) * 2 }}")
             text = ('  - unique_id: ' + uid + '\n    name: ' + name + '\n    state: "' + state + '"\n')
             if variant == 'binary_sensor':
                 text += '    delay_on: "00:00:02"\n'
