@@ -145,10 +145,16 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn((entity_id, None), self.identities.values())
                     self.assertIsNone(self.f.entity.async_get(entity_id))
                     self.assertTrue(key.startswith('@physical-template-v1:'))
-                encoded = self.module('native_template_composition').encode_composition(composition, baseline)
+            encoded = self.module('native_template_composition').encode_composition(composition, baseline)
+            state_type = self.module('native_template_state_composition').TemplateStateComposition
+            if type(composition) is state_type:
+                self.assertEqual(encoded['schema'], 3)
+                self.assertEqual(encoded['profile'], 'template_state_binding_v3')
+                self.assertEqual(composition.mapping, tuple(sorted(mapping.items())))
+                self.assertEqual(composition.state_config_program.sha256, composition.coverage_sha256)
+            elif uidless:
                 self.assertEqual(encoded['schema'], 2)
             else:
-                encoded = self.module('native_template_composition').encode_composition(composition, baseline)
                 self.assertEqual(encoded['schema'], 1)
                 self.assertNotIn('physical_consumers', encoded)
             self.assertEqual(baseline.receipt.changed_domains, ('template',))
