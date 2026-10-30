@@ -83,7 +83,7 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
     module = server.NativeTemplateYAMLServerTests.module
     stimulus = server.NativeTemplateYAMLServerTests.stimulus
 
-    async def data(self):
+    async def data(self, *, with_automation=True):
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.setup import async_setup_component
         # This helper sets up native data only (validate=False). It constructs
@@ -110,10 +110,11 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
             '    event_data:\n'
             '      value: "{{ states(\'' + old + '\') }}"\n')
         with (root / 'configuration.yaml').open('a') as handle:
-            handle.write('\nautomation: !include mixed_automations.yaml\n'
-                         'script: !include mixed_scripts.yaml\n')
+            if with_automation:
+                handle.write('\nautomation: !include mixed_automations.yaml\n')
+            handle.write('\nscript: !include mixed_scripts.yaml\n')
         config = await async_hass_config_yaml(hass)
-        for domain in ('automation', 'script'):
+        for domain in (('automation', 'script') if with_automation else ('script',)):
             self.assertTrue(await async_setup_component(hass, domain, config))
         await hass.async_block_till_done()
         await self._flush_documents()
@@ -122,8 +123,10 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         dependents = tuple(sorted((row.platform, row.unique_id, row.entity_id, row.id)
             for row in self.f.entity.entities.values()
             if row.platform in ('automation', 'script')))
-        self.assertEqual({(domain, key) for domain, key, _, _ in dependents},
-                         {('automation', 'mixed_source'), ('script', 'mixed_source')})
+        expected = {('script', 'mixed_source')}
+        if with_automation:
+            expected.add(('automation', 'mixed_source'))
+        self.assertEqual({(domain, key) for domain, key, _, _ in dependents}, expected)
         paths = ('configuration.yaml', 'template.yaml',
                  'mixed_automations.yaml', 'mixed_scripts.yaml')
         original = {path: (root / path).read_bytes() for path in paths}
@@ -192,6 +195,45 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_staging_preserves_disabled_with_yaml_initial_true(self):
         await self._native_staging_case(False)
+
+    async def test_template_script_without_automation_forward_fresh_reverse(self):
+        from homeassistant.core import Context
+        runtime, mapping, uuids, _, original = await self.data(with_automation=False)
+        hass, root = self.f.hass, self.f.root
+        self.assertIsNone(hass.data.get('automation'), 'fixture must not manufacture an empty native component')
+        events = []
+        self.addCleanup(hass.bus.async_listen('mixed_yaml_script_result',
+            lambda event: events.append(str(event.data['value']))))
+        history = self.module('history_guard').NativeHistoryGuard(self.module('recorder_guard').NativeRecorderGuard(hass))
+        before = await history.capture(mapping)
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        result = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+        self.assertEqual(result['state'], 'applied')
+        record = await runtime.journal.load(result['operation_id'])
+        baseline, composition = runtime.preparations.resolve_composition(record.plan.native_inputs)
+        self.assertEqual(baseline.receipt.changed_domains, ('script', 'template'))
+        original_receipt = baseline.receipt_json
+        await self.stimulus(13)
+        await hass.services.async_call('script', 'mixed_source', {}, blocking=True, context=Context())
+        self.assertEqual(events, ['13'])
+        for old, new in mapping.items():
+            self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+        reverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
+            guard=lambda: None, refresh=refresh)
+        self.assertEqual(reverse['state'], 'rolled_back')
+        for name, raw in original.items():
+            self.assertEqual((root / name).read_bytes(), raw)
+        reopened, restored = runtime.preparations.resolve_composition(record.plan.native_inputs)
+        self.assertEqual(reopened.receipt_json, original_receipt)
+        self.assertEqual(restored, composition)
+        await self.stimulus(17)
+        await hass.services.async_call('script', 'mixed_source', {}, blocking=True, context=Context())
+        self.assertEqual(events, ['13', '17'])
+        self.assertTrue(await history.verify(before))
+        self.assertTrue(await history.verify(composition.consumer_history))
+        self.assertIsNone(hass.data.get('automation'))
+        self.assertFalse(runtime.operation_lock.locked())
 
     async def test_unrelated_automation_remains_live_during_owned_transition(self):
         from homeassistant.core import Context
