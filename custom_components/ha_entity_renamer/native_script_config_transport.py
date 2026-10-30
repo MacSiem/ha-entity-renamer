@@ -19,13 +19,18 @@ def _need(value, reason='native_script_config_transport_unqualified'):
         raise Refused(reason) from None
 
 
-_CACHES = ('_condition_cache', '_repeat_script', '_choose_data', '_if_data',
-           '_parallel_scripts', '_sequence_scripts')
+_CACHES = ('_repeat_script', '_choose_data', '_if_data', '_parallel_scripts', '_sequence_scripts')
+
+
+def _cache_names():
+    from homeassistant.const import __version__
+    _need(__version__ in ('2025.6.0', '2026.10.2', '2026.10.4'))
+    return (('_config_cache' if __version__ == '2025.6.0' else '_condition_cache'),) + _CACHES
 
 
 def _idle_census(root):
     """Known native lazy-cache graph, including every retained nested Script."""
-    from homeassistant.helpers.script import Script, _IfData
+    from homeassistant.helpers.script import Script
     seen, result = set(), []
     def visit(script, parent=None):
         _need(type(script) is Script and script._hass is root._hass
@@ -41,7 +46,7 @@ def _idle_census(root):
         _need(id(script) not in seen, 'native_script_config_cache_cycle')
         seen.add(id(script))
         caches = []
-        for name in _CACHES:
+        for name in _cache_names():
             cache = getattr(script, name)
             _need(type(cache) is dict)
             caches.append((name, id(cache), tuple((key, id(value)) for key, value in cache.items())))
@@ -63,10 +68,12 @@ def _idle_census(root):
             if data['default'] is not None:
                 visit(data['default'], script)
         for key, data in script._if_data.items():
-            _need(type(key) is int and type(data) is _IfData and type(data.if_conditions) is list)
-            visit(data.if_then, script)
-            if data.if_else is not None:
-                visit(data.if_else, script)
+            _need(type(key) is int and type(data) is dict
+                  and set(data) == {'if_conditions', 'if_then', 'if_else'}
+                  and type(data['if_conditions']) is list)
+            visit(data['if_then'], script)
+            if data['if_else'] is not None:
+                visit(data['if_else'], script)
     visit(root)
     return tuple(result)
 
@@ -93,6 +100,7 @@ class NativeScriptConfigTransport:
         obj.observer, obj.chain, obj.guard, obj.sample = observer, chain, guard, sample
         obj.before, obj.after, obj.active, obj.target = before, after, active, target
         obj.task, obj.phase, obj.operations, obj.actors = asyncio.current_task(), 'captured', [], []
+        obj._projected = {}
         component = observer.hass.data.get(DATA_INSTANCES, {}).get('script')
         entities = {entity.unique_id: entity for entity in component.entities} if component is not None else {}
         _need([row[0] for row in before['script']] == [row[0] for row in after['script']])
@@ -105,7 +113,7 @@ class NativeScriptConfigTransport:
             script = entity.script
             census = _idle_census(script)
             obj.actors.append((entity, script, census,
-                tuple((name, getattr(script, name), tuple(getattr(script, name).items())) for name in _CACHES)))
+                tuple((name, getattr(script, name), tuple(getattr(script, name).items())) for name in _cache_names())))
             obj._project(entity.raw_config, old[1], new[1])
             obj._project(script.sequence, old[2], new[2])
             obj._project(script.variables, old[6], new[6])
@@ -121,6 +129,20 @@ class NativeScriptConfigTransport:
         from homeassistant.helpers.script_variables import ScriptVariables
         from .yaml_validation_worker import _normal
         _need(_normal(value) == before, 'native_script_config_slot_changed')
+        tracked = type(value) in (list, dict, Template, ScriptVariables)
+        if tracked and id(value) in self._projected:
+            old, new, projected = self._projected[id(value)]
+            _need(old == before and new == after, 'native_script_config_shared_slot_conflict')
+            return projected
+        projected = self._project_value(value, before, after)
+        if tracked:
+            self._projected[id(value)] = before, after, projected
+        return projected
+
+    def _project_value(self, value, before, after):
+        from homeassistant.helpers.template import Template
+        from homeassistant.helpers.script_variables import ScriptVariables
+        from .yaml_validation_worker import _normal
         if before == after:
             return value
         if type(value) is str:
@@ -169,11 +191,13 @@ class NativeScriptConfigTransport:
         from .yaml_runtime_observer import NativeYAMLRuntimeReadback
         from .yaml_validation_worker import _normal
         observer = NativeYAMLRuntimeReadback(self.observer.hass)
+        pinned = {domain: (component, identities) for domain, component, identities in self.sample.native_tokens}
         for domain, rows in expected.items():
             from homeassistant.helpers.entity_component import DATA_INSTANCES
             component = self.observer.hass.data.get(DATA_INSTANCES, {}).get(domain)
-            actual = observer._projection(domain)[0] if component is not None else []
+            actual, identities = observer._projection(domain) if component is not None else ([], ())
             _need(_normal(actual) == rows, 'native_script_config_projection_mismatch')
+            _need((id(component), identities) == pinned[domain], 'native_script_config_actor_identity_changed')
 
     @staticmethod
     def _write(operation, reverse=False):
@@ -218,6 +242,12 @@ class NativeScriptConfigTransport:
         """Only this exact still-owned idle data plane, never registry replay."""
         _need(asyncio.current_task() is self.task and self.phase == 'installed')
         self._check_rows(self.after)
+        for kind, container, _, after in self.operations:
+            current = tuple(container) if kind == 'list' else tuple(container.items())
+            _need(len(current) == len(after) and all(
+                actual is desired if kind == 'list' else actual[0] is desired[0] and actual[1] is desired[1]
+                for actual, desired in zip(current, after, strict=True)),
+                'native_script_config_cleanup_slot_replaced')
         _need(all(entity.script is script and not script.is_running and not script._runs
                   and all(getattr(script, name) is cache and not cache for name, cache, _ in caches)
                   for entity, script, _, caches in self.actors), 'native_script_config_cleanup_ownership_changed')

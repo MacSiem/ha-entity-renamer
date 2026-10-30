@@ -16,7 +16,7 @@ class NativeScriptConfigTransportTests(binding.NativeDependentConfigBindingTests
     source: ''' + old + '''
     alias: "{{ source }}"
   sequence:
-    - if: "{{ states(alias) | int(0) > 0 }}"
+    - if: "{{ states(''' + repr(old) + ''') | int(0) > 0 }}"
       then:
         - event: mixed_yaml_script_result
           event_data:
@@ -36,7 +36,7 @@ class NativeScriptConfigTransportTests(binding.NativeDependentConfigBindingTests
         self.assertEqual([str(value) for value in events], ['17'])
         entity = next(iter(hass.data[DATA_INSTANCES]['script'].entities))
         self.assertTrue(entity.script._if_data)
-        self.assertTrue(entity.script._condition_cache)
+        self.assertTrue(getattr(entity.script, self.module('native_script_config_transport')._cache_names()[0]))
         await self._flush_documents()
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
@@ -63,7 +63,7 @@ class NativeScriptConfigTransportTests(binding.NativeDependentConfigBindingTests
         module = self.module('native_script_config_transport')
         script = entity.script
         before = observer.sample(chain)
-        caches = tuple((name, getattr(script, name), tuple(getattr(script, name).items())) for name in module._CACHES)
+        caches = tuple((name, getattr(script, name), tuple(getattr(script, name).items())) for name in module._cache_names())
         variables = script.variables
         service = self.f.hass.services._services['script']['mixed_source']
         transport = module.NativeScriptConfigTransport.capture(observer, chain, next(iter(mapping)), guard=lambda: None)
@@ -90,7 +90,7 @@ class NativeScriptConfigTransportTests(binding.NativeDependentConfigBindingTests
         transport = module.NativeScriptConfigTransport.capture(observer, chain, next(iter(mapping)), guard=lambda: None)
         # Native laziness may legitimately change during an await in the caller.
         # Evict a cache through its ordinary dict; install must recapture/refuse.
-        cache = entity.script._condition_cache
+        cache = getattr(entity.script, module._cache_names()[0])
         original = tuple(cache.items())
         cache.clear()
         try:
@@ -99,4 +99,25 @@ class NativeScriptConfigTransportTests(binding.NativeDependentConfigBindingTests
         finally:
             cache.update(original)
         self.assertEqual(transport.phase, 'captured')
+        self.assertEqual(observer.sample(chain), transport.sample)
+
+    async def test_script_real_equal_foreign_template_is_not_overwritten_on_abort(self):
+        from homeassistant.helpers.template import Template
+        observer, chain, mapping, _, _ = await self.script_binding()
+        module = self.module('native_script_config_transport')
+        transport = module.NativeScriptConfigTransport.capture(observer, chain, next(iter(mapping)), guard=lambda: None)
+        transport.install()
+        container, key, owned = next((container, key, value)
+            for kind, container, _, after in transport.operations if kind == 'dict'
+            for key, value in after if type(value) is Template)
+        foreign = Template(owned.template, owned.hass)
+        container[key] = foreign
+        try:
+            with self.assertRaisesRegex(self.module('transaction').Refused, 'cleanup_slot_replaced'):
+                transport.restore_before_attempt()
+            self.assertIs(container[key], foreign)
+            self.assertEqual(transport.phase, 'installed')
+        finally:
+            container[key] = owned
+            transport.restore_before_attempt()
         self.assertEqual(observer.sample(chain), transport.sample)
