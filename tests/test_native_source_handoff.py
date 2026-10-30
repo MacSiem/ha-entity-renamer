@@ -7,6 +7,88 @@ import test_native_rename_emission_classifier as emission
 
 
 class NativeSourceHandoffTests(emission.NativeRenameEmissionTests):
+    async def prepared_handoff(self, *, target=None):
+        _, mapping, uuids, _ = await self.data(variant='sensor')
+        old, new = next(iter(mapping.items()))
+        native = self.module('native_registry')
+        io = native.NativeRegistryIO(self.f.hass)
+        bridge = native.NativeRegistryBridge(io, self.module('recorder_guard').NativeRecorderGuard(self.f.hass))
+        change = await bridge.prepare('entity', uuids[old], {'entity_id': new}, lambda: None)
+        handoff = await self.module('native_source_handoff').NativeSourceHandoff.prepare(
+            io, change, change.after if target is None else target, guard=lambda: None)
+        return handoff, change, old, new
+
+    async def test_source_review_mutable_caller_target_is_detached_before_await(self):
+        _, mapping, uuids, _ = await self.data(variant='sensor')
+        old, new = next(iter(mapping.items()))
+        native = self.module('native_registry')
+        io = native.NativeRegistryIO(self.f.hass)
+        bridge = native.NativeRegistryBridge(io, self.module('recorder_guard').NativeRecorderGuard(self.f.hass))
+        change = await bridge.prepare('entity', uuids[old], {'entity_id': new}, lambda: None)
+        target = change.after
+        self.f.hass.loop.call_soon(target.__setitem__, 'entity_id', 'sensor.foreign_third_target')
+        handoff = await self.module('native_source_handoff').NativeSourceHandoff.prepare(
+            io, change, target, guard=lambda: None)
+        try:
+            self.assertEqual(target['entity_id'], 'sensor.foreign_third_target')
+            self.assertEqual(handoff.target['entity_id'], new)
+            self.assertFalse(handoff.attempted)
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+            self.assertIsNone(self.f.entity.async_get('sensor.foreign_third_target'))
+        finally:
+            handoff.close()
+
+    async def test_source_review_preflight_refusal_releases_own_monitor(self):
+        handoff, _, old, new = await self.prepared_handoff()
+        key = handoff.tool
+        self.f.hass.states.async_reserve(new)
+        try:
+            with self.assertRaises(self.module('native_source_handoff').NativeSourceHandoffError):
+                handoff.mutate()
+            self.assertFalse(handoff.attempted)
+            self.assertTrue(handoff.closed)
+            self.assertIsNone(sys.monitoring.get_tool(key))
+            self.assertIsNotNone(self.f.entity.async_get(old))
+        finally:
+            handoff.close()
+            self.f.hass.states.async_remove(new)
+
+    async def test_source_review_changed_sensor_globals_refuse_before_api(self):
+        import homeassistant.components.sensor as sensor
+        handoff, _, old, _ = await self.prepared_handoff()
+        original = sensor.DOMAIN
+        sensor.DOMAIN = 'synthetic_handoff_foreign_domain'
+        try:
+            with self.assertRaises(self.module('native_source_handoff').NativeSourceHandoffError):
+                handoff.mutate()
+            self.assertFalse(handoff.attempted)
+            self.assertIsNotNone(self.f.entity.async_get(old))
+        finally:
+            sensor.DOMAIN = original
+            handoff.close()
+
+    async def test_source_review_old_remove_nested_registry_change_is_uncertain(self):
+        from homeassistant.core import callback
+        handoff, _, old, new = await self.prepared_handoff()
+        changed = []
+        @callback
+        def foreign(event):
+            if event.data['entity_id'] == old and event.data['new_state'] is None and not changed:
+                changed.append(self.f.entity.async_update_entity(new, name='Synthetic foreign callback name'))
+        remove = self.f.hass.bus.async_listen('state_changed', foreign)
+        try:
+            with self.assertRaises(self.module('native_source_handoff').NativeSourceHandoffError):
+                handoff.mutate()
+            self.assertTrue(handoff.attempted)
+            self.assertEqual(len(changed), 1)
+            current = self.f.entity.async_get(new)
+            self.assertEqual(current.name, 'Synthetic foreign callback name')
+            self.assertIs(self.producer.registry_entry, current)
+            self.assertTrue(handoff.closed)
+        finally:
+            remove()
+            handoff.close()
+
     async def test_source_handoff_retains_live_source_and_cleanup(self):
         await self.handoff_flow()
 
