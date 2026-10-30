@@ -89,9 +89,10 @@ class NativeSourceHandoff:
         obj.tool = None
         refs = [(SensorEntity, 'async_registry_entry_updated'),
                 (SensorEntity, '_async_read_entity_options'), (SensorEntity, '_update_suggested_precision'),
-                (Entity, 'async_on_remove'), (Entity, 'async_internal_added_to_hass'),
+                (Entity, 'async_on_remove'), (SensorEntity, 'async_internal_added_to_hass'),
                 (event_helper, 'async_track_entity_registry_updated_event'), (StateMachine, 'async_available'),
-                (event_helper, '_async_track_event'), (event_helper, '_remove_listener')]
+                (event_helper, '_async_track_event'), (event_helper, '_remove_listener'),
+                (Entity, 'async_internal_added_to_hass')]
         pins = dict(_SOURCES[__version__])
         pins.update({'helpers/event.py': _EVENT_PINS[__version__],
                      'components/sensor/__init__.py': _SENSOR_PINS[__version__]})
