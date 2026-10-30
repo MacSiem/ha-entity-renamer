@@ -28,6 +28,18 @@ def _cache_names():
     return (('_config_cache' if __version__ == '2025.6.0' else '_condition_cache'),) + _CACHES
 
 
+def _source_string(original, text):
+    from homeassistant.util.yaml.objects import NodeStrClass
+    _need(type(original) in (str, NodeStrClass) and type(text) is str)
+    if type(original) is str:
+        return text
+    replacement = NodeStrClass(text)
+    for name in ('__config_file__', '__line__'):
+        if hasattr(original, name):
+            setattr(replacement, name, getattr(original, name))
+    return replacement
+
+
 def _idle_census(root):
     """Known native lazy-cache graph, including every retained nested Script."""
     from homeassistant.helpers.script import Script
@@ -127,9 +139,10 @@ class NativeScriptConfigTransport:
         """Exact native path edits; untouched values/types/containers survive."""
         from homeassistant.helpers.template import Template
         from homeassistant.helpers.script_variables import ScriptVariables
+        from homeassistant.util.yaml.objects import NodeDictClass, NodeListClass
         from .yaml_validation_worker import _normal
         _need(_normal(value) == before, 'native_script_config_slot_changed')
-        tracked = type(value) in (list, dict, Template, ScriptVariables)
+        tracked = type(value) in (list, dict, NodeDictClass, NodeListClass, Template, ScriptVariables)
         if tracked and id(value) in self._projected:
             old, new, projected = self._projected[id(value)]
             _need(old == before and new == after, 'native_script_config_shared_slot_conflict')
@@ -142,12 +155,13 @@ class NativeScriptConfigTransport:
     def _project_value(self, value, before, after):
         from homeassistant.helpers.template import Template
         from homeassistant.helpers.script_variables import ScriptVariables
+        from homeassistant.util.yaml.objects import NodeStrClass, NodeDictClass, NodeListClass
         from .yaml_validation_worker import _normal
         if before == after:
             return value
-        if type(value) is str:
+        if type(value) in (str, NodeStrClass):
             _need(type(after) is str)
-            return after
+            return _source_string(value, after)
         if type(value) is Template:
             _need(type(after) is dict and set(after) == {'$template'}
                   and type(after['$template']) is str and value.hass in (None, self.observer.hass))
@@ -160,21 +174,22 @@ class NativeScriptConfigTransport:
             _need(type(after) is dict and set(after) == {'$variables'})
             self._project(value.variables, before['$variables'], after['$variables'])
             return value
-        if type(value) is list:
+        if type(value) in (list, NodeListClass):
             _need(type(after) is list and len(value) == len(after) == len(before))
             projected = [self._project(child, old, new) for child, old, new in zip(value, before, after, strict=True)]
             self.operations.append(('list', value, tuple(value), tuple(projected)))
             return value
-        if type(value) is dict:
+        if type(value) in (dict, NodeDictClass):
             _need(type(before) is dict and set(before) == {'$map'}
                   and type(after) is dict and set(after) == {'$map'}
                   and len(value) == len(before['$map']) == len(after['$map'])
-                  and all(type(key) is str for key in value))
+                  and all(type(key) in (str, NodeStrClass) for key in value))
             projected = []
             for (key, child), (old_key, old), (new_key, new) in zip(
                     value.items(), before['$map'], after['$map'], strict=True):
                 _need(key == old_key and type(new_key) is str)
-                projected.append((new_key, self._project(child, old, new)))
+                projected.append((key if key == new_key else _source_string(key, new_key),
+                                  self._project(child, old, new)))
             _need(len({key for key, _ in projected}) == len(projected))
             self.operations.append(('dict', value, tuple(value.items()), tuple(projected)))
             return value
