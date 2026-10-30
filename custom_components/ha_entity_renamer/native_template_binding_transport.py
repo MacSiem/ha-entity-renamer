@@ -15,6 +15,8 @@ the new source ID is absent. No refresh, handler, output write or reload occurs.
 from __future__ import annotations
 
 import asyncio
+from contextvars import Context
+import math
 from dataclasses import dataclass
 from importlib import import_module
 import inspect
@@ -142,6 +144,9 @@ class _Runtime:
         self.refs = [(event, 'async_track_template_result'),
             (event, 'async_track_state_change_filtered'),
             (event._TrackStateChangeFiltered, 'async_setup'),
+            (event._TrackStateChangeFiltered, 'async_update_listeners'),
+            (event, '_render_infos_to_track_states'),
+            (event, '_suppress_domain_all_in_render_info'),
             (event._TrackStateChangeFiltered, '_setup_all_listener'),
             (event._TrackStateChangeFiltered, '_setup_domains_listener'),
             (event, 'async_track_utc_time_change'),
@@ -193,6 +198,46 @@ class _Runtime:
               and event.KeyedRateLimit is self.RateLimit
               and event.HassJob is self.HassJob,
               'template_binding_native_alias_changed')
+
+    def rate_timers(self, tracker):
+        """Authenticate the actual scheduled native replay, including its Event.
+
+        Preserve the physical TimerHandle/context/deadline. Only its native
+        tracker/TrackTemplate binding is transported at the synchronous seam.
+        """
+        from homeassistant.core import Event
+        timers = tracker._rate_limit._rate_limit_timers
+        _need(type(timers) is dict and len({id(h) for h in timers.values()}) == len(timers),
+              'template_binding_rate_timer_inventory_changed')
+        loop = self.native.hass.loop
+        for template, handle in timers.items():
+            _need(type(handle) is asyncio.TimerHandle and handle._loop is loop
+                  and not handle.cancelled() and math.isfinite(handle.when())
+                  and type(handle._context) is Context
+                  and sum(item is handle for item in loop._scheduled)
+                      + sum(item is handle for item in loop._ready) == 1
+                  and _bound(handle._callback, tracker, self.event.TrackTemplateResultInfo._refresh),
+                  'template_binding_rate_timer_owner_changed')
+            args = handle._args
+            _need(type(args) is tuple and len(args) == 3 and type(args[0]) is Event
+                  and args[0].event_type == 'state_changed'
+                  and type(args[0].data.get('entity_id')) is str
+                  and type(args[1]) is tuple and len(args[1]) == 1 and args[2] is True,
+                  'template_binding_rate_timer_arguments_changed')
+            track = args[1][0]
+            _need(type(track) is self.event.TrackTemplate and track.template is template
+                  and sum(item is track for item in tracker._track_templates) == 1
+                  and template in tracker._info and template in tracker._rate_limit._last_triggered,
+                  'template_binding_rate_timer_template_changed')
+        return timers
+
+    def update_rate_listeners(self, tracker):
+        """Use native suppression while the original pending replay still owns work."""
+        event = self.event
+        tracker._track_state_changes.async_update_listeners(event._render_infos_to_track_states([
+            event._suppress_domain_all_in_render_info(info)
+            if tracker._rate_limit.async_has_timer(template) else info
+            for template, info in tracker._info.items()]))
 
     def time_owner(self, tracker, template, remove):
         from homeassistant.core import HassJobType
@@ -283,9 +328,9 @@ class _Runtime:
               and _bound(filtered._action_as_hassjob.target, tracker, event.TrackTemplateResultInfo._refresh),
               'template_binding_filtered_owner_changed')
         _need(type(tracker._rate_limit) is self.RateLimit
-              and tracker._rate_limit.hass is native.hass
-              and not tracker._rate_limit._rate_limit_timers,
-              'template_binding_pending_rate_event_unqualified')
+              and tracker._rate_limit.hass is native.hass,
+              'template_binding_rate_owner_changed')
+        self.rate_timers(tracker)
         _need(set(tracker._last_result) <= set(attrs)
               and set(tracker._rate_limit._last_triggered) <= set(attrs)
               and {id(t.template) for t in tracker._track_templates} == {id(t) for t in attrs}
@@ -450,7 +495,7 @@ class NativeTemplateBindingTransport:
                 replacements=replacements, originals=originals, containers=containers,
                 bodies={key: value.template for key, value in originals.items()}, memo={},
                 cleanup=tuple(entity._on_remove), index=entity._on_remove.index(tracker.async_remove),
-                new=None, detached=False, time_moves=[]))
+                new=None, detached=False, time_moves=[], rate_moves=[]))
         _need(set(by_id) <= {key for row in obj.rows for key in row['originals']},
               'template_binding_source_not_in_group')
         configured = {key: value for row in obj.rows for key, value in row['containers'].items()}
@@ -566,6 +611,21 @@ class NativeTemplateBindingTransport:
                 new._last_result = {replacements[id(t)]: value for t, value in old._last_result.items()}
                 new._rate_limit._last_triggered = {replacements[id(t)]: value
                     for t, value in old._rate_limit._last_triggered.items()}
+            for row in self.rows:
+                old, new = row['tracker'], row['new']
+                _need(not new._rate_limit._rate_limit_timers,
+                      'template_binding_new_rate_timer_unexpected')
+                for template, handle in tuple(self.runtime.rate_timers(old).items()):
+                    replacement = row['replacements'][id(template)]
+                    tracks = [track for track in new._track_templates if track.template is replacement]
+                    _need(len(tracks) == 1, 'template_binding_rate_replacement_missing')
+                    row['rate_moves'].append((template, replacement, handle, handle._callback, handle._args))
+                    del old._rate_limit._rate_limit_timers[template]
+                    new._rate_limit._rate_limit_timers[replacement] = handle
+                    handle._callback = new._refresh
+                    handle._args = (handle._args[0], (tracks[0],), True)
+                if row['rate_moves']:
+                    self.runtime.update_rate_listeners(new)
             # Transport genuine native recurring time owners, including an
             # already-due physical timer. Recreating a scheduler would randomize
             # its microsecond and could skip the pending tick at a boundary.
@@ -636,6 +696,11 @@ class NativeTemplateBindingTransport:
         # Called synchronously only BEFORE registry attempt. Restore the exact
         # old objects and history; native setup recreates its authentic listeners.
         for row in reversed(self.rows):
+            for template, replacement, handle, callback, args in reversed(row['rate_moves']):
+                row['new']._rate_limit._rate_limit_timers.pop(replacement, None)
+                handle._callback, handle._args = callback, args
+                row['tracker']._rate_limit._rate_limit_timers[template] = handle
+            row['rate_moves'].clear()
             for template, replacement, remove, owner, job in reversed(row['time_moves']):
                 row['new']._time_listeners.pop(replacement, None)
                 owner.job = job
@@ -653,6 +718,8 @@ class NativeTemplateBindingTransport:
             entity._template_result_info = row['tracker']
             entity._on_remove[:] = row['cleanup']
             row['tracker'].async_setup()
+            if row['tracker']._rate_limit._rate_limit_timers:
+                self.runtime.update_rate_listeners(row['tracker'])
             row['detached'] = False
 
     def rollback_before_registry(self, caller_context):

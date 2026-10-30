@@ -451,7 +451,10 @@ def _graph(runtime, entity):
             render.all_states, render.all_states_lifecycle, render.has_time))
     # This pinned native helper combines existing RenderInfo sets only. It does
     # not render, evaluate Jinja, produce source evidence or alter native state.
-    expected = event._render_infos_to_track_states(info._info.values())
+    expected = event._render_infos_to_track_states([
+        event._suppress_domain_all_in_render_info(render)
+        if info._rate_limit.async_has_timer(template) else render
+        for template, render in info._info.items()])
     filtered = info._track_state_changes
     actual = filtered._last_track_states
     _need(type(actual) is event.TrackStates and actual == expected,

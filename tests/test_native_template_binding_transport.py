@@ -561,7 +561,7 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await self.emit(self.other, 5)
         self.assertEqual(hass.states.get(entity.entity_id).state, hass.states.get(self.control.entity_id).state)
 
-    async def test_genuine_pending_rate_event_refuses_before_any_binding_effect(self):
+    async def test_foreign_pending_rate_callback_refuses_before_any_binding_effect(self):
         await self.pair(broad=True)
         entity = self.consumer
         old, attrs, cleanup = entity._template_result_info, entity._template_attrs, tuple(entity._on_remove)
@@ -570,8 +570,14 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await self.emit(self.producer, 3)
         timers = dict(old._rate_limit._rate_limit_timers)
         self.assertTrue(timers, 'native fixture failed to create pending rate event')
-        with self.assertRaisesRegex(ValueError, 'pending_rate_event_unqualified'):
-            self.capture()
+        handle = next(iter(timers.values()))
+        callback = handle._callback
+        try:
+            handle._callback = self.control._template_result_info._refresh
+            with self.assertRaisesRegex(ValueError, 'rate_timer_owner_changed'):
+                self.capture()
+        finally:
+            handle._callback = callback
         self.assertIs(entity._template_result_info, old)
         self.assertIs(entity._template_attrs, attrs)
         self.assertEqual(tuple(entity._on_remove), cleanup)
