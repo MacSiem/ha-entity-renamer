@@ -128,6 +128,9 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_partial_retained_two_routes_restore_shared_native_callback_lists(self):
         await self._duration_case(mode='partial_multi')
 
+    async def test_native_pending_expiry_during_active_root_keeps_one_action_and_fresh_inverse(self):
+        await self._duration_case(mode='active_expiry')
+
     async def _duration_case(self, *, mode):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -136,10 +139,11 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         old,new = next(iter(mapping.items()))
         multi = mode in ('multi','multi_foreign')
         partial = mode.startswith('partial_')
+        active_expiry = mode=='active_expiry'
         foreign = mode in ('foreign','transient','multi_foreign')
         meaningful = mode in ('meaningful','foreign','replace','multi','multi_foreign')
-        pending = partial or mode in ('pending','cancel','from_only','attribute','rollback','foreign_route','orphan','replace','transient')
-        duration = 480 if pending or multi else 180 if meaningful else 2
+        pending = partial or active_expiry or mode in ('pending','cancel','from_only','attribute','rollback','foreign_route','orphan','replace','transient')
+        duration = 30 if active_expiry else 480 if pending or multi else 180 if meaningful else 2
         other_id = 'sensor.duration_other'
         original_keys = [old,other_id] if multi else [old]
         target_keys = [new,other_id] if multi else [new]
@@ -294,6 +298,8 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                witness_type.mutate.__code__,duration_type.start_pair.__code__)
         if partial:
             codes+= (self.module('native_automation_duration_binding')._PreEffectLog.write.__code__,)
+        elif active_expiry:
+            codes+= (native_pending['timer_job'].target.__code__,)
         tool=next(k for k in range(6) if sys.monitoring.get_tool(k) is None)
         sys.monitoring.use_tool_id(tool,'actual Root literal for acceptance')
         emitted=[]
@@ -301,12 +307,15 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
         revoked=False
         faulted=False
         foreign_partial=None
+        expiries=[]
         def guard():
             if revoked:
                 raise PermissionError('fixture pre-effect authorization loss')
         def start(code,offset):
             nonlocal revoked
             frame=sys._getframe(1);actor=frame.f_locals.get('self')
+            if active_expiry and code is codes[5] and frame.f_locals.get('job') is native_pending['same_job']:
+                expiries.append(tuple(root.consumers.phases.graph.live for root in roots))
             if code is codes[0] and actor.hass is hass:
                 handoffs.append(actor)
                 if len(handoffs)==1 and meaningful:
@@ -442,7 +451,15 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNot(current.original_keys,current.config_ids)
                 self.assertEqual(self.f.entity.async_get(new).id,uuids[old])
                 self.assertIsNone(hass.states.get(old))
-                self.assertEqual((actions,scripts),([],[]),'No immediate duration action')
+                if active_expiry:
+                    self.assertEqual((len(actions),len(scripts)),(1,1))
+                    self.assertEqual(expiries,[(True,)],'Expiry must run in the actual active Root')
+                    self.assertEqual(str(actions[0].data['bound']),new)
+                    self.assertEqual(actions[0].context.parent_id,native_tuple[13].id)
+                    self.assertEqual(native_pending['handle'].when(),native_tuple[5])
+                    self.assertIs(native_pending['handle']._context,native_tuple[6])
+                else:
+                    self.assertEqual((actions,scripts),([],[]),'No immediate duration action')
                 all_current=cap.pending(current)[0]
                 if multi:
                     kept=next(p for p in all_current if p['key']==other_id)
@@ -455,7 +472,9 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 if meaningful and foreign:
                     self.assertTrue(own_created[0]['handle'].cancelled())
                     self.assertEqual(len(emitted),1)
-                if mode=='transient':
+                if active_expiry:
+                    self.assertEqual(current_pending,())
+                elif mode=='transient':
                     self.assertEqual(len(emitted),1)
                     self.assertTrue(native_pending['handle'].cancelled())
                     self.assertEqual(len(current_pending),1)
@@ -510,7 +529,7 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                 await check_rows(roots[1],set())
                 back=cap.capture(source)
                 self.assertEqual(back.original_keys,original_keys)
-                self.assertEqual((actions,scripts),([],[]))
+                self.assertEqual((len(actions),len(scripts)),(1,1) if active_expiry else (0,0))
                 self.assertEqual(self.f.entity.async_get(old).id,uuids[old])
                 self.assertIsNone(self.f.entity.async_get(new))
                 for name,content in original.items():
@@ -521,6 +540,10 @@ class NativeAutomationDurationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((kept['handle'],kept['handle'].when(),kept['handle']._context),other_tuple)
                     self.assertFalse(kept['handle'].cancelled())
                 remaining=tuple(p for p in all_remaining if p['key']==old)
+                if active_expiry:
+                    self.assertEqual(remaining,())
+                    self.assertEqual(len(controls),1)
+                    return
                 if mode in ('cancel','foreign','transient','multi_foreign'):
                     if mode!='transient':
                         self.assertEqual(remaining,())
