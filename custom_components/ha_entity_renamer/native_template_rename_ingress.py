@@ -66,9 +66,11 @@ class NativeTemplateRenameIngress:
 
     def _jobs(self, filtered, expected):
         """Find exact current own jobs; native domain add remains untouched."""
+        return self.native_jobs(self.transport.hass, self.transport.runtime.event, filtered, expected)
+
+    @staticmethod
+    def native_jobs(hass, event, filtered, expected):
         from homeassistant.core import HassJob
-        event = self.transport.runtime.event
-        hass = self.transport.hass
         jobs = [filtered._action_as_hassjob]
         _need(type(filtered._listeners) is dict and len(filtered._listeners) <= 3,
               'template_ingress_listener_inventory_changed')
@@ -119,4 +121,75 @@ class NativeTemplateRenameIngress:
             filtered._action = action
             for job in (*original_jobs, *current_jobs):
                 job.target = action
+        self.live = False
+
+
+class NativeTemplateProducerDelivery:
+    """Deliver already queued ordinary events to the OLD native jobs first.
+
+    Only pinned native keyed returns wake this fence. The synchronous final
+    clear check must precede transport and API without another await.
+    """
+    def __init__(self, runtime, entities, witness):
+        _need(type(witness) is NativeRenameEmissions and witness.preflight is None
+              and not witness.attempted and not witness.closed
+              and runtime.native.hass is witness.hass, 'template_delivery_witness_required')
+        self.runtime, self.witness = runtime, witness
+        self.jobs, self.running, self.live = [], set(), True
+        for entity in entities:
+            tracker = runtime.graph(entity)
+            filtered = tracker._track_state_changes
+            self.jobs.extend(NativeTemplateRenameIngress.native_jobs(witness.hass, runtime.event,
+                filtered, filtered._action))
+        witness.preflight = self
+
+    def _routes(self, callbacks, event):
+        from homeassistant.core import Event
+        if type(event) is not Event or event.event_type != 'state_changed':
+            return False
+        _need(type(callbacks) is defaultdict and callbacks.default_factory is list,
+              'template_delivery_callback_map_changed')
+        members = callbacks.get(event.data.get('entity_id'), ())
+        return any(any(job is member for job in self.jobs) for member in members)
+
+    def started(self, frame):
+        values = frame.f_locals
+        if (self.live and frame.f_code is self.witness.codes['keyed']
+                and values.get('hass') is self.witness.hass
+                and self._routes(values.get('callbacks'), values.get('event'))):
+            _need(len(self.running) < 32, 'template_delivery_dispatch_overflow')
+            self.running.add(id(frame))
+
+    def ended(self, frame, failed):
+        if id(frame) in self.running:
+            self.running.remove(id(frame))
+            if failed:
+                self.witness._poison('producer_dispatch_unwound')
+            self.witness._signal()
+
+    def pending(self):
+        count = 0
+        for handle in self.witness.loop._ready:
+            if handle.cancelled() or handle._callback is not self.witness.methods['keyed']:
+                continue
+            args = handle._args
+            if (type(args) is tuple and len(args) == 3 and args[0] is self.witness.hass
+                    and self._routes(args[1], args[2])):
+                count += 1
+                _need(count <= 32, 'template_delivery_ready_overflow')
+        return bool(count or self.running)
+
+    async def drain(self):
+        while True:
+            self.witness._owner_guard()
+            self.witness._check()
+            self.witness.wake = self.witness.loop.create_future()
+            if not self.pending():
+                return
+            await self.witness.wake
+
+    def retire_at_final_fence(self):
+        self.witness._owner_guard()
+        self.witness._check()
+        _need(self.live and not self.pending(), 'template_delivery_new_pending_event')
         self.live = False

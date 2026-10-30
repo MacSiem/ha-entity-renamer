@@ -22,7 +22,10 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_entity_ingress_suppresses_neutral_rename_then_delivers_producer_change(self):
         await self.round_trip()
 
-    async def round_trip(self):
+    async def test_queued_producer_event_reaches_old_tracker_before_cutover(self):
+        await self.round_trip(preflight_gap=True)
+
+    async def round_trip(self, *, preflight_gap=False):
         await self.pair()
         await self._flush_documents()
         native = self.module_named('native_registry')
@@ -38,6 +41,18 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
         async def move(source_id, target_id, target, before, desired):
             witness = await classifier.NativeRenameEmissions.prepare(io, change, target, guard=guard)
             self.addCleanup(witness.close)
+            delivery = ingress_module.NativeTemplateProducerDelivery(
+                self.module._Runtime(self.f.hass), (self.consumer,), witness)
+            if preflight_gap and source_id == self.old:
+                from homeassistant.const import __version__
+                self.producer._attr_native_value = 5
+                self.producer.async_write_ha_state()
+                if __version__ == '2025.6.0':
+                    self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, '2')
+                    self.assertTrue(delivery.pending())
+            await delivery.drain()
+            if preflight_gap and source_id == self.old:
+                self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, '10')
             pairs = tuple(self.module.BindingSourcePair(template, template.template,
                 template.template.replace(source_id, target_id),
                 (str(self.path), 'scope-value', tuple(slot._attribute for slot in slots)))
@@ -49,6 +64,7 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
             context = self.module._BindingCallerContext(owner, fence)
             transport = self.module.NativeTemplateBindingTransport.capture(self.f.hass, (self.consumer,),
                 source_pairs=pairs, caller_context=context)
+            delivery.retire_at_final_fence()
             physical = self.f.hass.states.get(self.consumer.entity_id)
             self.path.write_bytes(desired)
             transport.install_before_registry(context)

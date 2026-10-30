@@ -294,6 +294,7 @@ class NativeRenameEmissions:
         self.keyed, self.tasks, self.source_runs = {}, {}, 0
         self.fire_monitor = self.occurrences = None
         self.wake = None
+        self.preflight = None
         self.mutation = None
         self.io_mutate, self.io_settle = NativeRegistryIO.mutate, NativeRegistryIO.settle
         self.io_mutate_code, self.io_settle_code = self.io_mutate.__code__, self.io_settle.__code__
@@ -608,6 +609,8 @@ class NativeRenameEmissions:
     def _started(self, frame):
         if self.closed or self.error is not None:
             return
+        if self.preflight is not None:
+            self.preflight.started(frame)
         code, values = frame.f_code, frame.f_locals
         if code is self.codes['source']:
             self._source_started(frame)
@@ -683,6 +686,8 @@ class NativeRenameEmissions:
         self.source_runs += 1
 
     def _ended(self, frame, failed):
+        if self.preflight is not None:
+            self.preflight.ended(frame, failed)
         code, key = frame.f_code, id(frame)
         changed = False
         if code is self.codes['event']:
