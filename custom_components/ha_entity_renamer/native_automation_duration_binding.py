@@ -219,7 +219,7 @@ class NativeAutomationDurationCapability:
                   and a['event'].data['new_state'] is a['to_s'],'duration_history')
             pending.append(dict(key=key,clear=clear,cancel=cancel,keys=keys,cancel_job=job,
                 cancel_listener=target,predicate=predicate,handle=handle,timer_job=tj,same_job=sj,
-                action=action,entity_cell=entity_cell))
+                action=action,entity_cell=entity_cell,own=own if type(own) is _OwnDuration else None))
             rows.append((key,id(clear),id(handle),handle.when(),id(handle._context),_job(tj),_job(sj),
                 _value(action),_value(predicate),id(a['event'].context),id(a['from_s']),id(a['to_s']),
                 id(cancel),id(keys),tuple(keys),id(job),_shape(target)))
@@ -313,6 +313,9 @@ class NativeAutomationDurationCapability:
                 write('keys',p['keys'],tuple(p['keys']),(new,),lambda: p['keys'].__setitem__(slice(None),[new]))
                 write('cell',p['entity_cell'],p['entity_cell'].cell_contents,new,
                       lambda: setattr(p['entity_cell'],'cell_contents',new))
+                if p['own'] is not None:
+                    write('approved_entity',p['own'],p['own'].approved_entity,new,
+                          lambda: setattr(p['own'],'approved_entity',new))
         for values in maps:
             projected={mapping.get(k,k):v for k,v in values.items()}
             write('map_clear',values,tuple(values.items()),(),values.clear)
@@ -389,6 +392,7 @@ class _OwnDuration:
             return cur!=prior if 'from' in b.config and 'to' not in b.config else cur==new
         self.action,self.predicate=action,predicate
         self.entity_cell=_cell(action,'entity')
+        self.approved_entity=entity
         self.edges=(binding.config,binding.action_job,binding.listener_cells['period'],change,
             change.prior_state,change.new_state,change.event,change.event.context)
 
@@ -399,6 +403,7 @@ class _OwnDuration:
         _need(getattr(target,'__self__',None) is b.entity
               and getattr(target,'__func__',None) is b._native.AutomationEntity._async_trigger_if_enabled
               and b.entity.hass is b.hass and b.entity._trigger_config[b.index] is b.config
+              and self.entity_cell.cell_contents == self.approved_entity
               and self.entity_cell.cell_contents in b.original_keys
               and self.entity_cell.cell_contents in b.listener_cells['period'],
               'duration_own_current_binding_changed')
