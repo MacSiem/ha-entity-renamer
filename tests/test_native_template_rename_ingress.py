@@ -63,11 +63,48 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
     async def test_conditional_dependency_keeps_active_branch_until_real_condition_change(self):
         await self.round_trip(conditional=True)
 
-    async def round_trip(self, *, preflight_gap=False, producer_hook=False, domain=False, conditional=False):
+    async def test_handoff_entity_native_ingress_and_fresh_inverse(self):
+        await self.round_trip(source_handoff=True)
+
+    async def test_handoff_domain_native_ingress_and_fresh_inverse(self):
+        await self.round_trip(source_handoff=True, domain=True)
+
+    async def test_handoff_meaningful_domain_sum_has_no_duplicate_source_render(self):
+        await self.round_trip(source_handoff=True, domain=True, hybrid=True)
+
+    async def round_trip(self, *, preflight_gap=False, producer_hook=False, domain=False, conditional=False,
+                         source_handoff=False, hybrid=False):
         await self.pair(domain=domain)
         if domain:
             # Isolate actual domain-add bookkeeping from bootstrap timers.
             await self.wait_native_rate_idle()
+        if hybrid:
+            from homeassistant.core import Context
+            from homeassistant.helpers.entity_platform import async_get_platforms
+            self.producer._attr_extra_state_attributes = {'renamer_ingress_group': 'subject'}
+            self.other._attr_extra_state_attributes = {'renamer_ingress_group': 'control'}
+            self.producer.async_write_ha_state()
+            self.other.async_write_ha_state()
+            blocks = []
+            for source_id, key, group in ((self.old, 'scope-value', 'subject'),
+                                         (self.other.entity_id, 'scope-control', 'control')):
+                expression = ("{{ (states('" + source_id + "') | int(0)) + (states.sensor"
+                    " | selectattr('attributes.renamer_ingress_group', 'defined')"
+                    " | selectattr('attributes.renamer_ingress_group', 'eq', '" + group + "')"
+                    " | map(attribute='state') | map('int', 0) | sum) }}")
+                blocks.append('  - name: ' + key + '\n    unique_id: ' + key + '\n    state: "' + expression + '"\n')
+            self.original = ('- sensor:\n' + ''.join(blocks)).encode()
+            self.desired = self.original.replace(self.old.encode(), self.new.encode())
+            self.path.write_bytes(self.original)
+            await self.f.hass.services.async_call('template', 'reload', {}, blocking=True, context=Context())
+            await self.f.hass.async_block_till_done()
+            entities = {entity.unique_id: entity for platform in async_get_platforms(self.f.hass, 'template')
+                        if platform.domain == 'sensor' for entity in platform.entities.values()}
+            self.consumer, self.control = entities['scope-value'], entities['scope-control']
+            await self.emit(self.other, 29)
+            await self.wait_native_rate_idle()
+            self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, '2')
+            self.assertEqual(self.f.hass.states.get(self.control.entity_id).state, '58')
         if producer_hook:
             from homeassistant.core import Context
             from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -134,7 +171,13 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
         forward = False
         async def move(source_id, target_id, target, before, desired):
             nonlocal forward
-            witness = await classifier.NativeRenameEmissions.prepare(io, change, target, guard=guard)
+            handoff = None
+            if source_handoff:
+                handoff = await self.module_named('native_source_handoff').NativeSourceHandoff.prepare(
+                    io, change, target, guard=guard)
+                self.addCleanup(handoff.close)
+            witness = await classifier.NativeRenameEmissions.prepare(io, change, target, guard=guard,
+                source_handoff=handoff)
             self.addCleanup(witness.close)
             delivery = ingress_module.NativeTemplateProducerDelivery(
                 self.module._Runtime(self.f.hass), (self.consumer,), witness)
@@ -166,6 +209,8 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
             ingress = ingress_module.NativeTemplateRenameIngress.install(transport, witness, context)
             try:
                 transport.mark_registry_attempt(context)
+                if hybrid and source_id == self.old:
+                    self.producer._attr_native_value = 29
                 mutation = witness.mutate()
                 proof = await witness.finish()
             finally:
@@ -175,7 +220,7 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(_orjson_bytes_default_encoder(row.as_storage_fragment).decode('utf-8'),
                              mutation.after_json, 'inverse requires the full confirmed owned row')
             forward = source_id == self.old
-            changed = producer_hook and source_id == self.old
+            changed = (producer_hook or hybrid) and source_id == self.old
             self.assertEqual(proof['neutral'], not changed)
             if not changed and not domain:
                 self.assertGreater(ingress.suppressed, 0)
@@ -183,7 +228,7 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(self.module._Runtime(self.f.hass).graph(self.consumer),
                           self.consumer._template_result_info)
             if changed:
-                self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, '14')
+                self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, '58' if hybrid else '14')
             else:
                 self.assertIs(self.f.hass.states.get(self.consumer.entity_id), physical)
             self.assertEqual(self.producer.entity_id, target_id)
