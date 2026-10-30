@@ -60,7 +60,10 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_domain_add_keeps_bookkeeping_and_subsequent_producer_delivery(self):
         await self.round_trip(domain=True)
 
-    async def round_trip(self, *, preflight_gap=False, producer_hook=False, domain=False):
+    async def test_conditional_dependency_keeps_active_branch_until_real_condition_change(self):
+        await self.round_trip(conditional=True)
+
+    async def round_trip(self, *, preflight_gap=False, producer_hook=False, domain=False, conditional=False):
         await self.pair(domain=domain)
         if domain:
             # Isolate actual domain-add bookkeeping from bootstrap timers.
@@ -85,6 +88,32 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
             self.old, self.producer = source.entity_id, source
             self.desired = self.original.replace(self.old.encode(), self.new.encode())
             self.source_uuid = self.f.entity.async_get(self.old).id
+            self.path.write_bytes(self.original)
+            await self.f.hass.services.async_call('template', 'reload', {}, blocking=True, context=Context())
+            await self.f.hass.async_block_till_done()
+            entities = {e.unique_id: e for p in async_get_platforms(self.f.hass, 'template')
+                        if p.domain == 'sensor' for e in p.entities.values()}
+            self.consumer, self.control = entities['scope-value'], entities['scope-control']
+        if conditional:
+            from homeassistant.core import Context
+            from homeassistant.helpers.entity_component import DATA_INSTANCES
+            from homeassistant.helpers.entity_platform import async_get_platforms
+            branches = []
+            for label, value in (('a', 3), ('b', 7)):
+                source = type(self.producer)()
+                source._attr_unique_id = 'ingress-conditional-' + label
+                source._attr_name = 'Ingress conditional ' + label
+                source._attr_native_value = value
+                branches.append(source)
+            await self.f.hass.data[DATA_INSTANCES]['sensor'].async_add_entities(branches)
+            branch_a, branch_b = branches
+            for source_id in (self.old, self.other.entity_id):
+                before = "{{ states('" + source_id + "') | int(0) * 2 }}"
+                after = ("{{ states('" + branch_a.entity_id + "') | int(0) if states('" + source_id
+                         + "') | int(0) > 0 else states('" + branch_b.entity_id + "') | int(0) }}")
+                self.assertIn(before.encode(), self.original)
+                self.original = self.original.replace(before.encode(), after.encode())
+            self.desired = self.original.replace(self.old.encode(), self.new.encode())
             self.path.write_bytes(self.original)
             await self.f.hass.services.async_call('template', 'reload', {}, blocking=True, context=Context())
             await self.f.hass.async_block_till_done()
@@ -163,6 +192,24 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             await move(self.old, self.new, change.after, self.original, self.desired)
+            if conditional:
+                await self.emit(branch_a, 5)
+                self.assertEqual(self.f.hass.states.get(self.control.entity_id).state, '5')
+                self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, '5')
+                await self.emit(branch_b, 9)
+                self.assertEqual(self.f.hass.states.get(self.consumer.entity_id).state, '5')
+                for source in (self.producer, self.other):
+                    await self.emit(source, 0)
+                self.assertTrue(all(self.f.hass.states.get(entity.entity_id).state == '9'
+                                    for entity in (self.consumer, self.control)))
+                held = [self.f.hass.states.get(entity.entity_id) for entity in (self.consumer, self.control)]
+                await self.emit(branch_a, 11)
+                self.assertTrue(all(self.f.hass.states.get(entity.entity_id) is state
+                                    for entity, state in zip((self.consumer, self.control), held)))
+                await self.emit(branch_b, 13)
+                self.assertTrue(all(self.f.hass.states.get(entity.entity_id).state == '13'
+                                    for entity in (self.consumer, self.control)))
+                return
             for value in (7, 11):
                 from homeassistant.core import callback
                 fired = self.f.hass.loop.create_future()
