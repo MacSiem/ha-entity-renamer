@@ -43,6 +43,7 @@ class _PreparedReview:
     actor_id: str
     plan: object
     entity_count: int
+    expires_at: float
 
 
 @dataclass
@@ -114,14 +115,35 @@ class Runtime:
         async with self.operation_lock:
             await refresh()
             current()
-            session = await NativeTemplateStateServer.prepare(hass, mapping, guard=current, refresh=refresh,
-                entity_names=entity_names, device_names=device_names)
+            from .review_retention import async_reclaim_reviews, review_lease
+            import uuid
+            self.reviews = {op: review for op, review in self.reviews.items()
+                            if review.actor_id != actor_id and review.expires_at > hass.loop.time()}
+            self.preparations, self.journal = await async_reclaim_reviews(
+                hass, keep=self.reviews, guard=current)
+            current()
+            prefix = uuid.uuid4().hex
+            await self.preparations.create('review-' + prefix, review_lease(prefix, actor_id))
+            current()
+            try:
+                session = await NativeTemplateStateServer.prepare(hass, mapping,
+                    guard=current, refresh=refresh, entity_names=entity_names,
+                    device_names=device_names, review_id=prefix)
+            except BaseException:
+                # Revocation/uncertain IO can prevent immediate housekeeping.
+                # Its durable lease remains reclaimable at next prepare/setup.
+                try:
+                    self.preparations, self.journal = await async_reclaim_reviews(
+                        hass, keep=self.reviews, guard=current)
+                except Exception:
+                    pass
+                raise
             try:
                 current()
                 plan, operation = session.plan, session.operation_id
                 count = sum(change.kind == 'entity' for change in session.registry_changes)
                 devices = sum(change.kind == 'device' for change in session.registry_changes)
-                self.reviews[operation] = _PreparedReview(actor_id, plan, count)
+                self.reviews[operation] = _PreparedReview(actor_id, plan, count, hass.loop.time() + 900)
                 changes = []
                 for change in session.registry_changes:
                     before, after = change.before, change.after
@@ -157,7 +179,8 @@ class Runtime:
             current()
             review = self.reviews.get(operation_id)
             if (type(review) is not _PreparedReview or type(actor_id) is not str
-                    or review.actor_id != actor_id or review.plan.fingerprint != fingerprint):
+                    or review.actor_id != actor_id or review.plan.fingerprint != fingerprint
+                    or review.expires_at <= hass.loop.time()):
                 raise Refused('review_unavailable_or_mismatched')
             self.reviews.pop(operation_id)
             async def operation():
@@ -302,6 +325,8 @@ async def async_setup_entry(hass, entry):
     try:
         await journal.initialize()
         await preparations.initialize()
+        from .review_retention import async_reclaim_reviews
+        preparations, journal = await async_reclaim_reviews(hass, guard=lambda: None)
     except Exception as error:
         raise ConfigEntryNotReady('Migration recovery data could not be verified') from error
     runtime = Runtime(entry.entry_id, journal, preparations)

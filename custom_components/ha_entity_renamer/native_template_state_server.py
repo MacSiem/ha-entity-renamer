@@ -154,7 +154,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         change = await _drained(self.hass.async_add_executor_job, lambda: capture(bundle, yaml, self.mapping))
         self._scope()
         self.registry_changes, self.change = tuple(registry), change
-        self.operation_id, own = 'template-yaml-' + uuid.uuid4().hex, uuid.uuid4().hex
+        own = self.review_id or uuid.uuid4().hex
+        self.operation_id = 'template-yaml-' + (self.review_id or uuid.uuid4().hex)
         self.digests, steps = {}, []
         for index, (adapter, item) in enumerate([('registry', c) for c in registry] + [('yaml', change)]):
             ref = own + '-' + str(index)

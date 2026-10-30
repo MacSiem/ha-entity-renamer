@@ -165,11 +165,17 @@ class NativeTemplateYAMLServer:
         return obj
 
     @classmethod
-    async def prepare(cls, hass, mapping, *, guard, refresh, entity_names=None, device_names=None):
+    async def prepare(cls, hass, mapping, *, guard, refresh, entity_names=None, device_names=None,
+                      review_id=None):
         from .manifest import parse_manifest
         _need(type(mapping) is dict and bool(mapping)
               and all(type(k) is str and type(v) is str for k, v in mapping.items()), 'mapping_required')
         from .native_template_state_server import NativeTemplateStateServer
+        if review_id is not None:
+            from .review_retention import review_lease
+            _need(cls is NativeTemplateStateServer and type(review_id) is str,
+                  'review_scope_required')
+            review_lease(review_id, 'server')  # Validate server-owned namespace.
         names = {} if entity_names is None else entity_names
         devices = {} if device_names is None else device_names
         _need(type(names) is dict and type(devices) is dict
@@ -189,6 +195,7 @@ class NativeTemplateYAMLServer:
               and not set(mapping) & set(mapping.values()), 'independent_mapping_required')
         obj = await cls._open(hass, guard=guard, refresh=refresh)
         obj.mapping, obj.entity_names, obj.device_names = dict(mapping), names, devices
+        obj.review_id = review_id
         try:
             async with obj.locks.hold(obj._scope):
                 await obj._prepare()
