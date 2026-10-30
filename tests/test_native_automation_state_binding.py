@@ -23,7 +23,7 @@ class NativeAutomationStateBindingTests(unittest.IsolatedAsyncioTestCase):
         await self.stimulus(17)
         entity = next(iter(hass.data['automation'].entities))
         module = self.module('native_automation_state_binding')
-        bindings = module.capture_state_bindings(hass, entity)
+        bindings = await module.async_capture_state_bindings(hass, entity, guard=lambda: None)
         self.assertEqual(len(bindings), 1)
         binding = bindings[0]
         binding.assert_original()

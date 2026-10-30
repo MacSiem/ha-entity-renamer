@@ -86,6 +86,7 @@ class _Native:
         from homeassistant.components.homeassistant.triggers import state
         _need(__version__ in _PINS and type(hass) is HomeAssistant and type(hass.bus) is EventBus,
               'runtime_unsupported')
+        self.hass = hass
         self.root = Path(import_module('homeassistant').__file__).resolve().parent
         self.version = __version__
         self.pins = _PINS[__version__]
@@ -159,9 +160,11 @@ class NativeAutomationStateBinding:
     _original: tuple = field(repr=False)
 
     @classmethod
-    def capture(cls, hass, entity, index):
+    def capture(cls, hass, entity, index, *, _native=None):
         """Capture actual objects, after source and strict full-trigger admission."""
-        native = _Native(hass)
+        native = _Native(hass) if _native is None else _native
+        _need(type(native) is _Native and native.hass is hass, 'source_proof_owner_changed')
+        native.check()
         _need(type(entity) is native.AutomationEntity and entity.hass is hass
               and entity._is_enabled is True, 'enabled_native_owner_required')
         _automation_registrations(hass, entity)
@@ -256,14 +259,24 @@ class NativeAutomationStateBinding:
         _need(self._read() == self._original, 'original_graph_changed')
 
 
-def capture_state_bindings(hass, entity):
+def capture_state_bindings(hass, entity, *, _native=None):
     """Caller dispatch: genuinely disabled owners yield no state bindings."""
     from homeassistant.components.automation import AutomationEntity
     _need(type(entity) is AutomationEntity and entity.hass is hass, 'native_owner_required')
     if entity._is_enabled is False and entity._async_detach_triggers is None:
         return ()
     _need(entity._is_enabled is True, 'enabled_state_unknown')
-    _Native(hass)  # validate sources even when no state binding is selected
+    native = _Native(hass) if _native is None else _native
+    _need(type(native) is _Native and native.hass is hass, 'source_proof_owner_changed')
+    native.check()
     _automation_registrations(hass, entity)
-    return tuple(NativeAutomationStateBinding.capture(hass, entity, index)
+    return tuple(NativeAutomationStateBinding.capture(hass, entity, index, _native=native)
                  for index, cfg in enumerate(entity._trigger_config) if cfg.get('platform') == 'state')
+
+
+async def async_capture_state_bindings(hass, entity, *, guard):
+    """Source parsing/hashing off-loop, then fresh actual graph on the HA loop."""
+    guard()
+    native = await hass.async_add_executor_job(_Native, hass)
+    guard()
+    return capture_state_bindings(hass, entity, _native=native)
