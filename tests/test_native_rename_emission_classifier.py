@@ -4,9 +4,49 @@ No filtering, constructed Event/State, handler call, fake clock or source result
 This component is a prerequisite for explicit pending/A/S; it grants no readiness.
 """
 import asyncio
+from types import SimpleNamespace
 import unittest
 
 import test_native_template_yaml_server as server
+
+
+@unittest.skipUnless(server.activation.fixture.fixtures.HAS_HA, 'installed dependencies required')
+class SemanticSnapshotTests(unittest.TestCase):
+    def test_source_snapshot_never_rehashes_or_compares_foreign_attribute_keys(self):
+        import importlib
+        module = importlib.import_module(server.activation.fixture.fixtures.PACKAGE
+                                        + '.native_rename_emission_classifier')
+        calls = []
+        armed = False
+        class StringKey(str):
+            def __hash__(self):
+                if armed:
+                    calls.append('hash')
+                    raise AssertionError('snapshot invoked key hash')
+                return str.__hash__(self)
+            def __eq__(self, other):
+                if armed:
+                    calls.append('eq')
+                    raise AssertionError('snapshot invoked key comparison')
+                return str.__eq__(self, other)
+            def __str__(self):
+                raise AssertionError('snapshot invoked key conversion')
+        key = StringKey('friendly_name')
+        attributes = {key: 'fixture'}
+        armed = True
+        self.assertIsNotNone(module._semantic_state(SimpleNamespace(state='1', attributes=attributes)))
+        self.assertEqual(calls, [])
+        armed = False
+        class UnsupportedKey:
+            def __hash__(self):
+                if armed:
+                    calls.append('unsupported hash')
+                    raise AssertionError('snapshot invoked unsupported key hash')
+                return 1
+        attributes = {UnsupportedKey(): 'fixture'}
+        armed = True
+        self.assertIsNone(module._semantic_state(SimpleNamespace(state='1', attributes=attributes)))
+        self.assertEqual(calls, [])
 
 
 @unittest.skipUnless(server.activation.fixture.fixtures.HAS_HA, 'actual pinned HA required')

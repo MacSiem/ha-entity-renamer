@@ -119,7 +119,7 @@ def _semantic_state(state):
     their serializers, descriptors, iterators or equality hooks in a callback.
     """
     budget = [4096]
-    def freeze(value, depth=0):
+    def freeze(value, depth=0, *, native_attributes=False):
         budget[0] -= 1
         if budget[0] < 0 or depth > 32:
             raise ValueError()
@@ -142,7 +142,7 @@ def _semantic_state(state):
             return ('float', value)
         if kind in (list, tuple):
             return (kind.__name__, tuple(freeze(item, depth + 1) for item in value))
-        if kind is dict:
+        if kind is dict or native_attributes:
             if dict.__len__(value) > budget[0]:
                 raise ValueError()
             rows = []
@@ -157,8 +157,7 @@ def _semantic_state(state):
         # attributes are native ReadOnlyDict; bypass overridden dict methods.
         if dict.__len__(state.attributes) > budget[0]:
             return None
-        attributes = dict(dict.items(state.attributes))
-        return (freeze(state.state), freeze(attributes))
+        return (freeze(state.state), freeze(state.attributes, native_attributes=True))
     except (ValueError, TypeError, RecursionError):
         return None
 
@@ -737,6 +736,22 @@ class NativeRenameEmissions:
                     return False
                 return True
         return False
+
+    def suppresses_template_boundary(self, event):
+        """Only a structural remove or a proven data-neutral native re-add.
+
+        Meaningful producer data first published by native re-add must reach
+        the consumer. Unknown snapshots also pass through. This is useful only
+        within a root-owned rename ingress; it never authorizes a mutation.
+        """
+        if not self.is_owned_rename(event):
+            return False
+        item = next(item for item in self.emissions if item.event is event)
+        if item.phase == 'remove':
+            return True
+        removed = next((row for row in self.emissions if row.phase == 'remove'), None)
+        return (removed is not None and removed.semantic is not None
+                and item.semantic is not None and removed.semantic == item.semantic)
 
     def mutate(self):
         self._owner_guard()
