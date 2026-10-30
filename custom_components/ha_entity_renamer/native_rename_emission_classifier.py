@@ -126,6 +126,14 @@ def _semantic_state(state):
         kind = type(value)
         if value is None:
             return ('none',)
+        if isinstance(value, str):
+            # Native HA attributes include StrEnum keys/values. Read their
+            # underlying Unicode data without invoking subclass conversion,
+            # comparison, hashing or serialization hooks.
+            value = str.__str__(value)
+            if len(value) > 1024 * 1024:
+                raise ValueError()
+            return ('str', value)
         if kind in (str, bool, int):
             if kind is str and len(value) > 1024 * 1024:
                 raise ValueError()
@@ -135,14 +143,20 @@ def _semantic_state(state):
         if kind in (list, tuple):
             return (kind.__name__, tuple(freeze(item, depth + 1) for item in value))
         if kind is dict:
-            if any(type(key) is not str for key in value):
+            if dict.__len__(value) > budget[0]:
                 raise ValueError()
-            return ('dict', tuple((key, freeze(item, depth + 1))
-                                  for key, item in sorted(dict.items(value))))
+            rows = []
+            for key, item in dict.items(value):
+                if not isinstance(key, str):
+                    raise ValueError()
+                rows.append((freeze(key, depth + 1), freeze(item, depth + 1)))
+            return ('dict', tuple(sorted(rows)))
         raise ValueError()
     try:
         # State is the exact pinned native class at every callsite. Its outer
         # attributes are native ReadOnlyDict; bypass overridden dict methods.
+        if dict.__len__(state.attributes) > budget[0]:
+            return None
         attributes = dict(dict.items(state.attributes))
         return (freeze(state.state), freeze(attributes))
     except (ValueError, TypeError, RecursionError):
