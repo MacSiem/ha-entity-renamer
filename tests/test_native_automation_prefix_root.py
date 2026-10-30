@@ -189,6 +189,8 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     await hass.async_block_till_done()
                     self.assertTrue(revoked)
                     self.assertEqual(len(handoffs), 1)
+                    self.assertEqual((handoffs[0].api_calls, handoffs[0].registry_calls,
+                                      handoffs[0].handler_calls), (1, 1, 1))
                     self.assertEqual([(str(event.data['previous']), str(event.data['current']))
                         for event in actions], [('17', '29')])
                     self.assertEqual([str(event.data['value']) for event in scripts], ['29'])
@@ -201,6 +203,10 @@ class NativeAutomationPrefixRootTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
                     self.assertIsNone(self.f.entity.async_get(old))
                     self.assertEqual(hass.states.get(new).state, '29')
+                    for platform in async_get_platforms(hass, 'template'):
+                        for entity in platform.entities.values():
+                            self.assertEqual(hass.states.get(entity.entity_id).state,
+                                'off' if platform.domain == 'binary_sensor' else '58')
                     for name, content in original.items():
                         self.assertEqual((root / name).read_bytes(), content)
                     self.assertFalse(runtime.operation_lock.locked())

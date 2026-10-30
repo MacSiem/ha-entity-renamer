@@ -470,7 +470,12 @@ class NativeRegistryBridge:
                     or node.change != change or node.source != source['entity_id']
                     or node.target != target['entity_id']):
                 raise RegistryConflict('own_helper_effect_binding_mismatch')
-            stamp = node.mutate()
+            try:
+                stamp = node.mutate()
+            except BaseException:
+                if type(node) is NativeTemplateStateRegistryEffect:
+                    await node.finish_failed_attempt()
+                raise
             if type(node) is NativeTemplateStateRegistryEffect:
                 await node.finish_native()
         await self.io.settle(change)

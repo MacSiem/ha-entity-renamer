@@ -144,6 +144,17 @@ class NativeTemplateStateRegistryEffect:
                 if self.ingress is not None:
                     self.ingress.retire()
 
+    async def finish_failed_attempt(self):
+        if self.witness is None or not self.witness.failed_handoff:
+            return
+        try:
+            await self.witness.finish_failed_handoff()
+        finally:
+            if self.script_phase is not None:
+                self.script_phase.poison(self)
+            if self.ingress is not None:
+                self.ingress.retire()
+
     def _capture_at_final_fence(self):
         # Runtime values may legitimately advance during intent/phase IO. The
         # SAME immutable source program remains authoritative; recapture actual
@@ -272,12 +283,14 @@ class NativeTemplateStateRegistryEffect:
                     self.witness.close()
             else:
                 if self.script_phase is not None:
-                    self.script_phase.poison(self)
-                    graph = getattr(self.script_phase, 'graph', None)
-                    if graph is not None:
-                        graph.retire()
+                    if self.witness is None or not self.witness.failed_handoff:
+                        self.script_phase.poison(self)
+                        graph = getattr(self.script_phase, 'graph', None)
+                        if graph is not None:
+                            graph.retire()
                 if self.ingress is not None:
-                    self.ingress.retire()
+                    if self.witness is None or not self.witness.failed_handoff:
+                        self.ingress.retire()
             raise
 
     async def verify_effect(self, mutation, after):

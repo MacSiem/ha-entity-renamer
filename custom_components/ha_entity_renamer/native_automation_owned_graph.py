@@ -35,6 +35,9 @@ class _Route:
     handle: object = None
     seen: object = None
     wrapper_graph: tuple = ()
+    added_keys: object = None
+    keys_written: bool = False
+    wrapper_written: bool = False
 
 
 def _stable(binding):
@@ -90,7 +93,7 @@ class OwnedAutomationGraph:
                 target = tuple(mapping.get(key, key) for key in old)
                 _need(len(set(target)) == len(target), 'automation_route_collision')
                 self.routes.append(_Route(binding, old, target, _stable(binding),
-                    queue=deque(), seen=set()))
+                    queue=deque(), seen=set(), added_keys=[]))
 
     def install(self, witness):
         from homeassistant.core import callback, HassJobType
@@ -118,8 +121,11 @@ class OwnedAutomationGraph:
                     if key not in route.before:
                         _need(not any(job is b.keyed_job for job in members))
                         members.append(b.keyed_job)
+                        route.added_keys.append(key)
                 b.original_keys[:] = keys
+                route.keys_written = True
                 b.keyed_job.target = route.wrapper
+                route.wrapper_written = True
             self.check()
         except BaseException:
             self.retire(before_attempt=True)
@@ -264,17 +270,51 @@ class OwnedAutomationGraph:
         witness = self.witness
         _need(not self.pending() or before_attempt or witness.error is not None,
               'automation_ingress_delivery_pending')
-        for route in reversed(self.routes):
+        # Validate EVERY retained edge before changing any one of them. In
+        # particular, never iterate a foreign replacement/extended keys list as
+        # our cleanup plan. Partial installation has its own exact write log.
+        plans = []
+        for route in self.routes:
+            b = route.binding
+            b._native.check()
+            _need(_stable(b) == route.stable and b.entity._is_enabled is True
+                  and b.entity._async_detach_triggers is b.detach
+                  and b.entity._trigger_config[b.index] is b.config
+                  and b.config['entity_id'] is b.config_ids,
+                  'automation_retire_native_owner_changed')
+            expected = tuple(dict.fromkeys((*route.before, *route.added_keys)))
+            keys = expected if route.keys_written else route.before
+            _need(tuple(b.original_keys) == keys
+                  and b.keyed_job.target is (route.wrapper if route.wrapper_written else b.listener),
+                  'automation_retire_owned_slots_changed')
+            if route.wrapper_written:
+                _need(_value(route.wrapper) == route.wrapper_graph,
+                      'automation_retire_wrapper_changed')
+            _need(b.data is self.hass.data.get(b.tracker.key)
+                  and b.data.callbacks is b.callbacks and b.data.listener is b.bus_remove,
+                  'automation_retire_callback_owner_changed')
+            rc = _closure(b.remove, b._native.state.__name__, 'async_attach_trigger.<locals>.async_remove')
+            _need(rc['unsub'] is b.unsubscribe and not rc['unsub_track_same']
+                  and b.unsubscribe.func is b._native.event._remove_listener
+                  and not b.unsubscribe.keywords
+                  and all(actual is retained for actual, retained in zip(b.unsubscribe.args,
+                      (self.hass, b.tracker, b.original_keys, b.keyed_job, b.callbacks), strict=True)),
+                  'automation_retire_native_cleanup_changed')
+            entry, _ = _registered_bus_remove(self.hass, b.bus_remove, b.tracker.event_type)
+            _need(entry is b.bus_entry, 'automation_retire_bus_owner_changed')
+            _need(all(type(members) is list and sum(job is b.keyed_job for job in members)
+                      == (1 if key in expected else 0) for key, members in b.callbacks.items())
+                  and all(key in b.callbacks for key in expected),
+                  'automation_retire_route_membership_changed')
+            plans.append((route, expected, route.before if before_attempt else route.target))
+        for route, expected, target in reversed(plans):
             b = route.binding
             if route.handle is not None:
                 route.handle.cancel()  # only this OWN handle, never native ready work
-            _need(b.keyed_job.target in (route.wrapper, b.listener))
-            target = route.before if before_attempt else route.target
-            for key in tuple(b.original_keys):
+            for key in expected:
                 if key in target:
                     continue
-                members = b.callbacks[key]
-                _need(sum(job is b.keyed_job for job in members) == 1)
+                members = b.callbacks.get(key)
                 members.remove(b.keyed_job)
                 if not members:
                     b.callbacks.pop(key)

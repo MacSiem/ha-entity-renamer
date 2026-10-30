@@ -339,6 +339,7 @@ class NativeRenameEmissions:
         self.const, self.attribute_key = const, vars(const).get('EntityStateAttribute')
         self.queued = __version__ != '2025.6.0'
         self.error = None
+        self.failed_handoff = self.failed_handoff_drained = False
         self.closed, self.attempted, self.in_mutate, self.finished = False, False, False, False
         self.emissions, self.pending, self.dispatches, self.constructors = [], [], {}, {}
         self.keyed, self.tasks, self.source_runs = {}, {}, 0
@@ -946,11 +947,83 @@ class NativeRenameEmissions:
             _need(type(self.mutation) is NativeRegistryMutation, 'native_mutation_return')
             return self.mutation
         except BaseException:
-            self._poison('mutation_uncertain')
-            self.close()
+            # A completed physical handoff can fail its final request guard
+            # AFTER genuine ADD/REMOVE have been emitted. Keep the authentic
+            # event monitor alive solely to finish that already-issued delivery.
+            # This does not establish a mutation receipt or permit another API.
+            if self.automation_graph is not None and self._failed_handoff_complete():
+                self.failed_handoff = True
+            else:
+                self._poison('mutation_uncertain')
+                self.close()
             raise
         finally:
             self.in_mutate = False
+
+    def _failed_handoff_complete(self):
+        """Narrow read-only admission, never clearing an observer failure."""
+        try:
+            self._owner_guard(authorize=False)
+            self._check()
+            h = self.source_handoff
+            add = [item for item in self.emissions if item.phase == 'add']
+            _need(h is not None and self.mutation is None and self.attempted
+                  and h.attempted and h.closed and h.old_retired and h.error is None
+                  and h.api_calls == h.registry_calls == h.handler_calls == 1 and h.handler_done
+                  and len(self.emissions) == 3 and len(add) == 1
+                  and {item.phase for item in self.emissions} == {'registry', 'add', 'remove'}
+                  and all(self._data_current(item) for item in self.emissions)
+                  and h.original_state is self.handoff_state
+                  and self.hass.states.get(h.old) is None
+                  and self.hass.states.get(h.new) is add[0].raw['new_state']
+                  and self.registry.async_get(h.old) is None
+                  and self.registry.async_get(h.new) is h.new_row
+                  and self.source.registry_entry is h.new_row and self.source.entity_id == h.new
+                  and all(mapping.get(h.new) is self.source and h.old not in mapping for mapping in h.maps)
+                  and h.sources.get(h.new) is h.info and h.old not in h.sources
+                  and h.id_cell.cell_contents == h.new,
+                  'failed_handoff_not_physically_complete')
+            h._subscription(h.new_unsub, h.new)
+            self.automation_graph.check()
+            return True
+        except BaseException:
+            return False
+
+    async def finish_failed_handoff(self):
+        """Drain genuine native delivery after effect; no request auth or write.
+
+        The initiating exception remains terminal. In particular, this cannot
+        ACK a registry step, fabricate a receipt, replay an action or rename.
+        """
+        try:
+            self._owner_guard(authorize=False)
+            _need(self.failed_handoff and not self.failed_handoff_drained
+                  and self._failed_handoff_complete(), 'failed_handoff_drain_unavailable')
+            await self.io.settle(self.change)
+            while True:
+                self._check()
+                tasks = [task for task in self.tasks if not task.done()]
+                if tasks:
+                    await asyncio.gather(*(asyncio.shield(task) for task in tasks))
+                    continue
+                self.wake = self.loop.create_future()
+                if self._pending_dispatches():
+                    await self.wake
+                    self.wake = None
+                    continue
+                self.wake = None
+                break
+            _need(self.source_runs == 1 and len(self.tasks) == 1
+                  and all(task.done() and not task.cancelled() and task.exception() is None
+                          and row[2] for task, row in self.tasks.items())
+                  and all(item.dispatched for item in self.emissions),
+                  'failed_handoff_native_delivery_unconfirmed')
+            self.automation_graph.check()
+            self.automation_graph.retire()
+            self.failed_handoff_drained = True
+        finally:
+            self._poison('mutation_uncertain')
+            self.close()
 
     def _pending_dispatches(self):
         pending = bool(self.pending or self.dispatches or self.constructors or self.keyed)
