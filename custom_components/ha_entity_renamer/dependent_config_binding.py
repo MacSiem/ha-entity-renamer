@@ -6,6 +6,7 @@ position or current-looking body cannot select an expected prefix.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 
 from .dependent_config_program import DependentConfigProgram, _digest
 from .transaction import Refused
@@ -74,6 +75,7 @@ class NativeDependentConfigReadback:
     def __init__(self, hass, program, evidence, receipt, plan):
         from .dependent_config_program import _bytes
         from .native_template_state_composition import _retained_fields
+        from .native_input_baseline import _Managers
         _need(type(program) is DependentConfigProgram)
         program.assert_sources(receipt, evidence, plan=plan, mapping=dict(program.mapping),
                                source_order=program.source_order)
@@ -82,6 +84,7 @@ class NativeDependentConfigReadback:
         self._program_json, self._program_sha = _bytes(program.descriptor_json.decode()), program.sha256
         self._receipt_json, self._evidence_sha = program.receipt_json, evidence.sha256
         self._plan_fields = _retained_fields(plan)
+        self._managers = _Managers(hass, receipt)
 
     def sample(self, chain, **live):
         from .dependent_config_program import _bytes
@@ -90,6 +93,7 @@ class NativeDependentConfigReadback:
         from .yaml_runtime_observer import NativeYAMLRuntimeReadback
         from .yaml_source_binding import _runtime_rows_sample
         from .yaml_validation_worker import _normal
+        from .native_template_state_binding import _state_inputs
         _need(self.program.sha256 == self._program_sha
               and _bytes(self.program.descriptor_json.decode()) == self._program_json
               and self.program.original_evidence_sha256 == self._evidence_sha
@@ -99,6 +103,15 @@ class NativeDependentConfigReadback:
               and chain.original_receipt == self.receipt,
               'dependent_config_retained_original_changed')
         prefix = accepted_dependent_prefix(chain, self.program, **live)
+        inputs = _state_inputs(chain, live.get('input_state'),
+            live_intent=live.get('live_intent'), live_context=live.get('live_context'),
+            live_calls=live.get('live_calls', ()))
+        inputs.assert_current(self.receipt)
+        documents = chain.accepted_documents()
+        keys = ('core.entity_registry', 'core.device_registry', 'core.config_entries')
+        _need(all(json.loads(raw) == documents[key]['data']
+                  for key, raw in zip(keys, self._managers.sample(), strict=True)),
+              'dependent_config_full_native_inputs_changed')
         expected = self.program.rows(prefix.active)
         observer = NativeYAMLRuntimeReadback(self.hass)
         actual = []
@@ -109,7 +122,6 @@ class NativeDependentConfigReadback:
             normalized = _normal(projection)
             _need(normalized == rows, 'dependent_config_native_prefix_mismatch')
             actual.append((domain, normalized))
-        documents = chain.accepted_documents()
         population, blockers, tokens = _runtime_rows_sample(self.hass, self.evidence,
             documents['core.entity_registry']['data']['entities'],
             expected_projections=tuple((domain, _digest(rows)) for domain, rows in expected))
