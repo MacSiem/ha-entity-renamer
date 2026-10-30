@@ -209,8 +209,7 @@ class NativeTemplateRenameIngressTests(unittest.IsolatedAsyncioTestCase):
                 await self.emit(branch_b, 13)
                 self.assertTrue(all(self.f.hass.states.get(entity.entity_id).state == '13'
                                     for entity in (self.consumer, self.control)))
-                return
-            for value in (7, 11):
+            for value in (() if conditional else (7, 11)):
                 from homeassistant.core import callback
                 fired = self.f.hass.loop.create_future()
                 @callback

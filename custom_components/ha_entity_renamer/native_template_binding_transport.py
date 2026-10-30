@@ -6,7 +6,9 @@ operation intent. It keeps its existing event/registry fence through this call
 and the immediately following registry mutation, without yielding the HA loop.
 
 Actual old _last_result and rate timestamps are migration DATA, not generated
-native evidence. Every new RenderInfo is created by native setup. Setup uses the
+native evidence. With a real rename witness, last-consumed dependency history
+is migration DATA too; it does not prove a new render. Every new RenderInfo is
+created by native setup. Setup uses the
 explicit product policy full_slot_dependency_setup: availability is first, native
 setup initially renders every slot with has_super_template=False, then the real
 super flag is installed before dispatch. This prevents missing RenderInfo when
@@ -142,6 +144,10 @@ class _Runtime:
         _need(native.version in _EXTRA_PINS, 'template_binding_core_unqualified')
         native.pins.update(_EXTRA_PINS[native.version])
         self.refs = [(event, 'async_track_template_result'),
+            (template.RenderInfo, '__init__'),
+            (template.RenderInfo, '_freeze'), (template.RenderInfo, '_freeze_sets'),
+            (template.RenderInfo, '_filter_domains_and_entities'),
+            (template.RenderInfo, '_filter_lifecycle_domains'),
             (event, 'async_track_state_change_filtered'),
             (event._TrackStateChangeFiltered, 'async_setup'),
             (event._TrackStateChangeFiltered, 'async_update_listeners'),
@@ -527,6 +533,64 @@ class NativeTemplateBindingTransport:
         witness._owner_guard()
         witness._check()
 
+    def _dependency_history(self, row):
+        """Retain the last consumed branch across the absent-target setup.
+
+        Pending input must not be acknowledged by setup taking a different
+        branch. Future real inputs replace this history through native render.
+        """
+        if self.rename_witness is None:
+            return
+        from .native_rename_emission_classifier import NativeRenameEmissions
+        witness = self.rename_witness
+        _need(type(witness) is NativeRenameEmissions and witness.hass is self.hass
+              and not witness.attempted
+              and witness.source_id.split('.')[0] == witness.target_id.split('.')[0],
+              'template_binding_dependency_witness_required')
+        witness._owner_guard()
+        witness._check()
+        old, new = row['tracker'], row['new']
+        RenderInfo = self.runtime.template.RenderInfo
+        timers = self.runtime.rate_timers(old)
+        _need(set(old._time_listeners) == {t for t, info in old._info.items() if info.has_time},
+              'template_binding_dependency_time_inventory_changed')
+        for template, previous in old._info.items():
+            current = new._info[row['replacements'][id(template)]]
+            _need(type(previous) is RenderInfo and previous.template is template
+                  and type(current) is RenderInfo
+                  and previous.exception is None and current.exception is None
+                  and previous.is_static is current.is_static,
+                  'template_binding_dependency_history_unqualified')
+            for name in ('entities', 'domains', 'domains_lifecycle'):
+                values = getattr(previous, name)
+                _need(type(values) is frozenset and all(type(value) is str for value in values),
+                      'template_binding_dependency_set_changed')
+                if name == 'entities' and witness.source_id in values:
+                    values = (values - {witness.source_id}) | {witness.target_id}
+                setattr(current, name, values)
+            for name in ('all_states', 'all_states_lifecycle', 'has_time'):
+                value = getattr(previous, name)
+                _need(type(value) is bool, 'template_binding_dependency_flag_changed')
+                setattr(current, name, value)
+            limit = previous.rate_limit
+            _need(limit is None or ((type(limit) is int or type(limit) is float)
+                  and math.isfinite(limit) and limit >= 0),
+                  'template_binding_dependency_rate_changed')
+            current.rate_limit = limit
+            current.filter = current.filter_lifecycle = self.runtime.native.render_module._true
+            current._freeze()
+            if template in timers:
+                # The ORIGINAL pending Event must still reach native render.
+                # Mapping dependencies never grants permission to edit it.
+                _need(self.runtime.event._event_triggers_rerender(timers[template]._args[0], current),
+                      'template_binding_pending_replay_binding_unqualified')
+        for track in old._track_templates:
+            if track.template not in old._info:
+                _need(track.template not in old._last_result
+                      and track.template not in old._rate_limit._last_triggered
+                      and track.template not in timers and track.template not in old._time_listeners,
+                      'template_binding_missing_dependency_history')
+
     def _variables_current(self):
         if not self.configured_variables and not self.rendered_variables:
             return
@@ -633,6 +697,7 @@ class NativeTemplateBindingTransport:
                 new._last_result = {replacements[id(t)]: value for t, value in old._last_result.items()}
                 new._rate_limit._last_triggered = {replacements[id(t)]: value
                     for t, value in old._rate_limit._last_triggered.items()}
+                self._dependency_history(row)
             for row in self.rows:
                 old, new = row['tracker'], row['new']
                 _need(not new._rate_limit._rate_limit_timers,
@@ -646,7 +711,7 @@ class NativeTemplateBindingTransport:
                     new._rate_limit._rate_limit_timers[replacement] = handle
                     handle._callback = new._refresh
                     handle._args = (handle._args[0], (tracks[0],), True)
-                if row['rate_moves']:
+                if row['rate_moves'] or self.rename_witness is not None:
                     self.runtime.update_rate_listeners(new)
             # Transport genuine native recurring time owners, including an
             # already-due physical timer. Recreating a scheduler would randomize
