@@ -35,7 +35,7 @@ async def async_reclaim_reviews(hass, *, keep=(), guard):
     protected_refs = {step.prepared_ref for record in records for step in record.plan.steps}
     protected_refs.update(record.plan.native_inputs[0] for record in records if record.plan.native_inputs)
     leases = [(key, row['payload']) for key, row in preparations.plans.items()
-              if row['payload'].get('kind') == 'ordinary_review_lease']
+              if type(row['payload']) is dict and row['payload'].get('kind') == 'ordinary_review_lease']
     if not leases:
         return preparations, journal
     receipts = native_registry_receipt_store(hass, preparations)

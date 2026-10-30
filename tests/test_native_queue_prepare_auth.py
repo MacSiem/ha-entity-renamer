@@ -159,3 +159,34 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
         self.assertIsNone(self.f.entity.async_get(new))
         await self.stimulus(7)
+
+    async def test_failed_native_prepare_reclaims_only_its_lease_and_preserves_foreign_yaml(self):
+        from unittest.mock import patch
+        runtime, old, new, uuids, original, payload = await self.selection()
+        hass = self.f.hass
+        factory = self.module('native_template_state_server').NativeTemplateStateServer
+        actual_common = factory._common
+        edited = original + b'\n# synthetic foreign edit during final review admission\n'
+        injected = []
+        async def change_before_final_admission(session, rollback, **kwargs):
+            if kwargs.get('initial') and not injected:
+                injected.append(True)
+                await hass.async_add_executor_job((self.f.root / 'template.yaml').write_bytes, edited)
+            return await actual_common(session, rollback, **kwargs)
+        connection, user, output = await self._connection(admin=True)
+        with patch.object(factory, '_common', change_before_final_admission):
+            connection.async_handle({'id': 1, 'type': 'ha_entity_renamer/prepare', **payload})
+            response = await output
+        self.assertTrue(injected, 'fault must follow actual durable preparations and root creation')
+        self.assertFalse(response['success'])
+        self.assertFalse(runtime.reviews)
+        self.assertEqual(runtime.preparations.plans, {})
+        receipts = self.module('native_registry_receipts').native_registry_receipt_store(hass, runtime.preparations)
+        await receipts.initialize()
+        self.assertEqual(receipts.rows, {})
+        self.assertEqual(await runtime.journal.all(), ())
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), edited)
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        await hass.async_add_executor_job((self.f.root / 'template.yaml').write_bytes, original)
+        await self.stimulus(7)

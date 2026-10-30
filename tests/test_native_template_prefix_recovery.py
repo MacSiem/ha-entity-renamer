@@ -33,7 +33,10 @@ class NativeTemplatePrefixRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_acknowledged_prefix_controller_inspection_and_inverse(self):
         await self._prefix_reverse(1, controller=True)
 
-    async def _prefix_reverse(self, count, *, controller=False):
+    async def test_leased_review_prefix_survives_retention_and_controller_inverse(self):
+        await self._prefix_reverse(1, controller=True, retained=True)
+
+    async def _prefix_reverse(self, count, *, controller=False, retained=False):
         runtime, mapping, uuids, original = await self.data(multiple=True)
         hass, root = self.f.hass, self.f.root
         journal_type = self.module('journal').DurableJournal
@@ -46,11 +49,28 @@ class NativeTemplatePrefixRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 raise asyncio.CancelledError('synthetic interruption after durable prefix ACK')
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
+        if retained:
+            review = await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                guard=lambda: None, refresh=refresh)
         with patch.object(journal_type, 'save', stop_after_ack):
             with self.assertRaises(asyncio.CancelledError):
-                await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+                if retained:
+                    await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                        actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+                else:
+                    await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
         self.assertEqual(len(interrupted), 1)
         record = interrupted[0]
+        if retained:
+            keys = ('ha_entity_renamer.prepared', 'ha_entity_renamer.registry_receipts',
+                    'ha_entity_renamer.migrations')
+            snapshots = {key: (root / '.storage' / key).read_bytes() for key in keys}
+            async with runtime.operation_lock:
+                runtime.preparations, runtime.journal = await self.module('review_retention').async_reclaim_reviews(
+                    hass, guard=lambda: None)
+            self.assertEqual({key: (root / '.storage' / key).read_bytes() for key in keys}, snapshots,
+                             'retention must preserve all uncertain-operation evidence exactly')
+            self.assertFalse(runtime.reviews)
         self.assertEqual(await runtime.journal.load(record.operation_id), record)
         self.assertEqual((root / 'template.yaml').read_bytes(), original)
         first, second = sorted(mapping)
