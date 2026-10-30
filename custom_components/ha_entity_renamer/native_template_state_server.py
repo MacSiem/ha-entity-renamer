@@ -317,5 +317,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         yaml = adapter_type(self.hass, resolver, self.locks,
             self.observer, self.chain, self._observe, self.journal.load, self._scope, context=Context(),
             full_verify=lambda _: self._full(False), full_verify_rollback=lambda _: self._full(True))
+        admission = ({'record_admission': self.consumers.phases.admit_record}
+                     if type(self.composition) is ScriptTemplateStateComposition else {})
         return compose({'registry': registry, 'yaml': yaml},
-            self.journal, self._scope, required_scopes=('registry', 'yaml'))
+            self.journal, self._scope, required_scopes=('registry', 'yaml'), **admission)

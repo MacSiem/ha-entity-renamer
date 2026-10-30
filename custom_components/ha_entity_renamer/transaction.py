@@ -10,6 +10,7 @@ import asyncio
 from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
+import inspect
 import json
 import re
 from typing import Callable, Protocol
@@ -195,7 +196,8 @@ class Coordinator:
 
     def __init__(self, adapters: dict[str, Adapter], journal: Journal,
                  guard: Callable[[], None], *, required_scopes: tuple[str, ...],
-                 lock: asyncio.Lock | None = None):
+                 lock: asyncio.Lock | None = None,
+                 record_admission: Callable[[str], None] | None = None):
         if not required_scopes:
             raise ValueError("Server must define required migration scope")
         self.required_scopes = frozenset(required_scopes)
@@ -203,6 +205,22 @@ class Coordinator:
         self.journal = journal
         self.guard = guard
         self.lock = lock or asyncio.Lock()
+        if record_admission is not None and not callable(record_admission):
+            raise ValueError("Server record admission must be callable")
+        self.record_admission = record_admission
+
+    def _admit_record(self, direction):
+        """Trusted synchronous admission immediately before durable mutation."""
+        if self.record_admission is None:
+            return
+        self.guard()
+        result = self.record_admission(direction)
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise Refused("Record admission must be synchronous")
+        if result is not None:
+            raise Refused("Record admission must raise or return None")
 
     async def _load(self, operation_id: str) -> Record | None:
         self.guard()
@@ -265,6 +283,7 @@ class Coordinator:
                     raise Refused("Stale or unverified plan")
             record = Record(operation_id, plan, phases=("pending",) * len(plan.steps))
             self.guard()
+            self._admit_record("forward")
             try:
                 await self.journal.create(record)
             except asyncio.CancelledError:
@@ -411,6 +430,7 @@ class Coordinator:
                 return record
             if any(p in ("intent", "undo_intent") for p in record.phases):
                 raise Refused("Reconcile unresolved effect before compensation")
+            self._admit_record("rollback")
             # Persist recovery direction before compensation, even if its ACK is lost.
             record = await self._save(replace(record, direction="rollback", status="rolling_back"))
             for index in reversed(range(len(record.plan.steps))):

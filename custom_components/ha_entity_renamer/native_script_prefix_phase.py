@@ -104,6 +104,15 @@ class NativeScriptPrefixPhase:
                 wanted = target
         _need(self._read(wanted) == self.sample, 'script_prefix_phase_identity_changed')
 
+    def admit_record(self, direction):
+        self.root._scope()
+        _need(direction in ('forward', 'rollback') and self.active is None
+              and self.root.chain.active is None
+              and asyncio.current_task() is self.root.task)
+        from .native_script_config_transport import assert_idle_script_program_targets
+        assert_idle_script_program_targets(self.root.hass, self.program,
+            active=self.mask if direction == 'rollback' else None)
+
     def capture(self, node):
         from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
         self.check()

@@ -172,11 +172,13 @@ class ReceiptedMixedTemplateStateYAMLTransactionAdapter(ReceiptedTemplateStateYA
         return _MixedStateYAMLHooks(self, change, context, intent, guard)
 
 
-def compose_mixed_template_state_yaml_coordinator(adapters, journal, guard, *, required_scopes, lock=None):
+def compose_mixed_template_state_yaml_coordinator(adapters, journal, guard, *, required_scopes, lock=None,
+                                                 record_admission=None):
     from .transaction import Coordinator
     adapter = adapters.get('yaml')
     _need(type(adapter) is ReceiptedMixedTemplateStateYAMLTransactionAdapter
           and type(adapter.observer) is NativeMixedTemplateStateYAMLRuntimeReadback)
     completion = _MixedStateCompletionGuard(guard)
     adapter._template_completion = completion
-    return Coordinator(adapters, journal, completion, required_scopes=required_scopes, lock=lock)
+    return Coordinator(adapters, journal, completion, required_scopes=required_scopes, lock=lock,
+                       record_admission=record_admission)
