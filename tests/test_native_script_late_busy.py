@@ -26,7 +26,10 @@ class NativeScriptLateBusyTests(unittest.IsolatedAsyncioTestCase):
     async def test_late_busy_retained_apply_has_no_operation_record_or_native_api(self):
         await self._late_busy(retained=True)
 
-    async def _late_busy(self, *, retained):
+    async def test_late_busy_inverse_preserves_applied_record_until_target_finishes(self):
+        await self._late_busy(retained=False, rollback=True)
+
+    async def _late_busy(self, *, retained, rollback=False):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         runtime, mapping, uuids, _, _ = await self.data(with_automation=False)
@@ -51,8 +54,9 @@ class NativeScriptLateBusyTests(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(hass.bus.async_listen(kind, lambda event: events.append(event.event_type)))
         server = self.module('native_template_yaml_server').NativeTemplateYAMLServer
         io = self.module('native_registry').NativeRegistryIO
-        codes, calls = (server.apply.__code__, io.mutate.__code__), []
+        codes, calls = ((server.rollback if rollback else server.apply).__code__, io.mutate.__code__), []
         armed, task = False, None
+        safely_admitted_inverse = False
         tool = next(index for index in range(6) if sys.monitoring.get_tool(index) is None)
         sys.monitoring.use_tool_id(tool, 'actual target starts in apply refresh after bind')
         def started(code, offset):
@@ -76,27 +80,42 @@ class NativeScriptLateBusyTests(unittest.IsolatedAsyncioTestCase):
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, started)
             for code in codes:
                 sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START)
-            if retained:
+            if rollback:
+                applied = await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+                self.assertEqual(applied['state'], 'applied')
+                before_record = await runtime.journal.load(applied['operation_id'])
+                current_files = {name: (root / name).read_bytes() for name in original}
+                self.assertIsNone(task)
+            elif retained:
                 review = await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
                     guard=lambda: None, refresh=refresh)
                 self.assertIsNone(task)
+            before_calls = len(calls)
             with self.assertRaises((ValueError, self.module('transaction').Refused)):
-                if retained:
+                if rollback:
+                    await runtime.native_yaml_reverse(hass, applied['operation_id'], applied['fingerprint'],
+                        guard=lambda: None, refresh=refresh)
+                elif retained:
                     await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
                         actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
                 else:
                     await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
             self.assertIsNotNone(task, 'the target must start only after actual bind')
             witness.assert_live(self)
-            self.assertEqual(calls, [])
-            self.assertEqual(await runtime.journal.all(), [], 'late busy target must not create a pending operation')
+            self.assertEqual(len(calls), before_calls)
+            if rollback:
+                self.assertEqual(await runtime.journal.load(applied['operation_id']), before_record)
+            else:
+                self.assertEqual(await runtime.journal.all(), [], 'late busy target must not create a pending operation')
             self.assertFalse(runtime.operation_lock.locked())
             for previous, proposed in mapping.items():
-                self.assertEqual(self.f.entity.async_get(previous).id, uuids[previous])
-                self.assertIsNone(self.f.entity.async_get(proposed))
-            for name, contents in original.items():
+                present, absent = (proposed, previous) if rollback else (previous, proposed)
+                self.assertEqual(self.f.entity.async_get(present).id, uuids[previous])
+                self.assertIsNone(self.f.entity.async_get(absent))
+            for name, contents in (current_files if rollback else original).items():
                 self.assertEqual((root / name).read_bytes(), contents)
             self.assertEqual(events, ['late_script_started'])
+            safely_admitted_inverse = rollback
         finally:
             for code in codes:
                 sys.monitoring.set_local_events(tool, code, 0)
@@ -108,3 +127,14 @@ class NativeScriptLateBusyTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(asyncio.shield(task), 5)
                 await hass.async_block_till_done()
         self.assertEqual(events, ['late_script_started', 'late_script_finished'])
+        if safely_admitted_inverse:
+            # The exact applied record was independently confirmed unchanged,
+            # and the real action has naturally finished. Fresh inverse now.
+            restored = await runtime.native_yaml_reverse(hass, applied['operation_id'], applied['fingerprint'],
+                guard=lambda: None, refresh=refresh)
+            self.assertEqual(restored['state'], 'rolled_back')
+            for previous, proposed in mapping.items():
+                self.assertEqual(self.f.entity.async_get(previous).id, uuids[previous])
+                self.assertIsNone(self.f.entity.async_get(proposed))
+            for name, contents in original.items():
+                self.assertEqual((root / name).read_bytes(), contents)
