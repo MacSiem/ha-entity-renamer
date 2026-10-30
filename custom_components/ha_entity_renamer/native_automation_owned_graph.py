@@ -48,7 +48,7 @@ class _Route:
     duration_retained: object = None
 
 
-def _stable(binding):
+def _stable(binding, *, configured_view=None):
     b = binding
     cells = _closure(b.listener, b._native.state.__name__,
                      'async_attach_trigger.<locals>.state_automation_listener')
@@ -61,7 +61,7 @@ def _stable(binding):
         (id(b.action_job), id(b.action_job.target.__self__), id(b.action_job.target.__func__),
          b.action_job.name, b.action_job._cancel_on_shutdown, id(b.action_job._cache)),
         _value(b.match_from), _value(b.match_to),
-        (b._duration.stable(b) if hasattr(b, '_duration') else
+        (b._duration.stable(b, configured_view=configured_view) if hasattr(b, '_duration') else
          tuple((key, _value(value)) for key, value in cells.items() if key != 'config')))
 
 
@@ -119,11 +119,12 @@ class OwnedAutomationGraph:
                     continue
                 binding.assert_original()
                 if hasattr(binding, '_duration_scalar_image'):
-                    # First scalar profile has no source/cell transport. Refuse
-                    # even an unchanged opaque reference to this edge's IDs.
-                    body = binding.config['for'].template
-                    _need(not any(key in body for key in (*mapping, *mapping.values())),
-                          'automation_duration_source_reference_unsupported')
+                    transfer = getattr(self, 'transfer', None)
+                    from jinja2 import Environment, nodes
+                    source_bearing = tuple(Environment().parse(binding.config['for'].template).find_all(nodes.Call))
+                    _need(not source_bearing or transfer is not None, 'automation_duration_program_edge_required')
+                    if transfer is not None:
+                        transfer.scalar_edge(binding)
                 old = tuple(binding.original_keys)
                 target = tuple(mapping.get(key, key) for key in old)
                 _need(len(set(target)) == len(target), 'automation_route_collision')
@@ -449,12 +450,12 @@ class OwnedAutomationGraph:
                     for route in self.routes)
                 or self.duration is not None and self.duration.expiry.pending())
 
-    def retire(self, *, before_attempt=False):
-        if not self.live:
-            self.routes.clear()
-            return
+    def plan_retire(self, *, before_attempt=False, configured_view=None):
         witness = self.witness
-        _need(not self.pending() or before_attempt or witness.error is not None,
+        transfer = getattr(self, 'transfer', None)
+        if transfer is not None:
+            transfer.check_configured_retained()
+        _need(not self.live or not self.pending() or before_attempt or witness.error is not None,
               'automation_ingress_delivery_pending')
         # Validate EVERY retained edge before changing any one of them. In
         # particular, never iterate a foreign replacement/extended keys list as
@@ -463,7 +464,7 @@ class OwnedAutomationGraph:
         for route in reversed(self.routes):
             b = route.binding
             b._native.check()
-            _need(_stable(b) == route.stable and b.entity._is_enabled is True
+            _need(_stable(b, configured_view=configured_view) == route.stable and b.entity._is_enabled is True
                   and b.entity._async_detach_triggers is b.detach
                   and b.entity._trigger_config[b.index] is b.config
                   and b.config['entity_id'] is b.config_ids,
@@ -492,8 +493,14 @@ class OwnedAutomationGraph:
                       == (1 if key in expected else 0) for key, members in b.callbacks.items())
                   and all(key in b.callbacks for key in expected),
                   'automation_retire_route_membership_changed')
+            if before_attempt and hasattr(b, '_duration'):
+                self.duration.expiry.before_rollback(route)
+            if configured_view is not None and hasattr(b, '_duration'):
+                _need(route.duration_operations is None, 'duration_rollback_view_after_graph_write')
+                _need(self.duration.pending(b, configured_view=configured_view)[1] == route.duration_snapshot,
+                      'duration_unstarted_pending_changed')
             duration_plan = (self.duration.validate_retire(route, before_attempt,shadow)
-                             if hasattr(b, '_duration') else None)
+                             if hasattr(b, '_duration') and configured_view is None else None)
             target=route.before if before_attempt else route.target
             plans.append((route, expected,target,duration_plan))
             if before_attempt:
@@ -512,9 +519,13 @@ class OwnedAutomationGraph:
                     if not projected:
                         callbacks=tuple((k,v) for k,v in callbacks if k!=key)
                 shadow[slot]=callbacks
+        return tuple(plans)
+
+    def apply_retire(self, plans, *, before_attempt=False):
+        witness = self.witness
         for route, expected, target, duration_plan in plans:
             b = route.binding
-            if hasattr(b, '_duration'):
+            if hasattr(b, '_duration') and (self.live or route.duration_operations is not None):
                 self.duration.retire(route, before_attempt, duration_plan)
             if route.handle is not None:
                 route.handle.cancel()  # only this OWN handle, never native ready work
@@ -531,7 +542,11 @@ class OwnedAutomationGraph:
         self.routes.clear()
         # Successful witness.finish keeps its original monitor until this
         # final synchronous native retirement has actually completed.
-        if self.duration is not None:
+        if self.duration is not None and witness is not None:
             self.duration.expiry.detach(witness)
-        if witness.finished:
+        if witness is not None and witness.finished:
             witness.close()
+
+    def retire(self, *, before_attempt=False):
+        plans = self.plan_retire(before_attempt=before_attempt)
+        self.apply_retire(plans, before_attempt=before_attempt)

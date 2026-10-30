@@ -1,4 +1,4 @@
-"""Private unchanged scalar Template-for profile; no source/cell transport.
+"""Private closed scalar Template-for and direct source profile.
 
 All values come from native attach closures or authentic classified occurrences.
 This module never renders a pending period and never installs a monitoring tool.
@@ -26,6 +26,11 @@ _PINS = {
     },
     '2026.10.4': {
         'homeassistant.helpers.template': 'cb26b93a52a25160072ac7a987f79cc8c26534abf5522461850e8ca30dfe4bd4',
+        'homeassistant.helpers.template.states': '482640b98dc1aa8b168e2bd5d3bd5adf7e1c151c3511d1fe6022258c28205803',
+        'homeassistant.helpers.template.extensions.state': 'b62d4dcf0d9749c2365a47568ec41d692ad3b66cbefdaa28e2cd994e41310245',
+        'homeassistant.helpers.template.extensions.type_cast': 'a5e37bd0d7239ca1919dd473d4253e5139e5c273d2595a28dc8f769064a51f5e',
+        'homeassistant.helpers.template.extensions.base': 'd959f98907e3e3752f33096aa8ea185d471e8d81bc693c5dc2fa323ac3226c9b',
+        'homeassistant.helpers.template.helpers': '2f4796b9d35516ab9c39498365d4fcf843ebd3334ac9c1b07000d7811d706c67',
         'homeassistant.helpers.template.context': '63e1cabb7b08027db08b0b4e513f0f7f1ad15995476829ae0c7655b9e3266f1f',
         'homeassistant.helpers.config_validation': '78776d1584e83ec05c97dc138cbaf343233f0293597dda4eb1872106ecb97d0c',
         'probatio.validators.combinators': '504c2a20c01c24fc121b017e98cf138a80c914f618e1a680beadf42eaeaca124',
@@ -38,7 +43,12 @@ _PINS = {
 # Installed Core 2026.10.2: all eight actual Template/CV/native validator
 # module bytes match .4 (scalar-core102-source-readback.json, 2026-10-30).
 # The same per-runtime file/code/reference/protocol checks still apply.
-_PINS['2026.10.2'] = dict(_PINS['2026.10.4'])
+_PINS['2026.10.2'] = {name: digest for name, digest in _PINS['2026.10.4'].items()
+    if name not in {'homeassistant.helpers.template.states',
+        'homeassistant.helpers.template.extensions.state',
+        'homeassistant.helpers.template.extensions.type_cast',
+        'homeassistant.helpers.template.extensions.base',
+        'homeassistant.helpers.template.helpers'}}
 
 
 def configured_duration(config, hass):
@@ -50,22 +60,38 @@ def configured_duration(config, hass):
         return value
     _need(type(value) is Template and value.hass is hass and not value.is_static
           and type(value.template) is str, 'duration_scalar_template_required')
-    # A deliberately closed first profile: pure expressions over authentic
-    # trigger/attach-time this data. No state-machine/global helper, call,
-    # filter, import, macro or assignment can hide a migrated source reference.
-    # Parsing is read-only admission; it never evaluates or compiles a render.
+    # Closed expressions over native trigger/this and literal states('id')|int.
+    # Calls/filters are admitted only as this exact pair, without aliases,
+    # defaults, keyword/dynamic args or other globals. Parsing never renders.
     from jinja2 import Environment, nodes
     tree = Environment().parse(value.template)
     allowed = (nodes.Template, nodes.Output, nodes.Const, nodes.Name,
                nodes.Getattr, nodes.Getitem, nodes.CondExpr, nodes.Compare,
                nodes.Operand, nodes.And, nodes.Or, nodes.Not, nodes.Add,
                nodes.Sub, nodes.Mul, nodes.Div, nodes.FloorDiv, nodes.Mod,
-               nodes.Pow, nodes.Neg, nodes.Pos, nodes.Tuple, nodes.List)
+               nodes.Pow, nodes.Neg, nodes.Pos, nodes.Tuple, nodes.List, nodes.Call, nodes.Filter)
     _need(all(type(node) in allowed for node in (tree, *tree.find_all(nodes.Node)))
-          and all(node.name in ('trigger', 'this') and node.ctx == 'load'
+          and all(node.name in ('trigger', 'this', 'states') and node.ctx == 'load'
                   for node in tree.find_all(nodes.Name))
           and all(not node.attr.startswith('_') for node in tree.find_all(nodes.Getattr)),
           'duration_scalar_expression_unsupported')
+    calls = tuple(tree.find_all(nodes.Call))
+    filters = tuple(tree.find_all(nodes.Filter))
+    import re
+    _need(all(type(call.node) is nodes.Name and call.node.name == 'states'
+              and len(call.args) == 1 and type(call.args[0]) is nodes.Const
+              and type(call.args[0].value) is str
+              and re.fullmatch(r'[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*', call.args[0].value)
+              and not call.kwargs and call.dyn_args is None and call.dyn_kwargs is None
+              for call in calls)
+          and all(f.name == 'int' and type(f.node) is nodes.Call
+                  and any(f.node is call for call in calls) and not f.args and not f.kwargs
+                  and f.dyn_args is None and f.dyn_kwargs is None for f in filters)
+          and len(calls) == len(filters)
+          and all(sum(f.node is call for f in filters) == 1 for call in calls)
+          and all(any(name is call.node for call in calls)
+                  for name in tree.find_all(nodes.Name) if name.name == 'states'),
+          'duration_scalar_source_expression_unsupported')
     return value
 
 
@@ -94,10 +120,30 @@ class ScalarDurationNative:
             self.paths[name] = path
             self.expected[name] = tuple(_codes(compile(raw, str(path), 'exec',
                 dont_inherit=True, optimize=sys.flags.optimize)))
+        # Jinja's int converter is reachable from both pinned native filters.
+        name = 'jinja2.filters'
+        module = import_module(name)
+        path = Path(module.__file__)
+        raw = path.read_bytes()
+        _need(path.resolve() == path and hashlib.sha256(raw).hexdigest() ==
+              '3d0fc481df67f634a0b671906321782b98f69d8c21508ba584f9f28a691dafe9',
+              'duration_scalar_int_source_changed')
+        self.modules[name], self.paths[name] = module, path
+        self.expected[name] = tuple(_codes(compile(raw, str(path), 'exec',
+            dont_inherit=True, optimize=sys.flags.optimize)))
+        self.source_envs = {}
+        from homeassistant.core import StateMachine
+        from .native_unload_code_proof import prove_methods
+        self.state_machine = StateMachine
+        self.state_refs = [(StateMachine, 'get')]
+        self.state_methods, self.state_codes = prove_methods(native.root, native.pins, self.state_refs)
+        self.state_shapes = tuple(_value(method) for method in self.state_methods)
         # Authenticate module functions and native declared class descriptors,
         # including Template render/compile/parse and CV/Schema execution paths.
         for name, module in self.modules.items():
             for key, value in tuple(vars(module).items()):
+                if name == 'jinja2.filters' and key != 'do_int':
+                    continue
                 if type(value) is FunctionType and value.__module__ == name:
                     self._retain(module, key, value)
                 elif isinstance(value, type) and value.__module__ == name:
@@ -107,6 +153,8 @@ class ScalarDurationNative:
                                 and function.__code__.co_filename == str(self.paths[name])):
                             self._retain(value, attr, function)
         self.template = self.modules['homeassistant.helpers.template']
+        self.states_class = self.template.AllStates
+        self.environment_class = self.template.TemplateEnvironment
         self.cv = self.modules['homeassistant.helpers.config_validation']
         self.state = native.state
         self.positive = self.cv.positive_time_period
@@ -169,7 +217,8 @@ class ScalarDurationNative:
             '_HAS_ENTITY_SERVICE_FIELD': 'has_at_least_one_key.<locals>.validate',
             'extra': 'Extra', '_sort_item': '_compile_itemsort.<locals>.item_priority',
         }
-        _need(function.__qualname__ == aliases.get(expected, expected),
+        annotation = expected.replace('.__annotate_func__', '.__annotate__')
+        _need(function.__qualname__ == aliases.get(expected, annotation),
               'duration_scalar_method_qualifier_changed')
         self.refs.append((owner, name, function, self._function_shape(function)))
 
@@ -196,7 +245,57 @@ class ScalarDurationNative:
             _need(type(validator.validators) is list and validator._extra == 0,
                   'duration_scalar_validator_mode_changed')
 
+    def check_template(self, value):
+        from jinja2 import Environment, nodes
+        configured_duration({'for': value}, self.native.hass)
+        if not tuple(Environment().parse(value.template).find_all(nodes.Call)):
+            return
+        _need(self.native.version in ('2025.6.0', '2026.10.4'),
+              'duration_scalar_source_core_unqualified')
+        self.check()
+        t, hass = self.template, self.native.hass
+        _need(value._log_fn is None and not value._limited and not value._strict,
+              'duration_scalar_source_environment_mode')
+        env = hass.data.get(t._ENVIRONMENT)
+        _need(t.TemplateEnvironment is self.environment_class
+              and type(env) is self.environment_class and type(hass.states) is self.state_machine,
+              'duration_scalar_source_environment_changed')
+        states = env.globals.get('states')
+        _need(t.AllStates is self.states_class and type(states) is self.states_class
+              and states._hass is hass,
+              'duration_scalar_states_api_changed')
+        if self.native.version == '2025.6.0':
+            expected_int = t.forgiving_int_filter
+        else:
+            expected_int = self.modules['homeassistant.helpers.template.extensions.type_cast'].TypeCastExtension.forgiving_int
+        _need(env.filters.get('int') is expected_int,
+              'duration_scalar_int_api_changed')
+        # Exact source-authenticated native mapping; no arbitrary globals/alias.
+        image = (env, env.globals, env.filters, states, expected_int)
+        key = id(env)
+        if key in self.source_envs:
+            prior = self.source_envs[key]
+            _need(all(a is b for a, b in zip(image, prior, strict=True)),
+                  'duration_scalar_source_environment_replaced')
+        else:
+            self.source_envs[key] = image
+
     def check(self):
+        from .native_unload_code_proof import unchanged
+        unchanged(self.state_refs, self.state_methods, self.state_codes)
+        _need(tuple(_value(getattr(o, n)) for o, n in self.state_refs) == self.state_shapes,
+              'duration_scalar_state_machine_changed')
+        _need(self.template.AllStates is self.states_class
+              and self.template.TemplateEnvironment is self.environment_class,
+              'duration_scalar_source_class_changed')
+        if 'homeassistant.helpers.template.states' in self.modules:
+            _need(self.modules['homeassistant.helpers.template.states'].AllStates is self.states_class,
+                  'duration_scalar_states_import_changed')
+        for env, globals_, filters, states, integer in self.source_envs.values():
+            _need(env.globals is globals_ and env.filters is filters
+                  and globals_.get('states') is states and filters.get('int') is integer
+                  and states._hass is self.native.hass,
+                  'duration_scalar_source_api_changed')
         _need(all(sys.modules.get(name) is module for name, module in self.modules.items()),
               'duration_scalar_module_changed')
         for owner, name, function, shape in self.refs:
@@ -258,6 +357,7 @@ class ScalarDurationNative:
 
     def render(self, binding, change):
         self.check()
+        self.check_template(binding.config['for'])
         cells = binding.listener_cells
         variables = {**cells['_variables'], 'trigger': {
             'platform': 'state', 'entity_id': change.event.data['entity_id'],

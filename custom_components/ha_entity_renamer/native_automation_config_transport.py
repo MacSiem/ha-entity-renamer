@@ -139,6 +139,7 @@ class NativeAutomationConfigTransport:
         self.input_state, self.before, self.after = input_state, before, after
         self.task, self.phase, self.operations, self._projected = asyncio.current_task(), 'captured', [], {}
         self.actors = []
+        self.duration_edges = ()
         for domain, key in sorted(admitted):
             entity = entities[domain, key]
             script = entity.action_script if domain == 'automation' else entity.script
@@ -161,10 +162,19 @@ class NativeAutomationConfigTransport:
                     for cfg, old_cfg, new_cfg in zip(entity._trigger_config, old[2], new[2], strict=True):
                         _need(type(old_cfg) is dict and type(new_cfg) is dict)
                         a, b = dict(old_cfg['$map']), dict(new_cfg['$map'])
-                        _need(a.get('for') == b.get('for'),
-                              'automation_dynamic_duration_change_unsupported')
-                        _need({k:v for k,v in a.items() if k != 'entity_id'}
-                              == {k:v for k,v in b.items() if k != 'entity_id'},
+                        allowed = {'entity_id'}
+                        if a.get('for') != b.get('for'):
+                            from .native_automation_scalar_duration import configured_duration
+                            from homeassistant.helpers.template import Template
+                            _need(type(configured_duration(cfg, observer.hass)) is Template,
+                                  'automation_literal_duration_edit_unsupported')
+                            _need(type(b.get('for')) is dict and set(b['for']) == {'$template'},
+                                  'automation_duration_after_scalar_required')
+                            probe = Template(b['for']['$template'], observer.hass)
+                            configured_duration({'for': probe}, observer.hass)
+                            allowed.add('for')
+                        _need({k:v for k,v in a.items() if k not in allowed}
+                              == {k:v for k,v in b.items() if k not in allowed},
                               'automation_trigger_topology_change_unsupported')
                     self._project(entity._trigger_config, old[2], new[2])
                     self._project(script.sequence, old[3], new[3])
@@ -181,9 +191,55 @@ class NativeAutomationConfigTransport:
         edge = {mapping[source]: source} if reverse else {source: mapping[source]}
         self.graph.capture(tuple(actor.entity for actor in self.actors
             if actor.entity.entity_id.startswith('automation.')), edge)
+        self._capture_duration_edges(entities)
         self.original = self._actor_graph()
         self.check_before()
         return self
+
+    def scalar_edge(self, binding):
+        """Authenticate exact native config position in this sealed program edge."""
+        from .yaml_validation_worker import _normal
+        from .native_automation_scalar_duration import configured_duration
+        configured_duration(binding.config, self.observer.hass)
+        rows = {row[0]: row for row in self.before['automation']}
+        row = rows[binding.entity.unique_id]
+        _need(_normal(binding.entity._trigger_config) == row[2],
+              'automation_duration_program_config_changed')
+
+    def _capture_duration_edges(self, entities):
+        from .native_automation_configured_duration import ConfiguredEdge
+        from homeassistant.helpers.template import Template
+        from .yaml_validation_worker import _normal
+        edges = []
+        for route in self.graph.routes:
+            b = route.binding
+            if not hasattr(b, '_duration_scalar_image'):
+                continue
+            self.scalar_edge(b)
+            old = next(row for row in self.before['automation'] if row[0] == b.entity.unique_id)
+            new = next(row for row in self.after['automation'] if row[0] == b.entity.unique_id)
+            before = dict(old[2][b.index]['$map'])['for']
+            after = dict(new[2][b.index]['$map'])['for']
+            if before == after:
+                continue  # existing exact Template/cell and no metadata rewrite
+            replacement = self._project(b.config['for'], before, after)
+            _need(type(replacement) is Template and _normal(replacement) == after)
+            b._duration.scalar.check_template(replacement)
+            pending, rows = b._duration.pending(b)
+            _need(rows == route.duration_snapshot, 'automation_duration_before_changed')
+            edge = ConfiguredEdge.capture(b, replacement, pending)
+            edges.append(edge)
+        # Every installed duration consumer of a shared replacement must be in
+        # the authenticated call scope. Never silently alter another listener.
+        replacements = {id(edge.before): edge for edge in edges if edge.before is not edge.after}
+        admitted = {id(route.binding.config) for route in self.graph.routes}
+        for (domain, _), entity in entities.items():
+            if domain != 'automation' or not entity._is_enabled:
+                continue
+            for cfg in entity._trigger_config:
+                _need(id(cfg.get('for')) not in replacements or id(cfg) in admitted,
+                      'automation_duration_shared_consumer_unaccounted')
+        self.duration_edges = tuple(edges)
 
     def _actor_graph(self, *, slots=None):
         return tuple((id(a.entity), id(a.script), _graph(a.entity.raw_config, slots=slots),
@@ -194,6 +250,11 @@ class NativeAutomationConfigTransport:
     def check_before(self):
         _need(asyncio.current_task() is self.task and self.phase == 'captured')
         self.guard()
+        for edge in self.duration_edges:
+            edge.check_pins()
+            for owner, before, _ in edge.owners:
+                _need(owner.image is before, "automation_duration_holder_before_changed")
+                owner.check()
         _need(self._actor_graph() == self.original)
         _need(self.observer.sample(self.chain, input_state=self.input_state) == self.sample)
         for actor in self.actors:
@@ -201,7 +262,24 @@ class NativeAutomationConfigTransport:
         for route in self.graph.routes:
             route.binding.assert_original()
 
+    def _check_restored_configured(self):
+        _need(self._actor_graph() == self.original, 'automation_restored_config_changed')
+        for edge in self.duration_edges:
+            edge.check_pins()
+            for owner, before, _ in edge.owners:
+                _need(owner.image is before, 'automation_restored_holder_changed')
+                owner.check()
+
+    def check_configured_retained(self):
+        for edge in self.duration_edges:
+            edge.check_pins()
+        slots = getattr(self, '_retained_original_slots', None)
+        if slots is not None:
+            _need(self._actor_graph(slots=slots) == self.original,
+                  'automation_retained_original_config_changed')
+
     def _rows(self, expected):
+        self.check_configured_retained()
         from .yaml_runtime_observer import NativeYAMLRuntimeReadback
         from .yaml_validation_worker import _normal
         from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -226,7 +304,10 @@ class NativeAutomationConfigTransport:
         # Retain unmodified slots too; never restore an uncleared foreign cache.
         for kind,container,_,_ in self.operations:
             log.retain(kind,container)
+        for edge in self.duration_edges:
+            edge.retain(log)
         slots={id(container):before for _,container,before,_ in self.operations}
+        self._retained_original_slots = slots
         def cache_token(value):
             # Observe the retained ORIGINAL slot references while traversing
             # their actual current children. Unlike masking a whole edited
@@ -253,12 +334,33 @@ class NativeAutomationConfigTransport:
                 _idle_census(actor.script)
             _need(all(getattr(script,name) is cache and cache_token(items)==token
                       for script,name,cache,items,token in saved), 'automation_cleanup_cache_changed')
-            return log.plan()  # all config/cache slots validated before any cleanup write
+            for edge in self.duration_edges:
+                edge.check_pins()
+            config_plan = log.plan()
+            # All graph plans are read-only and precede the first undo write.
+            from .native_automation_configured_duration import ConfiguredRollbackView
+            view = ConfiguredRollbackView(self.duration_edges) if not self.graph.live else None
+            graph_plan = self.graph.plan_retire(before_attempt=True, configured_view=view)
+            return config_plan, graph_plan
         self._config_log,self._config_cleanup_plan=log,cleanup_plan
         try:
             for operation in self.operations:
                 kind,container,before,after=operation
                 log.write(kind,container,after,lambda: self._write(operation))
+            written = set()
+            for edge in self.duration_edges:
+                edge.install(log, written)
+            for edge in self.duration_edges:
+                edge.check_after()
+            # Expected stable/pending images use declared path projections;
+            # every selected Template graph was fixed before the first write.
+            for route in self.graph.routes:
+                if hasattr(route.binding, '_duration'):
+                    from .native_automation_owned_graph import _stable
+                    _need(_stable(route.binding) == route.stable,
+                          'automation_duration_after_stable_changed')
+                    _need(route.binding._duration.pending(route.binding)[1] == route.duration_snapshot,
+                          'automation_duration_after_pending_changed')
             for actor in self.actors:
                 _idle_census(actor.script)
                 if actor.changed:
@@ -269,9 +371,11 @@ class NativeAutomationConfigTransport:
             self.installed = self._actor_graph()
         except BaseException:
             try:
-                plan=cleanup_plan()
-                self.graph.retire(before_attempt=True)
+                plan, graph_plan=cleanup_plan()
+                self.graph.apply_retire(graph_plan, before_attempt=True)
                 log.undo(plan)
+                self._check_restored_configured()
+                self._rows(self.before)
                 self.phase = 'failed_before_attempt'
             except BaseException:
                 self.phase = 'failed_before_attempt_cleanup_unknown'
@@ -291,10 +395,11 @@ class NativeAutomationConfigTransport:
             _idle_census(actor.script)
             if actor.changed:
                 _need(all(not cache for _, cache, _ in actor.caches))
-        plan=self._config_cleanup_plan()
+        plan, graph_plan=self._config_cleanup_plan()
         try:
-            self.graph.retire(before_attempt=True)
+            self.graph.apply_retire(graph_plan, before_attempt=True)
             self._config_log.undo(plan)
+            self._check_restored_configured()
             self._rows(self.before)
             self.phase = 'restored_before_attempt'
         except BaseException:

@@ -171,9 +171,10 @@ class NativeDurationExpiry:
                    ('async_remove_state_for_cancel', 'async_remove_state_for_listener')}
         omitted.update(map(id, (b.listener_cells['period'], b.listener_cells['unsub_track_same'],
                                 b.callbacks, b.original_keys)))
-        functions = tuple(_retained_value(p[n], omitted) for n in
+        configured = getattr(b, '_duration_config_owner', None)
+        functions = tuple(_retained_value(p[n], omitted, configured=configured) for n in
                           ('clear', 'cancel', 'cancel_listener', 'predicate', 'action'))
-        jobs = tuple((id(p[n]), _retained_value(p[n].target, omitted), p[n].job_type,
+        jobs = tuple((id(p[n]), _retained_value(p[n].target, omitted, configured=configured), p[n].job_type,
                       p[n].name, p[n]._cancel_on_shutdown, _value(p[n]._cache))
                      for n in ('timer_job', 'same_job', 'cancel_job'))
         own = p['own']
@@ -184,7 +185,7 @@ class NativeDurationExpiry:
             own.check()
             history = own.history()
         event = history['event']
-        return (id(b), id(b.config), _value(b.config), tuple(b.config_ids), tuple(p['keys']),
+        return (id(b), id(b.config), _retained_value(b.config, set(), configured=configured, entry_edge=True), tuple(b.config_ids), tuple(p['keys']),
                 p['key'], id(p['entity_cell']), _value(p['entity_cell'].cell_contents),
                 id(h), h.when(), id(h._loop), id(h._context), id(h._callback),
                 tuple(map(id, h._args)), functions, jobs,

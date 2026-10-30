@@ -156,7 +156,7 @@ class _PreEffectLog:
                 setattr(owner, kind, before)
 
 
-def _retained_value(value, omitted, seen=()):
+def _retained_value(value, omitted, seen=(), *, configured=None, view=None, entry_edge=False):
     """Pin closure topology while separately journaled slots change values."""
     from homeassistant.util.yaml.objects import NodeDictClass, NodeListClass
     from homeassistant.helpers.template import Template
@@ -168,17 +168,17 @@ def _retained_value(value, omitted, seen=()):
     seen = (*seen, id(value))
     if type(value) is FunctionType:
         return (id(value), id(value.__code__), id(value.__globals__),
-            tuple((id(c), None if id(c) in omitted else _retained_value(c.cell_contents, omitted, seen))
+            tuple((id(c), None if id(c) in omitted else _retained_value(configured.cell_value(c, view) if configured is not None else c.cell_contents, omitted, seen, configured=configured, view=view, entry_edge=configured is not None and c is configured.config_cell))
                   for c in value.__closure__ or ()),
             tuple((name, id(value.__globals__[name])) for name in value.__code__.co_names
                   if name in value.__globals__), _value(value.__dict__))
     if type(value) is partial:
-        return (id(value), _retained_value(value.func, omitted, seen),
-                _retained_value(value.args, omitted, seen), _retained_value(value.keywords, omitted, seen))
+        return (id(value), _retained_value(value.func, omitted, seen, configured=configured, view=view),
+                _retained_value(value.args, omitted, seen, configured=configured, view=view), _retained_value(value.keywords, omitted, seen, configured=configured, view=view))
     if type(value) in (list, tuple, NodeListClass):
-        return id(value), tuple(_retained_value(v, omitted, seen) for v in value)
+        return id(value), tuple(_retained_value(v, omitted, seen, configured=configured, view=view) for v in value)
     if type(value) in (dict, NodeDictClass):
-        return id(value), tuple((_retained_value(k, omitted, seen), _retained_value(v, omitted, seen))
+        return id(value), tuple((_retained_value(k, omitted, seen, configured=configured, view=view), _retained_value(configured.entry_value(value, k, v, view) if configured is not None and entry_edge else v, omitted, seen, configured=configured, view=view))
                                for k, v in value.items())
     return _value(value)
 
@@ -198,6 +198,7 @@ class NativeAutomationDurationCapability:
     def __init__(self, hass, native, scalar=False):
         _need(type(native) is _Native and native.hass is hass, 'duration_source_owner')
         self.hass, self.native, self.wrappers = hass, native, {}
+        self.configured_owners, self.configured_images = {}, {}
         self.refs = [(native.event,n) for n in ('async_track_same_state','async_call_later',
             '_run_async_call_action','async_track_state_change_event')]
         self.methods,self.codes = prove_methods(native.root,native.pins,self.refs)
@@ -286,11 +287,15 @@ class NativeAutomationDurationCapability:
             object.__setattr__(b,'_duration_scalar_image', (
                 _cell(listener,'time_delta'), cfg['for'], _graph(cfg['for']),
                 cells['_variables'], _value(cells['_variables'])))
+        if hasattr(b, '_duration_scalar_image'):
+            from .native_automation_configured_duration import ConfiguredOwner
+            object.__setattr__(b, '_duration_config_owner', ConfiguredOwner(b))
+            self.scalar.check_template(cfg['for'])
         object.__setattr__(b,'_original',b._read())
         b.assert_original()
         return b
 
-    def stable(self,b):
+    def stable(self,b, *, configured_view=None):
         c=_closure(b.listener,b._native.state.__name__,'async_attach_trigger.<locals>.state_automation_listener')
         _need(set(c)==set(b.listener_cells) and c['config'] is b.config
               and c['period'] is b.listener_cells['period'] and c['unsub_track_same'] is b.listener_cells['unsub_track_same'],
@@ -299,28 +304,31 @@ class NativeAutomationDurationCapability:
         if image is not None:
             from .native_script_config_transport import _graph
             cell, configured, graph, variables, values = image
-            _need(_cell(b.listener, 'time_delta') is cell and cell.cell_contents is configured
-                  and c['time_delta'] is configured and b.config['for'] is configured
-                  and _graph(configured) == graph and c['_variables'] is variables
+            holder = b._duration_config_owner
+            holder.check(configured_view)
+            _need(_cell(b.listener, 'time_delta') is cell
+                  and holder.origin is configured and _graph(configured) == graph
+                  and c['_variables'] is variables
                   and _value(variables) == values,
                   'duration_scalar_config_or_attach_variables_changed')
-        return tuple((k,_value(v)) for k,v in c.items() if k not in ('config','period','unsub_track_same'))+(
+        return tuple((k,_value(configured if image is not None and k == 'time_delta' else v)) for k,v in c.items() if k not in ('config','period','unsub_track_same'))+(
             ('period',id(c['period'])),('unsub_track_same',id(c['unsub_track_same'])))
 
-    def pending(self,b):
+    def pending(self,b, *, configured_view=None):
         """Full native census; only registered active-route H may enter ready."""
         from homeassistant.core import Event,State,Context,HassJobType
         self.check_sources()
         from contextvars import Context as TimerContext
         n,e=self.native,self.native.event
-        self.stable(b)
+        self.stable(b, configured_view=configured_view)
+        configured_owner = getattr(b, "_duration_config_owner", None)
         # ConfigTransport owns this one configured-ID list. Its exact values
         # are checked by the config journal and graph registration guard.
         # Lifecycle snapshots retain its identity without conflating our prior
         # config edit with timer drift in a route not installed yet.
         omitted={id(b.config_ids)}
         def function_image(function):
-            return _retained_value(function,omitted)
+            return _retained_value(function,omitted, configured=configured_owner, view=configured_view)
         def job_image(job):
             return (id(job),function_image(job.target),job.name,
                     job._cancel_on_shutdown,_value(job._cache))
@@ -381,7 +389,7 @@ class NativeAutomationDurationCapability:
             ac=_cells(action)
             own=ac.get('self')
             if type(own) is _OwnDuration:
-                own.check()
+                own.check(configured_view=configured_view)
                 _need(own.action is action and own.predicate is predicate and own.clear is clear
                       and own.binding.config is b.config and own.binding.action_job is b.action_job,'duration_own_owner')
                 a=own.history();entity_cell=own.entity_cell
@@ -389,7 +397,8 @@ class NativeAutomationDurationCapability:
                 a=_nested(action,b.listener,'call_action');p=_nested(predicate,b.listener,'_check_same_state')
                 _need(set(a)=={'attribute','entity','event','from_s','hass','job','period','platform_type','time_delta','to_s','trigger_data'}
                       and a['entity']==key and a['hass'] is b.hass and a['job'] is b.action_job
-                      and a['period'] is period and a['time_delta'] is b.config['for']
+                      and a['period'] is period and (configured_view is not None
+                           or a['time_delta'] is b.config['for'])
                       and a['trigger_data'] is b.trigger_data and a['attribute']==b.attribute
                       and a['platform_type']==b.platform_type
                       and set(p)=={'attribute','config','new_value','old_value'}
@@ -573,14 +582,14 @@ class NativeAutomationDurationCapability:
         rows=[]
         for values in (route.binding.listener_cells['period'],route.binding.listener_cells['unsub_track_same']):
             _,_,before=log.slots[('dict',id(values))]
-            rows.append(tuple(_retained_value(v,omitted) for _,v in before))
+            rows.append(tuple(_retained_value(v,omitted, configured=getattr(route.binding, "_duration_config_owner", None)) for _,v in before))
         for p in route.duration_pending:
             handle=p['handle']
             self.expiry.location(handle,route.binding)
             history=p['own'].history() if p['own'] is not None else _cells(p['action'])
             rows.append((id(handle),handle.when(),id(handle._loop),id(handle._context),
                 id(handle._callback),tuple(map(id,handle._args)),
-                tuple(_retained_value(p[n],omitted) for n in
+                tuple(_retained_value(p[n],omitted, configured=getattr(route.binding, "_duration_config_owner", None)) for n in
                       ('clear','cancel','cancel_listener','predicate','action')),
                 tuple((id(p[n]),id(p[n].target),p[n].job_type,p[n].name,
                        p[n]._cancel_on_shutdown,_value(p[n]._cache)) for n in ('timer_job','same_job')),
@@ -665,11 +674,11 @@ class _OwnDuration:
             change.prior_state,change.new_state,change.event,change.event.context)
         self.history_value=_history_signature(change.event,change.prior_state,change.new_state)
 
-    def check(self):
+    def check(self, *, configured_view=None):
         b,c=self.binding,self.change
         b._native.check()
         if hasattr(b, '_duration_scalar_image'):
-            b._duration.stable(b)
+            b._duration.stable(b, configured_view=configured_view)
         target=b.action_job.target
         _need(getattr(target,'__self__',None) is b.entity
               and getattr(target,'__func__',None) is b._native.AutomationEntity._async_trigger_if_enabled
