@@ -465,7 +465,8 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             binding = {key: review[key] for key in ('operation_id', 'fingerprint')}
             plan = runtime.reviews[binding['operation_id']].plan
             original_receipt = runtime.preparations.resolve_composition(plan.native_inputs)[0].receipt_json
-            result = await self._request(ws, 2, 'apply', **binding)
+            with mixed.native_diagnostics(self.module):
+                result = await self._request(ws, 2, 'apply', **binding)
             self.assertTrue(result['success'], result)
             self.assertEqual(result['result']['state'], 'applied')
             self.assertEqual(events, {'automation': [], 'script': []})
