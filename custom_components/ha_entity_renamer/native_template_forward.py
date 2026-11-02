@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from pathlib import Path
 import uuid
@@ -89,6 +90,16 @@ class _UnchangedConsumers:
                       domain + '_runtime_unqualified')
         bound = await async_bind_original_runtime(self.hass, receipt, evidence, guard=guard, owned_automation=owned_automation)
         guard()
+        if not bound.verified:
+            # Internal fixed codes only: never source bodies, IDs or paths.
+            safe_codes = frozenset({
+                'runtime_source_native_projection_unavailable', 'runtime_source_projection_mismatch',
+                'runtime_source_registry_identity_unverified', 'runtime_source_inventory_mismatch',
+                'runtime_source_disabled_entry_unverified', 'runtime_source_inventory_unverified',
+                'runtime_source_inputs_changed', 'runtime_source_observation_changed',
+                'runtime_source_runtime_unavailable'})
+            logging.getLogger(__name__).warning('Native source binding refused: %s',
+                tuple(code for code in bound.blockers if code in safe_codes))
         _need(bound.verified, 'source_runtime_unqualified')
         observed = await async_observe_discovery_inputs(self.hass, guard=guard)
         guard()

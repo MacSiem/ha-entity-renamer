@@ -6,6 +6,7 @@ receipt, changed projection semantics, native load or configuration execution.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import logging
 import re
 from typing import TYPE_CHECKING
 
@@ -394,5 +395,8 @@ async def async_bind_original_runtime(hass, receipt, evidence, *, guard, owned_a
         return result(*last)
     except PermissionError:
         raise
-    except (ValueError, KeyError, AttributeError, TypeError):
+    except (ValueError, KeyError, AttributeError, TypeError) as error:
+        from .yaml_validation_worker import _checker_diagnostic
+        logging.getLogger(__name__).warning('Native source observation unavailable: %s',
+                                           _checker_diagnostic(error))
         return result(blockers=('runtime_source_runtime_unavailable',))
