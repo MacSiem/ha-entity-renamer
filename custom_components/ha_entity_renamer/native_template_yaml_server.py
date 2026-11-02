@@ -546,14 +546,17 @@ class NativeTemplateYAMLServer:
             obj._scope()
             from .native_template_state_server import _acknowledged_registry_prefix
             obj.prefix_recovery = _acknowledged_registry_prefix(record)
+            from .native_template_prefix_recovery import complete_forward_unknown, complete_forward_unknown_scope
+            obj.complete_unknown_recovery = complete_forward_unknown(record)
             _need(record is not None and record.operation_id == operation_id
                   and record.plan.fingerprint == fingerprint and record.direction == 'forward'
                   and ((record.status == 'applied'
                         and record.phases == ('verified',) * len(record.plan.steps))
-                       or obj.prefix_recovery), 'terminal_or_acknowledged_prefix_required')
+                       or obj.prefix_recovery or obj.complete_unknown_recovery),
+                  'terminal_or_acknowledged_prefix_required')
             obj.operation_id, obj.plan, obj.record = operation_id, record.plan, record
             baseline, obj.composition = obj.preparations.resolve_composition(obj.plan.native_inputs)
-            if obj.prefix_recovery:
+            if obj.prefix_recovery or obj.complete_unknown_recovery:
                 from .native_template_state_composition import TemplateStateComposition
                 from .native_template_state_server import NativeTemplateStateServer
                 from .native_script_program_composition import ScriptTemplateStateComposition
@@ -589,6 +592,8 @@ class NativeTemplateYAMLServer:
                                                    obj.receipt, obj.digests)
             _need(not readonly.writable and readonly.active is None, 'readonly_required')
             obj.chain = readonly
+            if obj.complete_unknown_recovery:
+                _need(complete_forward_unknown_scope(readonly, record), 'complete_unknown_profile_unsupported')
             obj._install()
             # Runtime automation/script sources must also match SAME ORIGINAL.
             # Only accepted physical state differs; no replacement receipt is made.
@@ -601,7 +606,7 @@ class NativeTemplateYAMLServer:
             await admit()
             await refresh()
             obj._scope()
-            await obj._fresh_stores(record, allow_active=obj.prefix_recovery)
+            await obj._fresh_stores(record, allow_active=obj.prefix_recovery or obj.complete_unknown_recovery)
             await admit()
             state = readonly.reconstruct_inputs()
             # Same separated admission pattern as NativeTemplateReverse: the
@@ -727,7 +732,8 @@ class NativeTemplateYAMLServer:
         await self.refresh()
         self._scope()
         prefix = getattr(self, 'prefix_recovery', False)
-        await self._fresh_stores(self.record, allow_active=prefix)
+        await self._fresh_stores(self.record,
+            allow_active=prefix or getattr(self, 'complete_unknown_recovery', False))
         if prefix:
             await self._prefix_current(self.record)
         else:

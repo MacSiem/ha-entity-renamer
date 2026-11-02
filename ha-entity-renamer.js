@@ -3404,9 +3404,13 @@ class HAEntityRenamer extends HTMLElement {
 
   _canRestoreMigration(m = this._migration) {
     return !!m && m.attempted && !m.busy && !m.restoreAttempted && !m.restoreRevoked && !!m.review
-      && m.stage === 'applied' && this._migrationCurrent(m)
+      && this._migrationCurrent(m)
+      && ((m.stage === 'applied' && m.inspection?.state === 'applied')
+        || (m.stage === 'unknown' && m.inspection?.state === 'recoverable_complete'
+          && m.registryMatches && m.journal?.status === 'unknown'
+          && m.journal?.direction === 'forward'))
       && m.inspection?.operation_id === m.operation_id && m.inspection?.fingerprint === m.fingerprint
-      && m.inspection?.eligible === true && m.inspection?.state === 'applied';
+      && m.inspection?.eligible === true;
   }
 
   _reviewMigrationRestore() {

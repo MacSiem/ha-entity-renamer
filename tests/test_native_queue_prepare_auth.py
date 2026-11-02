@@ -480,7 +480,10 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
     async def test_registered_mixed_apply_with_empty_scene_and_public_inverse(self):
         await self._registered_mixed_apply(with_scene=True)
 
-    async def _registered_mixed_apply(self, *, with_scene=False):
+    async def test_registered_mixed_final_verifier_unknown_fresh_inspect_and_public_inverse(self):
+        await self._registered_mixed_apply(with_scene=True, uncertain_complete=True)
+
+    async def _registered_mixed_apply(self, *, with_scene=False, uncertain_complete=False):
         import test_native_template_mixed_yaml_server as mixed
         from homeassistant.core import Context
         runtime, mapping, uuids, dependents, original = await (
@@ -525,13 +528,38 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             binding = {key: review[key] for key in ('operation_id', 'fingerprint')}
             plan = runtime.reviews[binding['operation_id']].plan
             original_receipt = runtime.preparations.resolve_composition(plan.native_inputs)[0].receipt_json
-            with mixed.native_diagnostics(self.module):
-                result = await self._request(ws, 2, 'apply', **binding)
-            self.assertTrue(result['success'], result)
-            self.assertEqual(result['result']['state'], 'applied')
+            if uncertain_complete:
+                from unittest.mock import patch
+                subject = self.module('native_template_state_server').NativeTemplateStateServer
+                failures = []
+                actual_full = subject._full
+                async def fail_final_once(session, rollback):
+                    current = await session.journal.load(session.operation_id)
+                    if not rollback and not failures:
+                        self.assertEqual(current.phases, ('verified',) * len(current.plan.steps))
+                        self.assertEqual(current.direction, 'forward')
+                        failures.append(current)
+                        # Only fail the verifier boundary. Native effects, receipts,
+                        # source/runtime/history and all later checks remain real.
+                        raise OSError('synthetic one-time final verifier unavailable')
+                    return await actual_full(session, rollback)
+                with patch.object(subject, '_full', fail_final_once):
+                    result = await self._request(ws, 2, 'apply', **binding)
+                self.assertEqual(len(failures), 1)
+                self.assertFalse(result['success'], result)
+                self.assertEqual(result['error']['code'], 'apply_refused')
+                self.assertNotIn(binding['operation_id'], runtime.reviews)
+            else:
+                with mixed.native_diagnostics(self.module):
+                    result = await self._request(ws, 2, 'apply', **binding)
+                self.assertTrue(result['success'], result)
+                self.assertEqual(result['result']['state'], 'applied')
             self.assertEqual(events, {'automation': [], 'script': []})
             record = await runtime.journal.load(binding['operation_id'])
             self.assertEqual(record.plan, plan)
+            if uncertain_complete:
+                self.assertEqual((record.status, record.reason), ('unknown', 'final_verification_uncertain'))
+                self.assertEqual(record.phases, ('verified',) * len(plan.steps))
             self.assertEqual(runtime.preparations.resolve_composition(plan.native_inputs)[0].receipt_json,
                              original_receipt)
             for old, new in mapping.items():
@@ -565,6 +593,34 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
                 denied = await self._request(household, 1, 'recovery/restore', **binding)
                 self.assertEqual(denied['error']['code'], 'unauthorized')
             async with self._transport() as (reverse_ws, _):
+                if uncertain_complete:
+                    before_inspect = {p: (self.f.root / p).read_bytes() for p in original}
+                    durable_paths = [self.f.root / '.storage' / ('ha_entity_renamer.' + name)
+                                     for name in ('migrations', 'prepared', 'registry_receipts')]
+                    durable_before = {path: path.read_bytes() for path in durable_paths}
+                    inspected = await self._request(reverse_ws, 3, 'recovery/inspect', **binding)
+                    self.assertTrue(inspected['success'], inspected)
+                    self.assertEqual(inspected['result']['state'], 'recoverable_complete', inspected)
+                    self.assertIs(inspected['result']['eligible'], True)
+                    self.assertFalse(inspected['result']['migration_ready'])
+                    self.assertEqual(await runtime.journal.load(binding['operation_id']), record)
+                    self.assertEqual({p: (self.f.root / p).read_bytes() for p in original}, before_inspect)
+                    self.assertEqual({path: path.read_bytes() for path in durable_paths}, durable_before)
+                    # Explicit inverse must independently reject a foreign source
+                    # edit after inspection, without consuming/fabricating receipts.
+                    path = self.f.root / 'mixed_scripts.yaml'
+                    protected = path.read_bytes()
+                    try:
+                        path.write_bytes(protected + b'\n# foreign edit after UNKNOWN inspection\n')
+                        denied = await self._request(reverse_ws, 4, 'recovery/restore', **binding)
+                        self.assertTrue(denied['success'], denied)
+                        self.assertIs(denied['result']['eligible'], False)
+                        self.assertEqual(denied['result']['state'], 'UNKNOWN', denied)
+                        self.assertEqual(await runtime.journal.load(binding['operation_id']), record)
+                        self.assertEqual({path: path.read_bytes() for path in durable_paths}, durable_before)
+                        self.assertTrue(path.read_bytes().endswith(b'# foreign edit after UNKNOWN inspection\n'))
+                    finally:
+                        path.write_bytes(protected)
                 restored = await self._request(reverse_ws, 1, 'recovery/restore', **binding)
                 self.assertTrue(restored['success'], restored)
                 self.assertEqual(restored['result']['state'], 'rolled_back', restored)

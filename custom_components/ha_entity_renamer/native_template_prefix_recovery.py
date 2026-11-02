@@ -52,3 +52,43 @@ def unstarted_rollback_complete(chain, record):
         (PreparedTemplateStateYAML, TemplateStateComposition),
         (PreparedMixedTemplateStateYAML, ScriptTemplateStateComposition),
         (PreparedMixedTemplateStateYAML, AutomationTemplateStateComposition))
+
+
+def complete_forward_unknown(record):
+    """Snapshot shape only; never evidence that an UNKNOWN operation succeeded."""
+    from .transaction import Record
+    return (type(record) is Record and record.direction == 'forward'
+            and record.status == 'unknown' and record.reason == 'final_verification_uncertain'
+            and len(record.plan.steps) >= 2
+            and record.phases == ('verified',) * len(record.plan.steps)
+            and record.plan.required_scopes == record.plan.covered_scopes
+                == record.plan.verification_adapters == ('registry', 'yaml')
+            and tuple(step.adapter for step in record.plan.steps)
+                == ('registry',) * (len(record.plan.steps) - 1) + ('yaml',)
+            and not any(step.caused_by for step in record.plan.steps))
+
+
+def complete_forward_unknown_scope(chain, record):
+    """Exact existing selective profiles only; caller still proves all native IO.
+
+    Original preparation/composition binding is mandatory even for the candidate
+    verifier's phase gate. Partial chains and outstanding intent refuse in the
+    caller's independent reconstruct/expected checks, never through replay.
+    """
+    from .native_registry_receipts import RegistryReceiptChain
+    from .native_template_state_yaml import (PreparedTemplateStateYAML,
+        PreparedMixedTemplateStateYAML, assert_state_yaml_composition)
+    from .native_template_state_composition import TemplateStateComposition
+    from .native_script_program_composition import ScriptTemplateStateComposition
+    from .native_automation_program_composition import AutomationTemplateStateComposition
+    if (not complete_forward_unknown(record) or type(chain) is not RegistryReceiptChain
+            or record.plan != chain.plan or record.operation_id != chain.operation_id
+            or chain.yaml_index != len(record.plan.steps) - 1):
+        return False
+    change = chain._original_change(chain.yaml_index)
+    if type(change) not in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
+        return False
+    return (type(change), type(assert_state_yaml_composition(chain, change))) in (
+        (PreparedTemplateStateYAML, TemplateStateComposition),
+        (PreparedMixedTemplateStateYAML, ScriptTemplateStateComposition),
+        (PreparedMixedTemplateStateYAML, AutomationTemplateStateComposition))

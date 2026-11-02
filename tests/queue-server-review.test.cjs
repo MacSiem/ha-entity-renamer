@@ -353,3 +353,49 @@ test('restored read verifies original entity name and device name in addition to
   f.devices[0].name_by_user=null;f.entries[0].name='Foreign edit';await f.card._inspectMigration();assert.equal(f.card._migration.stage,'unknown');
   f.entries[0].name=null;await f.card._inspectMigration();assert.equal(f.card._migration.stage,'restored');assert.equal(restores(f).length,1);
 });
+
+
+async function completeUnknownFixture(t) {
+  const f=fixture(t);await f.card._prepareMigration();
+  f.handlers['ha_entity_renamer/apply']=()=>{f.entries[0].entity_id='sensor.b';throw new Error('uncertain final verifier');};
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'unknown',direction:'forward'}]});
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'recoverable_complete',eligible:true});
+  await f.card._applyMigration();return f;
+}
+
+test('complete UNKNOWN inspection offers current restore while keeping UNKNOWN and apply consumed',async t=>{
+  const f=await completeUnknownFixture(t);const m=f.card._migration;
+  assert.equal(m.stage,'unknown');assert.equal(f.card._canRestoreMigration(),true);
+  assert.equal(f.card.shadowRoot.getElementById('reviewMigrationRestore').disabled,false);
+  assert.equal(f.card.shadowRoot.getElementById('finishMigration'),null);
+  await f.card._applyMigration();assert.equal(writes(f).length,1);
+  f.card._finishMigration();assert.equal(f.card._renameQueue.length,1);
+  f.handlers['ha_entity_renamer/recovery/restore']=()=>{f.entries[0].entity_id='sensor.a';finishedInspection(f);return restoreAck();};
+  f.card._reviewMigrationRestore();await f.card._restoreMigration();
+  assert.equal(m.stage,'restored');assert.equal(restores(f).length,1);
+  await f.card._inspectMigration();f.card._reviewMigrationRestore();await f.card._restoreMigration();
+  assert.equal(restores(f).length,1);assert.equal(writes(f).length,1);
+});
+
+for(const fence of ['operation','fingerprint','eligible','partial','registry','journal','role','connection']) test('complete UNKNOWN restore refuses '+fence,async t=>{
+  const f=await completeUnknownFixture(t);const m=f.card._migration;
+  if(fence==='operation') m.inspection.operation_id='foreign';
+  if(fence==='fingerprint') m.inspection.fingerprint='b'.repeat(64);
+  if(fence==='eligible') m.inspection.eligible=1;
+  if(fence==='partial') m.inspection.state='recoverable_prefix';
+  if(fence==='registry') m.registryMatches=false;
+  if(fence==='journal') m.journal.status='applying';
+  if(fence==='role') f.card.hass={...f.hass,user:{id:'admin-a',is_admin:false}};
+  if(fence==='connection') {const connection=new f.dom.window.EventTarget();connection.connected=true;f.card.hass={...f.hass,connection};}
+  f.card._reviewMigrationRestore();await f.card._restoreMigration();
+  assert.equal(restores(f).length,0);assert.equal(writes(f).length,1);
+});
+
+test('complete UNKNOWN restore lost ACK never becomes success or a second write',async t=>{
+  const f=await completeUnknownFixture(t);const m=f.card._migration;
+  f.handlers['ha_entity_renamer/recovery/restore']=()=>{f.entries[0].entity_id='sensor.a';finishedInspection(f);throw new Error('lost ACK');};
+  f.card._reviewMigrationRestore();await f.card._restoreMigration();
+  assert.equal(m.stage,'unknown');
+  await f.card._inspectMigration();f.card._reviewMigrationRestore();await f.card._restoreMigration();
+  assert.equal(m.stage,'unknown');assert.equal(restores(f).length,1);assert.equal(writes(f).length,1);
+});

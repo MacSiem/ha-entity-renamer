@@ -18,7 +18,7 @@ from .transaction import Refused
 
 
 def _result(operation_id, fingerprint, state, reason, *, summary=None):
-    eligible = state in ('applied', 'recoverable_prefix')
+    eligible = state in ('applied', 'recoverable_prefix', 'recoverable_complete')
     result = {'operation_id': operation_id, 'fingerprint': fingerprint,
         'state': state, 'reason': reason, 'eligible': eligible,
         'migration_ready': False, 'family_complete': False}
@@ -222,8 +222,8 @@ class RecoveryController:
         for record in records:
             self.check()
             need, reason = True, 'unsupported_recovery_state'
-            from .native_template_prefix_recovery import acknowledged_registry_prefix
-            if acknowledged_registry_prefix(record):
+            from .native_template_prefix_recovery import acknowledged_registry_prefix, complete_forward_unknown
+            if acknowledged_registry_prefix(record) or complete_forward_unknown(record):
                 # Snapshot shape only: actual source/chain/history inspection
                 # must still admit this scope before eligibility is reported.
                 operations.append({'operation_id': record.operation_id,
@@ -314,9 +314,11 @@ class RecoveryController:
                 return _result(operation_id, fingerprint, 'refused', 'already_finished')
             from .native_template_prefix_recovery import acknowledged_registry_prefix
             prefix = acknowledged_registry_prefix(record)
+            from .native_template_prefix_recovery import complete_forward_unknown
+            uncertain_complete = complete_forward_unknown(record)
             terminal = (record.status == 'applied' and record.direction == 'forward'
                         and record.phases == ('verified',) * len(record.plan.steps))
-            if not terminal and not prefix:
+            if not terminal and not prefix and not uncertain_complete:
                 return _result(operation_id, fingerprint, 'UNKNOWN', 'unsupported_recovery_state')
             if record.plan.required_scopes == ('registry', 'yaml'):
                 from . import _yaml_factory_for_plan
@@ -329,8 +331,10 @@ class RecoveryController:
                 summary = _yaml_summary(session)
                 if not restore:
                     return _result(operation_id, fingerprint,
-                        'recoverable_prefix' if prefix else 'applied',
-                        'acknowledged_prefix' if prefix else 'complete', summary=summary)
+                        'recoverable_prefix' if prefix else
+                            'recoverable_complete' if uncertain_complete else 'applied',
+                        'acknowledged_prefix' if prefix else
+                            'complete_forward_unknown' if uncertain_complete else 'complete', summary=summary)
                 result = await session.rollback()
                 self.check()
                 if result.status != 'rolled_back':

@@ -57,9 +57,11 @@ def _record(chain, record):
     if reverse and not complete:
         from .native_template_prefix_recovery import unstarted_rollback_complete
         complete = unstarted_rollback_complete(chain, record)
-    if (not complete
-            or record.status not in (('rolling_back', 'rolled_back', 'ready') if reverse
-                                      else ('applying', 'applied', 'ready'))):
+    from .native_template_prefix_recovery import complete_forward_unknown_scope
+    uncertain_complete = not reverse and complete_forward_unknown_scope(chain, record)
+    allowed = (('rolling_back', 'rolled_back', 'ready') if reverse
+               else ('applying', 'applied', 'ready'))
+    if not complete or not (record.status in allowed or uncertain_complete):
         _fail('phase_incomplete')
     return PhaseContext(record, len(chain.plan.steps) - 1)
 
