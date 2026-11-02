@@ -152,7 +152,35 @@ class _DiscoveryPinned:
                 total += len(raw)
                 if total > MAX_TOTAL_BYTES:
                     _reject()
-                if _json(_envelope(raw, key, self.location.version)['data']) != manager:
+                document = _envelope(raw, key, self.location.version)['data']
+                if _json(document) != manager:
+                    # Fixed schema names/counts only; never identifiers or values.
+                    import json
+                    expected = json.loads(manager)
+                    groups = ('entities', 'deleted_entities', 'devices',
+                              'deleted_devices', 'child_devices', 'entries', 'settings')
+                    fields = ('id', 'entity_id', 'unique_id', 'platform', 'name',
+                              'original_name', 'object_id_base', 'device_id',
+                              'config_entry_id', 'config_subentry_id', 'created_at',
+                              'modified_at', 'aliases', 'aliases_v2', 'labels',
+                              'connections', 'identifiers', 'data', 'options',
+                              'disabled_by', 'hidden_by', 'orphaned_timestamp')
+                    changes = []
+                    for group in groups:
+                        before, after = document.get(group), expected.get(group)
+                        if before == after:
+                            continue
+                        if type(before) is list and type(after) is list:
+                            differing = tuple(field for field in fields if any(
+                                type(a) is dict and type(b) is dict and (
+                                    a.get(field) != b.get(field)
+                                    or (field in a) != (field in b))
+                                for a, b in zip(before, after)))
+                            changes.append((group, len(before), len(after), differing))
+                        else:
+                            changes.append((group, 'changed'))
+                    logging.getLogger(__name__).warning(
+                        'Native discovery storage/manager mismatch: %s %s', key, changes)
                     _reject()
                 self.files.append(DiscoveryNativeFile(key, raw,
                     (initial.st_dev, initial.st_ino, initial.st_mode),
