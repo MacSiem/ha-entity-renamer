@@ -1,8 +1,9 @@
-"""SOURCE-ONLY DRAFT; NOT RUN. Actual Root preinstall-ready refusal.
+"""SOURCE-ONLY DRAFT; NOT RUN. Structured actual Root preinstall-ready refusal.
 
 The 30 s natural schedule previously refused without raw queue evidence. This
 distinct case must prove exact H membership at original location/raise, zero
-native API/transport effects, then the same natural F and independent control.
+native API/transport effects for a configured dict with a source Template leaf
+and static sibling, then the same natural F and independent structured control.
 No timing/admission claim follows from this source or an ordinary exception.
 """
 import asyncio
@@ -43,7 +44,7 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
             '- id: mixed_source\n  alias: Source duration active expiry\n  initial_state: true\n'
             '  variables:\n    source: '+old+'\n    alias: "{{ source }}"\n'
             '  triggers:\n  - trigger: state\n    entity_id: '+old+'\n'
-            '    from: "16"\n    for: "'+body+'"\n'
+            '    from: "16"\n    for:\n      seconds: "'+body+'"\n      milliseconds: 0\n'
             '  actions:\n  - event: duration_source_result\n    event_data:\n'
             '      bound: "{{ trigger.entity_id }}"\n'
             '      previous: "{{ trigger.from_state.state }}"\n'
@@ -56,7 +57,7 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
             '- id: duration_control\n  alias: Independent native source duration control\n'
             '  initial_state: true\n  triggers:\n  - trigger: state\n'
             '    entity_id: sensor.duration_control\n    from: "16"\n    to: "17"\n'
-            '    for: "'+control_body+'"\n'
+            '    for:\n      seconds: "'+control_body+'"\n      milliseconds: 0\n'
             '  actions:\n  - event: duration_control_result\n    event_data:\n'
             '      previous: "{{ trigger.from_state.state }}"\n'
             '      current: "{{ trigger.to_state.state }}"\n'
@@ -94,7 +95,26 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
         cells, cell = duration_module._cells, duration_module._cell
         configured, control_configured = source._trigger_config[0]['for'], control._trigger_config[0]['for']
         configured_graph = self.module('native_script_config_transport')._graph
+        self.assertIs(type(configured), dict)
+        self.assertIs(type(control_configured), dict)
+        leaf, control_leaf = configured['seconds'], control_configured['seconds']
+        for actual, expected_body in ((leaf, body), (control_leaf, control_body)):
+            self.assertIs(type(actual), template.Template)
+            self.assertEqual(actual.template, expected_body)
+            self.assertIs(actual.hass, hass)
+        self.assertEqual(tuple(configured), ('seconds', 'milliseconds'))
+        self.assertEqual(tuple(control_configured), ('seconds', 'milliseconds'))
+        self.assertIs(type(configured['milliseconds']), int)
+        self.assertIs(type(control_configured['milliseconds']), int)
+        self.assertEqual(configured['milliseconds'], 0)
+        self.assertEqual(control_configured['milliseconds'], 0)
+        configured_items = tuple(configured.items())
+        control_items = tuple(control_configured.items())
         original_configured_graph = configured_graph(configured)
+        original_control_graph = configured_graph(control_configured)
+        configured_module = self.module('native_automation_configured_duration')
+        original_leaf_pin = configured_module._template_pin(leaf)
+        original_control_leaf_pin = configured_module._template_pin(control_leaf)
         actions, scripts, controls, slow = [], [], [], []
         for name, events in (('duration_source_result', actions), ('duration_script_result', scripts),
                              ('duration_control_result', controls), ('duration_slow_result', slow)):
@@ -138,8 +158,11 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
                     p['action'], history['from_s'], history['to_s'], history['event'],
                     history['event'].context, binding.listener_cells['period'][p['key']])
 
-        def observed_template(value):
+        def observed_root(value):
             return value is configured or value is control_configured
+
+        def observed_leaf(value):
+            return value is leaf or value is control_leaf
 
         def location_image(actor, binding, handle):
             # Only read existing objects. No product methods or native stimuli.
@@ -151,6 +174,7 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
                             if getattr(bound.consumers, 'owned_automation', None) in matching),
                         history=image(native_pending, before),
                         configured=binding.config['for'],
+                        configured_items=tuple(binding.config['for'].items()),
                         listener=cell(binding.listener, 'time_delta').cell_contents,
                         keys=tuple(binding.original_keys),
                         effect_counts=tuple(len(effects[key]) for key in effects))
@@ -203,9 +227,10 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
                     for label, (p, binding, saved) in pending.items():
                         if local.get('job') is p['same_job']:
                             returns[label].append(value)
-                elif actual is render_codes[0] and observed_template(local.get('value')):
+                elif actual is render_codes[0] and (observed_root(local.get('value'))
+                        or observed_leaf(local.get('value'))):
                     renders.append((local['value'], dict(local['variables']), value))
-                elif actual is render_codes[1] and observed_template(local.get('self')):
+                elif actual is render_codes[1] and observed_leaf(local.get('self')):
                     template_calls.append((local['self'], dict(local['variables']), value))
                 elif actual is render_codes[2] and local.get('self') is cv.positive_time_period:
                     caller = frame.f_back
@@ -213,7 +238,7 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
                     binding = caller.f_locals.get('binding')
                     if binding is not None and binding.hass is hass:
                         owner = binding.config['for']
-                    if observed_template(owner):
+                    if observed_root(owner):
                         validations.append((local.get('value', local.get('v')), value))
             finally:
                 del frame
@@ -248,6 +273,32 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
                 if index != 5:
                     self.assertIs(actual[index], expected)
 
+        def assert_configured_items(actual, saved):
+            self.assertEqual(actual, saved)
+            for (key, value), (saved_key, saved_value) in zip(actual, saved, strict=True):
+                self.assertIs(key, saved_key)
+                self.assertIs(value, saved_value)
+
+        def assert_native_render(config, template_leaf, saved):
+            root_render, = [row for row in renders if row[0] is config]
+            leaf_render, = [row for row in renders if row[0] is template_leaf]
+            template_call, = [row for row in template_calls if row[0] is template_leaf]
+            rendered = root_render[2]
+            self.assertIs(type(rendered), dict)
+            self.assertEqual(tuple(rendered), ('seconds', 'milliseconds'))
+            self.assertEqual(rendered['seconds'], 30)
+            self.assertIs(rendered['milliseconds'], config['milliseconds'])
+            self.assertEqual(leaf_render[2], 30)
+            self.assertEqual(template_call[2], 30)
+            self.assertIs(rendered['seconds'], leaf_render[2])
+            self.assertIs(leaf_render[2], template_call[2])
+            for row in (root_render, leaf_render, template_call):
+                self.assertIs(row[1]['trigger']['from_state'], saved[10])
+                self.assertIs(row[1]['trigger']['to_state'], saved[11])
+            self.assertTrue(any(value is rendered and result is saved[14]
+                                for value, result in validations),
+                            'native CV must receive the exact rendered dict and return the retained period')
+
         monitor = sys.monitoring
         tools_before = tuple(monitor.get_tool(key) for key in range(6))
         tool = next(key for key, value in enumerate(tools_before) if value is None)
@@ -279,14 +330,12 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
             installed_codes.add(expiry_code)
             monitor.set_local_events(tool, expiry_code,
                                      monitor.events.PY_START | monitor.events.PY_RETURN)
-            source_render, = [row for row in renders if row[0] is configured]
-            self.assertEqual(source_render[2], 30)
-            self.assertIs(source_render[1]['trigger']['from_state'], retained[10])
-            self.assertIs(source_render[1]['trigger']['to_state'], retained[11])
+            self.assertIs(cell(before.listener, 'time_delta').cell_contents, configured)
+            self.assertIs(before.listener_cells['time_delta'], configured)
+            assert_configured_items(tuple(configured.items()), configured_items)
+            assert_native_render(configured, leaf, retained)
             self.assertEqual((retained[10].state, retained[11].state), ('16', '17'))
             self.assertIs(retained[11], physical)
-            self.assertTrue(any(value == 30 and result is retained[14]
-                                for value, result in validations))
             hass.states.async_set('sensor.duration_control', '16')
             hass.states.async_set('sensor.duration_control', '17')
             await hass.async_block_till_done()
@@ -294,6 +343,10 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
             control_pending, = cap.pending(control_binding)[0]
             control_image = image(control_pending, control_binding)
             self.assertEqual(control_image[14].total_seconds(), 30)
+            self.assertIs(cell(control_binding.listener, 'time_delta').cell_contents, control_configured)
+            self.assertIs(control_binding.listener_cells['time_delta'], control_configured)
+            assert_configured_items(tuple(control_configured.items()), control_items)
+            assert_native_render(control_configured, control_leaf, control_image)
             self.assertIs(control_pending['timer_job'].target.__code__, expiry_code)
             pending['control'] = control_pending, control_binding, control_image
             self.assertEqual(attachments, [old, 'sensor.duration_control'])
@@ -331,6 +384,7 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
                 self.assertEqual(row['records'], ())
                 self.assertEqual(row['keys'], (old,))
                 self.assertIs(row['configured'], configured)
+                assert_configured_items(row['configured_items'], configured_items)
                 self.assertIs(row['listener'], configured)
                 self.assertEqual(row['effect_counts'], (0, 0, 0, 0))
                 assert_image(row['history'], retained)
@@ -380,7 +434,21 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
             self.assertIs(current.keyed_job, before.keyed_job)
             self.assertIs(current.keyed_job.target, before.listener)
             self.assertEqual(current.original_keys, [old])
+            self.assertIs(current.listener_cells['time_delta'], configured)
+            assert_configured_items(tuple(configured.items()), configured_items)
             self.assertEqual(configured_graph(configured), original_configured_graph)
+            self.assertEqual(configured_module._template_pin(leaf), original_leaf_pin)
+            current_control = cap.capture(control)
+            self.assertIs(current_control.config['for'], control_configured)
+            self.assertIs(cell(current_control.listener, 'time_delta').cell_contents, control_configured)
+            self.assertIs(current_control.listener_cells['time_delta'], control_configured)
+            self.assertIs(current_control.listener, control_binding.listener)
+            self.assertIs(current_control.keyed_job, control_binding.keyed_job)
+            self.assertIs(current_control.keyed_job.target, control_binding.listener)
+            self.assertEqual(current_control.original_keys, ['sensor.duration_control'])
+            assert_configured_items(tuple(control_configured.items()), control_items)
+            self.assertEqual(configured_graph(control_configured), original_control_graph)
+            self.assertEqual(configured_module._template_pin(control_leaf), original_control_leaf_pin)
             self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
             self.assertIsNone(self.f.entity.async_get(new))
             self.assertIs(hass.states.get(old), physical)
