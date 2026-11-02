@@ -19,15 +19,27 @@ _MAX_PLANS = 1000
 _MAX_BYTES = 60 * 1024 * 1024
 
 
-def canonical(value):
-    """Bound a detached JSON tree before serialization/hashing/storage."""
+def _canonical_bytes(value):
+    """Validate and bound the exact canonical JSON bytes for each call."""
     from .reference_planner import Context, Consumer, Limits, plan_references
     checked = plan_references(value, {}, Context(Consumer.AUTOMATION, ()),
                               limits=Limits(max_string_length=_MAX_BYTES)).value
     raw = json.dumps(checked, sort_keys=True, separators=(',', ':'), allow_nan=False)
-    if len(raw.encode()) > _MAX_BYTES:
+    encoded = raw.encode()
+    if len(encoded) > _MAX_BYTES:
         raise ValueError('preparation_size_limit')
-    return json.loads(raw), hashlib.sha256(raw.encode()).hexdigest()
+    return encoded
+
+
+def canonical(value):
+    """Bound a detached JSON tree before serialization/hashing/storage."""
+    raw = _canonical_bytes(value)
+    return json.loads(raw), hashlib.sha256(raw).hexdigest()
+
+
+def canonical_digest(value):
+    """Hash freshly validated canonical bytes without rebuilding the JSON tree."""
+    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 
 
 def decode(value):
@@ -106,7 +118,7 @@ class PreparedStore:
         except Refused:
             raise ValueError('invalid_native_input_reference') from None
         payload = self.resolve(reference[0], reference[1])
-        if (type(payload) is not dict or canonical(payload)[1] != reference[1]
+        if (type(payload) is not dict or canonical_digest(payload) != reference[1]
                 or type(payload.get('schema')) is not int
                 or payload['schema'] not in (1, 2, 3)):
             raise ValueError()

@@ -118,10 +118,10 @@ def assert_state_yaml_composition(chain, change):
         raise Refused('template_state_yaml_preparation_required')
     from .native_template_composition import decode_composition
     from .native_template_yaml_server import _baseline_stamp
-    from .prepared import canonical
+    from .prepared import canonical_digest
     reference = chain.plan.native_inputs
     payload = chain.preparations.resolve(*reference[:2])
-    if canonical(payload)[1] != reference[1]:
+    if canonical_digest(payload) != reference[1]:
         raise Refused('template_state_yaml_preparation_changed')
     binding = getattr(chain, '_template_state_original_binding', None)
     baseline = chain.baseline

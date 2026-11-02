@@ -33,7 +33,7 @@ from .native_config_transition import (
     NativeConfigEffectAudit, prepared_helper_digest, validate_config_transition,
     _projection as _config_projection,
 )
-from .prepared import PreparedStore, canonical, decode_change
+from .prepared import PreparedStore, canonical, canonical_digest, decode_change
 from .transaction import PhaseContext, Plan
 from .yaml_transaction import PreparedYAML
 from .accepted_input_state import AcceptedInputState, initial_sources, fold_yaml_calls
@@ -68,7 +68,7 @@ def _sha(raw):
 
 
 def _digest(value):
-    return canonical(value)[1]
+    return canonical_digest(value)
 
 
 def _event_id(value):

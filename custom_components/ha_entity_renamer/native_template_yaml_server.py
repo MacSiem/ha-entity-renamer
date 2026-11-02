@@ -23,7 +23,7 @@ from .native_registry_receipts import (RegistryReceiptChain, RegistryReceiptErro
 from .native_template_yaml import (NativeTemplateYAMLRuntimeReadback,
     compose_template_yaml_coordinator)
 from .native_template_composition import TemplateComposition, MixedTemplateComposition, encode_composition
-from .prepared import native_prepared_store, encode_change, decode_change, canonical
+from .prepared import native_prepared_store, encode_change, decode_change, canonical_digest
 from .journal import native_journal
 
 
@@ -333,7 +333,7 @@ class NativeTemplateYAMLServer:
             _need(type(self.plan.native_inputs) is tuple and self.plan.native_inputs == reference,
                   'original_binding_changed')
             payload = self.preparations.resolve(*reference[:2])
-            _need(canonical(payload)[1] == reference[1]
+            _need(canonical_digest(payload) == reference[1]
                   and _baseline_stamp(self.chain.baseline) == original_stamp,
                   'original_binding_changed')
             _need(self.chain.baseline.receipt == self.receipt
