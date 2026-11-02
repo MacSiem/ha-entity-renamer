@@ -27,7 +27,12 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
     module = source_fixture.NativeAutomationSourceDurationRootTests.module
     stimulus = source_fixture.NativeAutomationSourceDurationRootTests.stimulus
     data = source_fixture.NativeAutomationSourceDurationRootTests.data
-    _capability = source_fixture.NativeAutomationSourceDurationRootTests._capability
+    async def _capability(self):
+        native = await self.f.hass.async_add_executor_job(
+            self.module('native_automation_state_binding')._Native, self.f.hass)
+        return await self.f.hass.async_add_executor_job(
+            self.module('native_automation_duration_binding').NativeAutomationDurationCapability,
+            self.f.hass, native, True, True)
 
     async def test_actual_root_preinstall_ready_refuses_without_effect_then_same_native_f(self):
         from homeassistant.core import Context
