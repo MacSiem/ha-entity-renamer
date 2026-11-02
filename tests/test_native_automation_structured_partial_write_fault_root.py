@@ -264,9 +264,18 @@ class NativeAutomationStructuredPartialWriteFaultRootTests(unittest.IsolatedAsyn
             raise FixtureStructuredPartialWriteFault('completed configured dict '+seam+' write')
 
         def raised(code, offset, error):
-            local = sys._getframe(1).f_locals
-            if code is codes['log_plan'] and is_config_log(local):
-                refusals.append(str(error))
+            # RAISE reports the original _need frame, not propagation through
+            # plan(). Attribute only the immediate original configured-log call.
+            if code is not duration._need.__code__:
+                return
+            frame = sys._getframe(1)
+            try:
+                caller = frame.f_back
+                if (caller is not None and caller.f_code is codes['log_plan']
+                        and is_config_log(caller.f_locals)):
+                    refusals.append(str(error))
+            finally:
+                del frame
 
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
