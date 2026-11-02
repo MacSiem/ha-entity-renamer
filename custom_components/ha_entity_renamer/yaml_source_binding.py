@@ -380,7 +380,10 @@ async def async_bind_original_runtime(hass, receipt, evidence, *, guard, owned_a
         check()
     except PermissionError:
         raise
-    except ValueError:
+    except ValueError as error:
+        from .yaml_validation_worker import _checker_diagnostic
+        logging.getLogger(__name__).warning('Native source inputs unavailable: %s',
+                                           _checker_diagnostic(error))
         return result(blockers=('runtime_source_inputs_changed',))
     try:
         first = _runtime_sample(hass, evidence, observed, owned_automation=owned_automation)

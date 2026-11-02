@@ -10,6 +10,7 @@ import asyncio
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import stat
@@ -299,11 +300,14 @@ def assert_validation_current(receipt):
     """Recheck ALL validator inputs immediately before first mutation, under locks."""
     reader = _Reader(receipt.config_root, Limits(max_file_bytes=_MAX_BYTES))
     try:
-        for path, digest, device, inode in receipt.source_files:
+        for index, (path, digest, device, inode) in enumerate(receipt.source_files):
             raw, info = reader.read(path)
             if (_digest(raw), info.st_dev, info.st_ino) != (digest, device, inode):
+                logging.getLogger(__name__).warning(
+                    'Validation source changed: index=%d content=%s identity=%s',
+                    index, _digest(raw) != digest, (info.st_dev, info.st_ino) != (device, inode))
                 raise YAMLValidationError('validation_source_changed')
-        for path, expected, names in receipt.source_directories:
+        for index, (path, expected, names) in enumerate(receipt.source_directories):
             fd = os.dup(reader.root) if path == '.' else reader.open(path, directory=True)
             try:
                 with os.scandir(fd) as entries:
@@ -311,6 +315,8 @@ def assert_validation_current(receipt):
                                             s.st_dev, s.st_ino) for entry in entries
                                            if names is None or entry.name in names))
                 if current != expected:
+                    logging.getLogger(__name__).warning(
+                        'Validation directory changed: index=%d', index)
                     raise YAMLValidationError('validation_graph_changed')
             finally:
                 os.close(fd)
