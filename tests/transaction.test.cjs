@@ -215,13 +215,17 @@ test('confirmation defaults to Cancel and returns focus to Apply after cancellat
   card.shadowRoot.getElementById('cancelRenameDialog').click();
   assert.equal(card.shadowRoot.activeElement.id, 'executeRenames');
 });
-test('confirmation keyboard stays on its two actions while the proposal is pending', t => {
+test('confirmation keyboard reaches prepare and both rename actions without applying', t => {
   const { card, dom, writes } = fixture(t);
   card._addToQueue('sensor.a', 'sensor.new_a'); card.setActiveTab('queue'); card._showRenameConfirmation();
   const cancel=card.shadowRoot.getElementById('cancelRenameDialog'); cancel.focus();
   cancel.dispatchEvent(new dom.window.KeyboardEvent('keydown', {key:'Tab',shiftKey:true,bubbles:true,cancelable:true}));
+  assert.equal(card.shadowRoot.activeElement.id,'prepareMigration');
+  card.shadowRoot.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown', {key:'Tab',shiftKey:true,bubbles:true,cancelable:true}));
   assert.equal(card.shadowRoot.activeElement.id,'confirmRenameApply');
-  card.shadowRoot.getElementById('confirmRenameApply').dispatchEvent(new dom.window.KeyboardEvent('keydown', {key:'Tab',bubbles:true,cancelable:true}));
+  card.shadowRoot.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown', {key:'Tab',bubbles:true,cancelable:true}));
+  assert.equal(card.shadowRoot.activeElement.id,'prepareMigration');
+  card.shadowRoot.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown', {key:'Tab',bubbles:true,cancelable:true}));
   assert.equal(card.shadowRoot.activeElement.id,'cancelRenameDialog'); assert.equal(writes.length,0);
 });
 
@@ -392,11 +396,13 @@ test('bulk confirmation keyboard reaches both reviews and wraps without applying
   assert.equal(reviews.length,2);
   const tab=shiftKey=>root.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Tab',shiftKey,bubbles:true,cancelable:true}));
   assert.equal(root.activeElement.id,'cancelRenameDialog');
+  tab(true);assert.equal(root.activeElement.id,'prepareMigration');
   tab(true);assert.equal(root.activeElement,reviews[1]);
   tab(true);assert.equal(root.activeElement,reviews[0]);
   tab(true);assert.equal(root.activeElement.id,'confirmRenameApply');
   tab(false);assert.equal(root.activeElement,reviews[0]);
   tab(false);assert.equal(root.activeElement,reviews[1]);
+  tab(false);assert.equal(root.activeElement.id,'prepareMigration');
   tab(false);assert.equal(root.activeElement.id,'cancelRenameDialog');
   assert.equal(writes.length,0);
   assert.equal(card._renameQueue.length,9);

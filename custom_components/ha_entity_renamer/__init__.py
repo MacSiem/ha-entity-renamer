@@ -152,7 +152,8 @@ class Runtime:
                     target = ({'entity_id': before['entity_id']} if change.kind == 'entity'
                               else {'device_id': change.identity})
                     changes.append({**target, 'fields': fields})
-                baseline, _ = self.preparations.resolve_composition(plan.native_inputs)
+                baseline, composition = self.preparations.resolve_composition(plan.native_inputs)
+                from .dependency_review import dependency_files
                 receipt = baseline.receipt
                 # Aggregate only the admitted planned YAML scope. Paths, YAML,
                 # native keys, receipts and private consumer configuration stay here.
@@ -160,6 +161,7 @@ class Runtime:
                     'domains': sorted(domain for domain in receipt.changed_domains
                                       if domain in ('template', 'automation', 'script')),
                     'yaml_file_count': len(receipt.proposed_files),
+                    'files': dependency_files(composition),
                     'template_consumer_count': sum(
                         row.domain in ('template.sensor', 'template.binary_sensor')
                         for row in session.evidence.template_sources.ledger.definitions)}

@@ -1463,6 +1463,7 @@ class HAEntityRenamer extends HTMLElement {
     this._confirmDialogOpen = false;
     this._confirmation = null;
     this._entityEditor = null;
+    this._migration = null; // Retained review; consumed intents are never replayed.
     this._applyOperation = null;
     this._readEpoch = 0;
     this._authorityEpoch = 0;
@@ -1525,6 +1526,15 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _cancelRenameAuthority() {
+    if (this._migration) {
+      const m = this._migration;
+      clearTimeout(m.pollTimer);
+      // Consent expires on every authority fence. Retain attempted identity only
+      // for same-account status/inspect, never to revive apply consent.
+      this._migration = m.attempted ? {owner: m.owner, operation_id: m.operation_id,
+        fingerprint: m.fingerprint, review: m.review, attempted: true,
+        stage: 'unknown', invalidated: true, busy: false} : null;
+    }
     this._clearQueueUndo();
     if (this._loading && !this._applyOperation) this._registryRefreshPending = true;
     this._legacyReviewLog = [];
@@ -1673,8 +1683,8 @@ class HAEntityRenamer extends HTMLElement {
       this._exportEventCleanups.push(() => target.removeEventListener(event, handler));
     };
     listen(window, 'offline', () => { this._exportBrowserOnline = false; this._cancelRenameAuthority(); this.render(); });
-    listen(window, 'online', () => { this._exportBrowserOnline = navigator.onLine === true; this._invalidateRenameExport(); this._resumePermittedRegistryRead(); });
-    listen(connection, 'ready', () => { this._exportConnectionOnline = true; this._invalidateRenameExport(); this._resumePermittedRegistryRead(); });
+    listen(window, 'online', () => { this._exportBrowserOnline = navigator.onLine === true; this._invalidateRenameExport(); if (this._migration?.attempted) this.render(); this._resumePermittedRegistryRead(); });
+    listen(connection, 'ready', () => { this._exportConnectionOnline = true; this._invalidateRenameExport(); if (this._migration?.attempted) this.render(); this._resumePermittedRegistryRead(); });
     listen(connection, 'disconnected', () => { this._exportConnectionOnline = false; this._cancelRenameAuthority(); this.render(); });
   }
 
@@ -1813,6 +1823,7 @@ class HAEntityRenamer extends HTMLElement {
       // A connection replacement alone cancels consent; account/role changes
       // additionally remove every retained private projection from this UI.
       if (previousSession.userId !== nextSession.userId || previousSession.admin !== nextSession.admin) {
+        this._migration = null;
         this._entities = []; this._devices = []; this._deviceEntities = {};
         this._renameQueue = []; this._deviceRenameQueue = {};
         this._renameLog = []; this._historyScope = null;
@@ -1975,7 +1986,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _queueAutomaticIds(deviceId = null, oldId = null) {
-    if (this._loading) return;
+    if (this._loading || this._migration) return;
     const queued = new Set(this._renameQueue.map(row => row.oldId));
     for (const row of this._visibleAutomaticRows()) {
       if (row.conflict || queued.has(row.oldId)) continue;
@@ -1991,7 +2002,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
 
-  _getDeviceName(d) { return d.name_by_user || d.name || d.id; }
+  _getDeviceName(d) { return d.unassigned ? (this._lang === 'pl' ? 'Bez urządzenia' : 'No device') : d.name_by_user || d.name || d.id; }
 
   get _listUi() {
     const language = this._hass?.language || this._lang;
@@ -2029,14 +2040,16 @@ class HAEntityRenamer extends HTMLElement {
   _deviceRows(device, filter=this._listFilters.devices) {
     const query = this._searchQuery.trim().toLocaleLowerCase(this._hass?.language || this._lang);
     const matchesDevice = this._getDeviceName(device).toLocaleLowerCase(this._hass?.language || this._lang).includes(query);
-    return (this._deviceEntities[device.id] || []).filter(entity =>
+    return (device.unassigned ? this._entities.filter(entity => !entity.device_id) : this._deviceEntities[device.id] || []).filter(entity =>
       (matchesDevice || [entity.entity_id,entity.name,entity.original_name].some(value=>String(value||'').toLocaleLowerCase(this._hass?.language || this._lang).includes(query))) &&
       (filter === 'new' && this._listUi.isNew(device.created_at) || this._entityMatches(entity,filter))
     ).sort((a,b)=>this._listUi.compare(a.entity_id,b.entity_id));
   }
 
   _getFilteredDevices() {
-    return this._devices.filter(device=>this._deviceRows(device).length).sort((a,b)=>this._compareDevices(a,b));
+    const groups = [...this._devices];
+    if (this._entities.some(entity => !entity.device_id)) groups.push({id: '__renamer_unassigned__', unassigned: true});
+    return groups.filter(device=>this._deviceRows(device).length).sort((a,b)=>this._compareDevices(a,b));
   }
 
   _visibleAutomaticRows(filter=this._listFilters.automatic) {
@@ -2100,7 +2113,7 @@ class HAEntityRenamer extends HTMLElement {
 
   _undoQueueRemoval() {
     const undo = this._queueUndo;
-    if (this._loading || !undo) return;
+    if ((this._loading || this._migration) || !undo) return;
     if (Date.now() < undo.until) {
       if (undo.kind==='batch') {
         const existing = new Set(this._renameQueue.map(row => row.oldId));
@@ -2119,7 +2132,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _removeDeviceFromQueue(id) {
-    if(this._loading || !Object.hasOwn(this._deviceRenameQueue,id)) return;
+    if((this._loading || this._migration) || !Object.hasOwn(this._deviceRenameQueue,id)) return;
     this._rememberQueueRemoval({kind:'device',row:{oldId:id,newId:this._deviceRenameQueue[id]},index:Object.keys(this._deviceRenameQueue).indexOf(id)});
     delete this._deviceRenameQueue[id];
     this._confirmation=null;this._confirmDialogOpen=false;this._lastApplyResult=null;this._impactResults=null;
@@ -2169,7 +2182,7 @@ class HAEntityRenamer extends HTMLElement {
 
 
   _addToQueue(oldId, newId, newName, source='manual') {
-    if (this._loading) return;
+    if (this._loading || this._migration) return;
     // Allow adding if EITHER entity_id changed OR friendly_name/alias changed
     if (oldId === newId && !newName) return;
     this._confirmDialogOpen = false;
@@ -2185,7 +2198,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _removeFromQueue(oldId) {
-    if (this._loading) return;
+    if (this._loading || this._migration) return;
     this._confirmDialogOpen = false;
     this._confirmation = null;
     this._lastApplyResult = null;
@@ -2199,7 +2212,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _clearQueue() {
-    if (this._loading) return;
+    if (this._loading || this._migration) return;
     this._areaPrefixEpoch = (this._areaPrefixEpoch || 0) + 1;
     if (this._renameQueue.length || Object.keys(this._deviceRenameQueue).length) {
       this._rememberQueueRemoval({kind:'batch',entities:[...this._renameQueue],devices:{...this._deviceRenameQueue},row:{oldId:this._lang==='pl'?'Cała kolejka':'Entire queue'}});
@@ -2214,7 +2227,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   async _addAreaPrefix() {
-    if (this._loading || this._areaPrefixPending || !this._selectedDevice || ![true,false].includes(this._hass?.user?.is_admin)) return;
+    if ((this._loading || this._migration) || this._areaPrefixPending || !this._selectedDevice || ![true,false].includes(this._hass?.user?.is_admin)) return;
     const { hass, current } = this._captureRead();
     const deviceId = this._selectedDevice;
     const areaEpoch = this._areaPrefixEpoch || 0;
@@ -2257,7 +2270,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _addPrefixRename() {
-    if (this._loading) return;
+    if (this._loading || this._migration) return;
     if (!this._prefixOld || !this._prefixNew || this._prefixOld === this._prefixNew) return;
     const ents = this._deviceEntities[this._selectedDevice] || [];
     for (const ent of ents) {
@@ -2275,7 +2288,7 @@ class HAEntityRenamer extends HTMLElement {
 
   async _analyzeImpact() {
     if (![true, false].includes(this._hass?.user?.is_admin)) return;
-    if (this._loading || !this._renameQueue.length) return;
+    if ((this._loading || this._migration) || !this._renameQueue.length) return;
     this._areaPrefixEpoch = (this._areaPrefixEpoch || 0) + 1;
     const { hass, current } = this._captureRead();
     const queue = this._renameQueue.map(row => ({ ...row }));
@@ -2467,6 +2480,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _showRenameConfirmation() {
+    if (this._migration) return;
     this._clearQueueUndo();
     if (!this._renameAuthorityAvailable()) {
       this._confirmDialogOpen = false;
@@ -2490,6 +2504,8 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _cancelRenameConfirmation() {
+    if (this._migration?.attempted) return;
+    this._migration = null;
     this._confirmation = null;
     this._confirmDialogOpen = false;
     this.render();
@@ -2497,6 +2513,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   async _executeRenames(confirmed = false) {
+    if (this._migration) return; // Never fall back from migration to registry-only.
     if (this._loading || this._applyOperation) return;
     if (!this._renameQueue.length && !Object.keys(this._deviceRenameQueue).length) return;
     if (!this._renameAuthorityAvailable()) {
@@ -3161,6 +3178,9 @@ class HAEntityRenamer extends HTMLElement {
     this._bindHelp();
     _bindLocalSupportDismiss(this.shadowRoot);
     this._attachEvents();
+    if (this._migration) {
+      this.shadowRoot.querySelectorAll('#applyPrefix,#executeRenames,#clearQueue,#analyzeImpact,#undoQueueRemoval,#applyDeviceName,#addAreaPrefix,#queueAllAutomatic,#queueEntityEdit,[data-auto-entity],[data-auto-device],[data-add-single],[data-remove-queue],[data-remove-dev-queue]').forEach(button => { button.disabled = true; });
+    }
     for (const group of this.shadowRoot.querySelectorAll('[data-auto-group]')) group.open = openAutomaticDevices.has(group.dataset.autoGroup);
     this._syncListExpansion();
     _restoreFamilyDrafts(this,familyDrafts);
@@ -3173,7 +3193,7 @@ class HAEntityRenamer extends HTMLElement {
 
 
   _showEntityEditor(oldId) {
-    if (this._loading || this._hass?.user?.is_admin !== true) return;
+    if ((this._loading || this._migration) || this._hass?.user?.is_admin !== true) return;
     const entity = this._entities.find(e => e.entity_id === oldId);
     if (!entity) return;
     const objectId = oldId.split('.')[1] || '';
@@ -3205,6 +3225,7 @@ class HAEntityRenamer extends HTMLElement {
     // render() calls this whenever _confirmDialogOpen is true (Apply Changes).
     // It was never implemented, so the call threw "is not a function" and
     // blanked the card — same regression class as _renderApplyResult below.
+    if (this._migration) return this._renderMigrationReview();
     const t = this._t;
     const queue = this._confirmation?.entities || this._renameQueue || [];
     const idChanges = queue.filter(r => (r.newId && r.newId !== r.oldId) || r.newName);
@@ -3240,8 +3261,9 @@ class HAEntityRenamer extends HTMLElement {
         <fieldset style="margin:12px 0;padding:10px;border:1px solid var(--bento-border,#e5e7eb);border-radius:8px">
           <legend>${this._lang === 'pl' ? 'Automatyczna aktualizacja zależności' : 'Automatic dependency updates'}</legend>
           ${[['template','Szablony','Templates'],['powercalc','Powercalc','Powercalc'],['automation','Automatyzacje','Automations'],['script','Skrypty','Scripts'],['config_entries','Integracje','Integrations']].map(([family,pl,en]) => `<label style="display:block;margin:6px 0;color:var(--bento-text-secondary,#6b7280)"><input type="checkbox" disabled data-coming-soon="${family}"> ${this._lang === 'pl' ? pl : en} — Coming soon</label>`).join('')}
-          <p style="font-size:12px;${sub};margin:8px 0 0">${this._lang === 'pl' ? 'Zostaną wykonane tylko powyższe zmiany nazw i ID. Aktualizacja zależności nie jest jeszcze dostępna.' : 'Only the name and ID changes listed above will be applied. Dependency updates are not available yet.'}</p>
+          <p style="font-size:12px;${sub};margin:8px 0 0">${this._lang === 'pl' ? 'Zmień nazwy zapisuje wyłącznie nazwy i ID. Aby sprawdzić zakres aktualizacji zależności, przygotuj osobny plan.' : 'Rename changes names and IDs only. Prepare a separate plan to review the available dependency updates.'}</p>
         </fieldset>
+        <button type="button" id="prepareMigration" class="btn btn-outline">${this._lang === 'pl' ? 'Przygotuj plan aktualizacji zależności' : 'Prepare dependency update plan'}</button>
         <div class="rename-confirm-actions">
           <button id="cancelRenameDialog" class="btn btn-outline">${_esc(t.cancel)}</button>
           <button id="confirmRenameApply" class="btn btn-danger">${_esc(t.rename)}</button>
@@ -3249,12 +3271,230 @@ class HAEntityRenamer extends HTMLElement {
       </div>`;
   }
 
+  _migrationText(en, pl) { return this._lang === 'pl' ? pl : en; }
+
+  _migrationCurrent(m) {
+    return this._migration === m && !m.invalidated && m.epoch === this._authorityEpoch
+      && this._sameReadSession(m.session, this._readSession()) && this._renameAuthorityAvailable();
+  }
+
+  _migrationRequest(hass, message) {
+    // HA owns connection failure handling. A long native operation must not be
+    // mistaken for a transport failure or retried due to a client deadline.
+    try { return Promise.resolve(hass.callWS(message)); }
+    catch (error) { return Promise.reject(error); }
+  }
+
+  async _refreshMigrationProgress(m = this._migration, hass = this._hass) {
+    if (!m?.attempted || !this._migrationCurrent(m) || m.progressBusy) return;
+    m.progressBusy = true;
+    const observation = m.observation;
+    try {
+      const status = await this._migrationRequest(hass, {type: 'ha_entity_renamer/status'});
+      if (!this._migrationCurrent(m) || m.observation !== observation) return;
+      const rows = status?.operations;
+      m.journal = (Array.isArray(rows) ? rows.find(row => row?.operation_id === m.operation_id
+        && row?.fingerprint === m.fingerprint) : null) || null;
+    } catch (_) {
+      // Progress is observation only; no failed read retries a mutation.
+    } finally {
+      m.progressBusy = false;
+      if (this._migrationCurrent(m)) {
+        const journal = this.shadowRoot.getElementById('migrationJournal');
+        if (journal) journal.innerHTML = this._renderMigrationProgress(m);
+        if (m.applying) m.pollTimer = setTimeout(() => this._refreshMigrationProgress(m, hass), 2000);
+      }
+    }
+  }
+
+  async _prepareMigration() {
+    const c = this._confirmation;
+    if (this._migration || this._loading || !this._renameAuthorityAvailable() || !c
+      || c.epoch !== this._authorityEpoch || !this._sameReadSession(c.session, this._readSession())) return;
+    this._clearQueueUndo();
+    this._areaPrefixEpoch = (this._areaPrefixEpoch || 0) + 1;
+    const m = {owner: this._hass.user.id, epoch: c.epoch, session: c.session,
+      stage: 'preparing', busy: true, attempted: false};
+    this._migration = m;
+    const hass = this._hass;
+    this.render();
+    this.shadowRoot.getElementById('cancelRenameDialog')?.focus();
+    try {
+      const current = () => this._migrationCurrent(m);
+      const automaticFailures = await this._revalidateAutomaticQueue(c.entities, hass, current);
+      if (!current()) return;
+      if (automaticFailures.size) throw new Error('stale_automatic_selection');
+      if (c.entities.some(row => row.sourceIdentity)) {
+        const rows = await hass.callWS({type: 'config/entity_registry/list'});
+        if (!current()) return;
+        if (!Array.isArray(rows) || c.entities.some(row => row.sourceIdentity
+          && this._sourceIdentity(rows.find(entry => entry.entity_id === row.oldId)) !== row.sourceIdentity)) {
+          throw new Error('stale_source_identity');
+        }
+      }
+      const result = await this._migrationRequest(hass, {
+        type: 'ha_entity_renamer/prepare',
+        entities: c.entities.map(r => ({entity_id: r.oldId,
+          ...(r.newId && r.newId !== r.oldId ? {new_entity_id: r.newId} : {}),
+          ...(r.newName ? {name: r.newName} : {})})),
+        devices: Object.entries(c.devices).map(([device_id, name_by_user]) => ({device_id, name_by_user})),
+      });
+      if (!this._migrationCurrent(m)) return;
+      const validChange = change => change && typeof (change.entity_id || change.device_id) === 'string'
+        && change.fields && typeof change.fields === 'object' && !Array.isArray(change.fields)
+        && Object.keys(change.fields).length > 0 && Object.entries(change.fields).every(([key, field]) =>
+          (change.device_id ? ['name_by_user'] : ['entity_id', 'name']).includes(key)
+          && field && ['before', 'after'].every(side => field[side] === null || typeof field[side] === 'string'));
+      if (!result || !/^[A-Za-z0-9_-]{1,80}$/.test(result.operation_id || '')
+        || !/^[0-9a-f]{64}$/.test(result.fingerprint || '')
+        || !Array.isArray(result.changes) || !result.changes.length || !result.changes.every(validChange)
+        || !result.dependencies || !Array.isArray(result.dependencies.domains)
+        || !result.dependencies.domains.every(domain => typeof domain === 'string')
+        || !Number.isSafeInteger(result.dependencies.yaml_file_count)
+        || !Number.isSafeInteger(result.dependencies.template_consumer_count)
+        || result.dependencies.yaml_file_count < 0 || result.dependencies.template_consumer_count < 0
+        || !Array.isArray(result.dependencies.files)
+        || result.dependencies.files.length !== result.dependencies.yaml_file_count
+        || new Set(result.dependencies.files.map(file => file?.path)).size !== result.dependencies.files.length
+        || !result.dependencies.files.every(file => file && typeof file.path === 'string'
+          && Number.isSafeInteger(file.edit_count) && file.edit_count > 0
+          && Array.isArray(file.references) && file.references.length > 0
+          && file.references.every(ref => ref && typeof ref.before === 'string' && typeof ref.after === 'string'
+            && Number.isSafeInteger(ref.occurrences) && ref.occurrences > 0))) throw new Error('invalid_review');
+      // Full detached public projection; never construct or send a client Plan.
+      m.review = JSON.parse(JSON.stringify({changes: result.changes, dependencies: result.dependencies}));
+      m.operation_id = result.operation_id; m.fingerprint = result.fingerprint;
+      m.stage = 'review';
+    } catch (_) {
+      if (!this._migrationCurrent(m)) return;
+      m.stage = 'refused'; // Cancel explicitly; no registry-only fallback.
+    } finally {
+      if (this._migrationCurrent(m)) {
+        m.busy = false; this.render();
+        this.shadowRoot.getElementById('cancelRenameDialog')?.focus();
+      }
+    }
+  }
+
+  async _applyMigration() {
+    const m = this._migration;
+    if (!m || m.stage !== 'review' || m.busy || m.attempted || !this._migrationCurrent(m)) return;
+    // Consume locally before the first await, including transport failures.
+    m.attempted = true; m.stage = 'applying'; m.busy = true; m.applying = true;
+    this._confirmation = null; this._confirmDialogOpen = false;
+    const hass = this._hass;
+    this.render();
+    void this._refreshMigrationProgress(m, hass);
+    try {
+      const result = await this._migrationRequest(hass, {type: 'ha_entity_renamer/apply',
+        operation_id: m.operation_id, fingerprint: m.fingerprint});
+      if (!this._migrationCurrent(m)) return;
+      if (result?.operation_id === m.operation_id && result?.fingerprint === m.fingerprint) m.applyState = result.state;
+    } catch (_) {
+      // Missing ACK remains UNKNOWN, even a refusal after review consumption.
+    } finally {
+      m.applying = false; clearTimeout(m.pollTimer);
+      if (this._migrationCurrent(m)) { m.stage = 'unknown'; m.busy = false; await this._inspectMigration(); }
+    }
+  }
+
+  async _inspectMigration() {
+    const m = this._migration;
+    if (!m?.attempted || m.busy || m.owner !== this._hass?.user?.id || !this._renameAuthorityAvailable()) return;
+    // Rebind read authority only. This cannot revive apply consent.
+    m.epoch = this._authorityEpoch; m.session = this._readSession(); m.invalidated = false;
+    m.observation = (m.observation || 0) + 1;
+    m.busy = true; this.render();
+    const hass = this._hass;
+    const results = await Promise.allSettled([
+      this._migrationRequest(hass, {type: 'ha_entity_renamer/status'}),
+      this._migrationRequest(hass, {type: 'ha_entity_renamer/recovery/inspect', operation_id: m.operation_id, fingerprint: m.fingerprint}),
+      this._migrationRequest(hass, {type: 'config/entity_registry/list'}),
+      this._migrationRequest(hass, {type: 'config/device_registry/list'}),
+    ]);
+    if (!this._migrationCurrent(m)) return;
+    const value = i => results[i].status === 'fulfilled' ? results[i].value : null;
+    const inventory = value(0)?.operations;
+    m.journal = (Array.isArray(inventory) ? inventory.find(row => row?.operation_id === m.operation_id && row?.fingerprint === m.fingerprint) : null) || null;
+    const inspection = value(1);
+    m.inspection = inspection?.operation_id === m.operation_id && inspection?.fingerprint === m.fingerprint ? inspection : null;
+    // Fresh reads refresh the projection; they do not prove dependencies.
+    const entities = value(2), devices = value(3);
+    m.registryRead = Array.isArray(entities) && Array.isArray(devices);
+    m.registryMatches = false;
+    if (m.registryRead) {
+      this._entities = entities; this._devices = devices;
+      this._deviceEntities = Object.create(null);
+      for (const row of entities) {
+        if (row.device_id) (this._deviceEntities[row.device_id] ||= []).push(row);
+      }
+      m.registryMatches = !!m.review && m.review.changes.every(change => {
+        const row = change.device_id ? devices.find(r => r.id === change.device_id)
+          : entities.find(r => r.entity_id === (change.fields.entity_id?.after || change.entity_id));
+        return row && Object.entries(change.fields).every(([key, field]) => (row[key] ?? null) === field.after);
+      });
+    }
+    m.stage = m.inspection?.state === 'applied' && m.registryMatches ? 'applied' : 'unknown';
+    m.busy = false; this.render();
+  }
+
+  _finishMigration() {
+    const m = this._migration;
+    if (!m || m.busy || m.stage !== 'applied' || !this._migrationCurrent(m)) return;
+    this._renameQueue = []; this._deviceRenameQueue = {}; this._impactResults = null;
+    this._migration = null; this.render();
+  }
+
+  _renderMigrationReview() {
+    const m = this._migration;
+    if (!m || m.attempted) return '';
+    const title = this._migrationText('Dependency update plan', 'Plan aktualizacji zależności');
+    const body = m.stage === 'preparing' ? this._migrationText('Preparing server review…', 'Przygotowywanie przeglądu na serwerze…')
+      : m.stage === 'refused' ? this._migrationText('The selection was refused or could not be verified. Nothing was applied. Cancel to review your queue. No registry-only fallback was performed.', 'Zakres został odrzucony lub nie udało się go zweryfikować. Niczego nie zastosowano. Anuluj, aby wrócić do kolejki. Nie wykonano zastępczego zapisu samego rejestru.')
+      : this._migrationText('Review every server change and the admitted dependency scope. Coverage of all dependency families is not confirmed.', 'Sprawdź wszystkie zmiany serwera i przyjęty zakres zależności. Pokrycie wszystkich rodzin zależności nie jest potwierdzone.');
+    const fieldName = key => ({entity_id: 'Entity ID', name: this._migrationText('Entity name', 'Nazwa encji'), name_by_user: this._migrationText('Device name', 'Nazwa urządzenia')}[key] || key);
+    const valueText = value => value === null ? this._migrationText('(default)', '(domyślna)') : value;
+    const rows = m.review?.changes.flatMap(change => Object.entries(change.fields).map(([key, field]) =>
+      `<tr><td>${_esc(change.entity_id || change.device_id)}</td><td>${_esc(fieldName(key))}</td><td>${_esc(valueText(field.before))}</td><td>${_esc(valueText(field.after))}</td></tr>`)).join('') || '';
+    const domains = m.review?.dependencies.domains.map(domain => ({template: 'Template', automation: this._migrationText('Automations', 'Automatyzacje'), script: this._migrationText('Scripts', 'Skrypty')}[domain] || domain)).join(', ');
+    return `<section class="confirm-dialog" role="dialog" aria-labelledby="migrationReviewTitle" aria-busy="${m.busy}">
+      <h2 id="migrationReviewTitle">${title}</h2><p role="status">${body}</p>
+      ${m.review ? `<h3>${this._migrationText('Server changes', 'Zmiany serwera')}</h3>
+        <div style="max-width:100%;overflow:auto"><table class="queue-table"><thead><tr><th scope="col">${this._migrationText('Target', 'Cel')}</th><th scope="col">${this._migrationText('Field', 'Pole')}</th><th scope="col">${this._migrationText('Before', 'Przed')}</th><th scope="col">${this._migrationText('After', 'Po')}</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <h3>${this._migrationText('Dependencies', 'Zależności')}</h3><p>${_esc(domains || this._migrationText('None admitted', 'Brak przyjętych'))}</p>
+        <p>${this._migrationText('YAML files', 'Pliki YAML')}: ${m.review.dependencies.yaml_file_count}. ${this._migrationText('Template consumers', 'Odbiorcy Template')}: ${m.review.dependencies.template_consumer_count}.</p>
+        ${m.review.dependencies.files.map(file => `<details open><summary><code>${_esc(file.path)}</code> — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li><code>${_entityIdHtml(ref.before)}</code> → <code>${_entityIdHtml(ref.after)}</code> (${ref.occurrences} ${this._migrationText('references', 'odwołań')})</li>`).join('')}</ul></details>`).join('')}` : ''}
+      <button type="button" class="btn btn-outline" id="cancelRenameDialog">${_esc(this._t.cancel)}</button>
+      ${m.stage === 'review' ? `<button type="button" class="btn btn-danger" id="applyMigration">${this._migrationText('Apply this plan once', 'Zastosuj ten plan jeden raz')}</button>` : ''}
+    </section>`;
+  }
+
+  _renderMigrationProgress(m) {
+    const observation = this._migrationText('unavailable', 'niedostępny');
+    const progress = m.journal?.progress;
+    return `      <h3>${this._migrationText('Journal progress', 'Postęp dziennika')}</h3>
+      <p>${this._migrationText('State', 'Stan')}: ${_esc(m.journal?.status || observation)}.</p>
+      ${progress ? `<p>${this._migrationText('Verified steps', 'Zweryfikowane kroki')}: ${_esc(String(progress.verified_steps))} / ${_esc(String(progress.total_steps))}. ${this._migrationText('Undone steps', 'Wycofane kroki')}: ${_esc(String(progress.undone_steps))}.</p>` : ''}
+      <ul>${(Array.isArray(m.journal?.phases) ? m.journal.phases : []).map(row => `<li>${_esc(String(row.adapter))}: ${_esc(String(row.phase))}</li>`).join('')}</ul>`;
+  }
+
   _renderApplyResult() {
-    // Stub: render() referenced this._renderApplyResult() but the method was
-    // never implemented, so it threw "is not a function" and blanked the whole
-    // card (regression since v4.2.0). Apply/rename feedback is surfaced via
-    // this._message above, so an empty string is the correct no-op here.
-    return '';
+    const m = this._migration;
+    if (!m?.attempted || m.owner !== this._hass?.user?.id || this._hass?.user?.is_admin !== true) return '';
+    const observation = this._migrationText('unavailable', 'niedostępny');
+    const progress = m.journal?.progress;
+    return `<section class="apply-result" aria-labelledby="migrationResultTitle" aria-busy="${m.busy}">
+      <h2 id="migrationResultTitle">${this._migrationText('Dependency operation', 'Operacja zależności')}</h2>
+      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan…', 'Wykonywanie zatwierdzonego planu…') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
+      <p>${this._migrationText('Full dependency coverage is unconfirmed. Public restore is unavailable.', 'Pełne pokrycie zależności jest niepotwierdzone. Publiczne przywracanie jest niedostępne.')}</p>
+      <code>${_esc(m.operation_id)}</code>
+      <p>${this._migrationText('Apply observation', 'Obserwacja zapisu')}: ${_esc(m.applyState || 'UNKNOWN')}. ${this._migrationText('Inspection', 'Inspekcja')}: ${_esc(m.inspection?.state || observation)}.</p>
+      <p>${this._migrationText('Registry read', 'Odczyt rejestru')}: ${m.registryRead ? this._migrationText('received', 'otrzymany') : observation}. ${this._migrationText('Requested fields match', 'Zgodność żądanych pól')}: ${m.registryMatches ? this._migrationText('yes', 'tak') : this._migrationText('unconfirmed', 'niepotwierdzona')}.</p>
+      <div id="migrationJournal">${this._renderMigrationProgress(m)}</div>
+      <button type="button" class="btn btn-outline" id="inspectMigration" ${m.busy || !this._renameAuthorityAvailable() ? 'disabled' : ''}>${this._migrationText('Check status and inspect', 'Sprawdź stan i inspekcję')}</button>
+      <button type="button" class="btn btn-outline" disabled>${this._migrationText('Restore unavailable', 'Przywracanie niedostępne')}</button>
+      ${m.stage === 'applied' ? `<button type="button" class="btn btn-primary" id="finishMigration">${this._migrationText('Finish and clear applied queue', 'Zakończ i wyczyść zastosowaną kolejkę')}</button>` : ''}
+    </section>`;
   }
 
   _renderAutomaticTab() {
@@ -3316,7 +3556,7 @@ class HAEntityRenamer extends HTMLElement {
               <button type="button" class="device-header" data-device-id="${_esc(d.id)}" role="button" tabindex="0" aria-expanded="${isExpanded}" aria-label="${_esc((this._lang === 'pl' ? 'Szczegóły urządzenia: ' : 'Device details: ') + this._getDeviceName(d))}">
                 <span class="device-expand ${isExpanded ? 'open' : ''}">▶</span>
                 <span class="device-name">${_esc(this._getDeviceName(d))}</span>${this._newBadge(d.created_at)}
-                <span class="device-meta">${this._registryCount(ents.length,'entity')} · ${(this._deviceEntities[d.id]||[]).filter(e=>this._renameQueue.some(r=>r.oldId===e.entity_id)).length} ${t.inQueue.toLowerCase()}</span>
+                <span class="device-meta">${this._registryCount(ents.length,'entity')} · ${(d.unassigned ? this._entities.filter(e=>!e.device_id) : this._deviceEntities[d.id]||[]).filter(e=>this._renameQueue.some(r=>r.oldId===e.entity_id)).length} ${t.inQueue.toLowerCase()}</span>
               </button>
               ${isExpanded ? `
               <div class="entity-list">
@@ -3335,7 +3575,7 @@ class HAEntityRenamer extends HTMLElement {
                   </div>`;
                 }).join('')}
               </div>
-              ${isSelected ? `
+              ${isSelected && !d.unassigned ? `
               <div class="prefix-section">
                 <h3>📱 ${t.newDeviceName}</h3>
                 <div class="prefix-row" style="margin-bottom:12px">
@@ -3519,7 +3759,7 @@ class HAEntityRenamer extends HTMLElement {
     const applyDeviceName = root.getElementById('applyDeviceName');
     if (applyDeviceName) {
       applyDeviceName.addEventListener('click', () => {
-        if (this._loading) return;
+        if (this._loading || this._migration) return;
         const devId = applyDeviceName.dataset.deviceId;
         const newName = (root.getElementById('deviceName') || {}).value || '';
         if (newName) {
@@ -3544,7 +3784,7 @@ class HAEntityRenamer extends HTMLElement {
     if (editor) {
       editor.addEventListener('submit', e => {
         e.preventDefault();
-        if (this._loading || !this._entityEditor) return;
+        if (this._loading || this._migration || !this._entityEditor) return;
         const { oldId, objectId, currentName } = this._entityEditor;
         const newObjectId = root.getElementById('entityEditObjectId').value || objectId;
         const name = root.getElementById('entityEditName').value;
@@ -3598,6 +3838,9 @@ class HAEntityRenamer extends HTMLElement {
     const analyzeImpact = root.getElementById('analyzeImpact');
     if (analyzeImpact) analyzeImpact.addEventListener('click', () => this._analyzeImpact());
 
+    for (const [id, method] of [['prepareMigration', '_prepareMigration'], ['applyMigration', '_applyMigration'], ['inspectMigration', '_inspectMigration'], ['finishMigration', '_finishMigration']]) {
+      root.getElementById(id)?.addEventListener('click', () => this[method]());
+    }
     const cancelRenameDialog = root.getElementById('cancelRenameDialog');
     if (cancelRenameDialog) {
       cancelRenameDialog.addEventListener('click', () => this._cancelRenameConfirmation());
@@ -3620,7 +3863,6 @@ class HAEntityRenamer extends HTMLElement {
     const confirmRenameApply = root.getElementById('confirmRenameApply');
     if (confirmRenameApply) {
       confirmRenameApply.addEventListener('click', () => {
-        this._confirmDialogOpen = false;
         this._executeRenames(true);
       });
     }

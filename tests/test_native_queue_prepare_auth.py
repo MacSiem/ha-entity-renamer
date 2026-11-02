@@ -257,6 +257,13 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(runtime.reviews[binding['operation_id']].actor_id, user.id)
             self.assertEqual(review['dependencies']['domains'], ['template'])
             self.assertEqual(review['dependencies']['yaml_file_count'], 1)
+            self.assertEqual([row['path'] for row in review['dependencies']['files']], ['template.yaml'])
+            for row in review['dependencies']['files']:
+                self.assertGreater(row['edit_count'], 0)
+                self.assertTrue(row['references'])
+                for reference in row['references']:
+                    self.assertEqual((reference['before'], reference['after']), (old, new))
+                    self.assertGreater(reference['occurrences'], 0)
             self.assertGreater(review['dependencies']['template_consumer_count'], 0)
             for ident, extra in enumerate(({'actor_id': user.id}, {'roots': []}, {'plan': {}}), 2):
                 denied = await self._request(ws, ident, 'apply', **binding, **extra)
@@ -363,6 +370,9 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             review = response['result']
             self.assertEqual(review['dependencies']['domains'], ['automation', 'script', 'template'])
             self.assertEqual(review['dependencies']['yaml_file_count'], 3)
+            self.assertEqual({row['path'] for row in review['dependencies']['files']},
+                             {'template.yaml', 'mixed_automations.yaml', 'mixed_scripts.yaml'})
+            self.assertTrue(all(row['references'] for row in review['dependencies']['files']))
             binding = {key: review[key] for key in ('operation_id', 'fingerprint')}
             plan = runtime.reviews[binding['operation_id']].plan
             original_receipt = runtime.preparations.resolve_composition(plan.native_inputs)[0].receipt_json
