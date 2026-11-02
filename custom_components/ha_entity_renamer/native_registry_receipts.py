@@ -456,6 +456,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         validate_registry_transition(source_content, result_content, change,
             version=self.version, direction=content_audit.direction,
             native_effect_audit=content_audit)
+        source_summary = self._summary(states)
         for item_key in KEYS:
             identity = observed[item_key]['identity']
             if (type(identity) is not list or len(identity) != 3
@@ -466,7 +467,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                     or type(observed[item_key]['sha256']) is not str
                     or not re.fullmatch(r'[0-9a-f]{64}', observed[item_key]['sha256'])):
                 _fail('file_identity_invalid')
-            if item_key != key and observed[item_key] != self._summary(states)[item_key]:
+            if item_key != key and observed[item_key] != source_summary[item_key]:
                 _fail('foreign_native_delta')
             result[item_key]['sha256'] = observed[item_key]['sha256']
             result[item_key]['identity'] = observed[item_key]['identity']
@@ -497,6 +498,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         validate_config_transition(source_raw, result_raw, change, version=self.version,
             direction=direction, native_effect_audit=content_audit, native_mutation=mutation)
         observed = payload['result']
+        source_summary = self._summary(states)
         for item_key in KEYS:
             identity = observed[item_key]['identity']
             if (type(identity) is not list or len(identity) != 3
@@ -507,7 +509,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                     or type(observed[item_key]['sha256']) is not str
                     or not re.fullmatch(r'[0-9a-f]{64}', observed[item_key]['sha256'])):
                 _fail('file_identity_invalid')
-            if item_key != key and observed[item_key] != self._summary(states)[item_key]:
+            if item_key != key and observed[item_key] != source_summary[item_key]:
                 _fail('foreign_native_delta')
             result[item_key]['sha256'] = observed[item_key]['sha256']
             result[item_key]['identity'] = identity
@@ -530,10 +532,10 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         # Even a cached reconstruction must resolve the ORIGINAL preparations.
         for index in range(len(self.plan.steps)):
             self._original_change(index)
-        for row in self.store.rows.values():
-            if row['digest'] != _digest(row['payload']):
-                _fail('event_digest_mismatch')
         token = self._cache_key()
+        for _, expected_digest, actual_digest in token:
+            if expected_digest != actual_digest:
+                _fail('event_digest_mismatch')
         if self._cache is not None and self._cache[0] == token:
             return self._cache[1]
         states, completed = self._initial(), {}
