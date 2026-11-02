@@ -6,9 +6,13 @@ runs this acceptance target through FIFO on the supported actual Core versions.
 import asyncio
 from contextlib import contextmanager
 import json
+import os
+import stat
+import tempfile
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 import test_native_template_yaml_server as server
 
@@ -115,7 +119,15 @@ class CompositeGuardThreadTests(unittest.IsolatedAsyncioTestCase):
 @unittest.skipUnless(server.activation.fixture.fixtures.HAS_HA, 'actual pinned HA required')
 class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
     with_yaml = True
-    asyncSetUp = server.NativeTemplateYAMLServerTests.asyncSetUp
+
+    async def asyncSetUp(self):
+        parent = tempfile.TemporaryDirectory(prefix='native-mixed-parent-',
+            dir=os.environ.get('RENAMER_TEST_SCRATCH'))
+        self.addCleanup(parent.cleanup)
+        self.scratch_parent = Path(parent.name).resolve()
+        with patch.dict(os.environ, {'RENAMER_TEST_SCRATCH': str(self.scratch_parent)}):
+            await server.NativeTemplateYAMLServerTests.asyncSetUp(self)
+
     _before_start = server.NativeTemplateYAMLServerTests._before_start
     _flush_documents = server.NativeTemplateYAMLServerTests._flush_documents
     prepare = server.NativeTemplateYAMLServerTests.prepare
@@ -530,7 +542,18 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runtime.operation_lock.locked())
 
     async def test_one_mapping_actual_dependents_forward_and_fresh_reverse(self):
-        await self._mixed_flow()
+        # Model installed /config under a 0755 parent using only owned fixture IO.
+        parent = self.scratch_parent
+        self.assertEqual(self.f.root.parent, parent)
+        self.assertEqual(parent.stat().st_uid, os.getuid())
+        mode = stat.S_IMODE(parent.stat().st_mode)
+        parent.chmod(0o755)
+        try:
+            await self._mixed_flow()
+            self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o755)
+            self.assertEqual(list(parent.glob('renamer-candidate-scratch-*')), [])
+        finally:
+            parent.chmod(mode)
 
     async def test_retained_review_foreign_source_refuses_without_new_original(self):
         from attr import asdict

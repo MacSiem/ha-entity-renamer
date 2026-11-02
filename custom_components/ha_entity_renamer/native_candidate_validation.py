@@ -6,6 +6,7 @@ not replace the original receipt, baseline, preparation or runtime expectations.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -199,6 +200,20 @@ async def _checker(before, after, timeout, checkpoint, *, with_sources=False,
         return json.loads(stdout)
     except (ValueError, UnicodeError):
         _fail('native_checker_failed')
+
+
+@contextmanager
+def private_candidate_scratch(config_root):
+    """Own a private sibling of config, even when its parent is public.
+
+    TemporaryDirectory creates mode 0700 without changing the parent. Keep this
+    scope around the awaited verifier: its staging/checker drains cancellation
+    before returning, then both temporary layers are removed on every exit.
+    The verifier still enforces its outside-config, mode and ownership checks.
+    """
+    with tempfile.TemporaryDirectory(prefix='renamer-candidate-scratch-',
+                                     dir=Path(config_root).resolve().parent) as scratch:
+        yield Path(scratch)
 
 
 async def async_revalidate_accepted_candidate(hass, chain, phase_loader,

@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import FrozenInstanceError
 import importlib
 import os
+import stat
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -145,7 +146,7 @@ class CandidateTests(unittest.IsolatedAsyncioTestCase):
                                                                       self.temp.name, lambda: None)
                 checker.assert_not_awaited()
 
-    async def test_synthetic_io_checker_sees_actual_after_and_returns_only_proof(self):
+    async def test_public_parent_private_scratch_checker_returns_only_proof_and_cleans_up(self):
         tx = importlib.import_module(fixture.PACKAGE + '.transaction')
         step = tx.Step('yaml', 'yaml', 'id', 'before', 'after', 'prepared')
         plan = tx.Plan('plan', ('yaml',), ('yaml',), (step,), 'evidence', ('yaml',))
@@ -164,7 +165,15 @@ class CandidateTests(unittest.IsolatedAsyncioTestCase):
                       changed_domains=list(self.original.changed_domains),
                       unsupported_domains=list(self.original.unsupported_domains),
                       runtime_expected=[list(row) for row in self.original.runtime_expected])
+        staged = []
         async def checker(before, after, timeout, checkpoint, *, with_sources):
+            staged.append(before.parent)
+            scratch = before.parent.parent
+            self.assertEqual(scratch.parent, self.root.parent)
+            self.assertEqual(stat.S_IMODE(scratch.stat().st_mode), 0o700)
+            self.assertEqual(scratch.stat().st_uid, os.getuid())
+            self.assertNotEqual(scratch, self.root)
+            self.assertNotIn(self.root, scratch.parents)
             self.assertIs(with_sources, False)
             await checkpoint()
             self.assertEqual((after / 'configuration.yaml').read_bytes(), self.new)
@@ -176,19 +185,64 @@ class CandidateTests(unittest.IsolatedAsyncioTestCase):
         hass = SimpleNamespace(async_add_executor_job=lambda fn: asyncio.to_thread(fn))
         async def loader(_):
             return record
-        with patch.object(subject, 'Path', wraps=Path) as paths:
-            paths.side_effect = lambda value: (Path(self.temp.name).parent
-                if value == '/Volumes/Samsung_SSD' else Path(value))
+        parent = self.root.parent
+        mode = stat.S_IMODE(parent.stat().st_mode)
+        parent.chmod(0o755)
+        try:
             with patch.object(subject, 'async_observe_native_inputs',
                               new=AsyncMock(return_value=observation)), patch.object(
                                   subject, '_checker', new=checker):
-                proof = await subject.async_revalidate_accepted_candidate(
-                    hass, chain, loader, self.temp.name, lambda: None)
+                # Passing the deployment parent itself must still refuse.
+                with self.assertRaisesRegex(ValueError, 'scratch_not_private'):
+                    await subject.async_revalidate_accepted_candidate(
+                        hass, chain, loader, parent, lambda: None)
+                with subject.private_candidate_scratch(self.root) as scratch:
+                    proof = await subject.async_revalidate_accepted_candidate(
+                        hass, chain, loader, scratch, lambda: None)
+                    self.assertTrue(scratch.is_dir())
+                    self.assertTrue(staged)
+                    self.assertTrue(all(not path.exists() for path in staged))
+                self.assertFalse(scratch.exists())
+            self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o755)
+        finally:
+            parent.chmod(mode)
         self.assertEqual(proof.head, self.state.head)
         self.assertEqual(proof.original_receipt_sha256,
                          fixture.digest(subject._receipt_bytes(self.original)))
         self.assertIs(chain.original_receipt, self.original)
         self.assertFalse(hasattr(proof, 'receipt'))
+
+    async def test_private_scratch_cleanup_on_failure_and_task_cancellation(self):
+        parent = self.root.parent
+        mode = stat.S_IMODE(parent.stat().st_mode)
+        parent.chmod(0o755)
+        try:
+            for failure in (ValueError('synthetic checker failure'), asyncio.CancelledError()):
+                with self.subTest(failure=type(failure).__name__):
+                    entered = asyncio.Event()
+                    blocked = asyncio.Event()
+                    paths = []
+                    async def validating():
+                        entered.set()
+                        with subject.private_candidate_scratch(self.root) as scratch:
+                            paths.append(scratch)
+                            self.assertEqual(stat.S_IMODE(scratch.stat().st_mode), 0o700)
+                            self.assertEqual(scratch.parent, parent)
+                            (scratch / 'secret-input').write_bytes(b'synthetic')
+                            if isinstance(failure, asyncio.CancelledError):
+                                await blocked.wait()
+                            raise failure
+                    task = asyncio.create_task(validating())
+                    await entered.wait()
+                    if isinstance(failure, asyncio.CancelledError):
+                        task.cancel()
+                    with self.assertRaises(type(failure)):
+                        await task
+                    self.assertEqual(len(paths), 1)
+                    self.assertFalse(paths[0].exists())
+                    self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o755)
+        finally:
+            parent.chmod(mode)
 
     def test_proof_is_frozen_and_has_no_authorization_or_refreshed_receipt(self):
         proof = subject._AcceptedCandidateProof('op', 'plan', 'head', 'forward',

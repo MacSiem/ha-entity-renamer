@@ -470,11 +470,13 @@ class NativeTemplateYAMLServer:
         witness.check()
 
     async def _full(self, rollback):
-        from .native_candidate_validation import async_revalidate_accepted_candidate
+        from .native_candidate_validation import (
+            async_revalidate_accepted_candidate, private_candidate_scratch)
         await self._common(rollback)
         async with self.locks.hold(self._scope):
-            proof = await async_revalidate_accepted_candidate(self.hass, self.chain,
-                self.journal.load, Path(self.receipt.config_root).parent, self._scope)
+            with private_candidate_scratch(self.receipt.config_root) as scratch:
+                proof = await async_revalidate_accepted_candidate(self.hass, self.chain,
+                    self.journal.load, scratch, self._scope)
             self._scope()
             _need(proof.fingerprint == self.plan.fingerprint and proof.head == self.chain.reconstruct_inputs().head
                   and proof.direction == ('rollback' if rollback else 'forward'), 'candidate_unconfirmed')
