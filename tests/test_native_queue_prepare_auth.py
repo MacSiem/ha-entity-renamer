@@ -425,11 +425,21 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.f.entity.async_get(new))
 
     async def test_registered_mixed_apply_keeps_actual_consumers_and_history(self):
+        await self._registered_mixed_apply()
+
+    async def test_registered_mixed_apply_with_empty_scene_and_fresh_inverse(self):
+        await self._registered_mixed_apply(with_scene=True)
+
+    async def _registered_mixed_apply(self, *, with_scene=False):
         import test_native_template_mixed_yaml_server as mixed
         from homeassistant.core import Context
         runtime, mapping, uuids, dependents, original = await (
             mixed.NativeTemplateMixedYAMLServerTests.data(self))
         hass = self.f.hass
+        if with_scene:
+            from homeassistant.setup import async_setup_component
+            self.assertTrue(await async_setup_component(hass, 'scene', {}))
+            await hass.async_block_till_done()
         history = self.module('history_guard').NativeHistoryGuard(
             self.module('recorder_guard').NativeRecorderGuard(hass))
         source_history = await history.capture(mapping)
@@ -486,6 +496,27 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row['progress']['verified_steps'], len(record.plan.steps))
             self.assertFalse(status['result']['migration_ready'])
             self.assertFalse(status['result']['family_complete'])
+
+        if with_scene:
+            # Fresh controller/session after the request and its source fence closed.
+            async def refresh():
+                return None
+            restored = await runtime.recovery_restore(hass, binding['operation_id'],
+                binding['fingerprint'], guard=lambda: None, refresh=refresh)
+            self.assertEqual(restored['state'], 'rolled_back', restored)
+            for path, raw in original.items():
+                self.assertEqual((self.f.root / path).read_bytes(), raw)
+            for old, new in mapping.items():
+                self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+                self.assertIsNone(self.f.entity.async_get(new))
+            for value in (17, 19):
+                await self.stimulus(value)
+                await hass.services.async_call('script', 'mixed_source', {}, blocking=True, context=Context())
+                await hass.async_block_till_done()
+                self.assertEqual(events['automation'][-1], str(value))
+                self.assertEqual(events['script'][-1], str(value))
+            self.assertTrue(await history.verify(source_history))
+            self.assertTrue(await history.verify(consumer_history))
 
 
     async def test_registered_stale_review_consumed_without_replacing_original_or_replay(self):
