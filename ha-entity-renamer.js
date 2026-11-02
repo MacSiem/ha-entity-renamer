@@ -2081,7 +2081,8 @@ class HAEntityRenamer extends HTMLElement {
     const pl=this._lang==='pl',scope=automatic?'automatic':'devices';
     const keys=['all','available','queued','conflicts','new'];
     const labels=pl?['Wszystkie','Do dodania','W kolejce','Konflikty','Nowe']:['All','To queue','In queue','Conflicts','New'];
-    const count=filter=>automatic?this._visibleAutomaticRows(filter).length:this._devices.reduce((n,d)=>n+this._deviceRows(d,filter).length,0);
+    const count=filter=>automatic?this._visibleAutomaticRows(filter).length:
+      [...this._devices,{id:'__renamer_unassigned__',unassigned:true}].reduce((n,d)=>n+this._deviceRows(d,filter).length,0);
     return `<div class="list-toolbar"><input type="search" id="${automatic?'automaticSearch':'searchInput'}" aria-label="${_esc(this._t.searchPlaceholder)}" placeholder="🔍 ${_esc(this._t.searchPlaceholder)}" value="${_esc(automatic?this._automaticSearch:this._searchQuery)}">
       <label>${pl?'Sortowanie':'Sort'} <select id="listSort">${[['name',pl?'Nazwa A–Z':'Name A–Z'],['reverse',pl?'Nazwa Z–A':'Name Z–A'],['newest',pl?'Najnowsze':'Newest']].map(([key,label])=>`<option value="${key}" ${this._listSort===key?'selected':''}>${label}</option>`).join('')}</select></label></div>
       <div class="list-chips" role="group" aria-label="${pl?'Filtry encji':'Entity filters'}">${keys.map((key,i)=>`<button type="button" class="btn btn-sm btn-outline" data-list-filter="${key}" data-list-scope="${scope}" aria-pressed="${this._listFilters[scope]===key}">${labels[i]} (${count(key)})</button>`).join('')}</div>

@@ -1,10 +1,20 @@
 """Admin-only discovery and narrowly qualified server-owned recovery commands."""
 from contextlib import asynccontextmanager
+import logging
 
 import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import callback
 from .const import DATA_RUNTIME, DOMAIN, VERSION
+
+
+_LOGGER = logging.getLogger(__name__)
+
+def _log_prepare_failure(error):
+    # Reuse the checked metadata-only diagnostic: no exception text, locals,
+    # source lines, absolute paths, configuration or credentials.
+    from .yaml_validation_worker import _checker_diagnostic
+    _LOGGER.warning("Migration review could not be prepared: %s", _checker_diagnostic(error))
 
 
 @callback
@@ -238,10 +248,12 @@ async def ws_prepare(hass, connection, message):
         connection.send_error(message['id'], 'unauthorized', 'Administrator permissions are required')
     except _InvalidSelection:
         connection.send_error(message['id'], 'invalid_selection', 'The rename selection is invalid')
-    except Refused:
+    except Refused as error:
+        _log_prepare_failure(error)
         connection.send_error(message['id'], 'unsupported_selection',
                               'This selection cannot be verified for migration')
     except Exception as error:
+        _log_prepare_failure(error)
         unavailable = type(error) is ValueError and error.args == ('recovery_runtime_unavailable',)
         connection.send_error(message['id'], 'unavailable' if unavailable else 'prepare_unavailable',
                               'The rename review could not be verified')

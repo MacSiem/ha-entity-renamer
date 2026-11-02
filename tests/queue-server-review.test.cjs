@@ -209,6 +209,8 @@ test('unassigned source is reachable through ordinary list and editor without a 
   assert.equal(f.card._devices.length,1,'real device inventory unchanged');
   f.card._expandedDevices.add(groups[0].id);f.card._selectedDevice=groups[0].id;f.card.setActiveTab('devices');
   assert.match(f.card.shadowRoot.textContent,/No device/);
+  assert.match(f.card.shadowRoot.querySelector('[data-list-filter=all]').textContent,/All \(1\)/);
+  assert.match(f.card.shadowRoot.querySelector('[data-list-filter=available]').textContent,/To queue \(1\)/);
   assert.equal(f.card.shadowRoot.getElementById('applyDeviceName'),null);
   f.card.shadowRoot.querySelector('[data-add-single="sensor.a"]').click();
   f.card.shadowRoot.getElementById('entityEditObjectId').value='next';
