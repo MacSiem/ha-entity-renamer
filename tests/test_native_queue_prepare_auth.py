@@ -319,6 +319,18 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await ws.receive_json(timeout=10))['type'], 'auth_required')
                 await ws.send_json({'type': 'auth', 'access_token': access})
                 self.assertEqual((await ws.receive_json(timeout=10))['type'], 'auth_ok')
+                # Current Core migrates fixture HTTP YAML to a pending config.
+                # Confirm it only after real network authentication worked, using
+                # HA's registered admin command before taking a migration baseline.
+                if admin and 'http/config/promote' in connection.handlers:
+                    from homeassistant.components.http.config import async_get_and_load_store
+                    store = await async_get_and_load_store(self.f.hass)
+                    if store.pending is not None:
+                        connection.async_handle({'id': 1, 'type': 'http/config/promote'})
+                        confirmed = await asyncio.wait_for(unused, 10)
+                        self.assertTrue(confirmed['success'], confirmed)
+                        self.assertIsNone(store.pending)
+                        self.assertIsNone(store.revert_deadline)
                 yield ws, user
 
     async def _request(self, ws, ident, action, **payload):
