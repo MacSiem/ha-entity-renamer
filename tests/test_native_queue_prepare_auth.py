@@ -6,6 +6,7 @@ import unittest
 import asyncio
 from contextlib import asynccontextmanager
 import json
+from pathlib import Path
 
 import test_native_backend_auth as auth
 import test_native_backend_lifecycle as backend_fixture
@@ -440,6 +441,16 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             from homeassistant.setup import async_setup_component
             self.assertTrue(await async_setup_component(hass, 'scene', {}))
             await hass.async_block_till_done()
+            # Scene setup schedules a native delayed repairs Store write. Settle
+            # bootstrap IO before capturing the immutable input graph, exactly
+            # as the fixture does for entity/device/config-entry Stores.
+            from homeassistant.helpers import issue_registry
+            issues = issue_registry.async_get(hass)
+            await issues._store.async_save(issues._data_to_save())
+            self.assertIsNone(issues._store._data)
+            self.assertIsNone(issues._store._delay_handle)
+            self.assertEqual(json.loads(Path(issues._store.path).read_bytes())['data'],
+                             issues._data_to_save())
         history = self.module('history_guard').NativeHistoryGuard(
             self.module('recorder_guard').NativeRecorderGuard(hass))
         source_history = await history.capture(mapping)
