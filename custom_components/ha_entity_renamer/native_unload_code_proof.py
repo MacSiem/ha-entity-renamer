@@ -6,7 +6,7 @@ import inspect
 from pathlib import Path
 import sys
 
-from .native_utility_setup_audit import _code_objects
+from .native_code_cache import compiled_code_objects
 
 
 def prove_methods(root, pins, refs):
@@ -31,8 +31,7 @@ def prove_methods(root, pins, refs):
         if relative not in pins or hashlib.sha256(raw).hexdigest() != pins[relative]:
             raise ValueError('native_unload_source_pin')
         if str(path) not in compiled:
-            compiled[str(path)] = tuple(_code_objects(compile(raw, str(path), 'exec',
-                dont_inherit=True, optimize=sys.flags.optimize)))
+            compiled[str(path)] = compiled_code_objects(raw, str(path), sys.flags.optimize)
         qualifier = ('Entity.__async_remove_impl' if name == '_Entity__async_remove_impl'
                      else name if inspect.ismodule(owner) else owner.__name__ + '.' + name)
         if not any(code == item and item.co_qualname == qualifier

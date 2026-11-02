@@ -28,6 +28,7 @@ from types import FunctionType, MethodType
 
 from .native_template_consumers import _Native, _bound, _need
 from .native_unload_code_proof import prove_methods, unchanged
+from .native_code_cache import compiled_code_objects
 
 # Full installed PUBLIC source readback, never supplied by a client.
 _EXTRA_PINS = {
@@ -106,13 +107,11 @@ def _callback(native, value, entity, slot=None):
     _need(type(value) is FunctionType, 'template_binding_callback_type')
     module = import_module(value.__module__)
     _need(value.__globals__ is vars(module), 'template_binding_callback_globals')
-    from .native_utility_setup_audit import _code_objects
     path = Path(value.__code__.co_filename)
     relative = path.relative_to(native.root).as_posix()
     _need(relative in native.pins and any(value.__code__ == code
-        and value.__qualname__ == code.co_qualname for code in _code_objects(compile(
-            path.read_bytes(), str(path), 'exec', dont_inherit=True,
-            optimize=sys.flags.optimize))), 'template_binding_callback_code')
+        and value.__qualname__ == code.co_qualname for code in compiled_code_objects(
+            path.read_bytes(), str(path), sys.flags.optimize)), 'template_binding_callback_code')
     cells = dict(zip(value.__code__.co_freevars,
         (cell.cell_contents for cell in value.__closure__ or ()), strict=True))
     if '__class__' in cells:
