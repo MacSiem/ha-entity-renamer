@@ -28,6 +28,34 @@ class DashboardPlanTests(unittest.TestCase):
         self.assertEqual('sensor.old', nested[0]['entities'][1]['name'])
         self.assertEqual('/local/sensor.old.png', nested[1]['image'])
 
+    def test_renamer_presentation_config_has_no_entity_dependencies(self):
+        card = {'type': 'custom:ha-entity-renamer', 'title': 'sensor.old',
+                'show_help': False, 'show_support': False, 'language': 'pl',
+                'default_tab': 'automatic', 'tabs': ['devices', 'automatic', 'queue'],
+                'grid_options': {'columns': 6, 'rows': 'auto'}}
+        result = self.plan([card])
+        self.assertFalse(result.markers)
+        self.assertFalse(result.changes)
+        self.assertEqual(result.value['views'][0]['cards'][0], card)
+
+    def test_renamer_visibility_retains_native_reference_semantics(self):
+        result = self.plan([{'type': 'custom:ha-entity-renamer',
+            'visibility': [{'condition': 'state', 'entity': 'sensor.old', 'state': 'on'}]}])
+        self.assertFalse(result.markers)
+        self.assertEqual(len(result.changes), 1)
+        self.assertEqual(result.value['views'][0]['cards'][0]['visibility'][0]['entity'], 'sensor.new')
+
+    def test_renamer_unknown_or_malformed_config_remains_blocked(self):
+        for extra in ({'entity': 'sensor.old'}, {'template': '{{ value }}'},
+                      {'tabs': ['custom']}, {'show_help': 'false'},
+                      {'grid_options': {'columns': 'sensor.old'}},
+                      {'grid_options': {'custom': 1}}, {'default_tab': 'custom'},
+                      {'tap_action': {'action': 'toggle'}}):
+            with self.subTest(extra=extra):
+                result = self.plan([{'type': 'custom:ha-entity-renamer', **extra}])
+                self.assertTrue(result.markers)
+                self.assertFalse(result.changes)
+
     def test_statistics_external_ids_preserved(self):
         result = self.plan([{'type': 'statistics-graph', 'entities': [
             'sensor.old', 'provider:external', {'entity': 'sensor.old', 'name': 'sensor.old'}]}])

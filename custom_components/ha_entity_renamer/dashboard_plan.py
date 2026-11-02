@@ -159,6 +159,36 @@ def plan_dashboard(config, mapping):
         if type(value) is not dict:
             block(path); return
         kind = value.get('type')
+        if role == 'card' and kind == 'custom:ha-entity-renamer':
+            # Our card reads registry/state afresh; these config fields only
+            # control presentation (HAEntityRenamer.setConfig/render). Never
+            # extend this admission to arbitrary custom cards or unknown keys.
+            tabs = {'devices', 'automatic', 'queue', 'log'}
+            for key, child in value.items():
+                p = path + (key,)
+                if key == 'type':
+                    continue
+                if key in {'title', 'language'} and type(child) is str:
+                    continue
+                if key in {'show_help', 'show_support'} and type(child) is bool:
+                    continue
+                if key == 'default_tab' and type(child) is str and child in tabs:
+                    continue
+                if key == 'tabs' and type(child) is list and all(
+                        type(tab) is str and tab in tabs for tab in child):
+                    continue
+                if key == 'visibility':
+                    conditions(child, p)
+                    continue
+                if key == 'grid_options' and type(child) is dict and all(
+                        field in {'columns', 'rows', 'min_columns', 'max_columns', 'min_rows', 'max_rows'}
+                        and (type(size) is int and size > 0
+                             or field == 'columns' and size == 'full'
+                             or field == 'rows' and size == 'auto')
+                        for field, size in child.items()):
+                    continue
+                block(p, 'unsupported_renamer_card_config')
+            return
         known = (role in {'root', 'view', 'section'} or
                  role == 'card' and kind in CARDS or
                  role in {'row', 'graph'} and (kind is None or kind in ROWS) or

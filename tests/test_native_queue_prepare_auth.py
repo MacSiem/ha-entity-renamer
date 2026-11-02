@@ -44,6 +44,40 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             'entities': [{'entity_id': old, 'new_entity_id': new,
                           'name': 'Reviewed native selection'}]}
 
+    async def test_registered_prepare_admits_own_card_but_refuses_foreign_card(self):
+        from homeassistant.setup import async_setup_component
+        from homeassistant.components.lovelace.const import LOVELACE_DATA
+        from homeassistant.components.lovelace.dashboard import LovelaceStorage
+        runtime, old, new, uuids, original, payload = await self.selection()
+        hass = self.f.hass
+        self.assertTrue(await async_setup_component(hass, 'lovelace', {'lovelace': {'mode': 'storage'}}))
+        await hass.async_block_till_done()
+        dashboard = hass.data[LOVELACE_DATA].dashboards[None]
+        self.assertIs(type(dashboard), LovelaceStorage)
+        config = {'views': [{'cards': [{'type': 'custom:ha-entity-renamer',
+            'title': old, 'show_support': False, 'tabs': ['devices', 'queue'],
+            'grid_options': {'columns': 12, 'rows': 'auto'}}]}]}
+        await dashboard.async_save(config)
+        await hass.async_block_till_done()
+        path = self.f.root / '.storage/lovelace'
+        before = path.read_bytes()
+        async with self._transport() as (ws, _):
+            response = await self._request(ws, 1, 'prepare', **payload)
+            self.assertTrue(response['success'], response)
+            self.assertEqual(path.read_bytes(), before, 'display options must remain byte-for-byte unchanged')
+            config['views'][0]['cards'][0] = {'type': 'custom:unknown-consumer'}
+            await dashboard.async_save(config)
+            await hass.async_block_till_done()
+            foreign = path.read_bytes()
+            denied = await self._request(ws, 2, 'prepare', **payload)
+            self.assertFalse(denied['success'], denied)
+            self.assertEqual(denied['error']['code'], 'unsupported_selection')
+            self.assertEqual(path.read_bytes(), foreign)
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        self.assertEqual(await runtime.journal.all(), ())
+
     async def test_registered_prepare_with_loaded_empty_native_scene(self):
         from homeassistant.setup import async_setup_component
         from homeassistant.components.scene import DATA_COMPONENT
