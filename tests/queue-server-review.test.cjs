@@ -399,3 +399,64 @@ test('complete UNKNOWN restore lost ACK never becomes success or a second write'
   await f.card._inspectMigration();f.card._reviewMigrationRestore();await f.card._restoreMigration();
   assert.equal(m.stage,'unknown');assert.equal(restores(f).length,1);assert.equal(writes(f).length,1);
 });
+
+test('all verified applying steps remain pending final confirmation in both languages',async t=>{
+  for(const language of ['en','pl']) {
+    const f=fixture(t,language);await f.card._prepareMigration();const pending=gate();
+    f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
+    f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'applying',direction:'forward',phases:[{adapter:'registry',phase:'verified'},{adapter:'yaml',phase:'verified'}],progress:{total_steps:2,verified_steps:2,undone_steps:0}}]});
+    const first=f.card._applyMigration();await tick();
+    const result=f.card.shadowRoot.querySelector('.apply-result');
+    assert.equal(result.getAttribute('aria-busy'),'true');assert.match(result.textContent,/2 \/ 2/);
+    assert.match(result.textContent,language==='pl'?/Liczba zweryfikowanych kroków nie potwierdza końcowego wyniku/:/Verified step count does not confirm the final outcome/);
+    assert.equal(f.card.shadowRoot.getElementById('finishMigration'),null);
+    assert.equal(f.card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);
+    pending.reject(new Error('uncertain'));await first;
+  }
+});
+
+test('unknown complete remains unknown and recovery guidance follows fresh eligible inspection',async t=>{
+  const f=await completeUnknownFixture(t);const m=f.card._migration;
+  assert.match(f.card.shadowRoot.textContent,/Partial or unknown/);
+  assert.match(f.card.shadowRoot.textContent,/Fresh inspection allows review of this operation’s restore scope/);
+  assert.equal(m.stage,'unknown');assert.equal(f.card.shadowRoot.getElementById('reviewMigrationRestore').disabled,false);
+  const retained=JSON.stringify(m.review);f.card.render();assert.equal(JSON.stringify(m.review),retained);
+  m.inspection.eligible=false;f.card.render();
+  assert.match(f.card.shadowRoot.textContent,/Restore is unavailable until a fresh inspection permits it/);
+  assert.equal(f.card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);
+  assert.equal(writes(f).length,1);
+});
+
+test('only matching current status is shown and server phases are explained without treating counts as success',async t=>{
+  const f=fixture(t);await f.card._prepareMigration();const pending=gate();
+  f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'other',fingerprint,status:'applied',phases:[{adapter:'foreign',phase:'verified'}],progress:{total_steps:2,verified_steps:2,undone_steps:0}},{operation_id:'review_qa',fingerprint,status:'applying',direction:'forward',phases:[{adapter:'registry',phase:'intent'},{adapter:'yaml',phase:'pending'}],progress:{total_steps:2,verified_steps:0,undone_steps:0}}]});
+  const first=f.card._applyMigration();await tick();let text=f.card.shadowRoot.getElementById('migrationJournal').textContent;
+  assert.match(text,/applying/);assert.match(text,/intent/);assert.match(text,/pending/);assert.doesNotMatch(text,/foreign/);
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint:'b'.repeat(64),status:'applied',progress:{total_steps:2,verified_steps:2,undone_steps:0}}]});
+  await f.card._refreshMigrationProgress();text=f.card.shadowRoot.getElementById('migrationJournal').textContent;
+  assert.match(text,/unavailable/);assert.doesNotMatch(text,/2 \/ 2/);
+  pending.reject(new Error('uncertain'));await first;
+});
+
+test('late progress from before inspection cannot replace a fresh journal',async t=>{
+  const f=fixture(t);await f.card._prepareMigration();const apply=gate(),oldStatus=gate();let calls=0;
+  f.handlers['ha_entity_renamer/apply']=()=>apply.promise;
+  f.handlers['ha_entity_renamer/status']=()=>++calls===1?oldStatus.promise:{operations:[{operation_id:'review_qa',fingerprint,status:'unknown',direction:'forward'}]};
+  const first=f.card._applyMigration();await tick();
+  apply.reject(new Error('uncertain'));await first;
+  assert.equal(f.card._migration.journal.status,'unknown');
+  oldStatus.resolve({operations:[{operation_id:'review_qa',fingerprint,status:'applied',progress:{total_steps:2,verified_steps:2,undone_steps:0}}]});await tick();
+  assert.equal(f.card._migration.journal.status,'unknown');assert.equal(f.card._migration.stage,'unknown');
+  assert.doesNotMatch(f.card.shadowRoot.getElementById('migrationJournal').textContent,/2 \/ 2/);
+});
+
+test('failed progress read no longer presents a stale snapshot as current',async t=>{
+  const f=fixture(t);await f.card._prepareMigration();const pending=gate();
+  f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
+  const first=f.card._applyMigration();await tick();assert.match(f.card.shadowRoot.getElementById('migrationJournal').textContent,/1 \/ 2/);
+  f.handlers['ha_entity_renamer/status']=()=>Promise.reject(new Error('offline'));
+  await f.card._refreshMigrationProgress();assert.match(f.card.shadowRoot.getElementById('migrationJournal').textContent,/unavailable/);
+  assert.doesNotMatch(f.card.shadowRoot.getElementById('migrationJournal').textContent,/1 \/ 2/);
+  pending.reject(new Error('uncertain'));await first;
+});

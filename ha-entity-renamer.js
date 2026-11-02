@@ -3298,7 +3298,8 @@ class HAEntityRenamer extends HTMLElement {
       m.journal = (Array.isArray(rows) ? rows.find(row => row?.operation_id === m.operation_id
         && row?.fingerprint === m.fingerprint) : null) || null;
     } catch (_) {
-      // Progress is observation only; no failed read retries a mutation.
+      // Do not present an older snapshot as the current observation.
+      if (this._migrationCurrent(m) && m.observation === observation) m.journal = null;
     } finally {
       m.progressBusy = false;
       if (this._migrationCurrent(m)) {
@@ -3542,10 +3543,30 @@ class HAEntityRenamer extends HTMLElement {
   _renderMigrationProgress(m) {
     const observation = this._migrationText('unavailable', 'niedostępny');
     const progress = m.journal?.progress;
+    // Persisted step observations do not establish the final verifier result.
+    const states = {
+      prepared: this._migrationText('Prepared', 'Przygotowano'),
+      applying: this._migrationText('Applying', 'Wykonywanie'),
+      applied: this._migrationText('Applied', 'Zastosowano'),
+      unknown: this._migrationText('Unknown', 'Nieustalony'),
+      ready: this._migrationText('Ready for recovery', 'Gotowość do odzyskania'),
+      rollback_ready: this._migrationText('Ready for rollback', 'Gotowość do wycofania'),
+      rolling_back: this._migrationText('Rolling back', 'Wycofywanie'),
+      rolled_back: this._migrationText('Rolled back', 'Wycofano'),
+    };
+    const phases = {
+      pending: this._migrationText('waiting', 'oczekuje'),
+      intent: this._migrationText('write intent recorded; outcome not yet verified', 'zapisano zamiar zapisu; wynik jeszcze niezweryfikowany'),
+      verified: this._migrationText('step verified', 'krok zweryfikowany'),
+      undo_intent: this._migrationText('restore intent recorded; outcome not yet verified', 'zapisano zamiar wycofania; wynik jeszcze niezweryfikowany'),
+      undone: this._migrationText('step undone', 'krok wycofany'),
+    };
+    const state = m.journal?.status;
     return `      <h3>${this._migrationText('Journal progress', 'Postęp dziennika')}</h3>
-      <p>${this._migrationText('State', 'Stan')}: ${_esc(m.journal?.status || observation)}.</p>
-      ${progress ? `<p>${this._migrationText('Verified steps', 'Zweryfikowane kroki')}: ${_esc(String(progress.verified_steps))} / ${_esc(String(progress.total_steps))}. ${this._migrationText('Undone steps', 'Wycofane kroki')}: ${_esc(String(progress.undone_steps))}.</p>` : ''}
-      <ul>${(Array.isArray(m.journal?.phases) ? m.journal.phases : []).map(row => `<li>${_esc(String(row.adapter))}: ${_esc(String(row.phase))}</li>`).join('')}</ul>`;
+      <p>${this._migrationText('State', 'Stan')}: ${_esc(state ? `${states[state] || state} (${state})` : observation)}.</p>
+      ${progress ? `<p>${this._migrationText('Verified steps', 'Zweryfikowane kroki')}: ${_esc(String(progress.verified_steps))} / ${_esc(String(progress.total_steps))}. ${this._migrationText('Undone steps', 'Wycofane kroki')}: ${_esc(String(progress.undone_steps))}.</p>
+      <p>${this._migrationText('Verified step count does not confirm the final outcome; final verification and inspection are separate.', 'Liczba zweryfikowanych kroków nie potwierdza końcowego wyniku; końcowa weryfikacja i inspekcja są osobne.')}</p>` : ''}
+      <ul>${(Array.isArray(m.journal?.phases) ? m.journal.phases : []).map(row => `<li>${_esc(String(row.adapter))}: ${_esc(phases[row.phase] || String(row.phase))} (${_esc(String(row.phase))})</li>`).join('')}</ul>`;
   }
 
   _renderApplyResult() {
@@ -3553,15 +3574,20 @@ class HAEntityRenamer extends HTMLElement {
     if (!m?.attempted || m.owner !== this._hass?.user?.id || this._hass?.user?.is_admin !== true) return '';
     if (m.restoreConsent) return this._renderMigrationReview(true);
     const observation = this._migrationText('unavailable', 'niedostępny');
-    const progress = m.journal?.progress;
+    const restoreGuidance = m.restoreAttempted
+      ? this._migrationText('A restore was already attempted. Inspect the outcome; do not repeat the write.', 'Podjęto już próbę wycofania. Sprawdź wynik; nie powtarzaj zapisu.')
+      : this._canRestoreMigration(m)
+        ? this._migrationText('Fresh inspection allows review of this operation’s restore scope. Review and confirm it separately before any restore.', 'Świeża inspekcja pozwala sprawdzić zakres wycofania tej operacji. Przed wycofaniem osobno sprawdź i potwierdź zakres.')
+        : this._migrationText('Restore is unavailable until a fresh inspection permits it. Check status and inspect; do not repeat the write.', 'Wycofanie jest niedostępne, dopóki świeża inspekcja go nie dopuści. Sprawdź stan i inspekcję; nie powtarzaj zapisu.');
     return `<section class="apply-result" aria-labelledby="migrationResultTitle" aria-busy="${m.busy}">
       <h2 id="migrationResultTitle">${this._migrationText('Dependency operation', 'Operacja zależności')}</h2>
-      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan…', 'Wykonywanie zatwierdzonego planu…') : m.stage === 'restoring' ? this._migrationText('Restoring the confirmed scope…', 'Wycofywanie potwierdzonego zakresu…') : m.stage === 'restored' ? this._migrationText('Restored scope acknowledged; original registry fields independently verified.', 'Wycofanie zakresu potwierdzone; oryginalne pola rejestru niezależnie zweryfikowane.') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
+      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan…', 'Wykonywanie zatwierdzonego planu…') : m.stage === 'restoring' ? this._migrationText('Restoring the confirmed scope…', 'Wycofywanie potwierdzonego zakresu…') : m.busy ? this._migrationText('Checking current status, inspection and registry…', 'Sprawdzanie bieżącego stanu, inspekcji i rejestru…') : m.stage === 'restored' ? this._migrationText('Restored scope acknowledged; original registry fields independently verified.', 'Wycofanie zakresu potwierdzone; oryginalne pola rejestru niezależnie zweryfikowane.') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
       <p>${this._migrationText('Full dependency coverage is unconfirmed. Restore covers only this current operation.', 'Pełne pokrycie zależności jest niepotwierdzone. Wycofanie obejmuje tylko bieżącą operację.')}</p>
       <code>${_esc(m.operation_id)}</code>
       <p>${this._migrationText('Apply observation', 'Obserwacja zapisu')}: ${_esc(m.applyState || 'UNKNOWN')}. ${this._migrationText('Inspection', 'Inspekcja')}: ${_esc(m.inspection?.state || observation)}.</p>
       <p>${this._migrationText('Registry read', 'Odczyt rejestru')}: ${m.registryRead ? this._migrationText('received', 'otrzymany') : observation}. ${this._migrationText('Requested fields match', 'Zgodność żądanych pól')}: ${m.registryMatches ? this._migrationText('yes', 'tak') : this._migrationText('unconfirmed', 'niepotwierdzona')}.</p>
-      <div id="migrationJournal">${this._renderMigrationProgress(m)}</div>
+      <div id="migrationJournal" aria-live="polite">${this._renderMigrationProgress(m)}</div>
+      ${!m.busy && m.stage !== 'restored' ? `<p>${restoreGuidance}</p>` : ''}
       <button type="button" class="btn btn-outline" id="inspectMigration" ${m.busy || !this._renameAuthorityAvailable() ? 'disabled' : ''}>${this._migrationText('Check status and inspect', 'Sprawdź stan i inspekcję')}</button>
       <button type="button" class="btn btn-outline" id="reviewMigrationRestore" ${this._canRestoreMigration(m) ? '' : 'disabled'}>${this._migrationText('Review restore scope', 'Sprawdź zakres wycofania')}</button>
       ${['applied', 'restored'].includes(m.stage) ? `<button type="button" class="btn btn-primary" id="finishMigration">${m.stage === 'restored' ? this._migrationText('Finish and clear restored queue', 'Zakończ i wyczyść wycofaną kolejkę') : this._migrationText('Finish and clear applied queue', 'Zakończ i wyczyść zastosowaną kolejkę')}</button>` : ''}
