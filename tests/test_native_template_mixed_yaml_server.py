@@ -731,14 +731,24 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
                         result['fingerprint'], guard=lambda: None, refresh=refresh)
                     self.assertFalse(inspected['eligible'], 'missing required forward evidence must not authorize recovery')
                     self.assertNotEqual(inspected['state'], 'applied')
+                    if is_prefix:
+                        self.assertEqual((inspected['state'], inspected['reason']),
+                                         ('UNKNOWN', 'recovery_unproven'))
                     if not is_prefix:
                         second_mapping = {new: new + '_next' for new in mapping.values()}
                         with self.assertRaises(self.module('transaction').Refused):
                             await runtime.native_forward(hass, second_mapping,
                                 guard=lambda: None, refresh=refresh)
-                    with self.assertRaises(self.module('transaction').Refused):
+                    error_type = (self.module('native_registry_receipts').RegistryReceiptError
+                                  if is_prefix else self.module('transaction').Refused)
+                    with self.assertRaises(error_type) as refusal:
                         await runtime.native_yaml_reverse(hass, result['operation_id'],
                             result['fingerprint'], guard=lambda: None, refresh=refresh)
+                    if is_prefix:
+                        reason = {'registry_receipt': 'registry_receipt_unresolved_chain_fork',
+                                  'yaml_receipt': 'registry_receipt_unknown_unresolved_intent'}[missing]
+                        self.assertIs(type(refusal.exception), error_type)
+                        self.assertEqual(str(refusal.exception), reason)
                     self.assertEqual({key: asdict(row) for key, row in self.f.entity.entities.items()}, before_registry)
                     for name, raw in protected.items():
                         self.assertEqual((root / name).read_bytes(), raw)
