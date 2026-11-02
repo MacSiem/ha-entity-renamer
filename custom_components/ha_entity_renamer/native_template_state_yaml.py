@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, dataclass
 import inspect
+import logging
 import json
 import os
 from pathlib import Path
@@ -256,7 +257,10 @@ class NativeTemplateStateYAMLRuntimeReadback:
             return sample[0]
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            from .yaml_validation_worker import _checker_diagnostic
+            logging.getLogger(__name__).warning('Template runtime observation unavailable: %s',
+                                               _checker_diagnostic(error))
             return Position.UNKNOWN
 
     def runtime_check(self, expected):
