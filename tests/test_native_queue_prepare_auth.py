@@ -621,14 +621,14 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(path.read_bytes().endswith(b'# foreign edit after UNKNOWN inspection\n'))
                     finally:
                         path.write_bytes(protected)
-                restored = await self._request(reverse_ws, 1, 'recovery/restore', **binding)
+                restored = await self._request(reverse_ws, 5, 'recovery/restore', **binding)
                 self.assertTrue(restored['success'], restored)
                 self.assertEqual(restored['result']['state'], 'rolled_back', restored)
                 self.assertEqual(restored['result']['operation_id'], binding['operation_id'])
                 self.assertEqual(restored['result']['fingerprint'], binding['fingerprint'])
                 protected = {p: (self.f.root / p).read_bytes() for p in original}
                 journal = await runtime.journal.load(binding['operation_id'])
-                duplicate = await self._request(reverse_ws, 2, 'recovery/restore', **binding)
+                duplicate = await self._request(reverse_ws, 6, 'recovery/restore', **binding)
                 self.assertTrue(duplicate['success'], duplicate)
                 self.assertEqual((duplicate['result']['state'], duplicate['result']['reason']),
                                  ('refused', 'already_finished'))
