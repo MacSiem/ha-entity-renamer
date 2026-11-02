@@ -348,8 +348,8 @@ async def ws_recovery_inspect(hass, connection, message):
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_recovery_restore(hass, connection, message):
-    # Release A exposes recovery inventory, but admits no public restore IO.
-    connection.send_error(message['id'], 'feature_unavailable',
-                          'Migration restore is unavailable in this release')
+    # Fresh native admission and current AuthStore authority are repeated for
+    # this explicit operation; inspection never serves as write permission.
+    await _read_recovery(hass, connection, message, action='restore')
 
 

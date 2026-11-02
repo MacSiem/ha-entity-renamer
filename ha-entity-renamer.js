@@ -1532,7 +1532,8 @@ class HAEntityRenamer extends HTMLElement {
       // Consent expires on every authority fence. Retain attempted identity only
       // for same-account status/inspect, never to revive apply consent.
       this._migration = m.attempted ? {owner: m.owner, operation_id: m.operation_id,
-        fingerprint: m.fingerprint, review: m.review, attempted: true,
+        fingerprint: m.fingerprint, review: m.review, identities: m.identities, attempted: true,
+        restoreAttempted: m.restoreAttempted, restoreRevoked: true,
         stage: 'unknown', invalidated: true, busy: false} : null;
     }
     this._clearQueueUndo();
@@ -3303,7 +3304,7 @@ class HAEntityRenamer extends HTMLElement {
       if (this._migrationCurrent(m)) {
         const journal = this.shadowRoot.getElementById('migrationJournal');
         if (journal) journal.innerHTML = this._renderMigrationProgress(m);
-        if (m.applying) m.pollTimer = setTimeout(() => this._refreshMigrationProgress(m, hass), 2000);
+        if (m.applying || m.restoring) m.pollTimer = setTimeout(() => this._refreshMigrationProgress(m, hass), 2000);
       }
     }
   }
@@ -3364,6 +3365,8 @@ class HAEntityRenamer extends HTMLElement {
             && Number.isSafeInteger(ref.occurrences) && ref.occurrences > 0))) throw new Error('invalid_review');
       // Full detached public projection; never construct or send a client Plan.
       m.review = JSON.parse(JSON.stringify({changes: result.changes, dependencies: result.dependencies}));
+      m.identities = m.review.changes.map(change => change.device_id ? change.device_id
+        : this._sourceIdentity(this._entities.find(row => row.entity_id === change.entity_id)));
       m.operation_id = result.operation_id; m.fingerprint = result.fingerprint;
       m.stage = 'review';
     } catch (_) {
@@ -3399,10 +3402,61 @@ class HAEntityRenamer extends HTMLElement {
     }
   }
 
+  _canRestoreMigration(m = this._migration) {
+    return !!m && m.attempted && !m.busy && !m.restoreAttempted && !m.restoreRevoked && !!m.review
+      && m.stage === 'applied' && this._migrationCurrent(m)
+      && m.inspection?.operation_id === m.operation_id && m.inspection?.fingerprint === m.fingerprint
+      && m.inspection?.eligible === true && m.inspection?.state === 'applied';
+  }
+
+  _reviewMigrationRestore() {
+    const m = this._migration;
+    if (!this._canRestoreMigration(m)) return;
+    m.restoreConsent = true;
+    this.render();
+    this.shadowRoot.getElementById('cancelMigrationRestore')?.focus();
+  }
+
+  _cancelMigrationRestore() {
+    const m = this._migration;
+    if (!m?.restoreConsent || m.restoreAttempted) return;
+    m.restoreConsent = false;
+    this.render();
+    this.shadowRoot.getElementById('reviewMigrationRestore')?.focus();
+  }
+
+  async _restoreMigration() {
+    const m = this._migration;
+    if (!m?.restoreConsent || !this._canRestoreMigration(m)) return;
+    // Consume before IO. Neither failed transport nor inspection can revive consent.
+    m.restoreConsent = false; m.restoreAttempted = true; m.restoreAcknowledged = false;
+    m.stage = 'restoring'; m.busy = true; m.restoring = true; m.registryMatches = false;
+    const hass = this._hass;
+    this.render();
+    void this._refreshMigrationProgress(m, hass);
+    try {
+      const result = await this._migrationRequest(hass, {type: 'ha_entity_renamer/recovery/restore',
+        operation_id: m.operation_id, fingerprint: m.fingerprint});
+      if (!this._migrationCurrent(m)) return;
+      m.restoreAcknowledged = result?.operation_id === m.operation_id
+        && result?.fingerprint === m.fingerprint && result?.state === 'rolled_back';
+    } catch (_) {
+      // A missing ACK or refusal remains UNKNOWN. Never replay or use registry writes.
+    } finally {
+      m.restoring = false; clearTimeout(m.pollTimer);
+      if (this._migrationCurrent(m)) {
+        m.stage = 'unknown'; m.busy = false;
+        // These reads begin only after the restore response, independently of its ACK.
+        await this._inspectMigration();
+      }
+    }
+  }
+
   async _inspectMigration() {
     const m = this._migration;
     if (!m?.attempted || m.busy || m.owner !== this._hass?.user?.id || !this._renameAuthorityAvailable()) return;
-    // Rebind read authority only. This cannot revive apply consent.
+    m.restoreConsent = false;
+    // Rebind read authority only. This cannot revive apply or restore consent.
     m.epoch = this._authorityEpoch; m.session = this._readSession(); m.invalidated = false;
     m.observation = (m.observation || 0) + 1;
     m.busy = true; this.render();
@@ -3429,44 +3483,55 @@ class HAEntityRenamer extends HTMLElement {
       for (const row of entities) {
         if (row.device_id) (this._deviceEntities[row.device_id] ||= []).push(row);
       }
-      m.registryMatches = !!m.review && m.review.changes.every(change => {
+      m.registryMatches = !!m.review && m.review.changes.every((change, index) => {
+        const side = m.restoreAttempted ? 'before' : 'after';
         const row = change.device_id ? devices.find(r => r.id === change.device_id)
-          : entities.find(r => r.entity_id === (change.fields.entity_id?.after || change.entity_id));
-        return row && Object.entries(change.fields).every(([key, field]) => (row[key] ?? null) === field.after);
+          : entities.find(r => r.entity_id === (change.fields.entity_id?.[side] || change.entity_id));
+        return row && (!m.restoreAttempted || (change.device_id ? row.id === m.identities?.[index]
+          : !!m.identities?.[index] && this._sourceIdentity(row) === m.identities[index]))
+          && Object.entries(change.fields).every(([key, field]) => (row[key] ?? null) === field[side]);
       });
     }
-    m.stage = m.inspection?.state === 'applied' && m.registryMatches ? 'applied' : 'unknown';
+    m.stage = m.restoreAttempted ? (m.restoreAcknowledged && m.registryMatches ? 'restored' : 'unknown')
+      : m.inspection?.state === 'applied' && m.registryMatches ? 'applied' : 'unknown';
     m.busy = false; this.render();
   }
 
   _finishMigration() {
     const m = this._migration;
-    if (!m || m.busy || m.stage !== 'applied' || !this._migrationCurrent(m)) return;
+    if (!m || m.busy || !['applied', 'restored'].includes(m.stage) || m.restoreConsent || !this._migrationCurrent(m)) return;
     this._renameQueue = []; this._deviceRenameQueue = {}; this._impactResults = null;
     this._migration = null; this.render();
   }
 
-  _renderMigrationReview() {
+  _renderMigrationReview(inverse = false) {
     const m = this._migration;
-    if (!m || m.attempted) return '';
-    const title = this._migrationText('Dependency update plan', 'Plan aktualizacji zależności');
-    const body = m.stage === 'preparing' ? this._migrationText('Preparing server review…', 'Przygotowywanie przeglądu na serwerze…')
+    if (!m || (m.attempted && !inverse)) return '';
+    const review = inverse ? {
+      changes: m.review.changes.map(change => ({...change, entity_id: change.device_id ? change.entity_id : (change.fields.entity_id?.after || change.entity_id), fields: Object.fromEntries(
+        Object.entries(change.fields).map(([key, field]) => [key, {before: field.after, after: field.before}]))})),
+      dependencies: {...m.review.dependencies, files: m.review.dependencies.files.map(file => ({...file,
+        references: file.references.map(ref => ({...ref, before: ref.after, after: ref.before}))}))},
+    } : m.review;
+    const title = inverse ? this._migrationText('Restore this operation', 'Wycofaj tę operację') : this._migrationText('Dependency update plan', 'Plan aktualizacji zależności');
+    const body = inverse ? this._migrationText('Confirm only the inverse changes below for this current operation. Other operations are excluded.', 'Potwierdź wyłącznie poniższe zmiany odwrotne bieżącej operacji. Inne operacje są wykluczone.') : m.stage === 'preparing' ? this._migrationText('Preparing server review…', 'Przygotowywanie przeglądu na serwerze…')
       : m.stage === 'refused' ? this._migrationText('The selection was refused or could not be verified. Nothing was applied. Cancel to review your queue. No registry-only fallback was performed.', 'Zakres został odrzucony lub nie udało się go zweryfikować. Niczego nie zastosowano. Anuluj, aby wrócić do kolejki. Nie wykonano zastępczego zapisu samego rejestru.')
       : this._migrationText('Review every server change and the admitted dependency scope. Coverage of all dependency families is not confirmed.', 'Sprawdź wszystkie zmiany serwera i przyjęty zakres zależności. Pokrycie wszystkich rodzin zależności nie jest potwierdzone.');
     const fieldName = key => ({entity_id: 'Entity ID', name: this._migrationText('Entity name', 'Nazwa encji'), name_by_user: this._migrationText('Device name', 'Nazwa urządzenia')}[key] || key);
     const valueText = value => value === null ? this._migrationText('(default)', '(domyślna)') : value;
-    const rows = m.review?.changes.flatMap(change => Object.entries(change.fields).map(([key, field]) =>
+    const rows = review?.changes.flatMap(change => Object.entries(change.fields).map(([key, field]) =>
       `<tr><td>${_esc(change.entity_id || change.device_id)}</td><td>${_esc(fieldName(key))}</td><td>${_esc(valueText(field.before))}</td><td>${_esc(valueText(field.after))}</td></tr>`)).join('') || '';
-    const domains = m.review?.dependencies.domains.map(domain => ({template: 'Template', automation: this._migrationText('Automations', 'Automatyzacje'), script: this._migrationText('Scripts', 'Skrypty')}[domain] || domain)).join(', ');
+    const domains = review?.dependencies.domains.map(domain => ({template: 'Template', automation: this._migrationText('Automations', 'Automatyzacje'), script: this._migrationText('Scripts', 'Skrypty')}[domain] || domain)).join(', ');
     return `<section class="confirm-dialog" role="dialog" aria-labelledby="migrationReviewTitle" aria-busy="${m.busy}">
       <h2 id="migrationReviewTitle">${title}</h2><p role="status">${body}</p>
-      ${m.review ? `<h3>${this._migrationText('Server changes', 'Zmiany serwera')}</h3>
+      ${review ? `<h3>${this._migrationText('Server changes', 'Zmiany serwera')}</h3>
         <div style="max-width:100%;overflow:auto"><table class="queue-table"><thead><tr><th scope="col">${this._migrationText('Target', 'Cel')}</th><th scope="col">${this._migrationText('Field', 'Pole')}</th><th scope="col">${this._migrationText('Before', 'Przed')}</th><th scope="col">${this._migrationText('After', 'Po')}</th></tr></thead><tbody>${rows}</tbody></table></div>
         <h3>${this._migrationText('Dependencies', 'Zależności')}</h3><p>${_esc(domains || this._migrationText('None admitted', 'Brak przyjętych'))}</p>
-        <p>${this._migrationText('YAML files', 'Pliki YAML')}: ${m.review.dependencies.yaml_file_count}. ${this._migrationText('Template consumers', 'Odbiorcy Template')}: ${m.review.dependencies.template_consumer_count}.</p>
-        ${m.review.dependencies.files.map(file => `<details open><summary><code>${_esc(file.path)}</code> — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li><code>${_entityIdHtml(ref.before)}</code> → <code>${_entityIdHtml(ref.after)}</code> (${ref.occurrences} ${this._migrationText('references', 'odwołań')})</li>`).join('')}</ul></details>`).join('')}` : ''}
-      <button type="button" class="btn btn-outline" id="cancelRenameDialog">${_esc(this._t.cancel)}</button>
-      ${m.stage === 'review' ? `<button type="button" class="btn btn-danger" id="applyMigration">${this._migrationText('Apply this plan once', 'Zastosuj ten plan jeden raz')}</button>` : ''}
+        <p>${this._migrationText('YAML files', 'Pliki YAML')}: ${review.dependencies.yaml_file_count}. ${this._migrationText('Template consumers', 'Odbiorcy Template')}: ${review.dependencies.template_consumer_count}.</p>
+        ${review.dependencies.files.map(file => `<details open><summary><code>${_esc(file.path)}</code> — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li><code>${_entityIdHtml(ref.before)}</code> → <code>${_entityIdHtml(ref.after)}</code> (${ref.occurrences} ${this._migrationText('references', 'odwołań')})</li>`).join('')}</ul></details>`).join('')}` : ''}
+      <button type="button" class="btn btn-outline" id="${inverse ? 'cancelMigrationRestore' : 'cancelRenameDialog'}">${_esc(this._t.cancel)}</button>
+      ${inverse ? `<button type="button" class="btn btn-danger" id="restoreMigration">${this._migrationText('Restore this scope once', 'Wycofaj ten zakres jeden raz')}</button>` : ''}
+      ${!inverse && m.stage === 'review' ? `<button type="button" class="btn btn-danger" id="applyMigration">${this._migrationText('Apply this plan once', 'Zastosuj ten plan jeden raz')}</button>` : ''}
     </section>`;
   }
 
@@ -3482,19 +3547,20 @@ class HAEntityRenamer extends HTMLElement {
   _renderApplyResult() {
     const m = this._migration;
     if (!m?.attempted || m.owner !== this._hass?.user?.id || this._hass?.user?.is_admin !== true) return '';
+    if (m.restoreConsent) return this._renderMigrationReview(true);
     const observation = this._migrationText('unavailable', 'niedostępny');
     const progress = m.journal?.progress;
     return `<section class="apply-result" aria-labelledby="migrationResultTitle" aria-busy="${m.busy}">
       <h2 id="migrationResultTitle">${this._migrationText('Dependency operation', 'Operacja zależności')}</h2>
-      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan…', 'Wykonywanie zatwierdzonego planu…') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
-      <p>${this._migrationText('Full dependency coverage is unconfirmed. Public restore is unavailable.', 'Pełne pokrycie zależności jest niepotwierdzone. Publiczne przywracanie jest niedostępne.')}</p>
+      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan…', 'Wykonywanie zatwierdzonego planu…') : m.stage === 'restoring' ? this._migrationText('Restoring the confirmed scope…', 'Wycofywanie potwierdzonego zakresu…') : m.stage === 'restored' ? this._migrationText('Restored scope acknowledged; original registry fields independently verified.', 'Wycofanie zakresu potwierdzone; oryginalne pola rejestru niezależnie zweryfikowane.') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
+      <p>${this._migrationText('Full dependency coverage is unconfirmed. Restore covers only this current operation.', 'Pełne pokrycie zależności jest niepotwierdzone. Wycofanie obejmuje tylko bieżącą operację.')}</p>
       <code>${_esc(m.operation_id)}</code>
       <p>${this._migrationText('Apply observation', 'Obserwacja zapisu')}: ${_esc(m.applyState || 'UNKNOWN')}. ${this._migrationText('Inspection', 'Inspekcja')}: ${_esc(m.inspection?.state || observation)}.</p>
       <p>${this._migrationText('Registry read', 'Odczyt rejestru')}: ${m.registryRead ? this._migrationText('received', 'otrzymany') : observation}. ${this._migrationText('Requested fields match', 'Zgodność żądanych pól')}: ${m.registryMatches ? this._migrationText('yes', 'tak') : this._migrationText('unconfirmed', 'niepotwierdzona')}.</p>
       <div id="migrationJournal">${this._renderMigrationProgress(m)}</div>
       <button type="button" class="btn btn-outline" id="inspectMigration" ${m.busy || !this._renameAuthorityAvailable() ? 'disabled' : ''}>${this._migrationText('Check status and inspect', 'Sprawdź stan i inspekcję')}</button>
-      <button type="button" class="btn btn-outline" disabled>${this._migrationText('Restore unavailable', 'Przywracanie niedostępne')}</button>
-      ${m.stage === 'applied' ? `<button type="button" class="btn btn-primary" id="finishMigration">${this._migrationText('Finish and clear applied queue', 'Zakończ i wyczyść zastosowaną kolejkę')}</button>` : ''}
+      <button type="button" class="btn btn-outline" id="reviewMigrationRestore" ${this._canRestoreMigration(m) ? '' : 'disabled'}>${this._migrationText('Review restore scope', 'Sprawdź zakres wycofania')}</button>
+      ${['applied', 'restored'].includes(m.stage) ? `<button type="button" class="btn btn-primary" id="finishMigration">${m.stage === 'restored' ? this._migrationText('Finish and clear restored queue', 'Zakończ i wyczyść wycofaną kolejkę') : this._migrationText('Finish and clear applied queue', 'Zakończ i wyczyść zastosowaną kolejkę')}</button>` : ''}
     </section>`;
   }
 
@@ -3839,7 +3905,7 @@ class HAEntityRenamer extends HTMLElement {
     const analyzeImpact = root.getElementById('analyzeImpact');
     if (analyzeImpact) analyzeImpact.addEventListener('click', () => this._analyzeImpact());
 
-    for (const [id, method] of [['prepareMigration', '_prepareMigration'], ['applyMigration', '_applyMigration'], ['inspectMigration', '_inspectMigration'], ['finishMigration', '_finishMigration']]) {
+    for (const [id, method] of [['prepareMigration', '_prepareMigration'], ['applyMigration', '_applyMigration'], ['inspectMigration', '_inspectMigration'], ['finishMigration', '_finishMigration'], ['reviewMigrationRestore', '_reviewMigrationRestore'], ['cancelMigrationRestore', '_cancelMigrationRestore'], ['restoreMigration', '_restoreMigration']]) {
       root.getElementById(id)?.addEventListener('click', () => this[method]());
     }
     const cancelRenameDialog = root.getElementById('cancelRenameDialog');
@@ -3850,7 +3916,8 @@ class HAEntityRenamer extends HTMLElement {
     root.querySelector('.confirm-dialog')?.addEventListener('keydown', e => {
       if (e.key === 'Escape') {
         e.preventDefault(); e.stopPropagation();
-        this._cancelRenameConfirmation();
+        if (this._migration?.restoreConsent) this._cancelMigrationRestore();
+        else this._cancelRenameConfirmation();
       } else if (e.key === 'Tab') {
         e.preventDefault();
         const controls = Array.from(e.currentTarget.querySelectorAll('summary, button:not(:disabled)'));

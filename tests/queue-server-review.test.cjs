@@ -228,3 +228,128 @@ test('dependency files and every reference change are visible; missing file revi
   f.review.dependencies.files.pop();await f.card._prepareMigration();
   assert.equal(f.card._migration.stage,'refused');assert.equal(writes(f).length,0);
 });
+
+const restores = f => f.requests.filter(m=>m.type==='ha_entity_renamer/recovery/restore');
+async function appliedFixture(t, language='en') {
+  const f=fixture(t,language);await f.card._prepareMigration();await f.card._applyMigration();
+  assert.equal(f.card._migration.stage,'applied');return f;
+}
+const restoreAck = () => ({operation_id:'review_qa',fingerprint,state:'rolled_back'});
+function finishedInspection(f) {
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'refused',reason:'already_finished',eligible:false});
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'rolled_back'}]});
+}
+
+test('restore review reverses registry and dependency deltas with escaping, PL/EN and focused Cancel',async t=>{
+  const f=fixture(t,'pl');const literal='<img src=x onerror="alert(1)">';
+  f.review.changes[0].fields.name={before:null,after:literal};
+  f.review.dependencies.files[0].path=literal+'.yaml';
+  f.review.dependencies.files[0].references[0]={before:'sensor.<old>',after:'sensor.<new>',occurrences:3};
+  f.handlers['ha_entity_renamer/apply']=()=>{Object.assign(f.entries[0],{entity_id:'sensor.b',name:literal});return {operation_id:'review_qa',fingerprint,state:'applied'};};
+  await f.card._prepareMigration();await f.card._applyMigration();
+  const retained=JSON.stringify(f.card._migration.review);
+  f.card.shadowRoot.getElementById('reviewMigrationRestore').click();
+  let dialog=f.card.shadowRoot.querySelector('[role="dialog"]');
+  assert.match(dialog.textContent,/Wycofaj tę operację/);assert.equal(dialog.querySelector('img'),null);
+  assert.equal(f.card.shadowRoot.activeElement.id,'cancelMigrationRestore');
+  const rows=[...dialog.querySelectorAll('tbody tr')].map(r=>[...r.children].map(c=>c.textContent));
+  assert.deepEqual(rows.map(r=>r.slice(2)),[['sensor.b','sensor.a'],[literal,'(domyślna)']]);
+  assert.ok(dialog.textContent.includes(literal+'.yaml'));
+  assert.match(dialog.querySelector('details li').textContent,/sensor\.<new>.*sensor\.<old>.*3/);
+  assert.equal(dialog.querySelectorAll('details').length,3);assert.equal(restores(f).length,0);
+  dialog.dispatchEvent(new f.dom.window.KeyboardEvent('keydown',{key:'Tab',bubbles:true}));
+  assert.equal(f.card.shadowRoot.activeElement.id,'restoreMigration');
+  f.card.hass={...f.hass,language:'en'};dialog=f.card.shadowRoot.querySelector('[role="dialog"]');
+  assert.match(dialog.textContent,/Restore this operation/);assert.equal(dialog.querySelector('img'),null);
+  assert.equal(JSON.stringify(f.card._migration.review),retained);
+  dialog.dispatchEvent(new f.dom.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+  assert.equal(f.card._migration.restoreConsent,false);assert.equal(restores(f).length,0);
+  f.card._reviewMigrationRestore();f.card.shadowRoot.getElementById('cancelMigrationRestore').click();
+  assert.equal(restores(f).length,0);assert.equal(f.card._renameQueue.length,1);
+});
+
+test('restore requires exact applied eligible inspection and current role/session',async t=>{
+  const f=await appliedFixture(t);const m=f.card._migration;
+  for(const override of [{operation_id:'other'},{fingerprint:'b'.repeat(64)},{eligible:false},{eligible:1},{state:'recoverable_prefix'}]) {
+    const previous=m.inspection;m.inspection={...previous,...override};
+    f.card._reviewMigrationRestore();await f.card._restoreMigration();assert.equal(m.restoreConsent,false);m.inspection=previous;
+  }
+  m.stage='unknown';f.card._reviewMigrationRestore();assert.equal(m.restoreConsent,false);m.stage='applied';
+  f.card.hass={...f.hass,user:{id:'admin-a',is_admin:false}};
+  await f.card._restoreMigration();assert.equal(restores(f).length,0);
+});
+
+test('restore sends identity once, consumes consent before IO and requires a separate fresh original read',async t=>{
+  const f=await appliedFixture(t);const pending=gate(), read=gate();
+  f.handlers['ha_entity_renamer/recovery/restore']=()=>pending.promise;
+  const statusBefore=f.requests.filter(m=>m.type==='ha_entity_renamer/status').length;
+  f.card._reviewMigrationRestore();const first=f.card._restoreMigration();
+  assert.ok(f.requests.filter(m=>m.type==='ha_entity_renamer/status').length>statusBefore);
+  assert.equal(f.card._migration.restoreConsent,false);assert.equal(f.card._migration.stage,'restoring');
+  await f.card._restoreMigration();await f.card._applyMigration();await f.card._executeRenames(true);
+  f.card._clearQueue();assert.equal(f.card._renameQueue.length,1);
+  assert.equal(restores(f).length,1);assert.deepEqual(JSON.parse(JSON.stringify(restores(f)[0])),{type:'ha_entity_renamer/recovery/restore',operation_id:'review_qa',fingerprint});
+  f.entries[0].entity_id='sensor.a';finishedInspection(f);
+  f.handlers['config/entity_registry/list']=()=>read.promise;
+  pending.resolve(restoreAck());await tick();assert.notEqual(f.card._migration.stage,'restored');
+  read.resolve(f.entries.map(r=>({...r})));await first;
+  assert.equal(f.card._migration.stage,'restored');assert.match(f.card.shadowRoot.textContent,/original registry fields independently verified/);
+  f.handlers['config/entity_registry/list']=()=>f.entries.map(r=>({...r}));
+  await f.card._inspectMigration();assert.equal(f.card._migration.stage,'restored');
+  assert.equal(restores(f).length,1);assert.equal(writes(f).length,1);
+  f.card._finishMigration();assert.equal(f.card._migration,null);assert.equal(f.card._renameQueue.length,0);
+});
+
+for(const failure of ['lost ACK','foreign ACK','refused','foreign registry','wrong original field','missing registry']) test('restore stays unknown after '+failure,async t=>{
+  const f=await appliedFixture(t);
+  f.handlers['ha_entity_renamer/recovery/restore']=()=>{
+    f.entries[0].entity_id='sensor.a';finishedInspection(f);
+    if(failure==='lost ACK') throw new Error('lost');
+    if(failure==='foreign ACK') return {...restoreAck(),operation_id:'foreign'};
+    if(failure==='refused') return {...restoreAck(),state:'refused'};
+    if(failure==='foreign registry') Object.assign(f.entries[0],{id:'replacement',unique_id:'foreign'});
+    if(failure==='wrong original field') f.entries[0].entity_id='sensor.wrong';
+    if(failure==='missing registry') f.handlers['config/entity_registry/list']=()=>Promise.reject(new Error('offline'));
+    return restoreAck();
+  };
+  f.card._reviewMigrationRestore();await f.card._restoreMigration();assert.equal(f.card._migration.stage,'unknown');
+  await f.card._inspectMigration();f.card._reviewMigrationRestore();await f.card._restoreMigration();f.card._finishMigration();
+  assert.equal(f.card._migration.stage,'unknown');assert.equal(f.card._renameQueue.length,1);
+  assert.equal(restores(f).length,1);assert.equal(writes(f).length,1);
+});
+
+for(const fence of ['role','connection','disconnect']) test('restore revocation ignores late ACK and never revives restore consent: '+fence,async t=>{
+  const f=await appliedFixture(t);const pending=gate();
+  f.handlers['ha_entity_renamer/recovery/restore']=()=>pending.promise;
+  f.card._reviewMigrationRestore();const first=f.card._restoreMigration();
+  if(fence==='role') f.card.hass={...f.hass,user:{id:'admin-a',is_admin:false}};
+  if(fence==='connection') {const connection=new f.dom.window.EventTarget();connection.connected=true;f.card.hass={...f.hass,connection};}
+  if(fence==='disconnect') {f.connection.connected=false;f.connection.dispatchEvent(new f.dom.window.Event('disconnected'));}
+  f.entries[0].entity_id='sensor.a';finishedInspection(f);pending.resolve(restoreAck());await first;
+  if(fence==='role') assert.equal(f.card._migration,null);
+  else {assert.equal(f.card._migration.stage,'unknown');assert.equal(f.card._migration.restoreAcknowledged,undefined);}
+  f.connection.connected=true;f.card.hass={...f.hass};f.connection.dispatchEvent(new f.dom.window.Event('ready'));await tick();
+  await f.card._inspectMigration();f.card._reviewMigrationRestore();await f.card._restoreMigration();
+  if(fence==='role') assert.equal(f.card._migration,null);
+  else assert.equal(f.card._migration.stage,'unknown');assert.equal(restores(f).length,1);
+});
+
+test('revoked confirmation and previously applied operation cannot authorize restore after read rebind',async t=>{
+  const f=await appliedFixture(t);f.card._reviewMigrationRestore();
+  f.card.hass={...f.hass,user:{id:'admin-a',is_admin:false}};
+  f.card.hass={...f.hass};await f.card._inspectMigration();
+  f.card._reviewMigrationRestore();await f.card._restoreMigration();
+  assert.equal(restores(f).length,0);assert.equal(f.card._migration,null);
+});
+
+
+test('restored read verifies original entity name and device name in addition to ID',async t=>{
+  const f=fixture(t);f.review.changes[0].fields.name={before:null,after:'Applied entity'};
+  f.review.changes.push({device_id:'dev',fields:{name_by_user:{before:null,after:'Applied device'}}});
+  f.handlers['ha_entity_renamer/apply']=()=>{Object.assign(f.entries[0],{entity_id:'sensor.b',name:'Applied entity'});f.devices[0].name_by_user='Applied device';return {operation_id:'review_qa',fingerprint,state:'applied'};};
+  await f.card._prepareMigration();await f.card._applyMigration();
+  f.handlers['ha_entity_renamer/recovery/restore']=()=>{Object.assign(f.entries[0],{entity_id:'sensor.a',name:null});finishedInspection(f);return restoreAck();};
+  f.card._reviewMigrationRestore();await f.card._restoreMigration();assert.equal(f.card._migration.stage,'unknown');
+  f.devices[0].name_by_user=null;f.entries[0].name='Foreign edit';await f.card._inspectMigration();assert.equal(f.card._migration.stage,'unknown');
+  f.entries[0].name=null;await f.card._inspectMigration();assert.equal(f.card._migration.stage,'restored');assert.equal(restores(f).length,1);
+});

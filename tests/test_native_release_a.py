@@ -1,4 +1,4 @@
-"""Release A registered restore refusal using actual HA auth and backend.
+"""Registered restore refusal using actual HA auth and backend.
 
 Owner runs each named case in a fresh FIFO native_unit_probe process. Monitoring
 observes real calls without replacing handlers, Runtime, Store or native IO.
@@ -60,16 +60,20 @@ class NativeReleaseATests(unittest.IsolatedAsyncioTestCase):
             if observed_task is None or task is not observed_task:
                 return
             filename = code.co_filename
-            if ((filename.startswith(component_root) and code is not restore_code)
-                    or filename == storage_source
-                    or filename.endswith(('/homeassistant/helpers/entity_registry.py',
-                                           '/homeassistant/helpers/device_registry.py',
-                                           '/homeassistant/helpers/area_registry.py'))):
+            native = filename == storage_source or filename.endswith((
+                '/homeassistant/helpers/entity_registry.py',
+                '/homeassistant/helpers/device_registry.py',
+                '/homeassistant/helpers/area_registry.py'))
+            component = filename.startswith(component_root) and code is not restore_code
+            writes = code.co_name in ('async_save', 'async_delay_save', 'async_remove',
+                '_async_handle_write_data', 'async_update_entity', 'async_remove_entity',
+                'async_update_device', 'async_remove_device', 'mutate', 'rollback')
+            if (not admin and (native or component)) or (admin and (native or component) and writes):
                 forbidden_calls.append((filename, code.co_name))
 
         for ident in range(6):
             try:
-                sys.monitoring.use_tool_id(ident, 'Release A registered restore refusal')
+                sys.monitoring.use_tool_id(ident, 'registered restore refusal')
             except ValueError:
                 continue
             tool = ident
@@ -86,21 +90,51 @@ class NativeReleaseATests(unittest.IsolatedAsyncioTestCase):
             sys.monitoring.set_events(tool, 0)
             sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
             sys.monitoring.free_tool_id(tool)
-        self.assertEqual((response['id'], response['success']), (1, False))
-        self.assertEqual(response['error']['code'],
-                         'feature_unavailable' if admin else 'unauthorized')
-        self.assertNotIn('result', response)
+        self.assertEqual((response['id'], response['success']), (1, admin))
+        if admin:
+            self.assertEqual((response['result']['state'], response['result']['reason']),
+                             ('refused', 'operation_mismatch'))
+        else:
+            self.assertEqual(response['error']['code'], 'unauthorized')
+            self.assertNotIn('result', response)
         self.assertEqual(handler_calls, ['ws_recovery_restore'] if admin else [])
-        self.assertEqual(forbidden_calls, [], 'restore entered Runtime, Store or native IO')
+        self.assertEqual(forbidden_calls, [], 'restore performed forbidden native work')
         self.assertIs(hass.data[backend.DATA_RUNTIME], runtime)
         self.assertFalse(runtime.operation_lock.locked())
         self.assertEqual(await runtime.journal.active(), original_operations)
 
-    async def test_registered_restore_admin_refuses_before_runtime_store_native_io(self):
+    async def test_registered_restore_unknown_operation_refuses_without_native_writes(self):
         await self._restore_refusal(admin=True)
 
     async def test_registered_restore_household_is_unauthorized(self):
         await self._restore_refusal(admin=False)
+
+    async def test_registered_restore_rechecks_revoked_role_after_runtime_wait(self):
+        import asyncio
+        from homeassistant.auth.const import GROUP_ID_USER
+        backend = self._loaded_backend()
+        runtime = self.f.hass.data[backend.DATA_RUNTIME]
+        connection, user, output = await self._connection(admin=True)
+        before = await runtime.journal.all()
+        await runtime.operation_lock.acquire()
+        try:
+            connection.async_handle({'id': 1, 'type': 'ha_entity_renamer/recovery/restore',
+                'operation_id': 'unknown-operation', 'fingerprint': '0' * 64})
+            for _ in range(1000):
+                if runtime.operation_lock._waiters or output.done():
+                    break
+                await asyncio.sleep(0.001)
+            self.assertTrue(runtime.operation_lock._waiters, 'actual restore must reach the lock')
+            self.assertFalse(output.done())
+            await self.f.hass.auth.async_update_user(user, group_ids=[GROUP_ID_USER])
+            self.assertFalse(user.is_admin)
+        finally:
+            runtime.operation_lock.release()
+        response = await asyncio.wait_for(output, 15)
+        self.assertFalse(response['success'], response)
+        self.assertEqual(response['error']['code'], 'unauthorized')
+        self.assertEqual(await runtime.journal.all(), before)
+        self.assertFalse(runtime.operation_lock.locked())
 
 
 def load_tests(loader, tests, pattern):

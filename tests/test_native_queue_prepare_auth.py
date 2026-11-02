@@ -335,7 +335,7 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
 
     async def _request(self, ws, ident, action, **payload):
         await ws.send_json({'id': ident, 'type': 'ha_entity_renamer/' + action, **payload})
-        result = await ws.receive_json(timeout=180)
+        result = await ws.receive_json(timeout=600 if action == 'recovery/restore' else 180)
         self.assertEqual(result['id'], ident)
         return result
 
@@ -397,8 +397,11 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row['progress'], {'total_steps': len(record.plan.steps),
                 'verified_steps': len(record.plan.steps), 'undone_steps': 0})
             self.assertFalse(row['eligible'])
-            restore = await self._request(ws, 8, 'recovery/restore', **binding)
-            self.assertEqual(restore['error']['code'], 'feature_unavailable')
+            restore = await self._request(ws, 8, 'recovery/restore',
+                operation_id=binding['operation_id'], fingerprint='0' * 64)
+            self.assertTrue(restore['success'], restore)
+            self.assertEqual((restore['result']['state'], restore['result']['reason']),
+                             ('refused', 'operation_mismatch'))
             self.assertEqual({name: (self.f.root / name).read_bytes() for name in protected}, protected)
             self.assertEqual(await runtime.journal.load(binding['operation_id']), record)
             serialized = json.dumps((review, applied, status))
@@ -440,7 +443,7 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
     async def test_registered_mixed_apply_keeps_actual_consumers_and_history(self):
         await self._registered_mixed_apply()
 
-    async def test_registered_mixed_apply_with_empty_scene_and_fresh_inverse(self):
+    async def test_registered_mixed_apply_with_empty_scene_and_public_inverse(self):
         await self._registered_mixed_apply(with_scene=True)
 
     async def _registered_mixed_apply(self, *, with_scene=False):
@@ -522,12 +525,25 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(status['result']['family_complete'])
 
         if with_scene:
-            # Fresh controller/session after the request and its source fence closed.
-            async def refresh():
-                return None
-            restored = await runtime.recovery_restore(hass, binding['operation_id'],
-                binding['fingerprint'], guard=lambda: None, refresh=refresh)
-            self.assertEqual(restored['state'], 'rolled_back', restored)
+            # New authenticated connection and fresh native inverse after forward
+            # source fences closed; neither client Plan nor private Runtime call.
+            async with self._transport(admin=False) as (household, _):
+                denied = await self._request(household, 1, 'recovery/restore', **binding)
+                self.assertEqual(denied['error']['code'], 'unauthorized')
+            async with self._transport() as (reverse_ws, _):
+                restored = await self._request(reverse_ws, 1, 'recovery/restore', **binding)
+                self.assertTrue(restored['success'], restored)
+                self.assertEqual(restored['result']['state'], 'rolled_back', restored)
+                self.assertEqual(restored['result']['operation_id'], binding['operation_id'])
+                self.assertEqual(restored['result']['fingerprint'], binding['fingerprint'])
+                protected = {p: (self.f.root / p).read_bytes() for p in original}
+                journal = await runtime.journal.load(binding['operation_id'])
+                duplicate = await self._request(reverse_ws, 2, 'recovery/restore', **binding)
+                self.assertTrue(duplicate['success'], duplicate)
+                self.assertEqual((duplicate['result']['state'], duplicate['result']['reason']),
+                                 ('refused', 'already_finished'))
+                self.assertEqual(await runtime.journal.load(binding['operation_id']), journal)
+                self.assertEqual({p: (self.f.root / p).read_bytes() for p in original}, protected)
             for path, raw in original.items():
                 self.assertEqual((self.f.root / path).read_bytes(), raw)
             for old, new in mapping.items():
