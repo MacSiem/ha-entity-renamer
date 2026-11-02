@@ -22,6 +22,7 @@ import re
 import stat
 from typing import TYPE_CHECKING
 
+from .installed_cost_trace import trace_call
 from .native_registry import NativeRegistryMutation, PreparedRegistryChange
 from .native_registry_transition import (
     NativeRegistryEffectAudit, prepared_registry_digest,
@@ -526,6 +527,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         self._cache = (self._cache_key(), result)
         return result
 
+    @trace_call("reconstruct")
     def _reconstruct(self):
         if self.store.read(self.root_id) != {'digest': self.root_digest, 'payload': self.root}:
             _fail('root_binding_mismatch')

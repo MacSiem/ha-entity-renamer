@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import asyncio
 
 from .const import DATA_RUNTIME, DATA_WEBSOCKETS, DOMAIN
+from .installed_cost_trace import trace_request, trace_owned
 
 
 def CONFIG_SCHEMA(config):
@@ -96,6 +97,7 @@ class Runtime:
     async def recovery_restore(self, hass, operation_id, fingerprint, *, guard, refresh):
         return await self._recovery(hass, 'restore', operation_id, fingerprint, guard=guard, refresh=refresh)
 
+    @trace_request("prepare")
     async def native_yaml_prepare(self, hass, mapping, *, actor_id, guard, refresh, entity_names=None, device_names=None):
         """Private ordinary mapping -> server-owned immutable retained review.
 
@@ -174,6 +176,7 @@ class Runtime:
             finally:
                 session.close()
 
+    @trace_request("apply")
     async def native_yaml_apply(self, hass, operation_id, fingerprint, *, actor_id, guard, refresh):
         """Consume this actor's retained plan under fresh authorization and fences.
 
@@ -198,6 +201,7 @@ class Runtime:
                     or review.expires_at <= hass.loop.time()):
                 raise Refused('review_unavailable_or_mismatched')
             self.reviews.pop(operation_id)
+            @trace_owned
             async def operation():
                 factory = _yaml_factory_for_plan(self.preparations, review.plan)
                 session = await factory.bind_prepared(hass, operation_id,

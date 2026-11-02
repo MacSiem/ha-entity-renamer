@@ -10,6 +10,7 @@ import hashlib
 import os
 import stat
 
+from .installed_cost_trace import trace_call
 from .native_input_baseline import MAX_FILE_BYTES, _receipt, _receipt_bytes
 from .yaml_plan import Limits, _Reader, _relative
 from .yaml_validation import assert_validation_current
@@ -226,6 +227,7 @@ class AcceptedInputState:
             directories.append((directory, tuple(revised), names))
         return tuple(directories)
 
+    @trace_call("source_fence")
     def assert_current(self, original):
         """Pure whole graph checker through nofollow anchored descriptors."""
         self._bound(original)

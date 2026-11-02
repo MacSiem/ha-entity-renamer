@@ -22,6 +22,7 @@ from pathlib import Path
 import stat
 from threading import Event, Lock
 
+from .installed_cost_trace import current_trace, run_with_trace
 from .yaml_plan import Limits, _Reader, _relative
 from .yaml_validation import ValidationReceipt, assert_validation_current
 
@@ -646,6 +647,7 @@ async def _drained(executor, function):
     cancel the Future while its already-started executor thread keeps running.
     The gate also makes a late, not-yet-started worker inert before cleanup.
     """
+    trace = current_trace()
     finished = Event()
     mutex = Lock()
     started = False
@@ -661,7 +663,7 @@ async def _drained(executor, function):
                 return None
             started = True
         try:
-            return function()
+            return run_with_trace(trace, function)
         finally:
             finished.set()
 

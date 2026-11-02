@@ -18,6 +18,7 @@ import sys
 import tempfile
 from typing import TYPE_CHECKING
 
+from .installed_cost_trace import trace_call
 from .yaml_plan import Limits, _Reader, _relative
 
 if TYPE_CHECKING:
@@ -296,6 +297,7 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native
         raise YAMLValidationError('validation_staging_failed') from None
 
 
+@trace_call("validation_fence")
 def assert_validation_current(receipt):
     """Recheck ALL validator inputs immediately before first mutation, under locks."""
     reader = _Reader(receipt.config_root, Limits(max_file_bytes=_MAX_BYTES))
