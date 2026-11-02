@@ -7,6 +7,7 @@ No profile, receipt, root, callback or preparation is supplied by a request.
 from __future__ import annotations
 import asyncio
 import json
+import logging
 from pathlib import Path
 import uuid
 
@@ -259,6 +260,15 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                                                      self.composition, guard=self._scope)
 
     async def _common(self, rollback, *, initial=False):
+        try:
+            return await self._check_common(rollback, initial=initial)
+        except Exception as error:
+            from .yaml_validation_worker import _checker_diagnostic
+            logging.getLogger(__name__).warning('Migration state verification unavailable: %s',
+                                               _checker_diagnostic(error))
+            raise
+
+    async def _check_common(self, rollback, *, initial=False):
         from .native_registry import NativeRegistryBridge, NativeRegistryIO
         from .native_template_state_binding import async_observe_accepted_state_bindings
         wanted = Position.BEFORE if rollback or initial else Position.AFTER
@@ -289,6 +299,15 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         return True
 
     async def _full(self, rollback):
+        try:
+            return await self._check_full(rollback)
+        except Exception as error:
+            from .yaml_validation_worker import _checker_diagnostic
+            logging.getLogger(__name__).warning('Migration final verification unavailable: %s',
+                                               _checker_diagnostic(error))
+            raise
+
+    async def _check_full(self, rollback):
         from .native_candidate_validation import async_revalidate_accepted_template_state_candidate
         await self._common(rollback)
         async with self.locks.hold(self._scope):
