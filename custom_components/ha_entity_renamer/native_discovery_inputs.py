@@ -9,6 +9,7 @@ No manager factory, load, save, flush, migration or native mutation is called.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 import os
 
@@ -209,7 +210,10 @@ Cancellation drains executor work before any held descriptor can be released.
         raise
     except PermissionError:
         raise PermissionError('native_discovery_inputs_permission_denied') from None
-    except Exception:
+    except Exception as error:
+        from .yaml_validation_worker import _checker_diagnostic
+        logging.getLogger(__name__).warning('Native discovery observation unavailable: %s',
+                                           _checker_diagnostic(error))
         _reject()
     finally:
         if pinned is not None:
