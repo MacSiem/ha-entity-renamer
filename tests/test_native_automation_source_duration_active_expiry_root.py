@@ -325,7 +325,11 @@ class NativeAutomationSourceDurationActiveExpiryRootTests(unittest.IsolatedAsync
             # Only the slow route matches 17->29; both see the same owned pair.
             self.assertEqual(len(pairs), 2)
             self.assertCountEqual(pair_entities, ['mixed_source', 'duration_slow'])
-            self.assertIs(pairs[0], pairs[1])
+            # Each route asks the witness to classify the event independently;
+            # the immutable wrapper is fresh, its actual HA objects are shared.
+            self.assertEqual(pairs[0], pairs[1])
+            for field in ('event', 'prior_state', 'new_state'):
+                self.assertIs(getattr(pairs[0], field), getattr(pairs[1], field))
             self.assertEqual((pairs[0].prior_state.state, pairs[0].new_state.state), ('17', '29'))
             self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
             self.assertIsNone(hass.states.get(old))

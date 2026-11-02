@@ -3,6 +3,9 @@
 One case per fresh native probe. No network-login or full UI claim.
 """
 import unittest
+import asyncio
+from contextlib import asynccontextmanager
+import json
 
 import test_native_backend_auth as auth
 import test_native_backend_lifecycle as backend_fixture
@@ -217,3 +220,206 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
         self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
         self.assertIsNone(self.f.entity.async_get(new))
+
+
+    @asynccontextmanager
+    async def _transport(self, *, admin=True):
+        """Actual HA WebSocket dispatch/auth, with reusable response IDs."""
+        from aiohttp import ClientSession
+        connection, user, unused = await self._connection(admin=admin)
+        self.assertIs(connection.handlers['ha_entity_renamer/apply'][0],
+                      self.module('websocket_api').ws_apply)
+        token = await self.f.hass.auth.async_create_refresh_token(user,
+            client_id='https://renamer.invalid/retained-plan-transport-qa')
+        self.addCleanup(self.f.hass.auth.async_remove_refresh_token, token)
+        access = self.f.hass.auth.async_create_access_token(token, remote_ip='127.0.0.1')
+        async with ClientSession() as client:
+            async with client.ws_connect('http://127.0.0.1:' + str(self.f.hass.http.server_port)
+                                         + '/api/websocket') as ws:
+                self.assertEqual((await ws.receive_json(timeout=10))['type'], 'auth_required')
+                await ws.send_json({'type': 'auth', 'access_token': access})
+                self.assertEqual((await ws.receive_json(timeout=10))['type'], 'auth_ok')
+                yield ws, user
+
+    async def _request(self, ws, ident, action, **payload):
+        await ws.send_json({'id': ident, 'type': 'ha_entity_renamer/' + action, **payload})
+        result = await ws.receive_json(timeout=180)
+        self.assertEqual(result['id'], ident)
+        return result
+
+    async def test_registered_apply_actor_schema_and_duplicate_preserve_native_data(self):
+        runtime, old, new, uuids, original, payload = await self.selection()
+        async with self._transport() as (ws, user):
+            response = await self._request(ws, 1, 'prepare', **payload)
+            self.assertTrue(response['success'], response)
+            review = response['result']
+            binding = {key: review[key] for key in ('operation_id', 'fingerprint')}
+            self.assertEqual(runtime.reviews[binding['operation_id']].actor_id, user.id)
+            self.assertEqual(review['dependencies']['domains'], ['template'])
+            self.assertEqual(review['dependencies']['yaml_file_count'], 1)
+            self.assertGreater(review['dependencies']['template_consumer_count'], 0)
+            for ident, extra in enumerate(({'actor_id': user.id}, {'roots': []}, {'plan': {}}), 2):
+                denied = await self._request(ws, ident, 'apply', **binding, **extra)
+                self.assertEqual(denied['error']['code'], 'invalid_format')
+            async with self._transport() as (other, other_user):
+                self.assertNotEqual(other_user.id, user.id)
+                denied = await self._request(other, 1, 'apply', **binding)
+                self.assertEqual(denied['error']['code'], 'apply_refused')
+                self.assertNotIn('result', denied)
+            async with self._transport(admin=False) as (household, _):
+                denied = await self._request(household, 1, 'apply', **binding)
+                self.assertEqual(denied['error']['code'], 'unauthorized')
+            self.assertIn(binding['operation_id'], runtime.reviews)
+            self.assertIsNone(await runtime.journal.load(binding['operation_id']))
+            self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+            applied = await self._request(ws, 5, 'apply', **binding)
+            self.assertTrue(applied['success'], applied)
+            self.assertEqual(applied['result']['state'], 'applied')
+            self.assertFalse(applied['result']['migration_ready'])
+            self.assertFalse(applied['result']['family_complete'])
+            self.assertNotIn(binding['operation_id'], runtime.reviews)
+            record = await runtime.journal.load(binding['operation_id'])
+            self.assertEqual(record.phases, ('verified',) * len(record.plan.steps))
+            self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+            self.assertIsNone(self.f.entity.async_get(old))
+            await self.stimulus(7)
+            protected = {name: (self.f.root / name).read_bytes() for name in (
+                'template.yaml', '.storage/ha_entity_renamer.migrations',
+                '.storage/ha_entity_renamer.prepared', '.storage/ha_entity_renamer.registry_receipts')}
+            duplicate = await self._request(ws, 6, 'apply', **binding)
+            self.assertEqual(duplicate['error']['code'], 'apply_refused')
+            status = await self._request(ws, 7, 'status')
+            self.assertTrue(status['success'], status)
+            row, = [row for row in status['result']['operations']
+                    if row['operation_id'] == binding['operation_id']]
+            self.assertEqual(row['phases'], [{'adapter': step.adapter, 'phase': phase}
+                for step, phase in zip(record.plan.steps, record.phases, strict=True)])
+            self.assertEqual(row['progress'], {'total_steps': len(record.plan.steps),
+                'verified_steps': len(record.plan.steps), 'undone_steps': 0})
+            self.assertFalse(row['eligible'])
+            restore = await self._request(ws, 8, 'recovery/restore', **binding)
+            self.assertEqual(restore['error']['code'], 'feature_unavailable')
+            self.assertEqual({name: (self.f.root / name).read_bytes() for name in protected}, protected)
+            self.assertEqual(await runtime.journal.load(binding['operation_id']), record)
+            serialized = json.dumps((review, applied, status))
+            for private in ('receipt_json', 'prepared_ref', 'native_inputs', 'configuration.yaml',
+                            '{{', 'access_token'):
+                self.assertNotIn(private, serialized)
+
+    async def test_registered_apply_revocation_during_real_runtime_lock_wait(self):
+        from homeassistant.auth.const import GROUP_ID_USER
+        runtime, old, new, uuids, original, payload = await self.selection()
+        async with self._transport() as (ws, user):
+            response = await self._request(ws, 1, 'prepare', **payload)
+            self.assertTrue(response['success'], response)
+            binding = {key: response['result'][key] for key in ('operation_id', 'fingerprint')}
+            await runtime.operation_lock.acquire()
+            try:
+                await ws.send_json({'id': 2, 'type': 'ha_entity_renamer/apply', **binding})
+                # Wait for actual native Lock contention, never replace apply/auth.
+                for _ in range(1000):
+                    if runtime.operation_lock._waiters:
+                        break
+                    await asyncio.sleep(0.001)
+                self.assertTrue(runtime.operation_lock._waiters)
+                await self.f.hass.auth.async_update_user(user, group_ids=[GROUP_ID_USER])
+                self.assertFalse(user.is_admin)
+                self.assertIs(await self.f.hass.auth.async_get_user(user.id), user)
+            finally:
+                runtime.operation_lock.release()
+            denied = await ws.receive_json(timeout=30)
+            self.assertEqual(denied['id'], 2)
+            self.assertEqual(denied['error']['code'], 'unauthorized')
+            self.assertNotIn('result', denied)
+            self.assertIn(binding['operation_id'], runtime.reviews)
+            self.assertIsNone(await runtime.journal.load(binding['operation_id']))
+            self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+            self.assertIsNone(self.f.entity.async_get(new))
+
+    async def test_registered_mixed_apply_keeps_actual_consumers_and_history(self):
+        import test_native_template_mixed_yaml_server as mixed
+        from homeassistant.core import Context
+        runtime, mapping, uuids, dependents, original = await (
+            mixed.NativeTemplateMixedYAMLServerTests.data(self))
+        hass = self.f.hass
+        history = self.module('history_guard').NativeHistoryGuard(
+            self.module('recorder_guard').NativeRecorderGuard(hass))
+        source_history = await history.capture(mapping)
+        consumers = {entity_id: entity_id for entity_id, _ in self.identities.values()}
+        consumers.update({entity_id: entity_id for _, _, entity_id, _ in dependents})
+        consumer_history = await history.capture(consumers)
+        self.assertTrue(consumer_history['state_ids'])
+        events = {'automation': [], 'script': []}
+        for domain in events:
+            def observed(event, domain=domain):
+                events[domain].append(str(event.data['value']))
+            self.addCleanup(hass.bus.async_listen('mixed_yaml_' + domain + '_result', observed))
+        async with self._transport() as (ws, user):
+            response = await self._request(ws, 1, 'prepare', entities=[
+                {'entity_id': old, 'new_entity_id': new} for old, new in mapping.items()])
+            self.assertTrue(response['success'], response)
+            review = response['result']
+            self.assertEqual(review['dependencies']['domains'], ['automation', 'script', 'template'])
+            self.assertEqual(review['dependencies']['yaml_file_count'], 3)
+            binding = {key: review[key] for key in ('operation_id', 'fingerprint')}
+            plan = runtime.reviews[binding['operation_id']].plan
+            original_receipt = runtime.preparations.resolve_composition(plan.native_inputs)[0].receipt_json
+            result = await self._request(ws, 2, 'apply', **binding)
+            self.assertTrue(result['success'], result)
+            self.assertEqual(result['result']['state'], 'applied')
+            self.assertEqual(events, {'automation': [], 'script': []})
+            record = await runtime.journal.load(binding['operation_id'])
+            self.assertEqual(record.plan, plan)
+            self.assertEqual(runtime.preparations.resolve_composition(plan.native_inputs)[0].receipt_json,
+                             original_receipt)
+            for old, new in mapping.items():
+                self.assertIsNone(self.f.entity.async_get(old))
+                self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+                for name in ('template.yaml', 'mixed_automations.yaml', 'mixed_scripts.yaml'):
+                    self.assertNotIn(old.encode(), (self.f.root / name).read_bytes())
+                    self.assertIn(new.encode(), (self.f.root / name).read_bytes())
+            self.assertEqual(tuple(sorted((row.platform, row.unique_id, row.entity_id, row.id)
+                for row in self.f.entity.entities.values()
+                if row.platform in ('automation', 'script'))), dependents)
+            for value in (11, 13):
+                await self.stimulus(value)
+                await hass.services.async_call('script', 'mixed_source', {}, blocking=True, context=Context())
+                await hass.async_block_till_done()
+                self.assertEqual(events['automation'][-1], str(value))
+                self.assertEqual(events['script'][-1], str(value))
+            self.assertTrue(await history.verify(source_history))
+            self.assertTrue(await history.verify(consumer_history))
+            status = await self._request(ws, 3, 'status')
+            self.assertTrue(status['success'], status)
+            row, = [row for row in status['result']['operations'] if row['operation_id'] == binding['operation_id']]
+            self.assertEqual(row['progress']['verified_steps'], len(record.plan.steps))
+            self.assertFalse(status['result']['migration_ready'])
+            self.assertFalse(status['result']['family_complete'])
+
+
+    async def test_registered_stale_review_consumed_without_replacing_original_or_replay(self):
+        runtime, old, new, uuids, original, payload = await self.selection()
+        async with self._transport() as (ws, user):
+            response = await self._request(ws, 1, 'prepare', **payload)
+            self.assertTrue(response['success'], response)
+            binding = {key: response['result'][key] for key in ('operation_id', 'fingerprint')}
+            plan = runtime.reviews[binding['operation_id']].plan
+            receipt = runtime.preparations.resolve_composition(plan.native_inputs)[0].receipt_json
+            edited = original + b'\n# synthetic foreign edit after review\n'
+            await self.f.hass.async_add_executor_job((self.f.root / 'template.yaml').write_bytes, edited)
+            denied = await self._request(ws, 2, 'apply', **binding)
+            self.assertFalse(denied['success'])
+            self.assertIn(denied['error']['code'], ('apply_refused', 'apply_unavailable'))
+            self.assertNotIn('result', denied)
+            self.assertNotIn(binding['operation_id'], runtime.reviews)
+            self.assertIsNone(await runtime.journal.load(binding['operation_id']))
+            duplicate = await self._request(ws, 3, 'apply', **binding)
+            self.assertEqual(duplicate['error']['code'], 'apply_refused')
+            self.assertEqual((self.f.root / 'template.yaml').read_bytes(), edited)
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+            self.assertIsNone(self.f.entity.async_get(new))
+            self.assertEqual(runtime.preparations.resolve_composition(plan.native_inputs)[0].receipt_json, receipt)
+            self.assertNotIn('template.yaml', json.dumps(denied))
+            self.assertNotIn(str(self.f.root), json.dumps(denied))

@@ -274,6 +274,18 @@ class RecoveryController:
                 'fingerprint': record.plan.fingerprint, 'status': record.status,
                 'direction': record.direction, 'recovery_required': need,
                 'reason': reason, 'eligible': False})
+        # These are persisted transaction observations, not a percentage of
+        # family qualification or proof that lifecycle/recovery work is complete.
+        by_id = {record.operation_id: record for record in records}
+        for operation in operations:
+            record = by_id[operation['operation_id']]
+            operation['phases'] = [
+                {'adapter': step.adapter, 'phase': phase}
+                for step, phase in zip(record.plan.steps, record.phases, strict=True)]
+            operation['progress'] = {
+                'total_steps': len(record.plan.steps),
+                'verified_steps': record.phases.count('verified'),
+                'undone_steps': record.phases.count('undone')}
         await self.refresh()
         self.check()
         return {'version': VERSION, 'migration_ready': False, 'family_complete': False,

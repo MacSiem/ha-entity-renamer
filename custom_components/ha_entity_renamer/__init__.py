@@ -100,7 +100,7 @@ class Runtime:
         """Private ordinary mapping -> server-owned immutable retained review.
 
         No mutation endpoint or family readiness is granted by this method.
-        The future authenticated transport supplies its own fresh actor identity;
+        The authenticated transport supplies its own fresh actor identity;
         neither a Plan nor any original/source document is accepted from clients.
         """
         from .native_template_state_server import NativeTemplateStateServer
@@ -143,7 +143,6 @@ class Runtime:
                 plan, operation = session.plan, session.operation_id
                 count = sum(change.kind == 'entity' for change in session.registry_changes)
                 devices = sum(change.kind == 'device' for change in session.registry_changes)
-                self.reviews[operation] = _PreparedReview(actor_id, plan, count, hass.loop.time() + 900)
                 changes = []
                 for change in session.registry_changes:
                     before, after = change.before, change.after
@@ -153,8 +152,22 @@ class Runtime:
                     target = ({'entity_id': before['entity_id']} if change.kind == 'entity'
                               else {'device_id': change.identity})
                     changes.append({**target, 'fields': fields})
+                baseline, _ = self.preparations.resolve_composition(plan.native_inputs)
+                receipt = baseline.receipt
+                # Aggregate only the admitted planned YAML scope. Paths, YAML,
+                # native keys, receipts and private consumer configuration stay here.
+                dependencies = {
+                    'domains': sorted(domain for domain in receipt.changed_domains
+                                      if domain in ('template', 'automation', 'script')),
+                    'yaml_file_count': len(receipt.proposed_files),
+                    'template_consumer_count': sum(
+                        row.domain in ('template.sensor', 'template.binary_sensor')
+                        for row in session.evidence.template_sources.ledger.definitions)}
+                current()
+                self.reviews[operation] = _PreparedReview(actor_id, plan, count, hass.loop.time() + 900)
                 return {'operation_id': operation, 'fingerprint': plan.fingerprint,
                     'entity_count': count, 'device_count': devices, 'changes': changes,
+                    'dependencies': dependencies,
                     'migration_ready': False, 'family_complete': False}
             finally:
                 session.close()

@@ -13,6 +13,7 @@ def async_register(hass):
     websocket_api.async_register_command(hass, ws_discover)
     websocket_api.async_register_command(hass, ws_preview)
     websocket_api.async_register_command(hass, ws_prepare)
+    websocket_api.async_register_command(hass, ws_apply)
     websocket_api.async_register_command(hass, ws_recovery_inspect)
     websocket_api.async_register_command(hass, ws_recovery_restore)
 
@@ -246,6 +247,41 @@ async def ws_prepare(hass, connection, message):
                               'The rename review could not be verified')
     else:
         connection.send_result(message['id'], result)
+
+
+@websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/apply',
+    vol.Required('operation_id'): vol.All(str, vol.Match(r'[A-Za-z0-9_-]{1,80}\Z')),
+    vol.Required('fingerprint'): vol.All(str, vol.Match(r'[0-9a-f]{64}\Z'))})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_apply(hass, connection, message):
+    """Consume only this connection actor's retained review, never a client Plan."""
+    from . import Runtime
+    from .transaction import Refused
+    runtime = hass.data.get(DATA_RUNTIME)
+    if type(runtime) is not Runtime or not runtime.loaded or runtime.unloading:
+        connection.send_error(message['id'], 'unavailable', 'Entity Renamer backend is not loaded')
+        return
+    guard, refresh = _recovery_authority(hass, connection, runtime)
+    actor_id = connection.user.id
+    try:
+        await refresh()
+        result = await runtime.native_yaml_apply(hass, message['operation_id'],
+            message['fingerprint'], actor_id=actor_id, guard=guard, refresh=refresh)
+        guard()  # No new IO after the native final source/history/auth fence.
+    except PermissionError:
+        connection.send_error(message['id'], 'unauthorized', 'Administrator permissions are required')
+    except Refused:
+        connection.send_error(message['id'], 'apply_refused',
+                              'The retained rename review could not be applied; check status')
+    except Exception:
+        # The review may already be consumed. Never retry an uncertain write or
+        # expose source paths, exception strings, native payloads or tokens.
+        connection.send_error(message['id'], 'apply_unavailable',
+                              'The rename outcome could not be verified; check status')
+    else:
+        connection.send_result(message['id'], {key: result[key] for key in (
+            'operation_id', 'fingerprint', 'state', 'migration_ready', 'family_complete')})
 
 
 async def _read_recovery(hass, connection, message, *, action):
