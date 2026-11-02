@@ -43,6 +43,24 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             'entities': [{'entity_id': old, 'new_entity_id': new,
                           'name': 'Reviewed native selection'}]}
 
+    async def test_registered_prepare_with_loaded_empty_native_scene(self):
+        from homeassistant.setup import async_setup_component
+        from homeassistant.components.scene.const import DATA_COMPONENT
+        runtime, old, new, uuids, original, payload = await self.selection()
+        hass = self.f.hass
+        self.assertTrue(await async_setup_component(hass, 'scene', {}))
+        await hass.async_block_till_done()
+        self.assertIn('scene', hass.config.components)
+        self.assertEqual(tuple(hass.data[DATA_COMPONENT].entities), ())
+        async with self._transport() as (ws, user):
+            response = await self._request(ws, 1, 'prepare', **payload)
+            self.assertTrue(response['success'], response)
+            self.assertEqual(len(runtime.reviews), 1)
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+            self.assertIsNone(self.f.entity.async_get(new))
+            self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+            self.assertEqual(await runtime.journal.active(), ())
+
     async def test_admin_prepare_retains_server_review_without_mutation(self):
         runtime, old, new, uuids, original, payload = await self.selection()
         hass = self.f.hass
