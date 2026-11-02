@@ -703,25 +703,39 @@ class NativeTemplateMixedYAMLServerTests(unittest.IsolatedAsyncioTestCase):
         receipts_path = root / '.storage/ha_entity_renamer.registry_receipts'
         receipt_bytes = receipts_path.read_bytes()
         lifecycle = self.module('native_automation_lifecycle')
+        prefix_type = self.module('native_automation_program_composition').AutomationTemplateStateComposition
+        is_prefix = type(composition) is prefix_type
+        if is_prefix:
+            # Prefix transport uses the registry/YAML chain itself; it never
+            # creates the outer quiesce/stage/restore lifecycle receipts.
+            receipt_id = self.module('native_registry_receipts')._event_id
+            chain_id = receipt_id(['root', result['operation_id'], result['fingerprint']])
+            missing_rows = tuple((kind, receipt_id([chain_id, 'receipt', index, 'forward']))
+                for kind, index in (('registry_receipt', 0), ('yaml_receipt', len(record.plan.steps) - 1)))
+        else:
+            missing_rows = tuple((kind, lifecycle._key(result['operation_id'],
+                result['fingerprint'], 'forward', kind)) for kind in ('completed', 'stage_receipt'))
         protected = {name: (root / name).read_bytes() for name in original}
         before_registry = {key: asdict(row) for key, row in self.f.entity.entities.items()}
         journal_bytes = (root / '.storage/ha_entity_renamer.migrations').read_bytes()
-        for missing in ('completed', 'stage_receipt'):
-            with self.subTest(missing_outer_lifecycle=missing):
+        for missing, key in missing_rows:
+            with self.subTest(missing_required_receipt=missing):
                 damaged = json.loads(receipt_bytes)
-                key = lifecycle._key(result['operation_id'], result['fingerprint'], 'forward', missing)
-                self.assertIsNotNone(damaged['data']['events'].pop(key))
+                removed = damaged['data']['events'].pop(key)
+                if is_prefix:
+                    self.assertEqual(removed['payload']['kind'], missing)
                 try:
                     # Deliberate owned fixture loss, never a recovery permission.
                     receipts_path.write_text(json.dumps(damaged))
                     inspected = await runtime.recovery_inspect(hass, result['operation_id'],
                         result['fingerprint'], guard=lambda: None, refresh=refresh)
-                    self.assertFalse(inspected['eligible'], 'inner applied does not prove completed automation restoration')
+                    self.assertFalse(inspected['eligible'], 'missing required forward evidence must not authorize recovery')
                     self.assertNotEqual(inspected['state'], 'applied')
-                    second_mapping = {new: new + '_next' for new in mapping.values()}
-                    with self.assertRaises(self.module('transaction').Refused):
-                        await runtime.native_forward(hass, second_mapping,
-                            guard=lambda: None, refresh=refresh)
+                    if not is_prefix:
+                        second_mapping = {new: new + '_next' for new in mapping.values()}
+                        with self.assertRaises(self.module('transaction').Refused):
+                            await runtime.native_forward(hass, second_mapping,
+                                guard=lambda: None, refresh=refresh)
                     with self.assertRaises(self.module('transaction').Refused):
                         await runtime.native_yaml_reverse(hass, result['operation_id'],
                             result['fingerprint'], guard=lambda: None, refresh=refresh)
