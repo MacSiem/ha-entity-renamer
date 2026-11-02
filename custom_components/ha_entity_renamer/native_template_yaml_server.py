@@ -137,7 +137,8 @@ class NativeTemplateYAMLServer:
             _need(not obj.closed and hass.data.get(DATA_RUNTIME) is runtime
                   and runtime.loaded and not runtime.unloading
                   and runtime.operation_lock is obj.lock and obj.lock.locked(), 'runtime_scope_lost')
-            _need(not ({'scene', 'powercalc', 'mqtt', 'rest', 'command_line'}
+            obj.scene_fence.check()
+            _need(not ({'powercalc', 'mqtt', 'rest', 'command_line'}
                        & set(hass.config.components)), 'other_consumer_scope_unsupported')
             if hasattr(obj, 'consumers'):
                 obj.consumers.check()
@@ -148,29 +149,35 @@ class NativeTemplateYAMLServer:
                       'runtime_cache_replaced')
                 obj._preparation_current()
         obj._scope = scope
-        scope()
-        await refresh()
-        scope()
-        obj.preparations, obj.journal = native_prepared_store(hass), native_journal(hass)
-        await obj.preparations.initialize()
-        scope()
-        await obj.journal.initialize()
-        scope()
-        active = await obj.journal.active()
-        _need(not active or (cls is NativeTemplateStateServer and type(recovering_operation) is str
-              and len(active) == 1 and active[0].operation_id == recovering_operation),
-              'other_operation_unresolved')
-        scope()
-        from .native_automation_lifecycle import async_assert_no_pending_automation_lifecycle
-        await async_assert_no_pending_automation_lifecycle(hass, obj.preparations, obj.journal)
-        scope()
-        from .recorder_guard import NativeRecorderGuard
-        from .history_guard import NativeHistoryGuard
-        from .yaml_editor_locks import NativeYAMLEditorLocks
-        obj.recorder = NativeRecorderGuard(hass)
-        obj.history = NativeHistoryGuard(obj.recorder)
-        obj.locks = NativeYAMLEditorLocks(hass)
-        return obj
+        from .native_empty_scene import NativeEmptySceneFence
+        obj.scene_fence = NativeEmptySceneFence(hass)
+        try:
+            scope()
+            await refresh()
+            scope()
+            obj.preparations, obj.journal = native_prepared_store(hass), native_journal(hass)
+            await obj.preparations.initialize()
+            scope()
+            await obj.journal.initialize()
+            scope()
+            active = await obj.journal.active()
+            _need(not active or (cls is NativeTemplateStateServer and type(recovering_operation) is str
+                  and len(active) == 1 and active[0].operation_id == recovering_operation),
+                  'other_operation_unresolved')
+            scope()
+            from .native_automation_lifecycle import async_assert_no_pending_automation_lifecycle
+            await async_assert_no_pending_automation_lifecycle(hass, obj.preparations, obj.journal)
+            scope()
+            from .recorder_guard import NativeRecorderGuard
+            from .history_guard import NativeHistoryGuard
+            from .yaml_editor_locks import NativeYAMLEditorLocks
+            obj.recorder = NativeRecorderGuard(hass)
+            obj.history = NativeHistoryGuard(obj.recorder)
+            obj.locks = NativeYAMLEditorLocks(hass)
+            return obj
+        except BaseException:
+            obj.scene_fence.close()
+            raise
 
     @classmethod
     async def prepare(cls, hass, mapping, *, guard, refresh, entity_names=None, device_names=None,
@@ -742,12 +749,15 @@ class NativeTemplateYAMLServer:
 
     def close(self):
         _need(asyncio.current_task() is self.task, 'owner_task_required')
-        if hasattr(self, 'automation_lifecycle'):
-            self.automation_lifecycle.close()
-        consumers = getattr(self, 'consumers', None)
-        phases = getattr(consumers, 'phases', None)
-        from .native_script_prefix_phase import NativeScriptPrefixPhase
-        from .native_automation_prefix_phase import NativeAutomationPrefixPhase
-        if type(phases) in (NativeScriptPrefixPhase, NativeAutomationPrefixPhase):
-            phases.close()
-        self.bound, self.closed = False, True
+        try:
+            if hasattr(self, 'automation_lifecycle'):
+                self.automation_lifecycle.close()
+            consumers = getattr(self, 'consumers', None)
+            phases = getattr(consumers, 'phases', None)
+            from .native_script_prefix_phase import NativeScriptPrefixPhase
+            from .native_automation_prefix_phase import NativeAutomationPrefixPhase
+            if type(phases) in (NativeScriptPrefixPhase, NativeAutomationPrefixPhase):
+                phases.close()
+        finally:
+            self.scene_fence.close()
+            self.bound, self.closed = False, True

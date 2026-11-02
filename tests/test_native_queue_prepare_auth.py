@@ -45,7 +45,7 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_registered_prepare_with_loaded_empty_native_scene(self):
         from homeassistant.setup import async_setup_component
-        from homeassistant.components.scene.const import DATA_COMPONENT
+        from homeassistant.components.scene import DATA_COMPONENT
         runtime, old, new, uuids, original, payload = await self.selection()
         hass = self.f.hass
         self.assertTrue(await async_setup_component(hass, 'scene', {}))
@@ -60,6 +60,67 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.f.entity.async_get(new))
             self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
             self.assertEqual(await runtime.journal.active(), ())
+
+    async def test_native_empty_scene_latches_create_delete_and_reload(self):
+        from homeassistant.setup import async_setup_component
+        from homeassistant.components.scene import DATA_COMPONENT
+        await self.selection()
+        hass = self.f.hass
+        self.assertTrue(await async_setup_component(hass, 'scene', {}))
+        await hass.async_block_till_done()
+        module = self.module('native_empty_scene')
+        for operation in ('create_delete', 'reload'):
+            fence = module.NativeEmptySceneFence(hass)
+            try:
+                fence.check()
+                if operation == 'create_delete':
+                    await hass.services.async_call('scene', 'create', {
+                        'scene_id': 'renamer_race', 'entities': {'sensor.synthetic': '7'}}, blocking=True)
+                    await hass.async_block_till_done()
+                    self.assertIsNotNone(hass.states.get('scene.renamer_race'))
+                    await hass.services.async_call('scene', 'delete', {
+                        'entity_id': 'scene.renamer_race'}, blocking=True)
+                else:
+                    await hass.services.async_call('scene', 'reload', {}, blocking=True)
+                await hass.async_block_till_done()
+                self.assertEqual(tuple(hass.data[DATA_COMPONENT].entities), ())
+                with self.assertRaises(self.module('transaction').Refused):
+                    fence.check()
+            finally:
+                fence.close()
+            self.assertEqual(fence.removers, [])
+
+    async def test_native_empty_scene_refuses_existing_scene_and_pending_addition(self):
+        from homeassistant.setup import async_setup_component
+        from homeassistant.components.scene import DATA_COMPONENT
+        from homeassistant.helpers.entity_platform import EntityPlatform
+        from unittest.mock import patch
+        await self.selection()
+        hass = self.f.hass
+        self.assertTrue(await async_setup_component(hass, 'scene', {}))
+        await hass.async_block_till_done()
+        module = self.module('native_empty_scene')
+        ready, release = asyncio.Event(), asyncio.Event()
+        original = EntityPlatform._async_add_entity
+        async def held(platform, *args, **kwargs):
+            if platform.domain == 'scene':
+                ready.set()
+                await release.wait()
+            return await original(platform, *args, **kwargs)
+        with patch.object(EntityPlatform, '_async_add_entity', held):
+            await hass.services.async_call('scene', 'create', {
+                'scene_id': 'renamer_pending', 'entities': {'sensor.synthetic': '7'}}, blocking=True)
+            await asyncio.wait_for(ready.wait(), 5)
+            try:
+                self.assertEqual(tuple(hass.data[DATA_COMPONENT].entities), ())
+                with self.assertRaises(self.module('transaction').Refused):
+                    module.NativeEmptySceneFence(hass)
+            finally:
+                release.set()
+                await hass.async_block_till_done()
+        self.assertIsNotNone(hass.states.get('scene.renamer_pending'))
+        with self.assertRaises(self.module('transaction').Refused):
+            module.NativeEmptySceneFence(hass)
 
     async def test_admin_prepare_retains_server_review_without_mutation(self):
         runtime, old, new, uuids, original, payload = await self.selection()
