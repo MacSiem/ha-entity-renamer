@@ -33,7 +33,7 @@ class NativeAutomationPrefixPhase:
         sample = self.observer.sample(root.chain, input_state=root.observation_state)
         self.mask = sample.prefix.active
         from .native_automation_config_transport import assert_idle_automation_program_targets
-        assert_idle_automation_program_targets(root.hass, self.program,
+        self.admission = assert_idle_automation_program_targets(root.hass, self.program,
             active=self.mask if self.mask else None)
         self.sample = sample.registry_rows, (), sample.native_tokens
         self.edge_entities = frozenset()
@@ -134,12 +134,20 @@ class NativeAutomationPrefixPhase:
               and self.root.chain.active is None
               and asyncio.current_task() is self.root.task)
         from .native_automation_config_transport import assert_idle_automation_program_targets
-        assert_idle_automation_program_targets(self.root.hass, self.program,
+        from .native_active_execution_pins import check_census
+        for script, census in self.admission:
+            check_census(script, census)
+        fresh = assert_idle_automation_program_targets(self.root.hass, self.program,
             active=self.mask if direction == 'rollback' else None)
+        _need(tuple(script for script, _ in fresh) == tuple(script for script, _ in self.admission),
+              'active_admission_population_changed')
 
     def capture(self, node):
         from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
         self.check()
+        from .native_active_execution_pins import check_census
+        for script, census in self.admission:
+            check_census(script, census)
         _need(self.active is None and type(node) is NativeTemplateStateRegistryEffect
               and node.root is self.root and self.root.chain.active is node.intent
               and node.phase == 'captured' and asyncio.current_task() is node.task)

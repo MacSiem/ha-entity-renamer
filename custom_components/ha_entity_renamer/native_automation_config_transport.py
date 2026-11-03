@@ -93,7 +93,8 @@ def _call_scope(hass, before, after):
     for key in admitted:
         entity = entities[key]
         script = entity.action_script if key[0] == 'automation' else entity.script
-        _idle_census(script)
+        from .native_active_execution_pins import capture_census
+        capture_census(script)
         if key[0] == 'automation' and entity._is_enabled:
             from datetime import timedelta
             from .native_automation_scalar_duration import configured_duration
@@ -111,7 +112,13 @@ def _call_scope(hass, before, after):
 def assert_idle_automation_program_targets(hass, program, *, active=None):
     target = frozenset(program.source_order) if active is None else active
     before, after = dict(program.rows(frozenset())), dict(program.rows(target))
-    _call_scope(hass, before, after)
+    entities, admitted, changed = _call_scope(hass, before, after)
+    from .native_active_execution_transport import validate_active_program
+    validate_active_program(hass, program, entities, admitted, changed)
+    from .native_active_execution_pins import capture_census
+    return tuple((script, capture_census(script)) for key in sorted(admitted)
+                 for script in (entities[key].action_script if key[0] == 'automation'
+                                else entities[key].script,))
     # Await source/graph admission before the final synchronous effect seam.
 
 
@@ -134,6 +141,11 @@ class NativeAutomationConfigTransport:
         observer.program.assert_edge(active, target, source)
         before, after = dict(observer.program.rows(active)), dict(observer.program.rows(target))
         entities, admitted, changed = _call_scope(observer.hass, before, after)
+        if any((entities[key].action_script if key[0] == 'automation' else entities[key].script).is_running
+               for key in admitted):
+            from .native_active_execution_transport import ActiveAutomationTransport
+            return ActiveAutomationTransport.capture(observer, chain, source, reverse=reverse,
+                                                     guard=guard, input_state=input_state)
         self = object.__new__(cls)
         self.observer, self.chain, self.guard, self.sample = observer, chain, guard, sample
         self.input_state, self.before, self.after = input_state, before, after
@@ -412,7 +424,7 @@ class NativeAutomationConfigTransport:
                 _need(owner.image is before, 'automation_restored_holder_changed')
                 owner.check()
 
-    def check_configured_retained(self, *, configured_view=None):
+    def check_configured_retained(self, *, configured_view=None, before_attempt=False):
         for edge in self.duration_edges:
             edge.check_pins()
             # Historical OWN holders/snapshot siblings must pass BEFORE undo.

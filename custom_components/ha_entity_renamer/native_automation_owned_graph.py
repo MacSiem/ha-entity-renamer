@@ -466,7 +466,8 @@ class OwnedAutomationGraph:
         witness = self.witness
         transfer = getattr(self, 'transfer', None)
         if transfer is not None:
-            transfer.check_configured_retained(configured_view=configured_view)
+            transfer.check_configured_retained(configured_view=configured_view,
+                                               before_attempt=before_attempt)
         _need(not self.live or not self.pending() or before_attempt or witness.error is not None,
               'automation_ingress_delivery_pending')
         if self.live and self.duration is not None:

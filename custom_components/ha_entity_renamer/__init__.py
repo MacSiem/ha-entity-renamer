@@ -40,11 +40,12 @@ def _yaml_factory_for_plan(preparations, plan):
 
 @dataclass(frozen=True)
 class _PreparedReview:
-    """Server-retained immutable Plan; no live session, callback or HA tokens."""
+    """Server-retained Plan and optional read-only execution admission pins."""
     actor_id: str
     plan: object
     entity_count: int
     expires_at: float
+    execution_admission: tuple = ()
 
 
 @dataclass
@@ -168,7 +169,13 @@ class Runtime:
                         row.domain in ('template.sensor', 'template.binary_sensor')
                         for row in session.evidence.template_sources.ledger.definitions)}
                 current()
-                self.reviews[operation] = _PreparedReview(actor_id, plan, count, hass.loop.time() + 900)
+                phases = getattr(session.consumers, 'phases', None)
+                admission = tuple(getattr(phases, 'admission', ()))
+                from .native_active_execution_pins import check_census
+                for script, census in admission:
+                    check_census(script, census)
+                self.reviews[operation] = _PreparedReview(actor_id, plan, count,
+                                                           hass.loop.time() + 900, admission)
                 return {'operation_id': operation, 'fingerprint': plan.fingerprint,
                     'entity_count': count, 'device_count': devices, 'changes': changes,
                     'dependencies': dependencies,
@@ -204,9 +211,23 @@ class Runtime:
             @trace_owned
             async def operation():
                 try:
+                    from .native_active_execution_pins import check_census
+                    for script, census in review.execution_admission:
+                        check_census(script, census)
                     factory = _yaml_factory_for_plan(self.preparations, review.plan)
                     session = await factory.bind_prepared(hass, operation_id,
                         review.plan, guard=current, refresh=refresh)
+                    try:
+                        for script, census in review.execution_admission:
+                            check_census(script, census)
+                        phases = getattr(session.consumers, 'phases', None)
+                        actual = tuple(getattr(phases, 'admission', ()))
+                        if tuple(script for script, _ in actual) != tuple(
+                                script for script, _ in review.execution_admission):
+                            raise Refused('review_execution_population_changed')
+                    except BaseException:
+                        session.close()
+                        raise
                 except Exception:
                     # bind_prepared is read-only and session.apply has not been
                     # entered. Only a freshly authorized durable record may

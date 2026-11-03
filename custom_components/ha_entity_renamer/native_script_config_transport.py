@@ -149,8 +149,11 @@ def assert_idle_script_program_targets(hass, program, *, active=None):
     _need(all(type(entity) is ScriptEntity for entity in entities))
     keyed = {entity.unique_id: entity for entity in entities}
     _need(len(keyed) == len(entities) and changed <= keyed.keys())
-    for key in sorted(changed):
-        _idle_census(keyed[key].script)
+    from .native_active_execution_pins import capture_census
+    from .native_active_execution_transport import _entities, validate_active_program
+    scope = frozenset(('script', key) for key in changed)
+    validate_active_program(hass, program, _entities(hass), scope, scope)
+    return tuple((keyed[key].script, capture_census(keyed[key].script)) for key in sorted(changed))
 
 
 class NativeScriptConfigTransport:
@@ -171,6 +174,13 @@ class NativeScriptConfigTransport:
         before, after = dict(observer.program.rows(active)), dict(observer.program.rows(target))
         # A separate trigger/program transport is required for automation.
         _need(before['automation'] == after['automation'], 'native_script_config_automation_change_unsupported')
+        component = observer.hass.data.get(DATA_INSTANCES, {}).get('script')
+        actors = {entity.unique_id: entity for entity in component.entities} if component is not None else {}
+        changed = {old[0] for old, new in zip(before['script'], after['script'], strict=True) if old != new}
+        if any(key in actors and actors[key].script.is_running for key in changed):
+            from .native_active_execution_transport import ActiveScriptTransport
+            return ActiveScriptTransport.capture(observer, chain, source, reverse=reverse,
+                                                 guard=guard, input_state=input_state)
         obj = object.__new__(cls)
         obj.observer, obj.chain, obj.guard, obj.sample = observer, chain, guard, sample
         obj.input_state = input_state
