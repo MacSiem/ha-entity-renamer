@@ -181,12 +181,28 @@ class NativePublicYAMLRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(hidden, serialized)
         self.assertFalse(detail['migration_ready'])
         self.assertFalse(detail['family_complete'])
-        restored = await self._ws('recovery/restore', result)
+        lifecycle = self.module('native_automation_lifecycle').NativeAutomationLifecycle
+        original_start = lifecycle.start
+        witnesses = []
+        async def checked_start(instance):
+            if instance.direction == 'rollback':
+                marker = await instance.session.journal.load(instance.session.operation_id)
+                self.assertIs(marker.restore_attempted, True)
+                witnesses.append(marker.restore_attempted)
+            return await original_start(instance)
+        lifecycle.start = checked_start
+        try:
+            restored = await self._ws('recovery/restore', result)
+        finally:
+            lifecycle.start = original_start
+        if variant == 'mixed':
+            self.assertEqual(witnesses, [True])
         self.assertTrue(restored['success'], restored)
         self.assertEqual(restored['result']['state'], 'rolled_back')
         self.assertFalse(restored['result']['migration_ready'])
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
         final = await runtime.journal.load(result['operation_id'])
+        self.assertIs(final.restore_attempted, True)
         self.assertEqual(final.plan, plan)
         self.assertEqual(final.phases, ('undone',) * len(plan.steps))
         baseline, reopened = runtime.preparations.resolve_composition(plan.native_inputs)

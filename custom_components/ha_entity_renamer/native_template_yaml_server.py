@@ -520,7 +520,7 @@ class NativeTemplateYAMLServer:
             self.automation_lifecycle = NativeAutomationLifecycle(self, 'forward')
             self.observer.automation_lifecycle = self.automation_lifecycle
             await self.journal.create(Record(self.operation_id, self.plan,
-                phases=('pending',) * len(self.plan.steps)))
+                phases=('pending',) * len(self.plan.steps), restore_attempted=False))
             self._scope()
             await self.automation_lifecycle.start()
             coordinator = self._coordinator()
@@ -540,7 +540,7 @@ class NativeTemplateYAMLServer:
         return result
 
     @classmethod
-    async def bind_reverse(cls, hass, operation_id, fingerprint, *, guard, refresh):
+    async def bind_reverse(cls, hass, operation_id, fingerprint, *, guard, refresh, restored=False):
         """Fresh read-only reopen, actual admission, then a DIFFERENT live chain."""
         obj = await cls._open(hass, guard=guard, refresh=refresh, recovering_operation=operation_id)
         try:
@@ -550,11 +550,15 @@ class NativeTemplateYAMLServer:
             obj.prefix_recovery = _acknowledged_registry_prefix(record)
             from .native_template_prefix_recovery import complete_forward_unknown, complete_forward_unknown_scope
             obj.complete_unknown_recovery = complete_forward_unknown(record)
-            _need(record is not None and record.operation_id == operation_id
-                  and record.plan.fingerprint == fingerprint and record.direction == 'forward'
-                  and ((record.status == 'applied'
-                        and record.phases == ('verified',) * len(record.plan.steps))
-                       or obj.prefix_recovery or obj.complete_unknown_recovery),
+            _need(type(restored) is bool and record is not None and record.operation_id == operation_id
+                  and record.plan.fingerprint == fingerprint
+                  and ((restored and record.restore_attempted is True and record.direction == 'rollback'
+                        and record.status == 'rolled_back'
+                        and record.phases == ('undone',) * len(record.plan.steps))
+                       or (not restored and record.direction == 'forward'
+                           and ((record.status == 'applied'
+                                 and record.phases == ('verified',) * len(record.plan.steps))
+                                or obj.prefix_recovery or obj.complete_unknown_recovery))),
                   'terminal_or_acknowledged_prefix_required')
             obj.operation_id, obj.plan, obj.record = operation_id, record.plan, record
             baseline, obj.composition = obj.preparations.resolve_composition(obj.plan.native_inputs)
@@ -599,18 +603,20 @@ class NativeTemplateYAMLServer:
             obj._install()
             # Runtime automation/script sources must also match SAME ORIGINAL.
             # Only accepted physical state differs; no replacement receipt is made.
-            await obj._bind_accepted_sources()
+            await obj._bind_accepted_sources(rollback=restored)
             async def admit():
                 if obj.prefix_recovery:
                     await obj._prefix_current(record)
                 else:
-                    await obj._terminal(record, rollback=False)
+                    await obj._terminal(record, rollback=restored)
             await admit()
             await refresh()
             obj._scope()
             await obj._fresh_stores(record, allow_active=obj.prefix_recovery or obj.complete_unknown_recovery)
             await admit()
             state = readonly.reconstruct_inputs()
+            if restored:
+                return obj  # Terminal proof never installs a writer.
             # Same separated admission pattern as NativeTemplateReverse: the
             # reopened reader remains readonly. Never set readonly.writable.
             writer = RegistryReceiptChain(obj.receipt_store, operation_id, obj.plan, obj.receipt, obj.digests)
@@ -685,7 +691,7 @@ class NativeTemplateYAMLServer:
             obj.close()
             raise
 
-    async def _bind_accepted_sources(self):
+    async def _bind_accepted_sources(self, *, rollback=False):
         from .native_discovery_inputs import async_observe_discovery_inputs
         from .yaml_source_binding import _RuntimeSourceSampler
         from .discovery import _runtime_family
@@ -702,7 +708,7 @@ class NativeTemplateYAMLServer:
             self._scope()
             return
         if _mixed_composition(self.composition):
-            self.consumers.bind_phases(self.receipt, self.evidence, observed, Position.AFTER)
+            self.consumers.bind_phases(self.receipt, self.evidence, observed, Position.BEFORE if rollback else Position.AFTER)
             self._scope()
             return
         sample = sampler.sample(self.hass, self.evidence, observed)

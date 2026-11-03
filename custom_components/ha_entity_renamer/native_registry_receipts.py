@@ -72,6 +72,39 @@ def _digest(value):
     return canonical_digest(value)
 
 
+def _freeze_json(value):
+    """Freeze a previously validated JSON tree into immutable builtins."""
+    if type(value) is dict:
+        return (dict, tuple((key, _freeze_json(child)) for key, child in value.items()))
+    if type(value) is list:
+        return (list, tuple(_freeze_json(child) for child in value))
+    return (type(value), value)
+
+
+def _exact_json_equal(value, evidence):
+    """Compare every node, including scalar types, against validated evidence."""
+    pending = [(value, evidence)]
+    while pending:
+        current, (kind, original) = pending.pop()
+        if type(current) is not kind:
+            return False
+        if kind is dict:
+            if (len(current) != len(original)
+                    or any(type(key) is not str for key in current)):
+                return False
+            for key, child in original:
+                if key not in current:
+                    return False
+                pending.append((current[key], child))
+        elif kind is list:
+            if len(current) != len(original):
+                return False
+            pending.extend(zip(current, original))
+        elif current != original:
+            return False
+    return True
+
+
 def _event_id(value):
     # Derived PRIVATE STORAGE keys, never generated transaction operation IDs.
     return 'rr-' + _digest(value)
@@ -197,6 +230,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         self.original_receipt = receipt
         self.yaml_index = yaml_steps[0] if yaml_steps else None
         self.changes, bindings = [], []
+        self._yaml_evidence = None
         self._helper_origins = {}  # Immutable target-row bytes, never current IO.
         original_config = None
         if (type(prepared_digests) is not dict
@@ -244,6 +278,9 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 binding = {'ref': step.prepared_ref, 'digest': digest,
                            'helper_digest': prepared_helper_digest(change),
                            'entry_id': entry_id, 'baseline_row_digest': _sha(_json(rows[index]))}
+            if step.adapter == 'yaml':
+                # Private detached copy of the fully validated original, never live IO.
+                self._yaml_evidence = (_freeze_json(original_payload), _freeze_json(binding), deepcopy(change))
             self.changes.append(change)
             bindings.append(binding)
         self.root = {'kind': 'registry_chain', 'schema': 1,
@@ -346,12 +383,15 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         if self.plan.steps[index].adapter == 'yaml':
             binding = self.root['bindings'][index]
             payload = self.preparations.resolve(binding['ref'], binding['digest'])
-            change = decode_change(payload)
-            if (_digest(payload) != binding['digest']
-                    or type(change) not in (PreparedYAML, PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML)
-                    or _digest(json.loads(_json(asdict(change.checked())))) != binding['yaml_digest']
-                    or change != self.changes[index]):
+            original_payload, original_binding, original_change = self._yaml_evidence
+            # Resolve on every call, then compare EVERY stored node and its type
+            # to the original validated tree. No mutable input or physical fence
+            # is cached. Return a detached original, not a mutable caller object.
+            if (not _exact_json_equal(binding, original_binding)
+                    or not _exact_json_equal(payload, original_payload)
+                    or self.changes[index] != original_change):
                 _fail('preparation_mismatch')
+            change = deepcopy(original_change)
             if type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
                 assert_state_yaml_composition(self, change)
             return change

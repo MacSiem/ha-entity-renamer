@@ -78,6 +78,8 @@ async def async_assert_no_pending_automation_lifecycle(hass, preparations, journ
     from .native_registry_receipts import RegistryReceiptChain, native_registry_receipt_store
     candidates = []
     for record in await journal.all():
+        if record.status == 'refused':
+            continue  # Durable proof that native lifecycle was never entered.
         if record.plan.required_scopes != ('registry', 'yaml'):
             continue
         reference = record.plan.native_inputs

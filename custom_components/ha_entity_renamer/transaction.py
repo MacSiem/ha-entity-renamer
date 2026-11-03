@@ -112,6 +112,8 @@ class Record:
     phases: tuple[str, ...] = ()
     reason: str = ""
     direction: str = "forward"
+    # None = legacy record with no proof; False = no public restore intent; True = consumed.
+    restore_attempted: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -281,7 +283,7 @@ class Coordinator:
                 self.guard()
                 if position != Position.BEFORE:
                     raise Refused("Stale or unverified plan")
-            record = Record(operation_id, plan, phases=("pending",) * len(plan.steps))
+            record = Record(operation_id, plan, phases=("pending",) * len(plan.steps), restore_attempted=False)
             self.guard()
             self._admit_record("forward")
             try:
@@ -376,7 +378,7 @@ class Coordinator:
             record = await self._load(operation_id)
             if record is None:
                 raise Refused("Unknown operation")
-            if record.status in ("applied", "rolled_back"):
+            if record.status in ("applied", "rolled_back", "refused"):
                 return record
             undoing = record.direction == "rollback"
             for index, step in enumerate(record.plan.steps):
@@ -428,6 +430,8 @@ class Coordinator:
                 raise Refused("Unknown operation")
             if record.status == "rolled_back":
                 return record
+            if record.status == "refused":
+                raise Refused("No applied effects to restore")
             if any(p in ("intent", "undo_intent") for p in record.phases):
                 raise Refused("Reconcile unresolved effect before compensation")
             self._admit_record("rollback")

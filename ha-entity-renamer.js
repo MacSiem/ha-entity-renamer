@@ -1464,6 +1464,7 @@ class HAEntityRenamer extends HTMLElement {
     this._confirmation = null;
     this._entityEditor = null;
     this._migration = null; // Retained review; consumed intents are never replayed.
+    this._recoveryInventory = null;
     this._applyOperation = null;
     this._readEpoch = 0;
     this._authorityEpoch = 0;
@@ -1533,9 +1534,10 @@ class HAEntityRenamer extends HTMLElement {
       // for same-account status/inspect, never to revive apply consent.
       this._migration = m.attempted ? {owner: m.owner, operation_id: m.operation_id,
         fingerprint: m.fingerprint, review: m.review, identities: m.identities, attempted: true,
-        restoreAttempted: m.restoreAttempted, restoreRevoked: true,
+        recoveredIdentity: m.recoveredIdentity, restoreAttempted: m.restoreAttempted, restoreRevoked: true,
         stage: 'unknown', invalidated: true, busy: false} : null;
     }
+    this._recoveryInventory = null;
     this._clearQueueUndo();
     if (this._loading && !this._applyOperation) this._registryRefreshPending = true;
     this._legacyReviewLog = [];
@@ -2930,6 +2932,10 @@ class HAEntityRenamer extends HTMLElement {
         background: var(--bento-success-light, rgba(16,185,129,0.08));
         border-color: var(--bento-success, #10B981);
       }
+      .apply-result.migration-pending {
+        background: var(--bento-warning-light, rgba(245,158,11,0.08));
+        border-color: var(--bento-warning, #F59E0B);
+      }
       .apply-result.has-failures {
         background: var(--bento-warning-light, rgba(245,158,11,0.08));
         border-color: var(--bento-warning, #F59E0B);
@@ -3161,6 +3167,7 @@ class HAEntityRenamer extends HTMLElement {
       ${this._renderHelp()}
       ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${this._message.outcome ? createUiV3({language:this._lang}).statusHtml(this._message.outcome) : ''} ${_esc(this._message.text || '')}</div>` : ''}
       ${this._renderApplyResult()}
+      ${this._renderRecoveryInventory()}
       ${this._confirmDialogOpen ? this._renderRenameConfirmation() : ''}
       ${this._renderEntityEditor()}
 
@@ -3275,6 +3282,47 @@ class HAEntityRenamer extends HTMLElement {
 
   _migrationText(en, pl) { return this._lang === 'pl' ? pl : en; }
 
+  async _findMigrationRecovery() {
+    if (this._migration || this._recoveryInventory?.busy || !this._renameAuthorityAvailable()) return;
+    const epoch = this._authorityEpoch, session = this._readSession(), hass = this._hass;
+    const inventory = {busy: true}; this._recoveryInventory = inventory; this.render();
+    try {
+      const result = await this._migrationRequest(hass, {type: 'ha_entity_renamer/status'});
+      if (this._recoveryInventory !== inventory || this._migration || epoch !== this._authorityEpoch
+          || !this._sameReadSession(session, this._readSession()) || !this._renameAuthorityAvailable()) return;
+      if (!Array.isArray(result?.operations)) throw new Error('invalid_inventory');
+      inventory.entries = result.operations.filter(row => row
+        && /^[A-Za-z0-9_-]{1,80}$/.test(row.operation_id || '')
+        && /^[0-9a-f]{64}$/.test(row.fingerprint || '') && typeof row.status === 'string');
+    } catch (_) { if (this._recoveryInventory === inventory) inventory.failed = true; }
+    finally {
+      if (this._recoveryInventory === inventory && epoch === this._authorityEpoch) {
+        inventory.busy = false; this.render();
+      }
+    }
+  }
+
+  _selectMigrationRecovery(index) {
+    const row = this._recoveryInventory?.entries?.[index];
+    if (!row || this._migration || !this._renameAuthorityAvailable()) return;
+    this._confirmation = null; this._confirmDialogOpen = false; this._entityEditor = null;
+    this._migration = {owner: this._hass.user.id, operation_id: row.operation_id,
+      fingerprint: row.fingerprint, attempted: true, recoveredIdentity: true,
+      restoreRevoked: true, stage: 'unknown', invalidated: true, busy: false};
+    this._recoveryInventory = null; this.render();
+  }
+
+  _renderRecoveryInventory() {
+    if (this._migration || this._hass?.user?.is_admin !== true) return '';
+    const inventory = this._recoveryInventory;
+    return `<section aria-label="${this._migrationText('Find previous operations', 'Znajdź poprzednie operacje')}">
+      <button type="button" class="btn btn-outline" id="findMigrationRecovery" ${inventory?.busy || !this._renameAuthorityAvailable() ? 'disabled' : ''}>${this._migrationText('Find previous operations', 'Znajdź poprzednie operacje')}</button>
+      ${inventory?.busy ? `<p role="status">${this._migrationText('Reading server inventory…', 'Odczytywanie listy serwera…')}</p>` : ''}
+      ${inventory?.failed ? `<p role="status">${this._migrationText('Server inventory unavailable.', 'Lista serwera jest niedostępna.')}</p>` : ''}
+      ${inventory?.entries ? `<p>${this._migrationText('Select an operation to inspect. Inventory does not prove success or permit a restore.', 'Wybierz operację do inspekcji. Lista nie potwierdza sukcesu ani prawa do wycofania.')}</p>${inventory.entries.map((row,index) => `<button type="button" class="btn btn-outline" data-recovery-index="${index}">${_esc(row.operation_id)} — ${_esc(row.status)}</button>`).join('')}` : ''}
+    </section>`;
+  }
+
   _migrationCurrent(m) {
     return this._migration === m && !m.invalidated && m.epoch === this._authorityEpoch
       && this._sameReadSession(m.session, this._readSession()) && this._renameAuthorityAvailable();
@@ -3310,6 +3358,30 @@ class HAEntityRenamer extends HTMLElement {
     }
   }
 
+  _validMigrationReview(result) {
+    const validChange = change => change && typeof (change.entity_id || change.device_id) === 'string'
+        && change.fields && typeof change.fields === 'object' && !Array.isArray(change.fields)
+        && Object.keys(change.fields).length > 0 && Object.entries(change.fields).every(([key, field]) =>
+          (change.device_id ? ['name_by_user'] : ['entity_id', 'name']).includes(key)
+          && field && ['before', 'after'].every(side => field[side] === null || typeof field[side] === 'string'));
+    return !(!result || !/^[A-Za-z0-9_-]{1,80}$/.test(result.operation_id || '')
+        || !/^[0-9a-f]{64}$/.test(result.fingerprint || '')
+        || !Array.isArray(result.changes) || !result.changes.length || !result.changes.every(validChange)
+        || !result.dependencies || !Array.isArray(result.dependencies.domains)
+        || !result.dependencies.domains.every(domain => typeof domain === 'string')
+        || !Number.isSafeInteger(result.dependencies.yaml_file_count)
+        || !Number.isSafeInteger(result.dependencies.template_consumer_count)
+        || result.dependencies.yaml_file_count < 0 || result.dependencies.template_consumer_count < 0
+        || !Array.isArray(result.dependencies.files)
+        || result.dependencies.files.length !== result.dependencies.yaml_file_count
+        || new Set(result.dependencies.files.map(file => file?.path)).size !== result.dependencies.files.length
+        || !result.dependencies.files.every(file => file && typeof file.path === 'string'
+          && Number.isSafeInteger(file.edit_count) && file.edit_count > 0
+          && Array.isArray(file.references) && file.references.length > 0
+          && file.references.every(ref => ref && typeof ref.before === 'string' && typeof ref.after === 'string'
+            && Number.isSafeInteger(ref.occurrences) && ref.occurrences > 0)));
+  }
+
   async _prepareMigration() {
     const c = this._confirmation;
     if (this._migration || this._loading || !this._renameAuthorityAvailable() || !c
@@ -3343,27 +3415,7 @@ class HAEntityRenamer extends HTMLElement {
         devices: Object.entries(c.devices).map(([device_id, name_by_user]) => ({device_id, name_by_user})),
       });
       if (!this._migrationCurrent(m)) return;
-      const validChange = change => change && typeof (change.entity_id || change.device_id) === 'string'
-        && change.fields && typeof change.fields === 'object' && !Array.isArray(change.fields)
-        && Object.keys(change.fields).length > 0 && Object.entries(change.fields).every(([key, field]) =>
-          (change.device_id ? ['name_by_user'] : ['entity_id', 'name']).includes(key)
-          && field && ['before', 'after'].every(side => field[side] === null || typeof field[side] === 'string'));
-      if (!result || !/^[A-Za-z0-9_-]{1,80}$/.test(result.operation_id || '')
-        || !/^[0-9a-f]{64}$/.test(result.fingerprint || '')
-        || !Array.isArray(result.changes) || !result.changes.length || !result.changes.every(validChange)
-        || !result.dependencies || !Array.isArray(result.dependencies.domains)
-        || !result.dependencies.domains.every(domain => typeof domain === 'string')
-        || !Number.isSafeInteger(result.dependencies.yaml_file_count)
-        || !Number.isSafeInteger(result.dependencies.template_consumer_count)
-        || result.dependencies.yaml_file_count < 0 || result.dependencies.template_consumer_count < 0
-        || !Array.isArray(result.dependencies.files)
-        || result.dependencies.files.length !== result.dependencies.yaml_file_count
-        || new Set(result.dependencies.files.map(file => file?.path)).size !== result.dependencies.files.length
-        || !result.dependencies.files.every(file => file && typeof file.path === 'string'
-          && Number.isSafeInteger(file.edit_count) && file.edit_count > 0
-          && Array.isArray(file.references) && file.references.length > 0
-          && file.references.every(ref => ref && typeof ref.before === 'string' && typeof ref.after === 'string'
-            && Number.isSafeInteger(ref.occurrences) && ref.occurrences > 0))) throw new Error('invalid_review');
+      if (!this._validMigrationReview(result)) throw new Error('invalid_review');
       // Full detached public projection; never construct or send a client Plan.
       m.review = JSON.parse(JSON.stringify({changes: result.changes, dependencies: result.dependencies}));
       m.identities = m.review.changes.map(change => change.device_id ? change.device_id
@@ -3411,7 +3463,7 @@ class HAEntityRenamer extends HTMLElement {
           && m.registryMatches && m.journal?.status === 'unknown'
           && m.journal?.direction === 'forward'))
       && m.inspection?.operation_id === m.operation_id && m.inspection?.fingerprint === m.fingerprint
-      && m.inspection?.eligible === true;
+      && m.inspection?.eligible === true && m.inspection?.restore_attempt_available === true;
   }
 
   _reviewMigrationRestore() {
@@ -3478,6 +3530,23 @@ class HAEntityRenamer extends HTMLElement {
     m.journal = (Array.isArray(inventory) ? inventory.find(row => row?.operation_id === m.operation_id && row?.fingerprint === m.fingerprint) : null) || null;
     const inspection = value(1);
     m.inspection = inspection?.operation_id === m.operation_id && inspection?.fingerprint === m.fingerprint ? inspection : null;
+    if ((m.recoveredIdentity || m.restoreAttempted) && m.inspection
+        && ((m.inspection.eligible === true && ['applied', 'recoverable_complete'].includes(m.inspection.state))
+          || (m.inspection.state === 'rolled_back' && m.inspection.reason === 'restored_verified'))) {
+      const frozen = m.inspection.frozen_review;
+      const projection = frozen && {...frozen, operation_id: m.operation_id, fingerprint: m.fingerprint};
+      if (this._validMigrationReview(projection) && Array.isArray(frozen.identities)
+          && frozen.identities.length === frozen.changes.length
+          && frozen.identities.every((identity, i) => frozen.changes[i].device_id
+            ? typeof identity === 'string' && identity === frozen.changes[i].device_id
+            : Array.isArray(identity) && identity.length === 4 && identity.every(value => value === null || typeof value === 'string'))) {
+        m.review = JSON.parse(JSON.stringify({changes: frozen.changes, dependencies: frozen.dependencies}));
+        m.identities = frozen.identities.map(identity => Array.isArray(identity) ? JSON.stringify(identity) : identity);
+        if (m.inspection.state === 'rolled_back') m.restoreAttempted = true;
+        else if (m.recoveredIdentity && !m.restoreAttempted && m.inspection.restore_attempt_available === true)
+          m.restoreRevoked = false; // New explicit confirmation is still required.
+      }
+    }
     // Fresh reads refresh the projection; they do not prove dependencies.
     const entities = value(2), devices = value(3);
     m.registryRead = Array.isArray(entities) && Array.isArray(devices);
@@ -3492,20 +3561,22 @@ class HAEntityRenamer extends HTMLElement {
         const side = m.restoreAttempted ? 'before' : 'after';
         const row = change.device_id ? devices.find(r => r.id === change.device_id)
           : entities.find(r => r.entity_id === (change.fields.entity_id?.[side] || change.entity_id));
-        return row && (!m.restoreAttempted || (change.device_id ? row.id === m.identities?.[index]
+        return row && ((!m.restoreAttempted && !m.recoveredIdentity) || (change.device_id ? row.id === m.identities?.[index]
           : !!m.identities?.[index] && this._sourceIdentity(row) === m.identities[index]))
           && Object.entries(change.fields).every(([key, field]) => (row[key] ?? null) === field[side]);
       });
     }
-    m.stage = m.restoreAttempted ? (m.restoreAcknowledged && m.registryMatches ? 'restored' : 'unknown')
+    m.stage = m.inspection?.state === 'refused' && m.inspection?.reason === 'prewrite_refused' ? 'refused'
+      : m.restoreAttempted ? ((m.restoreAcknowledged || (m.inspection?.state === 'rolled_back'
+        && m.inspection?.reason === 'restored_verified')) && m.registryMatches ? 'restored' : 'unknown')
       : m.inspection?.state === 'applied' && m.registryMatches ? 'applied' : 'unknown';
     m.busy = false; this.render();
   }
 
   _finishMigration() {
     const m = this._migration;
-    if (!m || m.busy || !['applied', 'restored'].includes(m.stage) || m.restoreConsent || !this._migrationCurrent(m)) return;
-    this._renameQueue = []; this._deviceRenameQueue = {}; this._impactResults = null;
+    if (!m || m.busy || !['applied', 'restored', 'refused'].includes(m.stage) || m.restoreConsent || !this._migrationCurrent(m)) return;
+    if (!m.recoveredIdentity && m.stage !== 'refused') { this._renameQueue = []; this._deviceRenameQueue = {}; this._impactResults = null; }
     this._migration = null; this.render();
   }
 
@@ -3546,6 +3617,7 @@ class HAEntityRenamer extends HTMLElement {
     // Persisted step observations do not establish the final verifier result.
     const states = {
       prepared: this._migrationText('Prepared', 'Przygotowano'),
+      refused: this._migrationText('Refused before write', 'Odmowa przed zapisem'),
       applying: this._migrationText('Applying', 'Wykonywanie'),
       applied: this._migrationText('Applied', 'Zastosowano'),
       unknown: this._migrationText('Unknown', 'Nieustalony'),
@@ -3579,18 +3651,24 @@ class HAEntityRenamer extends HTMLElement {
       : this._canRestoreMigration(m)
         ? this._migrationText('Fresh inspection allows review of this operation’s restore scope. Review and confirm it separately before any restore.', 'Świeża inspekcja pozwala sprawdzić zakres wycofania tej operacji. Przed wycofaniem osobno sprawdź i potwierdź zakres.')
         : this._migrationText('Restore is unavailable until a fresh inspection permits it. Check status and inspect; do not repeat the write.', 'Wycofanie jest niedostępne, dopóki świeża inspekcja go nie dopuści. Sprawdź stan i inspekcję; nie powtarzaj zapisu.');
-    return `<section class="apply-result" aria-labelledby="migrationResultTitle" aria-busy="${m.busy}">
+    return `<section class="apply-result ${['applied', 'restored'].includes(m.stage) && !m.busy ? '' : 'migration-pending'}" aria-labelledby="migrationResultTitle" aria-busy="${m.busy}">
       <h2 id="migrationResultTitle">${this._migrationText('Dependency operation', 'Operacja zależności')}</h2>
-      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan…', 'Wykonywanie zatwierdzonego planu…') : m.stage === 'restoring' ? this._migrationText('Restoring the confirmed scope…', 'Wycofywanie potwierdzonego zakresu…') : m.busy ? this._migrationText('Checking current status, inspection and registry…', 'Sprawdzanie bieżącego stanu, inspekcji i rejestru…') : m.stage === 'restored' ? this._migrationText('Restored scope acknowledged; original registry fields independently verified.', 'Wycofanie zakresu potwierdzone; oryginalne pola rejestru niezależnie zweryfikowane.') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
+      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan…', 'Wykonywanie zatwierdzonego planu…') : m.stage === 'restoring' ? this._migrationText('Restoring the confirmed scope…', 'Wycofywanie potwierdzonego zakresu…') : m.busy ? this._migrationText('Checking current status, inspection and registry…', 'Sprawdzanie bieżącego stanu, inspekcji i rejestru…') : m.stage === 'refused' ? this._migrationText('The server confirmed refusal before applying any changes.', 'Serwer potwierdził odmowę przed zastosowaniem zmian.') : m.stage === 'restored' ? this._migrationText('Restored scope confirmed; original registry fields independently verified.', 'Wycofanie zakresu potwierdzone; oryginalne pola rejestru niezależnie zweryfikowane.') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
       <p>${this._migrationText('Full dependency coverage is unconfirmed. Restore covers only this current operation.', 'Pełne pokrycie zależności jest niepotwierdzone. Wycofanie obejmuje tylko bieżącą operację.')}</p>
+      ${m.recoveredIdentity ? `<p>${this._migrationText('A previous operation is available for fresh inspection. Apply consent was not retained; do not repeat the write.', 'Poprzednia operacja jest dostępna do świeżej inspekcji. Zgoda na zastosowanie nie została zachowana; nie powtarzaj zapisu.')}</p>` : ''}
       <code>${_esc(m.operation_id)}</code>
       <p>${this._migrationText('Apply observation', 'Obserwacja zapisu')}: ${_esc(m.applyState || 'UNKNOWN')}. ${this._migrationText('Inspection', 'Inspekcja')}: ${_esc(m.inspection?.state || observation)}.</p>
       <p>${this._migrationText('Registry read', 'Odczyt rejestru')}: ${m.registryRead ? this._migrationText('received', 'otrzymany') : observation}. ${this._migrationText('Requested fields match', 'Zgodność żądanych pól')}: ${m.registryMatches ? this._migrationText('yes', 'tak') : this._migrationText('unconfirmed', 'niepotwierdzona')}.</p>
+      ${m.recoveredIdentity && m.review ? `<details><summary>${this._migrationText('Admitted original review (read-only)', 'Dopuszczony oryginalny przegląd (tylko odczyt)')}</summary>
+        <ul>${m.review.changes.flatMap(change => Object.entries(change.fields).map(([field, value]) => `<li>${_esc(change.entity_id || change.device_id)} — ${_esc(field)}: ${_esc(value.before ?? '(default)')} → ${_esc(value.after ?? '(default)')}</li>`)).join('')}</ul>
+        <p>${this._migrationText('Dependencies', 'Zależności')}: ${_esc(m.review.dependencies.domains.join(', '))}. ${this._migrationText('Template consumers', 'Odbiorcy Template')}: ${m.review.dependencies.template_consumer_count}.</p>
+        ${m.review.dependencies.files.map(file => `<details><summary>${_esc(file.path)} — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li>${_esc(ref.before)} → ${_esc(ref.after)} (${ref.occurrences})</li>`).join('')}</ul></details>`).join('')}
+      </details>` : ''}
       <div id="migrationJournal" aria-live="polite">${this._renderMigrationProgress(m)}</div>
       ${!m.busy && m.stage !== 'restored' ? `<p>${restoreGuidance}</p>` : ''}
       <button type="button" class="btn btn-outline" id="inspectMigration" ${m.busy || !this._renameAuthorityAvailable() ? 'disabled' : ''}>${this._migrationText('Check status and inspect', 'Sprawdź stan i inspekcję')}</button>
       <button type="button" class="btn btn-outline" id="reviewMigrationRestore" ${this._canRestoreMigration(m) ? '' : 'disabled'}>${this._migrationText('Review restore scope', 'Sprawdź zakres wycofania')}</button>
-      ${['applied', 'restored'].includes(m.stage) ? `<button type="button" class="btn btn-primary" id="finishMigration">${m.stage === 'restored' ? this._migrationText('Finish and clear restored queue', 'Zakończ i wyczyść wycofaną kolejkę') : this._migrationText('Finish and clear applied queue', 'Zakończ i wyczyść zastosowaną kolejkę')}</button>` : ''}
+      ${['applied', 'restored', 'refused'].includes(m.stage) ? `<button type="button" class="btn btn-primary" id="finishMigration">${m.recoveredIdentity ? this._migrationText('Finish operation', 'Zakończ operację') : m.stage === 'refused' ? this._migrationText('Finish and review queue', 'Zakończ i sprawdź kolejkę') : m.stage === 'restored' ? this._migrationText('Finish and clear restored queue', 'Zakończ i wyczyść wycofaną kolejkę') : this._migrationText('Finish and clear applied queue', 'Zakończ i wyczyść zastosowaną kolejkę')}</button>` : ''}
     </section>`;
   }
 
@@ -3957,6 +4035,9 @@ class HAEntityRenamer extends HTMLElement {
         controls[next]?.focus();
       }
     });
+
+    root.getElementById('findMigrationRecovery')?.addEventListener('click', () => this._findMigrationRecovery());
+    root.querySelectorAll('[data-recovery-index]').forEach(button => button.addEventListener('click', () => this._selectMigrationRecovery(Number(button.dataset.recoveryIndex))));
 
     const confirmRenameApply = root.getElementById('confirmRenameApply');
     if (confirmRenameApply) {

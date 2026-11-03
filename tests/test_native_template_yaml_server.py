@@ -493,6 +493,130 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
         self.assertFalse(await runtime.journal.active())
 
+    async def _private_restore_marker_fixture(self, marker):
+        from dataclasses import replace
+        import json
+        runtime, mapping, uuids, original = await self.data()
+        async def refresh(): return None
+        result = await runtime.native_forward(self.f.hass, mapping, guard=lambda: None, refresh=refresh)
+        operation = result['operation_id']
+        record = await runtime.journal.load(operation)
+        self.assertIs(record.restore_attempted, False)
+        if marker is True:
+            await runtime.journal.save(replace(record, restore_attempted=True))
+        elif marker is None:
+            # Construct the on-disk legacy schema in this isolated fixture, then
+            # reopen through the actual strict native journal reader.
+            path = self.f.root / '.storage' / 'ha_entity_renamer.migrations'
+            payload = json.loads(path.read_text())['data']
+            del payload['operations'][operation]['restore_attempted']
+            await runtime.journal.store.save(payload)
+            fresh = self.module('journal').native_journal(self.f.hass)
+            await fresh.initialize()
+            runtime.journal = fresh
+        actual = await runtime.journal.load(operation)
+        self.assertIs(actual.restore_attempted, marker)
+        return runtime, mapping, uuids, original, result, refresh
+
+    async def test_private_reverse_false_persists_intent_before_actual_native_undo(self):
+        runtime, mapping, uuids, original, result, refresh = await self._private_restore_marker_fixture(False)
+        yaml_adapter = self.module('native_yaml_transaction').ReceiptedYAMLTransactionAdapter
+        registry_adapter = self.module('native_registry_transaction').ReceiptedRegistryTransactionAdapter
+        original_yaml, original_registry = yaml_adapter.compensate, registry_adapter.compensate
+        seen = []
+        async def before_effect(kind, instance, step, guard, original_effect):
+            # A fresh native journal read proves the persisted marker before
+            # entering either real compensate method, not a cached session value.
+            fresh = self.module('journal').native_journal(self.f.hass)
+            await fresh.initialize()
+            record = await fresh.load(result['operation_id'])
+            self.assertIs(record.restore_attempted, True)
+            self.assertEqual(record.direction, 'rollback')
+            self.assertEqual(record.phases[record.plan.steps.index(step)], 'undo_intent')
+            seen.append(kind)
+            return await original_effect(instance, step, guard)
+        async def checked_yaml(instance, step, guard):
+            return await before_effect('yaml', instance, step, guard, original_yaml)
+        async def checked_registry(instance, step, guard):
+            return await before_effect('registry', instance, step, guard, original_registry)
+        with patch.object(yaml_adapter, 'compensate', checked_yaml), \
+             patch.object(registry_adapter, 'compensate', checked_registry):
+            reverse = await runtime.native_yaml_reverse(self.f.hass, result['operation_id'], result['fingerprint'],
+                guard=lambda: None, refresh=refresh)
+        self.assertEqual(reverse['state'], 'rolled_back')
+        self.assertEqual(seen, ['yaml', 'registry'])
+        self.assertIs((await runtime.journal.load(result['operation_id'])).restore_attempted, True)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        for old, new in mapping.items():
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+            self.assertIsNone(self.f.entity.async_get(new))
+
+    async def _assert_private_restore_marker_refuses(self, marker):
+        runtime, mapping, uuids, _, result, refresh = await self._private_restore_marker_fixture(marker)
+        before = (self.f.root / 'template.yaml').read_bytes()
+        with self.assertRaisesRegex(self.module('transaction').Refused, 'restore_attempt_unavailable'):
+            await runtime.native_yaml_reverse(self.f.hass, result['operation_id'], result['fingerprint'],
+                guard=lambda: None, refresh=refresh)
+        self.assertIs((await runtime.journal.load(result['operation_id'])).restore_attempted, marker)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), before)
+        for old, new in mapping.items():
+            self.assertIsNone(self.f.entity.async_get(old))
+            self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+
+    async def test_private_reverse_consumed_intent_refuses_before_effect(self):
+        await self._assert_private_restore_marker_refuses(True)
+
+    async def test_private_reverse_legacy_intent_refuses_before_effect(self):
+        await self._assert_private_restore_marker_refuses(None)
+
+    async def test_private_reverse_lost_intent_save_ack_cannot_enter_native_undo_or_replay(self):
+        runtime, mapping, uuids, _, result, refresh = await self._private_restore_marker_fixture(False)
+        journal_class = self.module('journal').DurableJournal
+        original_save = journal_class.save
+        yaml_adapter = self.module('native_yaml_transaction').ReceiptedYAMLTransactionAdapter
+        registry_adapter = self.module('native_registry_transaction').ReceiptedRegistryTransactionAdapter
+        bridge = self.module('native_registry').NativeRegistryBridge
+        yaml_mutator = self.module('yaml_transaction')
+        original_yaml, original_registry = yaml_adapter.compensate, registry_adapter.compensate
+        original_write, original_patch = bridge._write, yaml_mutator.apply_file_patch
+        seen = []
+        async def lost_after_durable(journal, record):
+            await original_save(journal, record)
+            if record.operation_id == result['operation_id'] and record.restore_attempted is True:
+                raise OSError('synthetic lost durable intent ACK')
+        async def observed_yaml(instance, step, guard):
+            seen.append('yaml_compensate')
+            return await original_yaml(instance, step, guard)
+        async def observed_registry(instance, step, guard):
+            seen.append('registry_compensate')
+            return await original_registry(instance, step, guard)
+        async def observed_write(instance, *args, **kwargs):
+            seen.append('registry_write')
+            return await original_write(instance, *args, **kwargs)
+        def observed_patch(*args, **kwargs):
+            seen.append('yaml_write')
+            return original_patch(*args, **kwargs)
+        before = (self.f.root / 'template.yaml').read_bytes()
+        with patch.object(journal_class, 'save', lost_after_durable), \
+             patch.object(yaml_adapter, 'compensate', observed_yaml), \
+             patch.object(registry_adapter, 'compensate', observed_registry), \
+             patch.object(bridge, '_write', observed_write), \
+             patch.object(yaml_mutator, 'apply_file_patch', observed_patch):
+            with self.assertRaisesRegex(OSError, 'synthetic lost durable intent ACK'):
+                await runtime.native_yaml_reverse(self.f.hass, result['operation_id'], result['fingerprint'],
+                    guard=lambda: None, refresh=refresh)
+            fresh = self.module('journal').native_journal(self.f.hass)
+            await fresh.initialize(); runtime.journal = fresh
+            self.assertIs((await fresh.load(result['operation_id'])).restore_attempted, True)
+            with self.assertRaisesRegex(self.module('transaction').Refused, 'restore_attempt_unavailable'):
+                await runtime.native_yaml_reverse(self.f.hass, result['operation_id'], result['fingerprint'],
+                    guard=lambda: None, refresh=refresh)
+        self.assertEqual(seen, [])
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), before)
+        for old, new in mapping.items():
+            self.assertIsNone(self.f.entity.async_get(old))
+            self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+
     async def test_terminal_reverse_replay_refused(self):
         runtime, mapping, _, original = await self.data()
         async def refresh():

@@ -116,6 +116,73 @@ def _yaml_summary(session):
     return result
 
 
+def _ordinary_review_owned(preparations, operation_id):
+    """Require the immutable ordinary-review lease, never infer a public review."""
+    import re
+    from .review_retention import review_lease
+    match = re.fullmatch(r'template-yaml-([0-9a-f]{32})', operation_id)
+    if match is None:
+        return False
+    key = 'review-' + match.group(1)
+    row = preparations.plans.get(key)
+    if type(row) is not dict or type(row.get('digest')) is not str:
+        return False
+    try:
+        payload = preparations.resolve(key, row['digest'])
+        return payload == review_lease(match.group(1), payload.get('actor_id'))
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def _yaml_frozen_review(session, *, restored=False):
+    """Project the original review only after full exact reverse admission.
+
+    This is read-only evidence, never consent or permission to issue a write.
+    Prefix recovery is excluded: its inverse scope is not the complete plan.
+    """
+    if any(phase != ('undone' if restored else 'verified') for phase in session.record.phases):
+        raise Refused('complete_review_required')
+    changes, identities = [], []
+    for change in session.registry_changes:
+        before, after = change.before, change.after
+        keys = ('entity_id', 'name') if change.kind == 'entity' else ('name_by_user',)
+        fields = {key: {'before': before.get(key), 'after': after.get(key)}
+                  for key in keys if before.get(key) != after.get(key)}
+        if not fields:
+            raise Refused('empty_recovery_change')
+        target = ({'entity_id': before['entity_id']} if change.kind == 'entity'
+                  else {'device_id': change.identity})
+        changes.append({**target, 'fields': fields})
+        identities.append([before.get(key) for key in ('id', 'platform', 'unique_id', 'device_id')]
+                          if change.kind == 'entity' else change.identity)
+    from .dependency_review import dependency_files
+    receipt = session.receipt
+    return {'changes': changes, 'identities': identities, 'dependencies': {
+        'domains': sorted(domain for domain in receipt.changed_domains
+                          if domain in ('template', 'automation', 'script')),
+        'yaml_file_count': len(receipt.proposed_files),
+        'files': dependency_files(session.composition),
+        'template_consumer_count': sum(
+            row.domain in ('template.sensor', 'template.binary_sensor')
+            for row in session.evidence.template_sources.ledger.definitions)}}
+
+
+async def _consume_yaml_restore_intent(session, expected, guard):
+    """Consume one durable intent under the owning Runtime lock before effects."""
+    from dataclasses import replace
+    guard()
+    if expected.restore_attempted is not False or session.record != expected:
+        raise Refused('restore_attempt_unavailable')
+    actual = await session.journal.load(expected.operation_id)
+    guard()
+    if actual != expected:
+        raise Refused('restore_record_changed')
+    claimed = replace(expected, restore_attempted=True)
+    await session.journal.save(claimed)
+    guard()
+    session.record = claimed
+
+
 async def _acquire_lease(hass, entry, *, guard, refresh):
     """Use native FIFO lock waiting; the actual finite lease still owns proof.
 
@@ -222,6 +289,12 @@ class RecoveryController:
         for record in records:
             self.check()
             need, reason = True, 'unsupported_recovery_state'
+            if record.status == 'refused' and record.reason == 'prewrite_refused':
+                operations.append({'operation_id': record.operation_id,
+                    'fingerprint': record.plan.fingerprint, 'status': record.status,
+                    'direction': record.direction, 'recovery_required': False,
+                    'reason': 'prewrite_refused', 'eligible': False})
+                continue
             from .native_template_prefix_recovery import acknowledged_registry_prefix, complete_forward_unknown
             if acknowledged_registry_prefix(record) or complete_forward_unknown(record):
                 # Snapshot shape only: actual source/chain/history inspection
@@ -309,9 +382,29 @@ class RecoveryController:
             self.check()
             if record is None or record.plan.fingerprint != fingerprint:
                 return _result(operation_id, fingerprint, 'refused', 'operation_mismatch')
+            if record.status == 'refused' and record.reason == 'prewrite_refused':
+                return _result(operation_id, fingerprint, 'refused', 'prewrite_refused')
             if record.status == 'rolled_back':
-                # Do NOT infer full native/lifecycle completion from this status.
-                return _result(operation_id, fingerprint, 'refused', 'already_finished')
+                if restore:
+                    return _result(operation_id, fingerprint, 'refused', 'already_finished')
+                # The inner journal alone is not proof of original runtime or
+                # completed outer lifecycle. Reopen and independently verify.
+                if (record.restore_attempted is not True or record.plan.required_scopes != ('registry', 'yaml')
+                        or not _ordinary_review_owned(preparations, operation_id)):
+                    return _result(operation_id, fingerprint, 'UNKNOWN', 'restored_unproven')
+                from . import _yaml_factory_for_plan
+                factory = _yaml_factory_for_plan(preparations, record.plan)
+                session = await factory.bind_reverse(self.hass, operation_id, fingerprint,
+                    guard=self.check, refresh=self.refresh, restored=True)
+                self.check()
+                result = _result(operation_id, fingerprint, 'rolled_back', 'restored_verified')
+                result['frozen_review'] = _yaml_frozen_review(session, restored=True)
+                return result
+            if record.plan.required_scopes == ('registry', 'yaml') and record.restore_attempted is not False:
+                # A previous restore may have stopped before its first journal
+                # transition, including inside outer automation lifecycle.
+                return _result(operation_id, fingerprint, 'UNKNOWN',
+                    'restore_attempt_unresolved' if record.restore_attempted is True else 'legacy_restore_unproven')
             from .native_template_prefix_recovery import acknowledged_registry_prefix
             prefix = acknowledged_registry_prefix(record)
             from .native_template_prefix_recovery import complete_forward_unknown
@@ -325,16 +418,28 @@ class RecoveryController:
                 factory = _yaml_factory_for_plan(preparations, record.plan)
                 # Fresh actual source/history/auth admission, independently repeated
                 # for restore; no inspect result is retained as write authority.
+                if restore and record.restore_attempted is not False:
+                    return _result(operation_id, fingerprint, 'UNKNOWN', 'restore_attempt_unavailable')
                 session = await factory.bind_reverse(self.hass,
                     operation_id, fingerprint, guard=self.check, refresh=self.refresh)
                 self.check()
                 summary = _yaml_summary(session)
                 if not restore:
-                    return _result(operation_id, fingerprint,
+                    result = _result(operation_id, fingerprint,
                         'recoverable_prefix' if prefix else
                             'recoverable_complete' if uncertain_complete else 'applied',
                         'acknowledged_prefix' if prefix else
                             'complete_forward_unknown' if uncertain_complete else 'complete', summary=summary)
+                    result['restore_attempt_available'] = record.restore_attempted is False
+                    if not prefix and _ordinary_review_owned(preparations, operation_id):
+                        try:
+                            result['frozen_review'] = _yaml_frozen_review(session)
+                        except (Refused, ValueError, KeyError, TypeError):
+                            pass  # Existing inspection remains usable without a full projection.
+                    return result
+                # Both Runtime entrypoints consume the same durable one-shot
+                # intent under the bound session and owning operation lock.
+                await _consume_yaml_restore_intent(session, record, self.check)
                 result = await session.rollback()
                 self.check()
                 if result.status != 'rolled_back':

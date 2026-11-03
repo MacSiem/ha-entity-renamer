@@ -53,6 +53,46 @@ class JournalTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises((ValueError, KeyError)): await fresh.initialize()
         with self.assertRaises(ValueError): await fresh.active()
 
+    async def test_restore_intent_is_durable_one_way_and_legacy_never_backfilled(self):
+        legacy = self.record
+        await self.journal.create(legacy)
+        with self.assertRaisesRegex(ValueError, 'journal_restore_intent_conflict'):
+            await self.journal.save(replace(legacy, restore_attempted=False))
+        current = replace(legacy, operation_id='op2', restore_attempted=False)
+        await self.journal.create(current)
+        await self.journal.save(replace(current, restore_attempted=True))
+        fresh = DurableJournal(self.store); await fresh.initialize()
+        self.assertIs((await fresh.load('op2')).restore_attempted, True)
+        with self.assertRaisesRegex(ValueError, 'journal_restore_intent_conflict'):
+            await fresh.save(current)
+        with self.assertRaisesRegex(ValueError, 'journal_restore_intent_conflict'):
+            await fresh.save(replace(current, restore_attempted=None))
+
+    async def test_lost_restore_intent_ack_requires_fresh_durable_read(self):
+        current = replace(self.record, restore_attempted=False)
+        await self.journal.create(current)
+        self.store.fail = True
+        with self.assertRaises(OSError):
+            await self.journal.save(replace(current, restore_attempted=True))
+        with self.assertRaises(ValueError): await self.journal.load('op1')
+        fresh = DurableJournal(self.store); await fresh.initialize()
+        self.assertIs((await fresh.load('op1')).restore_attempted, True)
+
+    async def test_legacy_payload_decodes_as_unknown_not_unattempted(self):
+        await self.journal.create(self.record)
+        self.assertNotIn('restore_attempted', self.store.payload['operations']['op1'])
+        fresh = DurableJournal(self.store); await fresh.initialize()
+        self.assertIsNone((await fresh.load('op1')).restore_attempted)
+        await fresh.create(replace(self.record, operation_id='new', restore_attempted=False))
+        self.assertNotIn('restore_attempted', self.store.payload['operations']['op1'])
+
+    async def test_prewrite_refusal_is_terminal_and_cannot_be_promoted(self):
+        refused = replace(self.record, status='refused', reason='prewrite_refused', restore_attempted=False)
+        await self.journal.create(refused)
+        self.assertEqual(await self.journal.active(), ())
+        with self.assertRaisesRegex(ValueError, 'journal_refusal_terminal'):
+            await self.journal.save(replace(refused, status='applied', phases=('verified',), reason=''))
+
     async def test_operation_ids_are_not_paths(self):
         for key in ['../op', 'op/child', '', 'x'*81]:
             with self.assertRaises(ValueError): await self.journal.create(replace(self.record, operation_id=key))

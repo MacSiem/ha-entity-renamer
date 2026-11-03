@@ -203,9 +203,26 @@ class Runtime:
             self.reviews.pop(operation_id)
             @trace_owned
             async def operation():
-                factory = _yaml_factory_for_plan(self.preparations, review.plan)
-                session = await factory.bind_prepared(hass, operation_id,
-                    review.plan, guard=current, refresh=refresh)
+                try:
+                    factory = _yaml_factory_for_plan(self.preparations, review.plan)
+                    session = await factory.bind_prepared(hass, operation_id,
+                        review.plan, guard=current, refresh=refresh)
+                except Exception:
+                    # bind_prepared is read-only and session.apply has not been
+                    # entered. Only a freshly authorized durable record may
+                    # advertise this precise pre-effect refusal after reconnect.
+                    current()
+                    from .journal import native_journal
+                    from .transaction import Record
+                    journal = native_journal(hass)
+                    await journal.initialize()
+                    current()
+                    await journal.create(Record(operation_id, review.plan, status='refused',
+                        phases=('pending',) * len(review.plan.steps), reason='prewrite_refused',
+                        restore_attempted=False))
+                    current()
+                    self.journal = journal
+                    raise
                 try:
                     return await session.apply()
                 finally:
@@ -276,10 +293,14 @@ class Runtime:
                 current()
                 if record is None or record.plan.fingerprint != fingerprint:
                     raise Refused('yaml_operation_mismatch')
+                if record.restore_attempted is not False:
+                    raise Refused('restore_attempt_unavailable')
                 factory = _yaml_factory_for_plan(self.preparations, record.plan)
                 session = await factory.bind_reverse(hass, operation_id,
                     fingerprint, guard=current, refresh=refresh)
                 try:
+                    from .recovery_controller import _consume_yaml_restore_intent
+                    await _consume_yaml_restore_intent(session, record, current)
                     return await session.rollback()
                 finally:
                     session.close()

@@ -9,7 +9,7 @@ from .transaction import Plan, Record, Step
 
 _OPERATION = re.compile(r'[a-zA-Z0-9_-]{1,80}\Z')
 _PHASES = {'pending', 'intent', 'verified', 'undo_intent', 'undone'}
-_STATUSES = {'prepared', 'applying', 'unknown', 'ready', 'applied', 'rolling_back', 'rollback_ready', 'rolled_back'}
+_STATUSES = {'prepared', 'applying', 'unknown', 'ready', 'applied', 'rolling_back', 'rollback_ready', 'rolled_back', 'refused'}
 
 
 def decode(value):
@@ -50,10 +50,14 @@ def decode(value):
         if (record.operation_id != key or record.status not in _STATUSES
                 or record.direction not in ('forward', 'rollback')
                 or len(record.phases) != len(plan.steps) or not set(record.phases) <= _PHASES
-                or type(record.reason) is not str):
+                or type(record.reason) is not str
+                or (record.restore_attempted is not None and type(record.restore_attempted) is not bool)):
             raise ValueError('invalid_journal_record')
         if record.status == 'applied' and (set(record.phases) != {'verified'} or record.direction != 'forward'):
             raise ValueError('invalid_applied_record')
+        if record.status == 'refused' and (record.reason != 'prewrite_refused' or record.direction != 'forward'
+                or record.restore_attempted is not False or set(record.phases) != {'pending'}):
+            raise ValueError('invalid_refusal_record')
         if record.status == 'rolled_back' and (not set(record.phases) <= {'pending', 'undone'} or record.direction != 'rollback'):
             raise ValueError('invalid_rollback_record')
         result[key] = record
@@ -97,7 +101,7 @@ class DurableJournal:
     async def active(self):
         async with self.lock:
             self._ready()
-            return tuple(record for record in self.records.values() if record.status not in ('applied', 'rolled_back'))
+            return tuple(record for record in self.records.values() if record.status not in ('applied', 'rolled_back', 'refused'))
 
     async def _write(self, record, *, create):
         async with self.lock:
@@ -109,8 +113,22 @@ class DurableJournal:
                 raise ValueError('journal_operation_conflict')
             if previous is not None and previous.plan.fingerprint != record.plan.fingerprint:
                 raise ValueError('journal_plan_conflict')
+            # A certified prewrite refusal is terminal and cannot be promoted.
+            if previous is not None and previous.status == 'refused' and record != previous:
+                raise ValueError('journal_refusal_terminal')
+            # Legacy records cannot be backfilled; consumed attempts cannot be reset.
+            if previous is not None and ((previous.restore_attempted is None and record.restore_attempted is not None)
+                    or (previous.restore_attempted is True and record.restore_attempted is not True)
+                    or (previous.restore_attempted is False and record.restore_attempted is None)):
+                raise ValueError('journal_restore_intent_conflict')
             updated = {**self.records, record.operation_id: record}
-            payload = {'schema': 1, 'operations': {key: asdict(row) for key, row in updated.items()}}
+            def encode_record(row):
+                data = asdict(row)
+                # Preserve the original legacy shape; absence is not False.
+                if row.restore_attempted is None:
+                    data.pop('restore_attempted')
+                return data
+            payload = {'schema': 1, 'operations': {key: encode_record(row) for key, row in updated.items()}}
             # Round-trip through the same decoder used after a restart.
             import json
             decoded = decode(json.loads(json.dumps(payload, allow_nan=False)))

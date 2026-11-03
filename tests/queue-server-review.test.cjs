@@ -26,7 +26,7 @@ function fixture(t, language='en') {
     if(message.type==='ha_entity_renamer/prepare') return review;
     if(message.type==='ha_entity_renamer/apply') { entries[0].entity_id='sensor.b'; return {operation_id:review.operation_id,fingerprint,state:'applied'}; }
     if(message.type==='ha_entity_renamer/status') return {operations:[{operation_id:review.operation_id,fingerprint,status:'applied',phases:[{adapter:'registry',phase:'verified'}],progress:{total_steps:2,verified_steps:1,undone_steps:0}}]};
-    if(message.type==='ha_entity_renamer/recovery/inspect') return {operation_id:review.operation_id,fingerprint,state:'applied',eligible:true,migration_ready:false,family_complete:false};
+    if(message.type==='ha_entity_renamer/recovery/inspect') return {operation_id:review.operation_id,fingerprint,state:'applied',eligible:true,restore_attempt_available:true,migration_ready:false,family_complete:false};
     throw new Error('Unexpected '+message.type);
   }};
   card._hass=hass;card._lang=language;card._entities=entries.map(row=>({...row}));card._devices=devices;card._deviceEntities={dev:card._entities};card._bindRenameExportEvents();
@@ -359,7 +359,7 @@ async function completeUnknownFixture(t) {
   const f=fixture(t);await f.card._prepareMigration();
   f.handlers['ha_entity_renamer/apply']=()=>{f.entries[0].entity_id='sensor.b';throw new Error('uncertain final verifier');};
   f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'unknown',direction:'forward'}]});
-  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'recoverable_complete',eligible:true});
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'recoverable_complete',eligible:true,restore_attempt_available:true});
   await f.card._applyMigration();return f;
 }
 
@@ -459,4 +459,128 @@ test('failed progress read no longer presents a stale snapshot as current',async
   await f.card._refreshMigrationProgress();assert.match(f.card.shadowRoot.getElementById('migrationJournal').textContent,/unavailable/);
   assert.doesNotMatch(f.card.shadowRoot.getElementById('migrationJournal').textContent,/1 \/ 2/);
   pending.reject(new Error('uncertain'));await first;
+});
+
+test('server inventory rediscovers a lost card without storage and never authorizes a write',async t=>{
+  const f=fixture(t);const storage=f.dom.window.Storage.prototype;const original=storage.setItem;
+  storage.setItem=()=>{throw new Error('blocked');};t.after(()=>{storage.setItem=original;});
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'old_qa',fingerprint,status:'prepared',direction:'forward'}]});
+  await f.card._findMigrationRecovery();const button=f.card.shadowRoot.querySelector('[data-recovery-index]');
+  assert.match(button.textContent,/old_qa.*prepared/);button.click();
+  assert.equal(f.card._migration.stage,'unknown');assert.equal(f.card._migration.restoreRevoked,true);
+  assert.equal(f.card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);
+  assert.ok(f.card.shadowRoot.querySelector('.apply-result.migration-pending'));assert.equal(writes(f).length,0);
+});
+
+test('recovered complete operation needs fresh restore confirmation after inspection',async t=>{
+  const f=fixture(t);f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'unknown',direction:'forward'}]});
+  f.entries[0].entity_id='sensor.b';
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'recoverable_complete',eligible:true,restore_attempt_available:true,
+    frozen_review:{changes:f.review.changes,dependencies:f.review.dependencies,identities:[['entry-a','mqtt','a','dev']]}});
+  await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();await f.card._inspectMigration();
+  assert.equal(f.card._migration.stage,'unknown');assert.match(f.card.shadowRoot.textContent,/Admitted original review/);
+  assert.match(f.card.shadowRoot.textContent,/template.yaml/);assert.equal(f.card.shadowRoot.getElementById('reviewMigrationRestore').disabled,false);
+  f.card._reviewMigrationRestore();assert.equal(f.card._migration.restoreConsent,true);
+  assert.equal(writes(f).length,0);assert.equal(restores(f).length,0);
+});
+
+test('late inventory response cannot populate a different account',async t=>{
+  const f=fixture(t);const pending=gate();f.handlers['ha_entity_renamer/status']=()=>pending.promise;
+  const read=f.card._findMigrationRecovery();f.card.hass={...f.hass,user:{id:'other-admin',is_admin:true}};
+  pending.resolve({operations:[{operation_id:'old_qa',fingerprint,status:'unknown'}]});await read;
+  assert.doesNotMatch(f.card.shadowRoot.textContent,/old_qa/);assert.equal(f.card._migration,null);
+});
+
+test('unavailable browser storage does not block ordinary reviewed apply',async t=>{
+  const f=fixture(t);await f.card._prepareMigration();const storage=f.dom.window.Storage.prototype;const original=storage.setItem;
+  storage.setItem=()=>{throw new Error('blocked');};t.after(()=>{storage.setItem=original;});
+  await f.card._applyMigration();assert.equal(writes(f).length,1);
+});
+
+test('recovered legacy or consumed attempt never offers another restore',async t=>{
+  for(const available of [false,undefined]) {
+    const f=fixture(t);f.entries[0].entity_id='sensor.b';
+    f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'applied',direction:'forward'}]});
+    f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'applied',eligible:true,restore_attempt_available:available,
+      frozen_review:{changes:f.review.changes,dependencies:f.review.dependencies,identities:[['entry-a','mqtt','a','dev']]}});
+    await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();await f.card._inspectMigration();
+    assert.equal(f.card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);
+    f.card._reviewMigrationRestore();await f.card._restoreMigration();assert.equal(restores(f).length,0);
+  }
+});
+
+test('recreated card can finish lost restore ACK only with server terminal proof and original identity',async t=>{
+  const f=fixture(t);f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'rolled_back',direction:'rollback'}]});
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'rolled_back',reason:'restored_verified',eligible:false,
+    frozen_review:{changes:f.review.changes,dependencies:f.review.dependencies,identities:[['entry-a','mqtt','a','dev']]}});
+  await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();await f.card._inspectMigration();
+  assert.equal(f.card._migration.stage,'restored');assert.ok(f.card.shadowRoot.getElementById('finishMigration'));
+  f.card._finishMigration();assert.equal(f.card._migration,null);assert.equal(restores(f).length,0);
+});
+
+test('restored server proof cannot finish when original registry identity changed',async t=>{
+  const f=fixture(t);f.entries[0].unique_id='foreign';
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'rolled_back',direction:'rollback'}]});
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'rolled_back',reason:'restored_verified',eligible:false,
+    frozen_review:{changes:f.review.changes,dependencies:f.review.dependencies,identities:[['entry-a','mqtt','a','dev']]}});
+  await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();await f.card._inspectMigration();
+  assert.equal(f.card._migration.stage,'unknown');assert.equal(f.card.shadowRoot.getElementById('finishMigration'),null);
+});
+
+test('only server-proven prewrite refusal finishes and preserves the queue',async t=>{
+  const f=fixture(t);await f.card._prepareMigration();
+  f.handlers['ha_entity_renamer/apply']=()=>Promise.reject(new Error('prewrite'));
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'refused',reason:'prewrite_refused',eligible:false});
+  await f.card._applyMigration();assert.equal(f.card._migration.stage,'refused');
+  assert.match(f.card.shadowRoot.textContent,/confirmed refusal before applying/);
+  f.card._finishMigration();assert.equal(f.card._migration,null);assert.equal(f.card._renameQueue.length,1);assert.equal(writes(f).length,1);
+});
+
+test('replacement requires fresh admission and separate consent before inverse',async t=>{
+  const f=fixture(t);await f.card._prepareMigration();const pending=gate();f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'unknown',direction:'forward'}]});
+  const first=f.card._applyMigration();await tick();f.card.remove();
+  const card=f.dom.window.document.createElement('ha-entity-renamer');card.setConfig({show_support:false});f.dom.window.document.body.append(card);card.hass=f.hass;await tick();
+  await card._findMigrationRecovery();card.shadowRoot.querySelector('[data-recovery-index]').click();
+  assert.equal(card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);assert.equal(restores(f).length,0);
+  f.entries[0].entity_id='sensor.b';
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'recoverable_complete',eligible:true,restore_attempt_available:true,
+    frozen_review:{changes:f.review.changes,dependencies:f.review.dependencies,identities:[['entry-a','mqtt','a','dev']]}});
+  await card._inspectMigration();assert.equal(card.shadowRoot.getElementById('reviewMigrationRestore').disabled,false);
+  card._reviewMigrationRestore();assert.equal(restores(f).length,0);
+  f.handlers['ha_entity_renamer/recovery/restore']=()=>{f.entries[0].entity_id='sensor.a';finishedInspection(f);return restoreAck();};
+  await card._restoreMigration();await card._restoreMigration();assert.equal(restores(f).length,1);
+  pending.reject(new Error('late apply response'));await first;assert.equal(writes(f).length,1);
+});
+
+test('foreign refusal and unproven restored journal cannot clear the operation',async t=>{
+  const f=fixture(t);await f.card._prepareMigration();
+  f.handlers['ha_entity_renamer/apply']=()=>Promise.reject(new Error('lost response'));
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'rolled_back'}]});
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'other',fingerprint,state:'refused',reason:'prewrite_refused'});
+  await f.card._applyMigration();assert.equal(f.card._migration.stage,'unknown');assert.equal(f.card.shadowRoot.getElementById('finishMigration'),null);
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'UNKNOWN',reason:'restored_unproven'});
+  await f.card._inspectMigration();assert.equal(f.card._migration.stage,'unknown');assert.equal(f.card.shadowRoot.getElementById('finishMigration'),null);
+});
+
+for (const state of ['applied','rolled_back']) test('finishing recovered '+state+' preserves unrelated queued entity, device name and impact',async t=>{
+  const f=fixture(t);f.entries[0].entity_id=state==='applied'?'sensor.b':'sensor.a';
+  f.entries.push({id:'entry-c',entity_id:'sensor.c',device_id:'dev',unique_id:'c',platform:'mqtt',name:null});
+  f.card._entities=f.entries.map(row=>({...row}));
+  f.card._renameQueue=[{oldId:'sensor.c',newId:'sensor.d'}];f.card._deviceRenameQueue={dev:'Unrelated device name'};
+  f.card._impactResults={'sensor.c':{automations:[],scripts:[],dashboards:[],scenes:[]}};const impact=f.card._impactResults;
+  f.card._showRenameConfirmation();assert.ok(f.card._confirmation);assert.equal(f.card._confirmDialogOpen,true);
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:state,direction:state==='applied'?'forward':'rollback'}]});
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state,
+    ...(state==='applied'?{eligible:true,restore_attempt_available:true}:{eligible:false,reason:'restored_verified'}),
+    frozen_review:{changes:f.review.changes,dependencies:f.review.dependencies,identities:[['entry-a','mqtt','a','dev']]}});
+  await f.card._findMigrationRecovery();f.card._entityEditor={oldId:'sensor.c'};
+  f.card.shadowRoot.querySelector('[data-recovery-index]').click();
+  assert.equal(f.card._confirmation,null);assert.equal(f.card._confirmDialogOpen,false);assert.equal(f.card._entityEditor,null);
+  await f.card._inspectMigration();assert.equal(f.card._migration.stage,state==='applied'?'applied':'restored');
+  assert.match(f.card.shadowRoot.getElementById('finishMigration').textContent,/Finish operation/);
+  f.card._finishMigration();assert.equal(f.card._migration,null);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.card._renameQueue)),[{oldId:'sensor.c',newId:'sensor.d'}]);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.card._deviceRenameQueue)),{dev:'Unrelated device name'});
+  assert.equal(f.card._impactResults,impact);assert.equal(writes(f).length,0);assert.equal(restores(f).length,0);
 });

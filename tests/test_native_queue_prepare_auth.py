@@ -602,6 +602,12 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(inspected['success'], inspected)
                     self.assertEqual(inspected['result']['state'], 'recoverable_complete', inspected)
                     self.assertIs(inspected['result']['eligible'], True)
+                    self.assertIs(inspected['result']['restore_attempt_available'], True)
+                    review = inspected['result']['frozen_review']
+                    self.assertEqual(len(review['identities']), len(review['changes']))
+                    self.assertTrue(all(change['fields'] for change in review['changes']))
+                    self.assertEqual(review['dependencies']['yaml_file_count'],
+                                     len(review['dependencies']['files']))
                     self.assertFalse(inspected['result']['migration_ready'])
                     self.assertEqual(await runtime.journal.load(binding['operation_id']), record)
                     self.assertEqual({p: (self.f.root / p).read_bytes() for p in original}, before_inspect)
@@ -634,6 +640,26 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
                                  ('refused', 'already_finished'))
                 self.assertEqual(await runtime.journal.load(binding['operation_id']), journal)
                 self.assertEqual({p: (self.f.root / p).read_bytes() for p in original}, protected)
+                self.assertIs(journal.restore_attempted, True)
+                # A foreign source edit cannot be promoted to restored success.
+                path = self.f.root / 'mixed_scripts.yaml'
+                original_script = path.read_bytes()
+                try:
+                    path.write_bytes(original_script + b'\n# foreign after rollback\n')
+                    blocked = await self._request(reverse_ws, 7, 'recovery/inspect', **binding)
+                    self.assertTrue(blocked['success'], blocked)
+                    self.assertEqual(blocked['result']['state'], 'UNKNOWN')
+                    self.assertEqual(await runtime.journal.load(binding['operation_id']), journal)
+                finally:
+                    path.write_bytes(original_script)
+                # Fresh independent inspection proves original state after a lost ACK.
+                inspected_restore = await self._request(reverse_ws, 8, 'recovery/inspect', **binding)
+                self.assertTrue(inspected_restore['success'], inspected_restore)
+                self.assertEqual((inspected_restore['result']['state'], inspected_restore['result']['reason']),
+                                 ('rolled_back', 'restored_verified'))
+                self.assertEqual(len(inspected_restore['result']['frozen_review']['changes']), len(journal.plan.steps) - 1)
+                self.assertEqual(await runtime.journal.load(binding['operation_id']), journal)
+                self.assertEqual({p: (self.f.root / p).read_bytes() for p in original}, protected)
             for path, raw in original.items():
                 self.assertEqual((self.f.root / path).read_bytes(), raw)
             for old, new in mapping.items():
@@ -664,8 +690,13 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(denied['error']['code'], ('apply_refused', 'apply_unavailable'))
             self.assertNotIn('result', denied)
             self.assertNotIn(binding['operation_id'], runtime.reviews)
-            self.assertIsNone(await runtime.journal.load(binding['operation_id']))
-            duplicate = await self._request(ws, 3, 'apply', **binding)
+            refusal = await runtime.journal.load(binding['operation_id'])
+            self.assertEqual((refusal.status, refusal.reason), ('refused', 'prewrite_refused'))
+            self.assertEqual(refusal.phases, ('pending',) * len(refusal.plan.steps))
+            inspected = await self._request(ws, 4, 'recovery/inspect', **binding)
+            self.assertTrue(inspected['success'], inspected)
+            self.assertEqual((inspected['result']['state'], inspected['result']['reason']), ('refused', 'prewrite_refused'))
+            duplicate = await self._request(ws, 5, 'apply', **binding)
             self.assertEqual(duplicate['error']['code'], 'apply_refused')
             self.assertEqual((self.f.root / 'template.yaml').read_bytes(), edited)
             self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
