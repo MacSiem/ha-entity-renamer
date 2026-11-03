@@ -4,6 +4,7 @@ from dataclasses import replace
 import importlib.util
 from pathlib import Path
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('_source_fence_mixed',
@@ -35,6 +36,24 @@ class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(receipts._exact_json_equal(('/config', (('file', 1, 3),), original[2]), evidence))
         self.assertFalse(receipts._exact_json_equal(('/config', [['file', 1, 2]], original[2]), evidence))
         self.assertTrue(receipts._exact_json_equal(original, evidence))
+
+    def test_yaml_fold_computes_identity_once_and_rejects_wrong_call_binding(self):
+        accepted = importlib.import_module(mixed.base.PACKAGE + '.accepted_input_state')
+        transaction = importlib.import_module(mixed.base.PACKAGE + '.yaml_transaction')
+        class Change:
+            files = tuple(SimpleNamespace(path=name) for name in ('one', 'two', 'three'))
+            calls = 0
+            @property
+            def identity(self):
+                self.calls += 1
+                return 'original-identity'
+        change = Change()
+        ids = ['yaml_' + transaction._digest(('original-identity', row.path, False))[:64]
+               for row in change.files]
+        self.assertEqual(accepted.fold_yaml_calls(change, {}, [], 'forward', ids, partial=True), {})
+        self.assertEqual(change.calls, 1)
+        with self.assertRaises(receipts.RegistryReceiptError):
+            accepted.fold_yaml_calls(change, {}, [], 'forward', ids[:-1] + ['foreign'], partial=True)
 
     async def test_reconstruction_skips_only_yaml_decode_and_returns_detached_value(self):
         f = await mixed.mixed_fixture()

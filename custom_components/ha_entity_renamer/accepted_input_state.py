@@ -171,7 +171,10 @@ def fold_yaml_calls(change, sources, calls, direction, operation_ids, *, partial
     reverse = direction == 'rollback'
     rows = tuple(reversed(change.files)) if reverse else change.files
     from .yaml_transaction import _digest
-    operations = ['yaml_' + _digest((change.identity, row.path, reverse))[:64] for row in rows]
+    # Identity is a pure digest of this detached change; no await or mutation
+    # occurs while deriving the operation IDs for its individual files.
+    identity = change.identity if rows else None
+    operations = ['yaml_' + _digest((identity, row.path, reverse))[:64] for row in rows]
     if operation_ids != operations or (len(calls) > len(rows) if partial else len(calls) != len(rows)):
         _fail('yaml_calls_incomplete_or_unbound')
     result = deepcopy(sources)
