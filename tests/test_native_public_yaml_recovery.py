@@ -204,10 +204,14 @@ class NativePublicYAMLRecoveryTests(unittest.IsolatedAsyncioTestCase):
             restored = await self._ws('recovery/restore', result)
         finally:
             lifecycle.start = original_start
-        if variant == 'mixed':
-            self.assertEqual(witnesses, [True])
+        # Template's mixed sensor/binary variant does not by itself imply an
+        # Automation lifecycle. Check the actual server-owned composition.
         self.assertTrue(restored['success'], restored)
-        self.assertEqual(restored['result']['state'], 'rolled_back')
+        self.assertEqual(restored['result']['state'], 'rolled_back', restored)
+        factory = self.module('native_template_yaml_server')
+        uses_lifecycle = (factory._mixed_composition(composition)
+                          and not factory._script_prefix_composition(composition))
+        self.assertEqual(witnesses, [True] if uses_lifecycle else [])
         self.assertFalse(restored['result']['migration_ready'])
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
         final = await runtime.journal.load(result['operation_id'])
