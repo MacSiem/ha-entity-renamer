@@ -198,6 +198,25 @@ class SelectiveYAMLNativeRootTests(unittest.IsolatedAsyncioTestCase):
         readonly = rr.RegistryReceiptChain.reopen(reopened_receipts, chain.operation_id,
                                                   plan, bundle.receipt, digests)
         self.assertFalse(readonly.writable)
+        # Recheck the exact bound preparation without serializing the unchanged
+        # large payload again. Mutation must still refuse, including type drift.
+        with patch.object(prep, 'canonical_digest', wraps=prep.canonical_digest) as digest:
+            module.assert_state_yaml_composition(readonly, change)
+            module.assert_state_yaml_composition(readonly, change)
+            self.assertEqual(digest.call_count, 0)
+        saved_payload = copy.deepcopy(reopened_store.plans[native_ref[0]]['payload'])
+        try:
+            row = reopened_store.plans[native_ref[0]]['payload']
+            row['composition']['schema'] = True
+            with self.assertRaises(tx.Refused):
+                module.assert_state_yaml_composition(readonly, change)
+            row.clear(); row.update(copy.deepcopy(saved_payload))
+            module.assert_state_yaml_composition(readonly, change)
+            row['codec'] += 'A'
+            with self.assertRaises(tx.Refused):
+                module.assert_state_yaml_composition(readonly, change)
+        finally:
+            reopened_store.plans[native_ref[0]]['payload'] = saved_payload
         fresh = module.NativeTemplateStateYAMLRuntimeReadback(hass, readonly, reopened_composition,
                                                               guard=lambda: None)
         self.assertIs(await fresh.position_at_inputs(change, readonly.reconstruct_inputs()), tx.Position.BEFORE)

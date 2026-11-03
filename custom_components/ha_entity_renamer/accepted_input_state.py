@@ -6,14 +6,54 @@ Python objects carry trusted backend evidence, not authorization/provenance.
 from __future__ import annotations
 
 from copy import deepcopy
+import ctypes
+import errno
 import hashlib
 import os
 import stat
+import sys
 
 from .installed_cost_trace import trace_call
 from .native_input_baseline import MAX_FILE_BYTES, _receipt, _receipt_bytes
 from .yaml_plan import Limits, _Reader, _relative
 from .yaml_validation import assert_validation_current
+
+
+class _OpenHow(ctypes.Structure):
+    _fields_ = [('flags', ctypes.c_uint64), ('mode', ctypes.c_uint64),
+                ('resolve', ctypes.c_uint64)]
+
+
+class _PhysicalReader(_Reader):
+    """Use Linux's anchored no-symlink resolver; retain the portable fallback."""
+    def open(self, relative: str, directory: bool = False) -> int:
+        path = _relative(relative)
+        if sys.platform != 'linux' or os.uname().machine not in ('aarch64', 'x86_64'):
+            return super().open(path, directory=directory)
+        try:
+            syscall = ctypes.CDLL(None, use_errno=True).syscall
+        except AttributeError:
+            return super().open(path, directory=directory)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        if directory:
+            flags |= os.O_DIRECTORY
+        # RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH enforces the same anchored
+        # nofollow policy for every component in a single kernel operation.
+        how = _OpenHow(flags, 0, 0x04 | 0x08)
+        fd = syscall(437, self.root, os.fsencode(path), ctypes.byref(how), ctypes.sizeof(how))
+        if fd < 0:
+            code = ctypes.get_errno()
+            if code in (errno.ENOSYS, errno.EINVAL, errno.E2BIG, errno.EPERM):
+                return super().open(path, directory=directory)
+            raise OSError(code, os.strerror(code), path)
+        try:
+            mode = os.fstat(fd).st_mode
+            if not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
+                raise ValueError('not a regular file/directory')
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
 
 
 def _fail(reason):
@@ -233,7 +273,7 @@ class AcceptedInputState:
         self._bound(original)
         if set(self._sources) != {row[0] for row in original.source_files}:
             _fail('input_graph_mismatch')
-        reader = _Reader(original.config_root, Limits(max_file_bytes=MAX_FILE_BYTES))
+        reader = _PhysicalReader(original.config_root, Limits(max_file_bytes=MAX_FILE_BYTES))
         try:
             for path, expected in self._sources.items():
                 raw, info = reader.read(path)

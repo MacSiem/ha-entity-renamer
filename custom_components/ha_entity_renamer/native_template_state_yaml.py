@@ -119,23 +119,30 @@ def assert_state_yaml_composition(chain, change):
     from .native_template_composition import decode_composition
     from .native_template_yaml_server import _baseline_stamp
     from .prepared import canonical_digest
+    from .native_registry_receipts import _freeze_json, _exact_json_equal
     reference = chain.plan.native_inputs
     payload = chain.preparations.resolve(*reference[:2])
-    if canonical_digest(payload) != reference[1]:
-        raise Refused('template_state_yaml_preparation_changed')
     binding = getattr(chain, '_template_state_original_binding', None)
     baseline = chain.baseline
     if binding is None:
+        # Authenticate the entire payload once, then retain a detached tree of
+        # immutable typed values. Each later fence compares EVERY node against
+        # this authenticated tree; no mutable store object is trusted or cached.
+        if canonical_digest(payload) != reference[1]:
+            raise Refused('template_state_yaml_preparation_changed')
         if baseline.digest != reference[2]:
             raise Refused('template_state_yaml_original_baseline_changed')
         composition = decode_composition(payload.get('composition'), baseline)
         wire, check = retain_state_composition(composition, baseline)
-        binding = (reference, _baseline_stamp(baseline), composition, wire, check)
+        binding = (reference, _baseline_stamp(baseline), composition, wire, check,
+                   _freeze_json(payload))
         chain._template_state_original_binding = binding
     else:
-        if (type(binding) is not tuple or len(binding) != 5 or binding[0] != reference
+        if (type(binding) is not tuple or len(binding) != 6 or binding[0] != reference
                 or binding[1] != _baseline_stamp(baseline)):
             raise Refused('template_state_yaml_original_baseline_changed')
+        if not _exact_json_equal(payload, binding[5]):
+            raise Refused('template_state_yaml_preparation_changed')
         composition = binding[2]
     binding[4]()
     if binding[3] != payload.get('composition'):

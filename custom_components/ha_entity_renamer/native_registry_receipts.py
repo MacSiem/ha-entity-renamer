@@ -100,6 +100,11 @@ def _exact_json_equal(value, evidence):
             if len(current) != len(original):
                 return False
             pending.extend(zip(current, original))
+        elif kind is float:
+            # JSON distinguishes -0.0 and 0.0 even though Python equality does
+            # not. Retain that distinction and still reject NaN as before.
+            if current != original or current.hex() != original.hex():
+                return False
         elif current != original:
             return False
     return True

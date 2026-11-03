@@ -14,6 +14,19 @@ receipts = mixed.receipts
 
 
 class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
+    def test_detached_evidence_distinguishes_signed_zero_and_nested_type_drift(self):
+        original = {'nested': [0.0, -0.0, 1, True, {'x': 1.5}]}
+        evidence = receipts._freeze_json(original)
+        self.assertTrue(receipts._exact_json_equal(deepcopy(original), evidence))
+        for changed in (
+            {'nested': [-0.0, -0.0, 1, True, {'x': 1.5}]},
+            {'nested': [0.0, 0.0, 1, True, {'x': 1.5}]},
+            {'nested': [0.0, -0.0, 1.0, True, {'x': 1.5}]},
+        ):
+            with self.subTest(changed=changed):
+                self.assertFalse(receipts._exact_json_equal(changed, evidence))
+        self.assertTrue(receipts._exact_json_equal(deepcopy(original), evidence))
+
     async def test_reconstruction_skips_only_yaml_decode_and_returns_detached_value(self):
         f = await mixed.mixed_fixture()
         chain = f['chain']
