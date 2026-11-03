@@ -278,12 +278,13 @@ class RecoveryController:
         # Independent readers never replace the active session's Runtime caches.
         # Each journal lock covers only the detached inventory snapshot, not the
         # long-running native operation or a restore/inspect capability.
-        journal, preparations = await self._read()
+        self.check()
+        journal = native_journal(self.hass)
+        await journal.initialize()
+        self.check()
         records = await journal.all()
         self.check()
-        store = native_helper_lifecycle_store(self.hass, preparations)
-        await store.initialize()
-        self.check()
+        preparations = store = None
         operations = []
         required = False
         for record in records:
@@ -306,17 +307,26 @@ class RecoveryController:
                 required = True
                 continue
             if record.status in ('applied', 'rolled_back'):
+                if (record.status == 'applied' and record.direction == 'forward'
+                        and record.plan.required_scopes == ('registry', 'yaml')):
+                    # Snapshot inventory is never full native/source admission.
+                    # Only explicit inspect may qualify this terminal plan.
+                    operations.append({'operation_id': record.operation_id,
+                        'fingerprint': record.plan.fingerprint, 'status': record.status,
+                        'direction': record.direction, 'recovery_required': need,
+                        'reason': 'inspection_available', 'eligible': False})
+                    required = required or need
+                    continue
+                if preparations is None:
+                    # The helper classifier requires both independently loaded
+                    # stores. Never retain these readers across status calls.
+                    preparations = native_prepared_store(self.hass)
+                    await preparations.initialize()
+                    self.check()
+                    store = native_helper_lifecycle_store(self.hass, preparations)
+                    await store.initialize()
+                    self.check()
                 try:
-                    if (record.status == 'applied' and record.direction == 'forward'
-                            and record.plan.required_scopes == ('registry', 'yaml')):
-                        # Snapshot inventory is never full native/source admission.
-                        # Only explicit inspect may qualify this terminal plan.
-                        operations.append({'operation_id': record.operation_id,
-                            'fingerprint': record.plan.fingerprint, 'status': record.status,
-                            'direction': record.direction, 'recovery_required': need,
-                            'reason': 'inspection_available', 'eligible': False})
-                        required = required or need
-                        continue
                     scope = _prepared_scope(record, preparations)
                     baseline, composition = preparations.resolve_composition(record.plan.native_inputs)
                     roots = [key for key, row in store.rows.items()

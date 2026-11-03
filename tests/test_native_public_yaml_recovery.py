@@ -67,6 +67,15 @@ class NativePublicYAMLRecoveryTests(unittest.IsolatedAsyncioTestCase):
             multiple=multiple, variant=variant, uidless=uidless)
         self.assertFalse(hasattr(self, 'plan'))
         self.assertFalse(hasattr(self, 'receipt'))
+        # Settle the real fixture-owned HA issue store before source capture.
+        # A delayed first write otherwise changes the native directory graph.
+        from homeassistant.helpers import issue_registry
+        issues = issue_registry.async_get(self.f.hass)
+        await issues._store.async_save(issues._data_to_save())
+        self.assertIsNone(issues._store._data)
+        self.assertIsNone(issues._store._delay_handle)
+        self.assertEqual(json.loads(Path(issues._store.path).read_bytes())['data'],
+                         issues._data_to_save())
         for value in (5, 7):
             await self.stimulus(value)
         connection, _, _ = await self._connection(admin=True)
@@ -230,7 +239,10 @@ class NativePublicYAMLRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await self._flow(variant='binary_sensor')
 
     async def test_registered_multi_source_mixed_yaml_status_inspect_restore(self):
-        await self._flow(multiple=True, variant='mixed')
+        # Observe actual graph mismatch if admission refuses, never replace it.
+        from test_native_template_mixed_yaml_server import native_diagnostics
+        with native_diagnostics(self.module):
+            await self._flow(multiple=True, variant='mixed')
 
     async def test_registered_uidless_numeric_yaml_status_inspect_restore(self):
         await self._flow(uidless=True)

@@ -445,11 +445,9 @@ class NativeTemplateYAMLRuntimeReadback:
               and self.hass.config.config_dir == self.receipt.config_root
               and type(state) is AcceptedInputState
               and state.original_json == self.chain.baseline.receipt_json
-              and self.chain.matches_input_state(state, documents_only=True),
+              and self.chain.matches_input_state(
+                  state, documents_only=state._live_check is not None),
               'template_scoped_input_binding_required')
-        if state._live_check is None:
-            _need(self.chain.matches_input_state(state),
-                  'template_scoped_input_head_changed')
         state._bound(self.receipt)
         _source_image(self.receipt, self.evidence, state)
         self.assert_reload_current()
