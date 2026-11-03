@@ -131,7 +131,7 @@ def _idle_census(root):
     return tuple(result)
 
 
-def assert_idle_script_program_targets(hass, program, *, active=None, trace_sink=None):
+def assert_idle_script_program_targets(hass, program, *, active=None, trace_sink=None, chain=None):
     """Read-only target admission; unrelated executions grant no write authority."""
     from homeassistant.helpers.entity_component import DATA_INSTANCES, EntityComponent
     from homeassistant.components.script import ScriptEntity
@@ -157,7 +157,7 @@ def assert_idle_script_program_targets(hass, program, *, active=None, trace_sink
     from .native_active_execution_pins import capture_census
     from .native_active_execution_transport import _entities, validate_active_program
     scope = frozenset(('script', key) for key in changed)
-    trace_proof = validate_active_program(hass, program, _entities(hass), scope, scope)
+    trace_proof = validate_active_program(hass, program, _entities(hass), scope, scope, chain=chain)
     if trace_sink is not None:
         _need(type(trace_sink) is list, 'active_trace_invalid_sink')
         if trace_proof is not None:

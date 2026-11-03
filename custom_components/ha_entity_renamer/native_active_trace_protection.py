@@ -13,8 +13,12 @@ import asyncio
 from collections import ChainMap, deque
 from pathlib import Path
 from types import MappingProxyType
+from weakref import WeakKeyDictionary
 
 from .transaction import Refused
+
+# In-memory provenance exists only for real running traces detached here.
+_ANCHOR_KEY = object()
 
 
 def _need(value, reason):
@@ -137,7 +141,7 @@ class NativeActiveTraceProtection:
     """Task-local native trace owners and checked pre-attempt detachment."""
 
     @classmethod
-    def capture(cls, hass, entity, script, pin, projector, *, trace_keys=None):
+    def capture(cls, hass, entity, script, pin, projector, *, trace_keys=None, detached_expected=None, trace_scope=None):
         import homeassistant
         from homeassistant.components.automation import AutomationEntity
         from homeassistant.components.automation.trace import AutomationTrace
@@ -147,6 +151,7 @@ class NativeActiveTraceProtection:
         from homeassistant.components.trace import models, util
         from homeassistant.const import __version__
         from homeassistant.helpers.trace import TraceElement
+        from homeassistant.helpers.script import Script
         from homeassistant.util.limited_size_dict import LimitedSizeDict
         from .native_automation_state_binding import _PINS as automation_pins
         from .native_source_handoff import _SCRIPT_PINS
@@ -155,10 +160,12 @@ class NativeActiveTraceProtection:
         trace_pins = {
             '2025.6.0': ('e5d8879aa712c080467177dc61d17f8adfe45c4a7e967ace3cfcdf2865b7e560',
                           '3752a95b4f46a9242c336d8fb8ce3c442d8780901b02264b202a5c2ee57f4c12',
-                          'abd5983c80860e461913c10edf3884923d11fe826a73e1a70a21c35edcf85f3f'),
+                          'abd5983c80860e461913c10edf3884923d11fe826a73e1a70a21c35edcf85f3f',
+                          '2d9444d77b93cea4e6232c23c101045661d713817153a21ba22a35595c97ec4d'),
             '2026.10.4': ('41ccc5fda5790f1ad6c2e473509903a0107bb0e6816018bd8f4449de9b5b807c',
                           '8d2775c760a3306ba599a69faa82dcc58ab39602204ad582fcaeb9e8bfb2cc46',
-                          '3735ccdf467c2e5242055948803e08b6fd9e83a8d404d81562edebd1f924a6f1'),
+                          '3735ccdf467c2e5242055948803e08b6fd9e83a8d404d81562edebd1f924a6f1',
+                          'f8da595e040a7ab80f2f9c963c18209bf554ef83d6ab0f0f0f422bc5df4124cd'),
         }
         _need(__version__ in trace_pins and asyncio.current_task() is not None
               and type(entity) in (ScriptEntity, AutomationEntity), 'scope_unsupported')
@@ -169,11 +176,14 @@ class NativeActiveTraceProtection:
         pins = {'components/trace/models.py': trace_pins[__version__][0],
                 'components/trace/util.py': trace_pins[__version__][1],
                 'helpers/trace.py': trace_pins[__version__][2],
+                'components/automation/trace.py': trace_pins[__version__][3],
                 'components/script/__init__.py': _SCRIPT_PINS[__version__],
-                'components/automation/__init__.py': automation_pins[__version__]['components/automation/__init__.py']}
+                'components/automation/__init__.py': automation_pins[__version__]['components/automation/__init__.py'],
+                'helpers/script.py': {'2025.6.0': 'c78dec6e98825b8ebdc0593061ad821f34735951ef564cc2a96231d04d9477e2',
+                                      '2026.10.4': '75376abc1686bcfde2f5d235863728b630b91f703ad03eb1a4b6a22eb8387ee3'}[__version__]}
         refs = ((models.ActionTrace, '__init__'), (util, 'async_store_trace'),
                 (ScriptEntity, '_async_run'), (AutomationEntity, 'async_trigger'),
-                (TraceElement, '__init__'))
+                (TraceElement, '__init__'), (AutomationTrace, '__init__'), (Script, 'async_run'))
         methods, codes = prove_methods(Path(homeassistant.__file__).resolve().parent, pins, refs)
         store = hass.data.get(DATA_TRACE)
         _need(type(store) is dict and type(projector.operations) in (list, tuple), 'store_unavailable')
@@ -186,7 +196,7 @@ class NativeActiveTraceProtection:
         _need(type(trace_keys) is frozenset and current_key in trace_keys and len(trace_keys) <= 2
               and all(type(key) is str and key.startswith(domain + '.') for key in trace_keys),
               'trace_key_scope_unqualified')
-        obj.keys = trace_keys
+        obj.keys, obj.trace_scope = trace_keys, trace_scope
         obj.data_key, obj.refs, obj.methods, obj.codes = DATA_TRACE, refs, methods, codes
         obj.trace_types, obj.restored_type = (ScriptTrace, AutomationTrace), models.RestoredTrace
         obj.trace_element = TraceElement
@@ -197,10 +207,42 @@ class NativeActiveTraceProtection:
         from homeassistant.core import Context
         contexts = tuple(run._context for run in pin.root._runs)
         _need(len(contexts) == 2 and all(type(context) is Context for context in contexts)
-              and len({id(context) for context in contexts}) == 2
-              and all(sum(trace.context is context for trace, _ in obj.owners) == 1 for context in contexts),
-              'accepted_run_trace_missing')
+              and len({id(context) for context in contexts}) == 2, 'accepted_run_trace_missing')
+        rows = obj._stored()
+        from .yaml_validation_worker import _normal
+        from .native_script_config_transport import _graph
+        passive, lineage = [], []
         raw = entity.raw_config
+        for context, run_pin in zip(contexts, (pin.parent, pin.queued), strict=True):
+            matches = [(trace, key) for trace, key in rows if type(trace) in obj.trace_types
+                       and key in obj.keys and trace.context is context]
+            _need(len(matches) == 1, 'accepted_run_trace_missing')
+            trace, key = matches[0]
+            lineage.append((run_pin, trace, obj._lineage(run_pin, trace)))
+            anchor = hass.data.get(_ANCHOR_KEY)
+            _need(anchor is None or type(anchor) is WeakKeyDictionary, 'anchor_changed')
+            proof = anchor.get(trace) if anchor is not None else None
+            # Check an existing anchor before owner/passive classification: an
+            # externally reattached config must not become a fresh live owner.
+            if proof is not None:
+                _need(type(proof) is tuple and len(proof) == 11
+                      and proof[0] is context and proof[1] is trace._config
+                      and proof[2] == _graph(trace._config) and proof[3] is entity
+                      and proof[4] is script and proof[5] is run_pin.run
+                      and proof[6] is run_pin.task and proof[7] == trace_scope
+                      and proof[8] == key and proof[9] == trace.run_id
+                      and proof[10] is trace.__dict__, 'detached_trace_unqualified')
+            if any(trace is owner for owner, _ in obj.owners):
+                _need(proof is None, 'anchor_owner_already_detached')
+                continue
+            # Only an own previously detached trace can be passive.
+            _need(proof is not None and detached_expected is not None and trace._dict is None
+                  and type(trace.__dict__) is dict and trace.__dict__.get('_config') is trace._config
+                  and not _contains(trace._config, _mutable_containers(raw))
+                  and _normal(trace._config) in detached_expected, 'detached_trace_unqualified')
+            passive.append((trace, context, key, trace.run_id, trace.__dict__, trace._config,
+                            _graph(trace._config), anchor, proof))
+        obj.passive, obj.lineage = tuple(passive), tuple(lineage)
         clone = _clone_config(raw)
         _need(not _contains(clone, obj.targets), 'copy_alias_changed')
         obj.raw, obj.clone = raw, clone
@@ -232,14 +274,40 @@ class NativeActiveTraceProtection:
         from homeassistant.components.script import trace as script_trace
         from homeassistant.components.trace import models, util
         from homeassistant.helpers import trace as trace_helper
+        import builtins
         import inspect
-        _need(models.ActionTrace is self.refs[0][0] and models.RestoredTrace is self.restored_type
+        from types import FunctionType
+        # Recover CPython's immutable, non-heap builtin type independently of
+        # the mutable builtins mapping used by the native constructor.
+        object_type = ().__class__.__mro__[-1]
+        type_type = ().__class__.__class__
+        native_supers = tuple(candidate for candidate in object_type.__subclasses__()
+            if type(candidate) is type_type and candidate.__module__ == 'builtins'
+            and candidate.__name__ == 'super' and not candidate.__flags__ & (1 << 9))
+        constructor = self.methods[5]
+        closure = constructor.__closure__ if type(constructor) is FunctionType else None
+        kwdefaults = constructor.__kwdefaults__ if type(constructor) is FunctionType else None
+        expected_kwdefaults = (kwdefaults is None if self.version == '2025.6.0' else
+            type(kwdefaults) is dict and set(kwdefaults) == {'not_triggered'}
+            and kwdefaults['not_triggered'] is False)
+        _need(type(constructor) is FunctionType
+              and constructor.__globals__ is vars(automation_trace)
+              and constructor.__builtins__ is vars(builtins)
+              and len(native_supers) == 1
+              and constructor.__builtins__.get('super') is native_supers[0]
+              and 'super' not in constructor.__globals__
+              and constructor.__code__.co_freevars == ('__class__',)
+              and type(closure) is tuple and len(closure) == 1
+              and closure[0].cell_contents is self.trace_types[1]
+              and constructor.__defaults__ is None and expected_kwdefaults
+              and not constructor.__dict__
+              and models.ActionTrace is self.refs[0][0] and models.RestoredTrace is self.restored_type
               and trace_helper.TraceElement is self.trace_element and models.TraceElement is self.trace_element
               and util.DATA_TRACE is self.data_key
               and script_trace.ScriptTrace is self.trace_types[0]
               and automation_trace.AutomationTrace is self.trace_types[1]
               and inspect.getattr_static(self.trace_types[0], '__init__') is self.methods[0]
-              and inspect.getattr_static(self.trace_types[1], '__init__') is self.methods[0]
+              and inspect.getattr_static(self.trace_types[1], '__init__') is self.methods[5]
               and (self.version == '2025.6.0' or models.TraceBuckets is self.bucket_type),
               'native_alias_changed')
 
@@ -267,6 +335,8 @@ class NativeActiveTraceProtection:
         rows = self._stored()
         owners = []
         seen = set()
+        anchor = self.hass.data.get(_ANCHOR_KEY)
+        _need(anchor is None or type(anchor) is WeakKeyDictionary, 'anchor_changed')
         for trace, key in rows:
             _need(id(trace) not in seen, 'foreign_trace_alias')
             seen.add(id(trace))
@@ -276,6 +346,7 @@ class NativeActiveTraceProtection:
                       and not _contains(trace._short_dict, self.targets)
                       and not _contains(trace._dict, self.targets), 'trace_history_alias')
                 if _contains(trace._config, self.targets):
+                    _need(anchor is None or trace not in anchor, 'anchor_owner_already_detached')
                     _need(key in self.keys and trace._config is self.entity.raw_config
                           and trace._dict is None and type(trace).__setattr__ is object.__setattr__
                           and type(trace.__dict__) is dict and trace.__dict__.get('_config') is trace._config,
@@ -288,12 +359,59 @@ class NativeActiveTraceProtection:
                 raise Refused('active_trace_foreign_trace_type') from None
         return tuple(owners)
 
+    def _lineage(self, run_pin, trace):
+        # HA shields a separate run task; the caller's native Script.async_run
+        # frame retains that exact run and shares an await chain with its trace.
+        from .native_active_execution_pins import _frames
+        from homeassistant.components.script import ScriptEntity
+        from homeassistant.components import script as script_module, automation as automation_module
+        from homeassistant.helpers import script as helper_module
+        is_script = type(self.entity) is ScriptEntity
+        trace_code = self.codes[2 if is_script else 3]
+        trace_name = 'script_trace' if is_script else 'automation_trace'
+        context_name = 'context' if is_script else 'trigger_context'
+        matches = []
+        for task in asyncio.all_tasks():
+            frames = tuple(_frames(task.get_coro()))
+            outer = [frame for frame in frames if frame.f_code is self.codes[6]
+                     and frame.f_globals is vars(helper_module)
+                     and frame.f_locals.get('self') is self.script
+                     and frame.f_locals.get('run') is run_pin.run
+                     and frame.f_locals.get('context') is run_pin.context]
+            traces = [frame for frame in frames if frame.f_code is trace_code
+                      and frame.f_globals is vars(script_module if is_script else automation_module)
+                      and frame.f_locals.get('self') is self.entity
+                      and frame.f_locals.get(trace_name) is trace
+                      and frame.f_locals.get(context_name) is run_pin.context]
+            if len(outer) == len(traces) == 1 and not task.done():
+                matches.append((task, outer[0], traces[0]))
+        _need(len(matches) == 1, 'detached_trace_frame_unowned')
+        return matches[0]
+
+    def _check_lineage(self):
+        _need(all(self._lineage(run_pin, trace) == saved
+                  for run_pin, trace, saved in self.lineage), 'trace_lineage_changed')
+
+    def _check_passive(self):
+        from .native_script_config_transport import _graph
+        rows = self._stored()
+        _need(all(any(actual is trace and actual_key == key for actual, actual_key in rows)
+                  and trace.__dict__ is storage and trace.context is context
+                  and trace.key == key and trace.run_id == run_id
+                  and trace._config is config and trace._dict is None
+                  and _graph(config) == graph and self.hass.data.get(_ANCHOR_KEY) is anchor
+                  and anchor.get(trace) is proof
+                  for trace, context, key, run_id, storage, config, graph, anchor, proof in self.passive),
+              'detached_trace_changed')
+
     def check_review(self):
         """Recheck the review-owned inventory in a later apply task."""
         from .native_unload_code_proof import unchanged
         _need(self.phase == 'captured' and self.entity.raw_config is self.raw, 'owner_changed')
         unchanged(self.refs, self.methods, self.codes)
         self._foreign_aliases()
+        self._check_lineage()
+        self._check_passive()
         current = self._owners()
         _need(len(current) == len(self.owners)
               and all(a is b and ka == kb for (a, ka), (b, kb) in zip(current, self.owners, strict=True)),
@@ -313,10 +431,28 @@ class NativeActiveTraceProtection:
 
     def install(self, log):
         self.check_before()
+        existing = self.hass.data.get(_ANCHOR_KEY)
+        _need(existing is None or type(existing) is WeakKeyDictionary, 'anchor_changed')
+        _need(existing is None or all(trace not in existing for trace, _, _, _, _ in self.edges),
+              'anchor_owner_already_detached')
         self.phase = 'installing'
         for trace, _, _, _, _ in self.edges:
             log.write('_config', trace, self.clone,
                       lambda trace=trace: setattr(trace, '_config', self.clone))
+        # This anchor is created only from the exact trace and clone just
+        # written by this cutover; fresh admission must never adopt lookalikes.
+        anchor = self.hass.data.setdefault(_ANCHOR_KEY, WeakKeyDictionary())
+        _need(type(anchor) is WeakKeyDictionary, 'anchor_changed')
+        minted = []
+        for trace, context, key, run_id, storage in self.edges:
+            pins = [item for item in (self.pin.parent, self.pin.queued) if item.context is context]
+            if pins:
+                _need(len(pins) == 1 and type(self.trace_scope) is tuple, 'anchor_scope_changed')
+                proof = (context, self.clone, self.clone_graph, self.entity, self.script,
+                         pins[0].run, pins[0].task, self.trace_scope, key, run_id, storage)
+                anchor[trace] = proof
+                minted.append((trace, proof))
+        self.anchor, self.minted = anchor, tuple(minted)
         self.phase = 'installed'
 
     def check_installed(self, *, strict):
@@ -333,7 +469,13 @@ class NativeActiveTraceProtection:
                   and (not strict or trace._dict is None)
                   for trace, context, key, run_id, storage in self.edges), 'owner_changed')
         if strict:
+            if self.phase == 'installed':
+                _need(self.hass.data.get(_ANCHOR_KEY) is self.anchor
+                      and all(self.anchor.get(trace) is proof for trace, proof in self.minted),
+                      'anchor_changed')
+            self._check_lineage()
             self._foreign_aliases()
+            self._check_passive()
             rows = self._stored()
             _need(all(any(actual is trace and actual_key == key for actual, actual_key in rows)
                       for trace, _, key, _, _ in self.edges), 'owner_inventory_changed')
@@ -363,4 +505,10 @@ class NativeActiveTraceProtection:
     def restored(self):
         _need(all(trace._config is self.raw for trace, _, _, _, _ in self.edges),
               'restore_changed')
+        if hasattr(self, 'anchor'):
+            _need(self.hass.data.get(_ANCHOR_KEY) is self.anchor
+                  and all(self.anchor.get(trace) is proof for trace, proof in self.minted),
+                  'anchor_changed')
+            for trace, _ in self.minted:
+                del self.anchor[trace]
         self.phase = 'restored'

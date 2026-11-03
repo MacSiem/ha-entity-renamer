@@ -33,7 +33,7 @@ class NativeScriptPrefixPhase:
         from .native_script_config_transport import assert_idle_script_program_targets
         trace_admission = []
         self.admission = assert_idle_script_program_targets(root.hass, self.program,
-            active=self.mask if self.mask else None, trace_sink=trace_admission)
+            active=self.mask if self.mask else None, trace_sink=trace_admission, chain=root.chain)
         self.trace_admission = tuple(trace_admission)
         self.sample = sample.registry_rows, (), sample.native_tokens
         _need(self._read(self.mask) == self.sample)
@@ -126,7 +126,7 @@ class NativeScriptPrefixPhase:
         for script, census in self.admission:
             check_census(script, census)
         fresh = assert_idle_script_program_targets(self.root.hass, self.program,
-            active=self.mask if direction == 'rollback' else None)
+            active=self.mask if direction == 'rollback' else None, chain=self.root.chain)
         _need(tuple(script for script, _ in fresh) == tuple(script for script, _ in self.admission),
               'active_admission_population_changed')
 

@@ -308,7 +308,17 @@ def _trace_keys(program, entity, domain):
     return frozenset(keys)
 
 
-def validate_active_program(hass, program, entities, admitted, changed):
+def _trace_scope(program, chain):
+    if chain is None:
+        return None
+    from .native_registry_receipts import RegistryReceiptChain
+    _need(type(chain) is RegistryReceiptChain and type(chain.operation_id) is str
+          and type(chain.plan.fingerprint) is str and bool(chain.plan.native_inputs),
+          'active_trace_chain_unqualified')
+    return (program.sha256, chain.operation_id, chain.plan.fingerprint, tuple(chain.plan.native_inputs))
+
+
+def validate_active_program(hass, program, entities, admitted, changed, *, chain=None):
     """Read-only pre-record admission of the actual future slots and owners."""
     from .yaml_validation_worker import _normal
     busy = [key for key in admitted if
@@ -378,7 +388,7 @@ def validate_active_program(hass, program, entities, admitted, changed):
     # its own final fence and owns the actual planned detachment/undo.
     from .native_active_trace_protection import NativeActiveTraceProtection
     return NativeActiveTraceProtection.capture(hass, entity, script, pin, projector,
-                                               trace_keys=_trace_keys(program, entity, key[0]))
+                                               trace_keys=_trace_keys(program, entity, key[0]), detached_expected=(old[1], new[1]), trace_scope=_trace_scope(program, chain))
 
 
 class _ActiveBase:
@@ -585,7 +595,7 @@ def _capture(observer, chain, source, *, reverse, guard, input_state, automation
     obj.task, obj.phase, obj.actors, obj.projector = asyncio.current_task(), 'captured', tuple(actor_rows), projector
     from .native_active_trace_protection import NativeActiveTraceProtection
     obj.trace_protection = NativeActiveTraceProtection.capture(observer.hass, entity, script, pin, projector,
-        trace_keys=_trace_keys(observer.program, entity, key[0]))
+        trace_keys=_trace_keys(observer.program, entity, key[0]), detached_expected=(old[1], new[1]), trace_scope=_trace_scope(observer.program, chain))
     obj.original = obj._actor_graph()
     obj.original_slots = {id(container): tuple(container.items())
                           for container, _, _, _ in projector.operations}

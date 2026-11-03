@@ -75,6 +75,24 @@ class NativeActiveScriptRootTests(unittest.IsolatedAsyncioTestCase):
         self._minimum_source_remove = hass.bus.async_listen('state_changed', source_changed)
         self.addCleanup(self._minimum_source_remove)
 
+    async def test_foreign_automation_trace_constructor_globals_refused(self):
+        """Identical native code with foreign globals must not gain trace ownership."""
+        from types import FunctionType
+        from homeassistant.components.automation.trace import AutomationTrace
+        original = AutomationTrace.__init__
+        foreign_globals = dict(original.__globals__)
+        foreign_globals['super'] = lambda: None
+        forged = FunctionType(original.__code__, foreign_globals, original.__name__,
+                              original.__defaults__, original.__closure__)
+        forged.__kwdefaults__ = original.__kwdefaults__
+        AutomationTrace.__init__ = forged
+        try:
+            with self.assertRaisesRegex(self.module('transaction').Refused,
+                                        'active_trace_native_alias_changed'):
+                await self.test_active_nested_wait_and_queue_forward_then_fresh_inverse()
+        finally:
+            AutomationTrace.__init__ = original
+
     async def test_active_nested_wait_and_queue_forward_then_fresh_inverse(self):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -105,6 +123,7 @@ class NativeActiveScriptRootTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(hass.bus.async_listen('active_transport_release', releases.append))
         self.addCleanup(hass.bus.async_listen('active_transport_control', controls.append))
         await hass.services.async_call('script', 'control_script', {}, blocking=True, context=Context())
+        await _until(lambda: len(controls) >= 1)
         self.assertEqual(len(controls), 1)
 
         async def pair(label):
@@ -191,6 +210,29 @@ class NativeActiveScriptRootTests(unittest.IsolatedAsyncioTestCase):
                 baseline.receipt, composition.yaml_plan)
             transport = self.module('native_active_execution_transport').ActiveScriptTransport.capture(
                 observer, chain, old, guard=lambda: None)
+            # A mutation after capture must not become an owned constructor environment.
+            from homeassistant.components.automation import trace as automation_trace
+            self.assertNotIn('super', vars(automation_trace))
+            vars(automation_trace)['super'] = lambda: None
+            try:
+                with self.assertRaisesRegex(self.module('transaction').Refused,
+                                            'active_trace_native_alias_changed'):
+                    transport.trace_protection.check_before()
+            finally:
+                del vars(automation_trace)['super']
+            # The effective builtin is checked, not merely the mutable dict identity.
+            import builtins
+            native_super = builtins.super
+            refused = False
+            try:
+                builtins.super = object
+                try:
+                    transport.trace_protection._native_aliases()
+                except self.module('transaction').Refused:
+                    refused = True
+            finally:
+                builtins.super = native_super
+            self.assertTrue(refused, 'foreign builtin super was accepted')
             graph = self.module('native_script_config_transport')._graph
             before_config = graph(entity.raw_config), graph(script.sequence)
             transport.install()
@@ -246,39 +288,104 @@ class NativeActiveScriptRootTests(unittest.IsolatedAsyncioTestCase):
             record = await runtime.journal.load(result['operation_id'])
             baseline, composition = runtime.preparations.resolve_composition(record.plan.native_inputs)
             original_ref, receipt = record.plan.native_inputs, baseline.receipt_json
+            # A foreign replacement with equal config and Context is not the
+            # trace held by the suspended native frame and must not qualify.
+            import copy
+            from homeassistant.components.trace import DATA_TRACE
+            original_trace = first_traces[0][0]
+            bucket = hass.data[DATA_TRACE][original_trace.key]
+            groups = (bucket,) if isinstance(bucket, dict) else (bucket.runs, bucket.not_triggered)
+            group, = [group for group in groups if group.get(original_trace.run_id) is original_trace]
+            foreign = copy.copy(original_trace)
+            foreign._trace = {}
+            group[original_trace.run_id] = foreign
+            try:
+                foreign_inspect = await runtime.recovery_inspect(hass, result['operation_id'], result['fingerprint'],
+                    guard=lambda: None, refresh=refresh)
+                self.assertEqual(foreign_inspect['state'], 'UNKNOWN')
+            finally:
+                group[original_trace.run_id] = original_trace
+            original_run_id = original_trace.run_id
+            foreign_run_id = original_run_id + 'foreign'
+            del group[original_run_id]
+            original_trace.run_id = foreign_run_id
+            group[foreign_run_id] = original_trace
+            try:
+                foreign_id_inspect = await runtime.recovery_inspect(hass, result['operation_id'], result['fingerprint'],
+                    guard=lambda: None, refresh=refresh)
+                self.assertEqual(foreign_id_inspect['state'], 'UNKNOWN')
+            finally:
+                del group[foreign_run_id]
+                original_trace.run_id = original_run_id
+                group[original_run_id] = original_trace
+            original_config = original_trace._config
+            original_trace._config = copy.deepcopy(original_config)
+            try:
+                foreign_config_inspect = await runtime.recovery_inspect(hass, result['operation_id'], result['fingerprint'],
+                    guard=lambda: None, refresh=refresh)
+                self.assertEqual(foreign_config_inspect['state'], 'UNKNOWN')
+            finally:
+                original_trace._config = original_config
+            original_trace._config = entity.raw_config
+            try:
+                reattached_inspect = await runtime.recovery_inspect(hass, result['operation_id'], result['fingerprint'],
+                    guard=lambda: None, refresh=refresh)
+                self.assertEqual(reattached_inspect['state'], 'UNKNOWN')
+            finally:
+                original_trace._config = original_config
+            inspected = await runtime.recovery_inspect(hass, result['operation_id'], result['fingerprint'],
+                guard=lambda: None, refresh=refresh)
+            print('ACTIVE_PUBLIC_INSPECTION', inspected.get('state'), inspected.get('reason'), flush=True)
+            if inspected.get('state') != 'applied':
+                import importlib
+                factory = importlib.import_module(runtime.__class__.__module__)._yaml_factory_for_plan(
+                    runtime.preparations, record.plan)
+                async with runtime.operation_lock:
+                    session = await factory.bind_reverse(hass, result['operation_id'], result['fingerprint'],
+                        guard=lambda: None, refresh=refresh)
+                    session.close()
+                self.fail('active public inspection did not qualify')
             same(first)
             trace_history_unchanged(first_traces)
             self.assertEqual(results, [])
             self.assertEqual(len(controls), 1)
             self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
             self.assertIsNone(self.f.entity.async_get(old))
-            await drain(first, 0)
-            await hass.services.async_call('script', 'control_script', {}, blocking=True, context=Context())
-            self.assertEqual(len(controls), 2)
-            self.assertEqual([(e.data['token'], str(e.data['value']), e.context.id) for e in results],
-                [('forward-0', '17', first[0][0].id), ('forward-1', '17', first[0][1].id)])
-
-            second = await pair('inverse')
-            second_traces = trace_snapshot(second[0])
+            # Inverse uses the exact same retained runs and original trace history.
             inverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
                 guard=lambda: None, refresh=refresh)
             self.assertEqual(inverse['state'], 'rolled_back')
             reopened, restored = runtime.preparations.resolve_composition(record.plan.native_inputs)
             self.assertEqual((record.plan.native_inputs, reopened.receipt_json, restored),
                              (original_ref, receipt, composition))
-            same(second)
+            same(first)
             trace_history_unchanged(first_traces)
-            trace_history_unchanged(second_traces)
-            self.assertEqual(len(results), 2)
-            self.assertEqual(len(controls), 2)
+            self.assertEqual(results, [])
             self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
             self.assertIsNone(self.f.entity.async_get(new))
-            await drain(second, 2)
-            await hass.services.async_call('script', 'control_script', {}, blocking=True, context=Context())
-            self.assertEqual(len(controls), 3)
+            restored_inspect = await runtime.recovery_inspect(hass, result['operation_id'], result['fingerprint'],
+                guard=lambda: None, refresh=refresh)
+            self.assertEqual(restored_inspect['state'], 'rolled_back')
+            same(first)
+            await drain(first, 0)
+            self.assertEqual([(e.data['token'], str(e.data['value']), e.context.id) for e in results],
+                [('forward-0', '17', first[0][0].id), ('forward-1', '17', first[0][1].id)])
+            self.assertEqual(len(releases), 2)
+            # The previously anchored trace remains historical in the native
+            # store after natural completion, while a new pair runs.
+            third = await pair('history')
+            self.assertIsNone(original_trace._dict)
+            old_config = original_trace._config
+            original_trace._config = entity.raw_config
+            try:
+                history_inspect = await runtime.recovery_inspect(hass, result['operation_id'], result['fingerprint'],
+                    guard=lambda: None, refresh=refresh)
+                self.assertEqual(history_inspect['state'], 'UNKNOWN')
+            finally:
+                original_trace._config = old_config
+            await drain(third, 2)
             self.assertEqual([(e.data['token'], str(e.data['value']), e.context.id) for e in results[2:]],
-                [('inverse-0', '17', second[0][0].id), ('inverse-1', '17', second[0][1].id)])
-            self.assertEqual(len(releases), 4)
+                [('history-0', '17', third[0][0].id), ('history-1', '17', third[0][1].id)])
             for name, content in original.items():
                 self.assertEqual((root / name).read_bytes(), content)
             self.assertTrue(await history.verify(before_history))

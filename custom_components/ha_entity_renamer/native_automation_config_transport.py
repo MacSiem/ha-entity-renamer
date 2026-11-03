@@ -135,7 +135,7 @@ def _call_scope(hass, before, after, *, paired=None):
     return entities, frozenset(admitted), frozenset(changed)
 
 
-def assert_idle_automation_program_targets(hass, program, *, active=None, trace_sink=None):
+def assert_idle_automation_program_targets(hass, program, *, active=None, trace_sink=None, chain=None):
     target = frozenset(program.source_order) if active is None else active
     before_mask, after_mask = frozenset(), target
     before, after = dict(program.rows(before_mask)), dict(program.rows(after_mask))
@@ -149,7 +149,7 @@ def assert_idle_automation_program_targets(hass, program, *, active=None, trace_
     paired = pair_sealed_images(program, before_mask, after_mask)
     entities, admitted, changed = _call_scope(hass, before, after, paired=paired)
     from .native_active_execution_transport import validate_active_program
-    trace_proof = validate_active_program(hass, program, entities, admitted, changed)
+    trace_proof = validate_active_program(hass, program, entities, admitted, changed, chain=chain)
     if trace_sink is not None:
         _need(type(trace_sink) is list, 'active_trace_invalid_sink')
         if trace_proof is not None:
