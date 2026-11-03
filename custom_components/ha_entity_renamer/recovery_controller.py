@@ -104,6 +104,17 @@ def _yaml_summary(session):
         for domain in domains:
             before = {row[0]: row for row in original[domain]}
             current = {row[0]: row for row in active[domain]}
+            if before.keys() != current.keys() and domain == 'script':
+                # The one admitted Script definition key follows its own
+                # registry identity. Align only that authenticated key; the
+                # remainder of the population must still match exactly.
+                from .native_registry_transition import _native_script_unique_move
+                fence = getattr(phases.root, 'own_dependent_fence', None)
+                if (fence is not None and fence.domain == 'script'
+                        and _native_script_unique_move(fence.change.before, fence.change.after)):
+                    old, new = fence.change.before['unique_id'], fence.change.after['unique_id']
+                    if old in before and new in current and old not in current and new not in before:
+                        before[new] = before.pop(old)
             if before.keys() != current.keys():
                 raise Refused(f'unsupported_recovery_{domain}_inventory')
             changed = {key for key in before if before[key] != current[key]}
@@ -114,6 +125,16 @@ def _yaml_summary(session):
                 raise Refused(f'unsupported_recovery_{domain}_inventory')
             result['dependent_changes'][domain] = sorted(row.entity_id for row in rows)
     return result
+
+
+def _own_registry_plan(preparations, record):
+    """Advisory routing only; the selected binder performs full admission."""
+    try:
+        from .native_template_yaml_server import _registry_only_state_plan
+        baseline, composition = preparations.resolve_composition(record.plan.native_inputs)
+        return _registry_only_state_plan(record.plan, composition, baseline.receipt)
+    except Exception:
+        return False
 
 
 def _ordinary_review_owned(preparations, operation_id):
@@ -327,6 +348,16 @@ class RecoveryController:
                     await store.initialize()
                     self.check()
                 try:
+                    if (record.status == 'applied' and record.direction == 'forward'
+                            and _own_registry_plan(preparations, record)):
+                        # Snapshot inventory is never full native/source admission.
+                        # Only explicit inspect may qualify this terminal plan.
+                        operations.append({'operation_id': record.operation_id,
+                            'fingerprint': record.plan.fingerprint, 'status': record.status,
+                            'direction': record.direction, 'recovery_required': need,
+                            'reason': 'inspection_available', 'eligible': False})
+                        required = required or need
+                        continue
                     scope = _prepared_scope(record, preparations)
                     baseline, composition = preparations.resolve_composition(record.plan.native_inputs)
                     roots = [key for key, row in store.rows.items()
@@ -399,7 +430,9 @@ class RecoveryController:
                     return _result(operation_id, fingerprint, 'refused', 'already_finished')
                 # The inner journal alone is not proof of original runtime or
                 # completed outer lifecycle. Reopen and independently verify.
-                if (record.restore_attempted is not True or record.plan.required_scopes != ('registry', 'yaml')
+                if (record.restore_attempted is not True
+                        or (record.plan.required_scopes != ('registry', 'yaml')
+                            and not _own_registry_plan(preparations, record))
                         or not _ordinary_review_owned(preparations, operation_id)):
                     return _result(operation_id, fingerprint, 'UNKNOWN', 'restored_unproven')
                 from . import _yaml_factory_for_plan
@@ -410,7 +443,8 @@ class RecoveryController:
                 result = _result(operation_id, fingerprint, 'rolled_back', 'restored_verified')
                 result['frozen_review'] = _yaml_frozen_review(session, restored=True)
                 return result
-            if record.plan.required_scopes == ('registry', 'yaml') and record.restore_attempted is not False:
+            if (record.plan.required_scopes == ('registry', 'yaml')
+                    or _own_registry_plan(preparations, record)) and record.restore_attempted is not False:
                 # A previous restore may have stopped before its first journal
                 # transition, including inside outer automation lifecycle.
                 return _result(operation_id, fingerprint, 'UNKNOWN',
@@ -423,7 +457,7 @@ class RecoveryController:
                         and record.phases == ('verified',) * len(record.plan.steps))
             if not terminal and not prefix and not uncertain_complete:
                 return _result(operation_id, fingerprint, 'UNKNOWN', 'unsupported_recovery_state')
-            if record.plan.required_scopes == ('registry', 'yaml'):
+            if record.plan.required_scopes == ('registry', 'yaml') or _own_registry_plan(preparations, record):
                 from . import _yaml_factory_for_plan
                 factory = _yaml_factory_for_plan(preparations, record.plan)
                 # Fresh actual source/history/auth admission, independently repeated

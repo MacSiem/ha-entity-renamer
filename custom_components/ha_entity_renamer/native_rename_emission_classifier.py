@@ -321,7 +321,10 @@ class NativeRenameEmissions:
         _need(change.kind == 'entity' and change.mapping and type(target) is dict
               and target in (change.before, change.after), 'rename_required')
         before, after = change.before, change.after
-        _need({k: v for k, v in before.items() if k not in ('entity_id', 'modified_at')}
+        from .native_registry_transition import _native_script_unique_move
+        script_unique_move = _native_script_unique_move(before, after)
+        _need(script_unique_move or
+              {k: v for k, v in before.items() if k not in ('entity_id', 'modified_at')}
               == {k: v for k, v in after.items() if k not in ('entity_id', 'modified_at')},
               'pure_rename_required')
         import homeassistant
@@ -346,6 +349,15 @@ class NativeRenameEmissions:
         self.handoff_methods = self.handoff_codes = self.handoff_sites = None
         self.target_row = deepcopy(target)
         source = after if target == before else before
+        self.script_unique_move = script_unique_move
+        from .native_registry_transition import _native_script_default_name_move, _native_script_suggested_move
+        self.script_default_name_move = script_unique_move and _native_script_default_name_move(before, after)
+        self.script_suggested_move = script_unique_move and _native_script_suggested_move(before, after)
+        self.source_suggested_object_id = source.get('suggested_object_id') if self.script_suggested_move else None
+        self.source_unique_id = source.get('unique_id') if script_unique_move else None
+        self.source_original_name = source.get('original_name') if self.script_default_name_move else None
+        self.script_registry_name_move = self.script_default_name_move and before.get('name') != after.get('name')
+        self.source_registry_name = source.get('name') if self.script_registry_name_move else None
         self.source_id, self.target_id = source['entity_id'], target['entity_id']
         self.hass, self.bus, self.loop = io.hass, io.hass.bus, io.hass.loop
         _need(type(self.hass) is HomeAssistant and type(self.bus) is EventBus
@@ -584,7 +596,11 @@ class NativeRenameEmissions:
                 and raw['action'] == 'update' and raw['entity_id'] == self.target_id
                 and raw['old_entity_id'] == self.source_id
                 and type(raw['changes']) is dict
-                and raw['changes'] == {'entity_id': self.source_id})
+                and raw['changes'] == ({'entity_id': self.source_id, 'unique_id': self.source_unique_id,
+                     **({'original_name': self.source_original_name} if self.script_default_name_move else {}),
+                     **({'name': self.source_registry_name} if self.script_registry_name_move else {}),
+                     **({'suggested_object_id': self.source_suggested_object_id} if self.script_suggested_move else {})}
+                    if self.script_unique_move else {'entity_id': self.source_id}))
 
     def _data_current(self, item):
         if item.phase == 'registry':
@@ -605,9 +621,10 @@ class NativeRenameEmissions:
                 and self.registry.async_get(self.target_id) is values.get('new')):
             return False
         frame = frame.f_back
-        if not self._frame(frame, 'registry_update', self.registry):
-            return False
-        frame = frame.f_back
+        if not self.script_suggested_move:
+            if not self._frame(frame, 'registry_update', self.registry):
+                return False
+            frame = frame.f_back
         if not (frame is not None and frame.f_code is self.io_mutate_code
                 and frame.f_globals is self.io_mutate.__globals__
                 and frame.f_locals.get('self') is self.io

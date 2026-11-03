@@ -123,10 +123,16 @@ class _UnchangedConsumers:
         self.native.check()
         if self.runtime_sample is not None:
             from .yaml_source_binding import _RuntimeSourceSampler
-            _need(type(self.runtime_sampler) is _RuntimeSourceSampler
-                  and self.runtime_sampler.sample(self.hass, self.evidence, self.observed,
-                      owned_automation=getattr(self, "owned_automation", None))
-                      == self.runtime_sample, 'source_runtime_changed')
+            fence = getattr(self, 'own_fence', None)
+            if fence is None:
+                actual = self.runtime_sampler.sample(self.hass, self.evidence, self.observed,
+                    owned_automation=getattr(self, 'owned_automation', None))
+            else:
+                from .yaml_source_binding import _runtime_rows_sample
+                actual = fence.normalize(_runtime_rows_sample(self.hass, self.evidence, fence.rows(),
+                    owned_automation=getattr(self, 'owned_automation', None)))
+            _need(type(self.runtime_sampler) is _RuntimeSourceSampler and actual == self.runtime_sample,
+                  'source_runtime_changed')
 
     def physical(self):
         self.native.physical()

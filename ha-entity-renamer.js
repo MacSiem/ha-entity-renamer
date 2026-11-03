@@ -3534,6 +3534,8 @@ class HAEntityRenamer extends HTMLElement {
           && Number.isSafeInteger(file.edit_count) && file.edit_count > 0
           && Array.isArray(file.references) && file.references.length > 0
           && file.references.every(ref => ref && typeof ref.before === 'string' && typeof ref.after === 'string'
+            && (ref.kind === undefined || ref.kind === 'script_key'
+                && /^[a-z0-9_]+$/.test(ref.before) && /^[a-z0-9_]+$/.test(ref.after))
             && Number.isSafeInteger(ref.occurrences) && ref.occurrences > 0)));
   }
 
@@ -3782,7 +3784,7 @@ class HAEntityRenamer extends HTMLElement {
         <div role="region" tabindex="0" aria-labelledby="migrationChangesTitle" style="max-width:100%;overflow:auto"><table class="queue-table"><thead><tr><th scope="col">${this._migrationText('Target', 'Cel')}</th><th scope="col">${this._migrationText('Field', 'Pole')}</th><th scope="col">${this._migrationText('Before', 'Przed')}</th><th scope="col">${this._migrationText('After', 'Po')}</th></tr></thead><tbody>${rows}</tbody></table></div>
         <h3>${this._migrationText('Dependencies', 'Zależności')}</h3><p>${_esc(domains || this._migrationText('None admitted', 'Brak przyjętych'))}</p>
         <p>${this._migrationText('YAML files', 'Pliki YAML')}: ${review.dependencies.yaml_file_count}. ${this._migrationText('Template consumers', 'Odbiorcy Template')}: ${review.dependencies.template_consumer_count}.</p>
-        ${review.dependencies.files.map(file => `<details open><summary><code>${_esc(file.path)}</code> — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li><code>${_entityIdHtml(ref.before)}</code> → <code>${_entityIdHtml(ref.after)}</code> (${ref.occurrences} ${this._migrationText('references', 'odwołań')})</li>`).join('')}</ul></details>`).join('')}` : ''}
+        ${review.dependencies.files.map(file => `<details open><summary><code>${_esc(file.path)}</code> — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li>${ref.kind === 'script_key' ? this._migrationText('Script key', 'Klucz skryptu') + ': ' : ''}<code>${_entityIdHtml(ref.before)}</code> → <code>${_entityIdHtml(ref.after)}</code> (${ref.occurrences} ${ref.kind === 'script_key' ? this._migrationText('definition', 'definicja') : this._migrationText('references', 'odwołań')})</li>`).join('')}</ul></details>`).join('')}` : ''}
       <button type="button" class="btn btn-outline" id="${inverse ? 'cancelMigrationRestore' : 'cancelRenameDialog'}">${_esc(this._t.cancel)}</button>
       ${inverse ? `<button type="button" class="btn btn-danger" id="restoreMigration">${this._migrationText('Restore this scope once', 'Wycofaj ten zakres jeden raz')}</button>` : ''}
       ${!inverse && m.stage === 'review' ? `<button type="button" class="btn btn-danger" id="applyMigration">${this._migrationText('Apply this plan once', 'Zastosuj ten plan jeden raz')}</button>` : ''}

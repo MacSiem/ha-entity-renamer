@@ -26,7 +26,7 @@ class ScriptTemplateStateComposition(MixedTemplateStateComposition):
 
     def assert_baseline(self, baseline):
         super().assert_baseline(baseline)
-        _need(baseline.receipt.changed_domains == ('script', 'template'))
+        _need(baseline.receipt.changed_domains in (('script',), ('script', 'template')))
         program = self.dependent_config_program
         _need(type(program) is DependentConfigProgram)
         program.assert_sources(baseline.receipt, self.evidence, plan=self.yaml_plan,

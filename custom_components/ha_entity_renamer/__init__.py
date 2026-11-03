@@ -46,6 +46,9 @@ class _PreparedReview:
     entity_count: int
     expires_at: float
     execution_admission: tuple = ()
+    own_admission: object = None
+    trace_admission: tuple = ()
+    template_admission: object = None
 
 
 @dataclass
@@ -174,8 +177,19 @@ class Runtime:
                 from .native_active_execution_pins import check_census
                 for script, census in admission:
                     check_census(script, census)
+                trace_admission = tuple(getattr(phases, 'trace_admission', ()))
+                for proof in trace_admission:
+                    proof.check_review()
+                own = getattr(session, 'own_dependent_fence', None)
+                if own is not None:
+                    from .native_own_dependent_fence import NativeOwnDependentAdmission
+                    own = NativeOwnDependentAdmission(own)
+                    own.check()
+                template_admission = getattr(session, 'own_template_admission', None)
+                if template_admission is not None:
+                    template_admission.check_review()
                 self.reviews[operation] = _PreparedReview(actor_id, plan, count,
-                                                           hass.loop.time() + 900, admission)
+                    hass.loop.time() + 900, admission, own, trace_admission, template_admission)
                 return {'operation_id': operation, 'fingerprint': plan.fingerprint,
                     'entity_count': count, 'device_count': devices, 'changes': changes,
                     'dependencies': dependencies,
@@ -214,12 +228,35 @@ class Runtime:
                     from .native_active_execution_pins import check_census
                     for script, census in review.execution_admission:
                         check_census(script, census)
+                    for proof in review.trace_admission:
+                        proof.check_review()
+                    if review.template_admission is not None:
+                        review.template_admission.check_review()
+                    if review.own_admission is not None:
+                        review.own_admission.check()
                     factory = _yaml_factory_for_plan(self.preparations, review.plan)
                     session = await factory.bind_prepared(hass, operation_id,
                         review.plan, guard=current, refresh=refresh)
                     try:
                         for script, census in review.execution_admission:
                             check_census(script, census)
+                        for proof in review.trace_admission:
+                            proof.check_review()
+                        session.trace_record_admission = review.trace_admission
+                        if review.template_admission is not None:
+                            review.template_admission.check_review()
+                            current_template = getattr(session, 'own_template_admission', None)
+                            if (current_template is None or current_template.entity is not review.template_admission.entity
+                                    or current_template.tracker is not review.template_admission.tracker):
+                                raise Refused('review_own_template_population_changed')
+                            session.template_record_admission = review.template_admission
+                        if review.own_admission is not None:
+                            review.own_admission.bind_scene_session(session)
+                            review.own_admission.check()
+                            if (getattr(session, 'own_dependent_fence', None) is None
+                                    or session.own_dependent_fence.entity is not review.own_admission.entity):
+                                raise Refused('review_own_dependent_population_changed')
+                            session.own_record_admission = review.own_admission
                         phases = getattr(session.consumers, 'phases', None)
                         actual = tuple(getattr(phases, 'admission', ()))
                         if tuple(script for script, _ in actual) != tuple(

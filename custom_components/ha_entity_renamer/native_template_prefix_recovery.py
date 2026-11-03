@@ -5,13 +5,37 @@ chain receipts. These predicates neither change phases nor permit intent replay.
 """
 
 
+def _registry_only_shape(record):
+    return (record.plan.required_scopes == record.plan.covered_scopes
+            == record.plan.verification_adapters == ('registry',)
+            and len(record.plan.steps) in (1, 2)
+            and all(step.adapter == 'registry' and not step.caused_by for step in record.plan.steps))
+
+
+def _registry_only_bound(chain, record):
+    from .native_registry_receipts import RegistryReceiptChain
+    from .native_template_state_composition import TemplateStateComposition
+    if type(chain) is not RegistryReceiptChain or record.plan != chain.plan or chain.yaml_index is not None:
+        return False
+    try:
+        baseline, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
+        if (type(composition) is not TemplateStateComposition or baseline != chain.baseline
+                or baseline.receipt.proposed_files or baseline.receipt.changed_domains):
+            return False
+        composition.assert_baseline(baseline)
+        return True
+    except Exception:
+        return False
+
+
 def acknowledged_registry_prefix(record):
     from .transaction import Record
     if (type(record) is not Record or record.direction != 'forward'
             or record.status not in ('applying', 'unknown', 'ready')
             or len(record.plan.steps) < 2 or len(record.phases) != len(record.plan.steps)
-            or tuple(step.adapter for step in record.plan.steps)
-               != ('registry',) * (len(record.plan.steps) - 1) + ('yaml',)):
+            or (tuple(step.adapter for step in record.plan.steps)
+               != ('registry',) * (len(record.plan.steps) - 1) + ('yaml',)
+                and not _registry_only_shape(record))):
         return False
     count = record.phases.count('verified')
     return (0 < count < len(record.phases)
@@ -31,6 +55,12 @@ def unstarted_rollback_complete(chain, record):
     from .native_template_state_composition import TemplateStateComposition
     from .native_script_program_composition import ScriptTemplateStateComposition
     from .native_automation_program_composition import AutomationTemplateStateComposition
+    if (type(chain) is RegistryReceiptChain and type(record) is Record and record.direction == 'rollback'
+            and record.status in ('rolling_back', 'rolled_back') and _registry_only_shape(record)
+            and record.operation_id == chain.operation_id and _registry_only_bound(chain, record)):
+        count = record.phases.count('undone')
+        return (0 < count < len(record.phases)
+                and record.phases == ('undone',) * count + ('pending',) * (len(record.phases) - count))
     if (type(chain) is not RegistryReceiptChain or type(record) is not Record
             or record.plan != chain.plan or record.operation_id != chain.operation_id
             or record.direction != 'rollback' or record.status not in ('rolling_back', 'rolled_back')
@@ -57,6 +87,11 @@ def unstarted_rollback_complete(chain, record):
 def complete_forward_unknown(record):
     """Snapshot shape only; never evidence that an UNKNOWN operation succeeded."""
     from .transaction import Record
+    if (type(record) is Record and record.direction == 'forward'
+            and record.status == 'unknown' and record.reason == 'final_verification_uncertain'
+            and _registry_only_shape(record)
+            and record.phases == ('verified',) * len(record.plan.steps)):
+        return True
     return (type(record) is Record and record.direction == 'forward'
             and record.status == 'unknown' and record.reason == 'final_verification_uncertain'
             and len(record.plan.steps) >= 2
@@ -81,6 +116,9 @@ def complete_forward_unknown_scope(chain, record):
     from .native_template_state_composition import TemplateStateComposition
     from .native_script_program_composition import ScriptTemplateStateComposition
     from .native_automation_program_composition import AutomationTemplateStateComposition
+    if (type(chain) is RegistryReceiptChain and complete_forward_unknown(record)
+            and _registry_only_shape(record)):
+        return (record.operation_id == chain.operation_id and _registry_only_bound(chain, record))
     if (not complete_forward_unknown(record) or type(chain) is not RegistryReceiptChain
             or record.plan != chain.plan or record.operation_id != chain.operation_id
             or chain.yaml_index != len(record.plan.steps) - 1):

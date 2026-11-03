@@ -138,6 +138,25 @@ class NativeActiveScriptRootTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(tuple(run._context for run in runs), contexts)
             self.assertFalse(runs[1].lock_acquired)
 
+        def trace_snapshot(contexts):
+            from copy import deepcopy
+            from homeassistant.components.script.trace import ScriptTrace
+            from homeassistant.components.trace import DATA_TRACE
+            from homeassistant.const import __version__
+            bucket = hass.data[DATA_TRACE]['script.mixed_source']
+            records = bucket.runs if __version__ != '2025.6.0' else bucket
+            traces = tuple(next(trace for trace in records.values()
+                                if type(trace) is ScriptTrace and trace.context is context)
+                           for context in contexts)
+            self.assertEqual(len({id(trace) for trace in traces}), 2)
+            self.assertTrue(all(trace._config is entity.raw_config for trace in traces))
+            return tuple((trace, trace.context, trace._config, deepcopy(trace._config)) for trace in traces)
+
+        def trace_history_unchanged(snapshot):
+            for trace, context, _, original_config in snapshot:
+                self.assertIs(trace.context, context)
+                self.assertEqual(trace._config, original_config)
+
         async def drain(pinned, expected):
             _, runs, child, child_run, _, _ = pinned
             hass.bus.async_fire('active_transport_release')
@@ -154,6 +173,7 @@ class NativeActiveScriptRootTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             first = await pair('forward')
+            first_traces = trace_snapshot(first[0])
             review = await runtime.native_yaml_prepare(hass, mapping, actor_id='active-root-admin',
                 guard=lambda: None, refresh=refresh)
             same(first)
@@ -175,7 +195,34 @@ class NativeActiveScriptRootTests(unittest.IsolatedAsyncioTestCase):
             before_config = graph(entity.raw_config), graph(script.sequence)
             transport.install()
             same(first)
+            trace_history_unchanged(first_traces)
+            self.assertTrue(all(trace._config is not original_config
+                                for trace, _, original_config, _ in first_traces))
             self.assertEqual(results, [])
+            changed_graph = graph(entity.raw_config), graph(script.sequence)
+            trace, _, _, _ = first_traces[0]
+            owned_trace_config = trace._config
+            foreign_trace_config = {'foreign': 'retained edit'}
+            trace._config = foreign_trace_config
+            try:
+                with self.assertRaises((ValueError, self.module('transaction').Refused)):
+                    transport.restore_before_attempt()
+                self.assertIs(trace._config, foreign_trace_config)
+                self.assertEqual((graph(entity.raw_config), graph(script.sequence)), changed_graph)
+                self.assertEqual(transport.phase, 'installed')
+            finally:
+                trace._config = owned_trace_config
+            original_trace_storage = trace.__dict__
+            foreign_trace_storage = dict(original_trace_storage)
+            trace.__dict__ = foreign_trace_storage
+            try:
+                with self.assertRaises((ValueError, self.module('transaction').Refused)):
+                    transport.restore_before_attempt()
+                self.assertIs(trace.__dict__, foreign_trace_storage)
+                self.assertEqual((graph(entity.raw_config), graph(script.sequence)), changed_graph)
+                self.assertEqual(transport.phase, 'installed')
+            finally:
+                trace.__dict__ = original_trace_storage
             owner = transport.projector.operations[0][0]
             self.assertNotIn('active_foreign_sibling', owner)
             foreign_value = object()
@@ -189,6 +236,9 @@ class NativeActiveScriptRootTests(unittest.IsolatedAsyncioTestCase):
                 del owner['active_foreign_sibling']
             transport.restore_before_attempt()
             self.assertEqual((graph(entity.raw_config), graph(script.sequence)), before_config)
+            self.assertTrue(all(trace._config is original_config
+                                for trace, _, original_config, _ in first_traces))
+            trace_history_unchanged(first_traces)
             same(first)
             result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
                 actor_id='active-root-admin', guard=lambda: None, refresh=refresh)
@@ -197,6 +247,7 @@ class NativeActiveScriptRootTests(unittest.IsolatedAsyncioTestCase):
             baseline, composition = runtime.preparations.resolve_composition(record.plan.native_inputs)
             original_ref, receipt = record.plan.native_inputs, baseline.receipt_json
             same(first)
+            trace_history_unchanged(first_traces)
             self.assertEqual(results, [])
             self.assertEqual(len(controls), 1)
             self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
@@ -208,6 +259,7 @@ class NativeActiveScriptRootTests(unittest.IsolatedAsyncioTestCase):
                 [('forward-0', '17', first[0][0].id), ('forward-1', '17', first[0][1].id)])
 
             second = await pair('inverse')
+            second_traces = trace_snapshot(second[0])
             inverse = await runtime.native_yaml_reverse(hass, result['operation_id'], result['fingerprint'],
                 guard=lambda: None, refresh=refresh)
             self.assertEqual(inverse['state'], 'rolled_back')
@@ -215,6 +267,8 @@ class NativeActiveScriptRootTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((record.plan.native_inputs, reopened.receipt_json, restored),
                              (original_ref, receipt, composition))
             same(second)
+            trace_history_unchanged(first_traces)
+            trace_history_unchanged(second_traces)
             self.assertEqual(len(results), 2)
             self.assertEqual(len(controls), 2)
             self.assertEqual(self.f.entity.async_get(old).id, uuids[old])

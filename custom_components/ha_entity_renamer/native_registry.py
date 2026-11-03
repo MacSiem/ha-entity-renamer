@@ -220,6 +220,14 @@ class NativeRegistryIO:
         state = self.hass.states.get(target["entity_id"])
         present = (state is None) if target.get("disabled_by") else (state is not None)
         if present and prepared.before.get('name') != prepared.after.get('name'):
+            from .native_registry_transition import (_native_script_default_name_move,
+                                                     _native_script_unique_move)
+            if (_native_script_unique_move(prepared.before, prepared.after)
+                    and _native_script_default_name_move(prepared.before, prepared.after)):
+                # The explicit registry name preserves the original visible
+                # friendly name while the default source name tracks the key.
+                wanted = prepared.before.get('name') or prepared.before['unique_id']
+                return state is not None and state.attributes.get('friendly_name') == wanted
             from .native_name_observers import NativeNameObserver
             return NativeNameObserver(self).verify(prepared, target,
                                                    expected_documents=expected_documents)
@@ -245,8 +253,33 @@ class NativeRegistryIO:
             kwargs = {"name": target["name"]}
             if source["entity_id"] != target["entity_id"]:
                 kwargs["new_entity_id"] = target["entity_id"]
-            # Exactly one native update retains registry id, unique_id, device id.
-            updated = registry.async_update_entity(source["entity_id"], **kwargs)
+            if source.get('unique_id') != target.get('unique_id'):
+                from .native_own_script_service_move import NativeOwnScriptServiceMove
+                from .native_registry_transition import _native_script_unique_move
+                capability = getattr(self, '_script_service_capability', None)
+                if (type(capability) is not NativeOwnScriptServiceMove
+                        or not _native_script_unique_move(prepared.before, prepared.after)):
+                    raise RegistryConflict('native_unique_change_capability_required')
+                capability.authorize_registry(self, prepared, target)
+                kwargs['new_unique_id'] = target['unique_id']
+                if source.get('original_name') != target.get('original_name'):
+                    from .native_registry_transition import _native_script_default_name_move
+                    if not _native_script_default_name_move(prepared.before, prepared.after):
+                        raise RegistryConflict('native_default_name_change_unqualified')
+                    kwargs['original_name'] = target['original_name']
+            # Core 2026's public wrapper omits suggested_object_id. The exact
+            # owned Script capability admits its pinned native writer once.
+            from .native_registry_transition import _native_script_suggested_move, _native_script_unique_move
+            if (_native_script_unique_move(prepared.before, prepared.after)
+                    and _native_script_suggested_move(prepared.before, prepared.after)):
+                from homeassistant.const import __version__
+                if (__version__ not in ('2026.10.2', '2026.10.4')
+                        or type(getattr(self, '_script_service_capability', None)) is not NativeOwnScriptServiceMove):
+                    raise RegistryConflict('native_suggested_change_capability_required')
+                kwargs['suggested_object_id'] = target['suggested_object_id']
+                updated = registry._async_update_entity(source['entity_id'], **kwargs)
+            else:
+                updated = registry.async_update_entity(source["entity_id"], **kwargs)
         else:
             updated = registry.async_update_device(prepared.identity,
                                          name_by_user=target["name_by_user"])
@@ -312,6 +345,37 @@ class NativeRegistryBridge:
             (lambda change, target: io.runtime(change, target,
                  expected_documents=native_images())) if native_images is not None else io.runtime)
         self.history_guard = history_guard
+        self.native_images = native_images
+        self._mutation_node = None
+
+    def _matches(self, change, actual, expected):
+        if _content(actual) == _content(expected):
+            return True
+        # Core records the preceding Script unique ID on the reverse call.
+        # Accept that non-ORIGINAL field only with this live effect's exact
+        # service/row witness or an already authenticated native receipt.
+        from .native_registry_transition import _native_script_unique_move
+        if (not _native_script_unique_move(change.before, change.after)
+                or expected != change.before):
+            return False
+        directional = dict(expected, previous_unique_id=change.after['unique_id'])
+        if _content(actual) != _content(directional):
+            return False
+        node = self._mutation_node
+        if node is not None:
+            from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
+            if (type(node) is NativeTemplateStateRegistryEffect and node.change == change
+                    and node.target == expected['entity_id'] and node.script_service_move is not None):
+                node.script_service_move.check_moved()
+                handoff = node.script_service_move.handoff
+                if handoff.new_row is self.io.registries['entity'].async_get(node.target):
+                    return True
+        if self.native_images is not None:
+            docs = self.native_images()
+            rows = docs['core.entity_registry']['data']['entities']
+            return sum(row.get('id') == change.identity and _content(row) == _content(actual)
+                       for row in rows) == 1
+        return False
 
     def _history(self):
         if self.history_guard is None:
@@ -327,7 +391,7 @@ class NativeRegistryBridge:
         if not self.io.running():
             raise RegistryConflict("home_assistant_not_running")
         document = self.io.document(change.kind)
-        if _content(_row(document, change.kind, change.identity)) != _content(expected):
+        if not self._matches(change, _row(document, change.kind, change.identity), expected):
             raise RegistryConflict("registry_revision_changed")
         if change.kind == "entity":
             destination = change.after if expected == change.before else change.before
@@ -335,6 +399,20 @@ class NativeRegistryBridge:
                 if any(row.get("entity_id") == destination["entity_id"]
                        for row in document["entities"]):
                     raise RegistryConflict("registry_destination_occupied")
+            # A native Script key move also changes unique_id. The minimum
+            # Core removes the old entity key *before* it checks this unique
+            # collision, so recheck the actual native index at the final
+            # synchronous fence. This is a refusal only, never authority to
+            # perform the otherwise separately guarded service/registry effect.
+            if (destination.get('platform') == 'script'
+                    and destination.get('unique_id') != expected.get('unique_id')):
+                from .native_registry_transition import _native_script_unique_move
+                if not _native_script_unique_move(change.before, change.after):
+                    raise RegistryConflict('registry_unique_change_unqualified')
+                if (type(self.io) is not NativeRegistryIO
+                        or self.io.registries['entity'].async_get_entity_id(
+                            'script', 'script', destination['unique_id']) is not None):
+                    raise RegistryConflict('registry_unique_destination_occupied')
 
     async def prepare(self, kind, identity, updates, guard):
         guard()
@@ -391,9 +469,9 @@ class NativeRegistryBridge:
                 return RegistryEvidence("conflict", False, None, None, None,
                                         reason="registry_identity_missing_or_ambiguous")
             before, after = change.before, change.after
-            if _content(live) == _content(before):
+            if self._matches(change, live, before):
                 position, target = "before", before
-            elif _content(live) == _content(after):
+            elif self._matches(change, live, after):
                 position, target = "after", after
             else:
                 return RegistryEvidence("conflict", live.get("id") == change.identity,
@@ -411,7 +489,7 @@ class NativeRegistryBridge:
             if self._live(change) != live or not self.io.running():
                 return RegistryEvidence("unknown", None, None, None, None,
                                         reason="live_state_changed_during_readback")
-            durable = _content(_row(disk, change.kind, change.identity)) == _content(target)
+            durable = self._matches(change, _row(disk, change.kind, change.identity), target)
             metadata = True
             if change.mapping:
                 baseline = json.loads(change.recorder_before_json)
@@ -477,16 +555,24 @@ class NativeRegistryBridge:
                     await node.finish_failed_attempt()
                 raise
             if type(node) is NativeTemplateStateRegistryEffect:
-                await node.finish_native()
-        await self.io.settle(change)
-        self._fresh(change, target, guard)
-        await self.io.flush(change.kind)
-        self._fresh(change, target, guard)
-        evidence = await self.inspect(change)
-        self._fresh(change, target, guard)
-        if evidence.position != ("after" if expected == "before" else "before"):
-            raise RegistryConflict("effect_uncertain:" + evidence.reason)
-        return stamp
+                self._mutation_node = node
+                try:
+                    await node.finish_native()
+                except BaseException:
+                    self._mutation_node = None
+                    raise
+        try:
+            await self.io.settle(change)
+            self._fresh(change, target, guard)
+            await self.io.flush(change.kind)
+            self._fresh(change, target, guard)
+            evidence = await self.inspect(change)
+            self._fresh(change, target, guard)
+            if evidence.position != ("after" if expected == "before" else "before"):
+                raise RegistryConflict("effect_uncertain:" + evidence.reason)
+            return stamp
+        finally:
+            self._mutation_node = None
 
 
 class RegistryTransactionAdapter:

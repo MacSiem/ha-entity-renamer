@@ -274,7 +274,7 @@ class OwnedAutomationGraph:
         # edges. Validate them before allowing that cancel to touch anything.
         b = route.binding
         self.duration.check_sources()
-        _need(_stable(b) == route.stable and self.hass.data.get(b.tracker.key) is b.data
+        _need(self._stable_route(route) == route.stable and self.hass.data.get(b.tracker.key) is b.data
               and b.data.callbacks is b.callbacks and b.data.listener is b.bus_remove,
               'automation_duration_dispatch_native_owner')
         job, handle = pending['cancel_job'], pending['handle']
@@ -393,6 +393,27 @@ class OwnedAutomationGraph:
         self.hass.async_run_hass_job(b.action_job, payload, event.context)
         self.counts['action_submitted'] += 1
 
+    def _stable_route(self, route, *, configured_view=None):
+        """Normalize only this Root's authenticated Automation own-ID edge."""
+        actual = _stable(route.binding, configured_view=configured_view)
+        if actual == route.stable:
+            return actual
+        from .native_own_dependent_fence import NativeOwnDependentFence
+        node = getattr(self, 'node', None)
+        root = getattr(node, 'root', None)
+        fence = getattr(root, 'own_dependent_fence', None)
+        if (type(fence) is not NativeOwnDependentFence or fence.domain != 'automation'
+                or route.binding.entity is not fence.entity or fence.node is not node
+                or node is None or node.change != fence.change
+                or self.witness is None or self.witness is not node.witness
+                or self.witness.automation_graph is not self):
+            return actual
+        # This checks the exact UUID, original/accepted registry row and,
+        # during an unacknowledged edge, the active intent and native handoff.
+        # It cannot adopt a foreign registry entry or a different entity.
+        fence.rows()
+        return (*actual[:4], route.stable[4], actual[5], route.stable[6], *actual[7:])
+
     def registrations(self, hass, entity):
         """Return explicit actual graph tokens; caller never unwraps job.target."""
         _need(hass is self.hass)
@@ -411,7 +432,7 @@ class OwnedAutomationGraph:
         for route in owned:
             b = route.binding
             b._native.check()
-            _need(_stable(b) == route.stable, 'automation_owned_native_edges_changed')
+            _need(self._stable_route(route) == route.stable, 'automation_owned_native_edges_changed')
             _need(_value(route.wrapper) == route.wrapper_graph, 'automation_owned_wrapper_graph_changed')
             _need(b.keyed_job.target is route.wrapper and b.config['entity_id'] is b.config_ids
                   and tuple(b.config_ids) == route.target
@@ -482,7 +503,7 @@ class OwnedAutomationGraph:
         for route in reversed(self.routes):
             b = route.binding
             b._native.check()
-            _need(_stable(b, configured_view=configured_view) == route.stable and b.entity._is_enabled is True
+            _need(self._stable_route(route, configured_view=configured_view) == route.stable and b.entity._is_enabled is True
                   and b.entity._async_detach_triggers is b.detach
                   and b.entity._trigger_config[b.index] is b.config
                   and b.config['entity_id'] is b.config_ids,

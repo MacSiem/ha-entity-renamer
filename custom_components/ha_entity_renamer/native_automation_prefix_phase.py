@@ -33,8 +33,10 @@ class NativeAutomationPrefixPhase:
         sample = self.observer.sample(root.chain, input_state=root.observation_state)
         self.mask = sample.prefix.active
         from .native_automation_config_transport import assert_idle_automation_program_targets
+        trace_admission = []
         self.admission = assert_idle_automation_program_targets(root.hass, self.program,
-            active=self.mask if self.mask else None)
+            active=self.mask if self.mask else None, trace_sink=trace_admission)
+        self.trace_admission = tuple(trace_admission)
         self.sample = sample.registry_rows, (), sample.native_tokens
         self.edge_entities = frozenset()
         _need(self._read(self.mask) == self.sample)
@@ -64,16 +66,25 @@ class NativeAutomationPrefixPhase:
         from .yaml_runtime_observer import NativeYAMLRuntimeReadback
         from .yaml_validation_worker import _normal
         from .yaml_source_binding import _runtime_rows_sample
-        expected = self.program.rows(mask)
-        native = NativeYAMLRuntimeReadback(self.root.hass, owned_automation=self.graph)
+        fence = getattr(self.root, 'own_dependent_fence', None)
+        from .native_own_script_key_view import key_view
+        expected, source_key_moves = key_view(self.program, mask, fence, self.active)
+        node = None if fence is None else fence.node
+        handoff = None if node is None or node.witness is None else node.witness.source_handoff
+        dispatch = (node if handoff is not None and handoff.in_native and handoff.new_row is not None
+                    and handoff.hass.states.get(handoff.new) is None else None)
+        native = NativeYAMLRuntimeReadback(self.root.hass, owned_automation=self.graph, script_dispatch=dispatch)
         for domain, rows in expected:
             component = self.root.hass.data.get(DATA_INSTANCES, {}).get(domain)
             projection = native._projection(domain)[0] if component is not None else []
             _need(_normal(projection) == rows, 'automation_prefix_phase_native_rows_changed')
-        result = _runtime_rows_sample(self.root.hass, self.root.evidence,
-            self.root.chain.accepted_documents()['core.entity_registry']['data']['entities'],
+        registry_rows = (self.root.chain.accepted_documents()['core.entity_registry']['data']['entities']
+                         if fence is None else fence.rows())
+        result = _runtime_rows_sample(self.root.hass, self.root.evidence, registry_rows,
             expected_projections=tuple((domain, _digest(rows)) for domain, rows in expected),
-            owned_automation=self.graph)
+            owned_automation=self.graph, source_key_moves=source_key_moves, script_dispatch=dispatch)
+        if fence is not None:
+            result = fence.normalize(result)
         _need(not result[1], 'automation_prefix_phase_native_inventory_changed')
         return result
 
@@ -161,7 +172,10 @@ class NativeAutomationPrefixPhase:
             transfer = NativeAutomationConfigTransport.capture(self.observer, self.root.chain,
                 source, reverse=reverse, guard=node.guard, input_state=node.state)
         self.graph.node, self.graph.transfer = node, transfer
-        self.edge_entities = frozenset(route.binding.entity.entity_id for route in self.graph.routes)
+        fence = getattr(self.root, 'own_dependent_fence', None)
+        self.edge_entities = frozenset(
+            fence.original_row.entity_id if fence is not None and route.binding.entity is fence.entity
+            else route.binding.entity.entity_id for route in self.graph.routes)
         self.active = node, transfer, target
 
     def install(self, node):
@@ -201,8 +215,11 @@ class NativeAutomationPrefixPhase:
         _need(not self.graph.live and not self.graph.routes)
         _need(self._read(target) == self.sample, 'automation_prefix_native_identity_changed')
         sample = self.observer.sample(self.root.chain)
-        _need(sample.prefix.active == target
-              and (sample.registry_rows, (), sample.native_tokens) == self.sample)
+        observed = (sample.registry_rows, (), sample.native_tokens)
+        fence = getattr(self.root, 'own_dependent_fence', None)
+        if fence is not None:
+            observed = fence.normalize(observed)
+        _need(sample.prefix.active == target and observed == self.sample)
         self.mask, self.active = target, None
         self.check()
 

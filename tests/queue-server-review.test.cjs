@@ -839,3 +839,32 @@ test('forward and inverse review keyboard loop reaches the named changes scroll 
     assert.equal(root.activeElement.id,inverse?'reviewMigrationRestore':'executeRenames');
   }
 });
+
+test('Script definition key is distinct from references in forward and inverse review',async t=>{
+  const f=await fixture(t,'en');
+  f.review.dependencies.files[2].references.push({kind:'script_key',before:'worker',after:'new_worker',occurrences:1});
+  f.review.dependencies.files[2].edit_count=2;
+  await f.card._prepareMigration();
+  let dialog=f.card.shadowRoot.querySelector('[role="dialog"]');
+  let rows=[...dialog.querySelectorAll('details li')].map(row=>row.textContent);
+  assert.ok(rows.some(row=>/Script key:.*worker.*new_worker.*1 definition/.test(row)));
+  assert.ok(rows.some(row=>/sensor\.a.*sensor\.b.*1 references/.test(row)));
+  await f.card._applyMigration();
+  f.card._reviewMigrationRestore();
+  dialog=f.card.shadowRoot.querySelector('[role="dialog"]');
+  rows=[...dialog.querySelectorAll('details li')].map(row=>row.textContent);
+  assert.ok(rows.some(row=>/Script key:.*new_worker.*worker.*1 definition/.test(row)));
+  assert.equal(restores(f).length,0);
+});
+
+test('unknown dependency kind and invalid Script key cannot be reviewed',async t=>{
+  for (const ref of [
+    {kind:'foreign',before:'worker',after:'new_worker',occurrences:1},
+    {kind:'script_key',before:'<worker>',after:'new_worker',occurrences:1},
+  ]) {
+    const f=await fixture(t);f.review.dependencies.files[2].references.push(ref);
+    await f.card._prepareMigration();
+    assert.equal(f.card._migration.stage,'refused');
+    assert.equal(writes(f).length,0);
+  }
+});

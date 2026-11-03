@@ -45,31 +45,73 @@ def _script_prefix_composition(value):
     return type(value) in (ScriptTemplateStateComposition, AutomationTemplateStateComposition)
 
 
+def _registry_only_state_plan(plan, composition, receipt):
+    from .native_template_state_composition import TemplateStateComposition
+    return (type(composition) is TemplateStateComposition and not receipt.proposed_files
+            and not receipt.changed_domains and not receipt.unsupported_domains
+            and plan.required_scopes == plan.covered_scopes == plan.verification_adapters == ('registry',)
+            and len(plan.steps) in (1, 2)
+            and all(step.adapter == 'registry' and not step.caused_by for step in plan.steps))
+
+
 def _registry_mapping(changes, composition):
     """Decode only the immutable server-selected registry field scope."""
     from .native_template_state_composition import TemplateStateComposition
+    from .native_script_program_composition import ScriptTemplateStateComposition
+    from .native_automation_program_composition import AutomationTemplateStateComposition
     names = type(composition) is TemplateStateComposition
+    own_template_profile = type(composition) in (TemplateStateComposition, ScriptTemplateStateComposition,
+                                                  AutomationTemplateStateComposition)
+    from .native_registry_transition import (_native_script_default_name_move,
+        _native_script_suggested_move, _native_script_unique_move)
+    own_entity = [change for change in changes
+                  if change.before.get('platform') in ('template', 'automation', 'script') and change.mapping]
+    if own_entity:
+        _need(own_template_profile and len(own_entity) == 1 and len(changes) in (1, 2),
+              'own_template_mapping_required')
     mapping = {}
     for change in changes:
         before, after = change.before, change.after
         delta = {key for key in set(before) | set(after) if before.get(key) != after.get(key)}
         _need(before.get('id') == after.get('id') == change.identity, 'source_uuid_required')
+        script_move = (change.kind == 'entity' and len(own_entity) == 1
+                       and change is own_entity[0] and own_template_profile
+                       and _native_script_unique_move(before, after))
+        default_name_move = script_move and _native_script_default_name_move(before, after)
         if change.kind == 'entity':
             allowed = {'entity_id', 'modified_at'} | ({'name'} if names else set())
+            if script_move:
+                allowed |= {'unique_id', 'previous_unique_id'}
+                if default_name_move:
+                    allowed |= {'name', 'original_name'}
+                if _native_script_suggested_move(before, after):
+                    from homeassistant.const import __version__
+                    _need(__version__ in ('2026.10.2', '2026.10.4'), 'source_mapping_required')
+                    allowed.add('suggested_object_id')
             _need(delta <= allowed, 'source_mapping_required')
             if change.mapping:
-                _need(len(change.mapping) == 1 and before['platform'] not in ('template', 'automation', 'script')
+                _need(len(change.mapping) == 1
+                      and (before['platform'] not in ('template', 'automation', 'script') or own_template_profile)
                       and not set(mapping) & set(change.mapping), 'source_mapping_required')
                 mapping.update(change.mapping)
             else:
                 _need(names and 'name' in delta and before['platform'] not in ('automation', 'script')
                       and bool(change.runtime_before_json), 'selected_name_scope_required')
             if 'name' in delta:
-                _need(names and bool(change.runtime_before_json), 'selected_name_runtime_required')
+                _need(default_name_move or names and bool(change.runtime_before_json),
+                      'selected_name_runtime_required')
         else:
             _need(names and change.kind == 'device' and 'name_by_user' in delta
                   and delta <= {'name_by_user', 'modified_at'} and bool(change.runtime_before_json),
                   'selected_device_name_scope_required')
+    if own_entity:
+        _need(all(change.kind == 'entity' and change.mapping
+                  and ((change is own_entity[0] and _native_script_unique_move(change.before, change.after))
+                       or {key: value for key, value in change.before.items()
+                           if key not in ('entity_id', 'modified_at')}
+                          == {key: value for key, value in change.after.items()
+                              if key not in ('entity_id', 'modified_at')}) for change in changes),
+              'own_template_mapping_required')
     _need(bool(mapping) and len(set(mapping.values())) == len(mapping)
           and not set(mapping) & set(mapping.values()), 'independent_mapping_required')
     return mapping
@@ -439,6 +481,18 @@ class NativeTemplateYAMLServer:
         else:
             consumers = tuple(sorted(v[0] for v in self.observer.identities.values()))
         source_ids = tuple(_registry_history_mapping(self.registry_changes))
+        # A selected Template/Automation can also be one of the consumers.
+        # Recorder migrates its metadata to the destination ID, so compare
+        # that consumer's finite ORIGINAL history over both exact reviewed IDs.
+        # The per-registry verify/verify_rollback below still proves the
+        # individual metadata row and rejects foreign destination history.
+        consumer_ids = set(consumers)
+        for change in self.registry_changes:
+            if change.kind == 'entity' and change.mapping:
+                old, new = next(iter(change.mapping.items()))
+                if old in consumer_ids or new in consumer_ids:
+                    consumer_ids.update((old, new))
+        consumers = tuple(sorted(consumer_ids))
         def physical():
             self.consumers.physical()
             self.observer.native.sources()
@@ -572,13 +626,16 @@ class NativeTemplateYAMLServer:
                       'prefix_profile_unsupported')
             obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
             obj.digests = dict(obj.composition.prepared_digests)
-            _need(obj.plan.coverage_evidence == obj.composition.coverage_sha256
-                  and obj.plan.required_scopes == obj.plan.covered_scopes == obj.plan.verification_adapters == ('registry', 'yaml')
+            registry_only = _registry_only_state_plan(obj.plan, obj.composition, obj.receipt)
+            standard = (obj.plan.required_scopes == obj.plan.covered_scopes == obj.plan.verification_adapters == ('registry', 'yaml')
                   and tuple(s.adapter for s in obj.plan.steps) == ('registry',) * (len(obj.plan.steps) - 1) + ('yaml',)
-                  and len(obj.plan.steps) >= 2 and not any(s.caused_by for s in obj.plan.steps), 'qualified_plan_required')
+                  and len(obj.plan.steps) >= 2 and not any(s.caused_by for s in obj.plan.steps))
+            _need(obj.plan.coverage_evidence == obj.composition.coverage_sha256
+                  and (registry_only or standard), 'qualified_plan_required')
             changes = [decode_change(obj.preparations.resolve(s.prepared_ref, obj.digests[s.prepared_ref]))
                        for s in obj.plan.steps]
-            obj.registry_changes, obj.change = tuple(changes[:-1]), changes[-1]
+            obj.registry_changes = tuple(changes if registry_only else changes[:-1])
+            obj.change = changes[-1]
             _need(set(obj.digests) == {s.prepared_ref for s in obj.plan.steps}, 'preparation_scope')
             obj.mapping = _registry_mapping(obj.registry_changes, obj.composition)
             consumer_type = _UnchangedConsumers
@@ -645,15 +702,18 @@ class NativeTemplateYAMLServer:
             baseline, obj.composition = obj.preparations.resolve_composition(plan.native_inputs)
             obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
             obj.digests = dict(obj.composition.prepared_digests)
-            _need(plan.coverage_evidence == obj.composition.coverage_sha256
-                  and plan.required_scopes == plan.covered_scopes == plan.verification_adapters == ('registry', 'yaml')
+            registry_only = _registry_only_state_plan(plan, obj.composition, obj.receipt)
+            standard = (plan.required_scopes == plan.covered_scopes == plan.verification_adapters == ('registry', 'yaml')
                   and len(plan.steps) >= 2
                   and tuple(s.adapter for s in plan.steps) == ('registry',) * (len(plan.steps) - 1) + ('yaml',)
-                  and not any(s.caused_by for s in plan.steps)
+                  and not any(s.caused_by for s in plan.steps))
+            _need(plan.coverage_evidence == obj.composition.coverage_sha256
+                  and (registry_only or standard)
                   and set(obj.digests) == {s.prepared_ref for s in plan.steps}, 'qualified_plan_required')
             changes = [decode_change(obj.preparations.resolve(s.prepared_ref, obj.digests[s.prepared_ref]))
                        for s in plan.steps]
-            obj.registry_changes, obj.change = tuple(changes[:-1]), changes[-1]
+            obj.registry_changes = tuple(changes if registry_only else changes[:-1])
+            obj.change = changes[-1]
             obj.mapping = _registry_mapping(obj.registry_changes, obj.composition)
             consumer_type = _UnchangedConsumers
             if _mixed_composition(obj.composition):

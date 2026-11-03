@@ -64,7 +64,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         active = frozenset(next(iter(change.mapping)) for index, change in enumerate(self.registry_changes)
                            if change.mapping and record.phases[index] == 'verified')
-        identities = set(self.observer.identities.values())
+        identities = self.observer.identities_at(active)
         _need(actual.prefix.active == active and actual.yaml_position == 'original'
               and len(actual.rows) == len(identities)
               and {(row.entity.entity_id, row.registry_id) for row in actual.rows} == identities,
@@ -87,13 +87,58 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         from .native_input_baseline import async_capture_native_input_baseline
         self.consumers = await _UnchangedConsumers.capture(self.hass, self.mapping, guard=self._scope)
         self._scope()
+        # Identify the native Script-key proposal BEFORE source planning. This
+        # is only the source-checker opt-in; the later Root qualifier still
+        # refuses this shape until registry/service/lifecycle are implemented.
+        # Retain an actual caller/service census across every staging await.
+        io = NativeRegistryIO(self.hass)
+        source_rows = io.document('entity')['entities']
+        owned_script = []
+        for old, new in self.mapping.items():
+            hits = [row for row in source_rows if row.get('entity_id') == old]
+            if (len(hits) == 1 and hits[0].get('platform') == 'script'
+                    and type(hits[0].get('unique_id')) is str
+                    and old == 'script.' + hits[0]['unique_id']
+                    and new != old):
+                owned_script.append(old)
+        _need(len(owned_script) <= 1, 'own_script_service_scope_unsupported')
+        owned_script = tuple(owned_script)
+        inventory = service_audit = service_recipients = None
+        if owned_script:
+            from .native_own_id_inventory import NativeOwnIDInventory
+            from .native_own_script_service_audit import NativeOwnScriptServiceAudit
+            from .native_own_script_service_recipients import NativeOwnScriptServiceRecipients
+            old = owned_script[0]
+            inventory = NativeOwnIDInventory.capture(self.hass, {old: self.mapping[old]})
+            service_audit = await NativeOwnScriptServiceAudit.capture(
+                self.hass, inventory, guard=self._scope)
+            service_recipients = await NativeOwnScriptServiceRecipients.capture(
+                self.hass, inventory, guard=self._scope, scene_fence=self.scene_fence)
         root = Path(self.hass.config.config_dir).resolve()
-        yaml = await _drained(self.hass.async_add_executor_job, lambda: plan_yaml(root, self.mapping))
+        yaml = await _drained(self.hass.async_add_executor_job,
+            lambda: plan_yaml(root, self.mapping, owned_script_services=owned_script))
         self._scope()
-        _need(yaml.ready and bool(yaml.patches), 'yaml_proposal_required')
+        if inventory is not None:
+            inventory.check()
+            service_audit.check()
+            service_recipients.check()
+        _need(yaml.ready, 'yaml_proposal_required')
+        registry_only = not yaml.patches
         bundle = await async_validate_proposed_with_template_state_sources(
-            self.hass, yaml, self.mapping, root.parent, with_state_program=True)
-        if bundle.receipt.changed_domains in (('script', 'template'), ('automation', 'template'), ('automation', 'script', 'template')):
+            self.hass, yaml, self.mapping, root.parent, with_state_program=True,
+            registry_only_template=registry_only, with_dependent_program=bool(owned_script),
+            owned_script_services=owned_script)
+        if inventory is not None:
+            inventory.check()
+            service_audit.check()
+            service_recipients.check()
+        candidate_own = any(row.get('entity_id') in self.mapping
+                            and row.get('platform') in ('template', 'automation', 'script')
+                            for row in source_rows)
+        if (not owned_script and (bundle.receipt.changed_domains in
+                (('script', 'template'), ('automation', 'template'), ('automation', 'script', 'template'))
+                or candidate_own and bundle.receipt.changed_domains in
+                (('script',), ('automation',), ('automation', 'script')))):
             # Both programs come from one extended checked invocation, with
             # exact ORIGINAL equality to the preceding legacy admission.
             extended = await async_validate_proposed_with_template_state_sources(
@@ -108,25 +153,30 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self.receipt, self.evidence, self.program = bundle.receipt, bundle.evidence, bundle.state_config_program
         self._scope()
         domains = self.receipt.changed_domains
-        if domains == ('script', 'template'):
+        selected_owners = [row for row in source_rows if row.get('entity_id') in self.mapping
+                           and row.get('platform') in ('template', 'automation', 'script')]
+        dependent_only = bool(domains) and 'template' not in domains and len(selected_owners) == 1
+        if domains in (('script',), ('script', 'template')):
             from .native_script_config_transport import assert_idle_script_program_targets
             assert_idle_script_program_targets(self.hass, bundle.dependent_config_program)
-        automation_prefix = domains in (('automation', 'template'), ('automation', 'script', 'template'))
+        automation_prefix = domains in (('automation',), ('automation', 'script'),
+                                        ('automation', 'template'), ('automation', 'script', 'template'))
         if automation_prefix:
             from .native_automation_config_transport import assert_idle_automation_program_targets
             assert_idle_automation_program_targets(self.hass, bundle.dependent_config_program)
-        self.mixed_state = domains != ('template',)
+        self.mixed_state = domains not in ((), ('template',))
         _need(not ((self.entity_names or self.device_names) and self.mixed_state),
               'selected_names_mixed_lifecycle_unsupported')
         if self.mixed_state:
             from .yaml_transaction import _assert_mixed_state_scope
             from .mixed_yaml_runtime import MixedYAMLConsumers
-            _assert_mixed_state_scope(self.receipt)
+            _assert_mixed_state_scope(self.receipt, allow_dependent_only=dependent_only)
             self.consumers = await MixedYAMLConsumers.capture(self.hass, self.mapping, guard=self._scope)
             self._scope()
-        _need('template' in domains and bundle.original_sources.source_matched
+        _need((domains == () and registry_only or ('template' in domains or dependent_only) and not registry_only)
+              and bundle.original_sources.source_matched
               and bundle.candidate_sources.sources.source_matched, 'modern_template_state_sources_required')
-        bind_sources = (self.consumers.bind_prefix_sources if domains == ('script', 'template') or automation_prefix
+        bind_sources = (self.consumers.bind_prefix_sources if domains in (('script',), ('script', 'template')) or automation_prefix
                         else self.consumers.bind_sources)
         await bind_sources(self.receipt, self.evidence, guard=self._scope)
         self._scope()
@@ -138,22 +188,47 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         entries = documents['core.config_entries']['data']['entries']
         _need(not any(row['domain'] == 'template' for row in entries), 'template_entry_unsupported')
         # Other native helper references also require their own lifecycle route.
-        from .helper_native import inventory
-        plans = inventory(self.hass, self.mapping)
+        from .helper_native import inventory as helper_inventory
+        plans = helper_inventory(self.hass, self.mapping)
         _need(not any(p.blocked or p.changes for p in plans), 'helper_dependency_unsupported')
         rows = documents['core.entity_registry']['data']['entities']
         bridge = NativeRegistryBridge(NativeRegistryIO(self.hass), self.recorder)
         registry = []
         for old, new in sorted(self.mapping.items()):
             source = [row for row in rows if row['entity_id'] == old]
-            _need(len(source) == 1 and source[0]['platform'] != 'template'
-                  and not any(row['entity_id'] == new for row in rows), 'source_uuid_required')
-            _need(source[0]['platform'] not in ('automation', 'script'), 'dependent_source_identity_unsupported')
+            _need(len(source) == 1 and not any(row['entity_id'] == new for row in rows),
+                  'source_uuid_required')
             fields = {'entity_id': new}
             if old in self.entity_names:
                 fields['name'] = self.entity_names[old]
-            registry.append(await bridge.prepare('entity', source[0]['id'], fields, self._scope))
+            if old in owned_script:
+                _need(inventory is not None, 'own_script_inventory_required')
+                inventory.check()
+                service_audit.check()
+                service_recipients.check()
+            prepared = await bridge.prepare('entity', source[0]['id'], fields, self._scope)
             self._scope()
+            if old in owned_script:
+                from .native_own_script_registry_preparation import own_script_registry_preparation
+                service_audit.check()
+                service_recipients.check()
+                prepared = own_script_registry_preparation(prepared, inventory)
+            registry.append(prepared)
+        own_template = [change for change in registry if change.before.get('platform') == 'template']
+        own_dependent = [change for change in registry if change.before.get('platform') in ('automation', 'script')]
+        if own_template or own_dependent:
+            _need(not (own_template and own_dependent)
+                  and domains in ((), ('template',), ('script',), ('automation',), ('automation', 'script'),
+                                  ('script', 'template'), ('automation', 'template'),
+                                  ('automation', 'script', 'template'))
+                  and not self.entity_names and not self.device_names, 'own_entity_scope_unsupported')
+            if own_template:
+                from .native_own_id_this import qualify_template_own_changes
+                qualify_template_own_changes(self.hass, registry, guard=self._scope)
+            else:
+                from .native_own_dependent_fence import qualify_dependent_own_changes
+                qualify_dependent_own_changes(self.hass, registry, guard=self._scope)
+        _need(not registry_only or bool(own_template or own_dependent), 'registry_only_own_entity_required')
         for entity_id, name in sorted(self.entity_names.items()):
             if entity_id in self.mapping:
                 continue
@@ -175,13 +250,16 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             capture = capture_mixed_template_state_yaml
         else:
             capture = capture_template_state_yaml
-        change = await _drained(self.hass.async_add_executor_job, lambda: capture(bundle, yaml, self.mapping))
+        change = (None if registry_only else
+                  await _drained(self.hass.async_add_executor_job, lambda: capture(bundle, yaml, self.mapping)))
         self._scope()
-        self.registry_changes, self.change = tuple(registry), change
+        self.registry_changes = tuple(registry)
+        self.change = registry[-1] if registry_only else change
         own = self.review_id or uuid.uuid4().hex
         self.operation_id = 'template-yaml-' + (self.review_id or uuid.uuid4().hex)
         self.digests, steps = {}, []
-        for index, (adapter, item) in enumerate([('registry', c) for c in registry] + [('yaml', change)]):
+        effects = [('registry', c) for c in registry] + ([] if registry_only else [('yaml', change)])
+        for index, (adapter, item) in enumerate(effects):
             ref = own + '-' + str(index)
             self.digests[ref] = await self.preparations.create(ref, encode_change(item))
             self._scope()
@@ -201,14 +279,14 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             for r in rows if r['platform'] == 'template'}
         consumer_ids.update({entity_id: entity_id for _, _, entity_id in physical})
         if self.mixed_state:
-            dependent_sample = (self.consumers.runtime_sample if domains == ('script', 'template') or automation_prefix
+            dependent_sample = (self.consumers.runtime_sample if domains in (('script',), ('script', 'template')) or automation_prefix
                                 else self.consumers.phases.sample)
             consumer_ids.update({row.entity_id: row.entity_id for row in dependent_sample[0]})
         source_history = await self.history.capture(_registry_history_mapping(self.registry_changes))
         self._scope()
         consumer_history = await self.history.capture(consumer_ids)
         self._scope()
-        script_prefix = self.receipt.changed_domains == ('script', 'template')
+        script_prefix = self.receipt.changed_domains in (('script',), ('script', 'template'))
         composition_type = (AutomationTemplateStateComposition if automation_prefix else
                             ScriptTemplateStateComposition if script_prefix else
                             MixedTemplateStateComposition if self.mixed_state else TemplateStateComposition)
@@ -220,7 +298,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         inputs = await self.preparations.create_native_inputs(own + '-original', baseline,
                                                              composition=self.composition)
         self._scope()
-        scopes = ('registry', 'yaml')
+        scopes = ('registry',) if registry_only else ('registry', 'yaml')
         self.plan = Plan(own, scopes, scopes, tuple(steps), self.program.sha256, scopes, inputs)
         self.plan.validate()
         self.receipt_store = native_registry_receipt_store(self.hass, self.preparations)
@@ -249,9 +327,46 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         from .native_template_state_yaml import NativeTemplateStateYAMLRuntimeReadback
         _need(type(self.composition) in (TemplateStateComposition, MixedTemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition), 'state_composition_required')
         self.program = self.composition.state_config_program
+        if any(change.before.get('platform') == 'template' for change in self.registry_changes):
+            _need(type(self.composition) in (TemplateStateComposition, ScriptTemplateStateComposition,
+                                               AutomationTemplateStateComposition)
+                  and self.receipt.changed_domains in ((), ('template',), ('script',), ('automation',),
+                      ('automation', 'script'), ('script', 'template'),
+                      ('automation', 'template'), ('automation', 'script', 'template')),
+                  'own_template_scope_unsupported')
+            from .native_own_id_this import qualify_template_own_changes
+            self.own_template_admission = qualify_template_own_changes(
+                self.hass, self.registry_changes, guard=self._scope)
+        own_dependent = [change for change in self.registry_changes
+                         if change.before.get('platform') in ('automation', 'script')]
+        if own_dependent:
+            _need(type(self.composition) in (TemplateStateComposition, ScriptTemplateStateComposition,
+                                             AutomationTemplateStateComposition), 'own_dependent_profile_unsupported')
+            from .native_own_dependent_fence import NativeOwnDependentFence, qualify_dependent_own_changes
+            change = qualify_dependent_own_changes(self.hass, self.registry_changes, guard=self._scope)
+            if type(self.composition) in (ScriptTemplateStateComposition, AutomationTemplateStateComposition):
+                from .dependent_config_binding import NativeDependentConfigReadback
+                dependent = NativeDependentConfigReadback(self.hass, self.composition.dependent_config_program,
+                    self.evidence, self.receipt, self.composition.yaml_plan,
+                    owned_automation=getattr(self.consumers, 'owned_automation', None))
+                sample = dependent.sample(self.chain, input_state=self.observation_state)
+                initial = sample.registry_rows, (), sample.native_tokens
+            else:
+                from .yaml_source_binding import _runtime_rows_sample
+                initial = _runtime_rows_sample(self.hass, self.evidence,
+                    self.chain.accepted_documents()['core.entity_registry']['data']['entities'],
+                    owned_automation=getattr(self.consumers, 'owned_automation', None))
+            self.own_dependent_fence = NativeOwnDependentFence(self, change, initial)
+            self.consumers.own_fence = self.own_dependent_fence
+            from .native_own_dependent_fence import NativeOwnDependentAdmission
+            self.own_record_admission = NativeOwnDependentAdmission(self.own_dependent_fence)
+            self.own_record_head = self.observation_state.head
         if type(self.composition) in (ScriptTemplateStateComposition, AutomationTemplateStateComposition):
             self.consumers.bind_prefix_phases(self)
         _need(self.composition.mapping == tuple(sorted(self.mapping.items())), 'original_mapping_changed')
+        if not self.receipt.proposed_files:
+            from .native_own_id_registry_readback import NativeOwnIDRegistryReadback
+            return NativeOwnIDRegistryReadback(self.hass, self.chain, self.composition, guard=self._scope)
         if type(self.composition) in (MixedTemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition):
             from .native_template_mixed_state_yaml import NativeMixedTemplateStateYAMLRuntimeReadback
             return NativeMixedTemplateStateYAMLRuntimeReadback(self.hass, self.chain,
@@ -290,9 +405,9 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         expected_active = frozenset() if rollback or initial else frozenset(self.mapping)
         _need(actual.prefix.active == expected_active
-              and actual.yaml_position == ('original' if rollback or initial else 'proposed'),
+              and actual.yaml_position == ('original' if rollback or initial or not self.receipt.proposed_files else 'proposed'),
               'terminal_prefix_unconfirmed')
-        expected = set(self.observer.identities.values())
+        expected = self.observer.identities_at(actual.prefix.active)
         _need(all((r.entity.entity_id, r.registry_id) in expected for r in actual.rows),
               'consumer_identity_changed')
         await self._final_history(state, witness)
@@ -336,6 +451,29 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             self.journal.load, self._scope, full_verify=lambda _: self._common(False),
             full_verify_rollback=lambda _: self._common(True))
         registry.bind_template_state_root(self)
+        own_admission = getattr(self, 'own_record_admission', None)
+        template_admission = getattr(self, 'template_record_admission', None)
+        trace_admission = getattr(self, 'trace_record_admission', ())
+        phase_admission = (self.consumers.phases.admit_record
+                           if type(self.composition) in (ScriptTemplateStateComposition, AutomationTemplateStateComposition)
+                           else None)
+        def admit(direction):
+            if template_admission is not None:
+                template_admission.check_review()
+            for proof in trace_admission:
+                proof.check_review()
+            if phase_admission is not None:
+                phase_admission(direction)
+            if own_admission is not None:
+                own_admission.check()
+        record_admission = (admit if own_admission is not None or template_admission is not None
+                            or phase_admission is not None or trace_admission else None)
+        if not self.receipt.proposed_files:
+            from .transaction import Coordinator
+            registry.full_verify = lambda _: self._full(False)
+            registry.full_verify_rollback = lambda _: self._full(True)
+            return Coordinator({'registry': registry}, self.journal, self._scope,
+                               required_scopes=('registry',), record_admission=record_admission)
         adapter_type, compose = ReceiptedTemplateStateYAMLTransactionAdapter, compose_template_state_yaml_coordinator
         if type(self.composition) in (MixedTemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition):
             from .native_template_mixed_state_yaml import (ReceiptedMixedTemplateStateYAMLTransactionAdapter,
@@ -344,7 +482,6 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         yaml = adapter_type(self.hass, resolver, self.locks,
             self.observer, self.chain, self._observe, self.journal.load, self._scope, context=Context(),
             full_verify=lambda _: self._full(False), full_verify_rollback=lambda _: self._full(True))
-        admission = ({'record_admission': self.consumers.phases.admit_record}
-                     if type(self.composition) in (ScriptTemplateStateComposition, AutomationTemplateStateComposition) else {})
+        admission = {} if record_admission is None else {'record_admission': record_admission}
         return compose({'registry': registry, 'yaml': yaml},
             self.journal, self._scope, required_scopes=('registry', 'yaml'), **admission)

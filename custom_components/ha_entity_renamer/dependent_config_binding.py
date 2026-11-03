@@ -126,9 +126,21 @@ class NativeDependentConfigReadback:
             normalized = _normal(projection)
             _need(normalized == rows, 'dependent_config_native_prefix_mismatch')
             actual.append((domain, normalized))
+        # Only a sealed Script definition-key edge at this accepted UUID
+        # prefix can redirect the ORIGINAL source ledger key.  The destination
+        # is derived from the immutable program, never from live objects.
+        original_script = {row[0] for row in dict(self.program.rows(frozenset()))['script']}
+        current_script = {row[0] for row in dict(expected)['script']}
+        moves = []
+        for source, destination in self.program.mapping:
+            if source in prefix.active and source.startswith('script.') and destination.startswith('script.'):
+                old, new = source.split('.', 1)[1], destination.split('.', 1)[1]
+                if old in original_script and old not in current_script and new in current_script:
+                    moves.append(('script', old, new))
         population, blockers, tokens = _runtime_rows_sample(self.hass, self.evidence,
             documents['core.entity_registry']['data']['entities'],
-            expected_projections=tuple((domain, _digest(rows)) for domain, rows in expected), owned_automation=self.owned_automation)
+            expected_projections=tuple((domain, _digest(rows)) for domain, rows in expected),
+            owned_automation=self.owned_automation, source_key_moves=tuple(moves))
         _need(not blockers, 'dependent_config_source_bijection_changed')
         # Recheck the authenticated head after the synchronous full native read.
         _need(accepted_dependent_prefix(chain, self.program, **live) == prefix,

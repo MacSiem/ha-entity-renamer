@@ -90,10 +90,11 @@ def _digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def _stage(config_root, plan, baseline, proposed, with_sources=False, native_helpers=()):
+def _stage(config_root, plan, baseline, proposed, with_sources=False, native_helpers=(), registry_only=False):
     reader = _Reader(config_root, Limits(max_file_bytes=_MAX_BYTES))
     try:
-        return _stage_owned(reader, plan, baseline, proposed, with_sources=with_sources, native_helpers=native_helpers)
+        return _stage_owned(reader, plan, baseline, proposed, with_sources=with_sources,
+                            native_helpers=native_helpers, registry_only=registry_only)
     except (OSError, ValueError) as error:
         if isinstance(error, YAMLValidationError):
             raise
@@ -102,8 +103,10 @@ def _stage(config_root, plan, baseline, proposed, with_sources=False, native_hel
         os.close(reader.root)
 
 
-def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native_helpers=()):
-    if not plan.ready or (not plan.patches and not native_helpers):
+def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native_helpers=(), registry_only=False):
+    if (type(registry_only) is not bool or not plan.ready
+            or (not plan.patches and not native_helpers and not registry_only)
+            or registry_only and (not with_sources or plan.patches or native_helpers)):
         raise YAMLValidationError('yaml_plan_not_ready')
     reachable = {'configuration.yaml'}
     while True:
@@ -345,13 +348,21 @@ async def _settled_executor(hass, function, *args):
 async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, with_sources=False,
                                    powercalc_bundle=None, powercalc_candidate_documents=None, native_helpers=(),
                                    template_reference_mapping=None, template_state_program=False,
-                                   dependent_reference_mapping=None):
+                                   dependent_reference_mapping=None, registry_only_template=False,
+                                   owned_script_services=()):
     """Return only after native validation of the entire proposed graph succeeds.
 
     scratch_parent must be private local storage OUTSIDE config_root. It contains
     temporary secret material with mode 0700 and is erased on every normal exit.
     A failure never invokes file_mutations or a live reload service.
     """
+    if (type(registry_only_template) is not bool or registry_only_template
+            and (not template_state_program or plan.patches or dependent_reference_mapping is not None)):
+        raise YAMLValidationError('template_registry_only_scope_required')
+    if (type(owned_script_services) is not tuple or len(owned_script_services) > 1
+            or owned_script_services and (not template_state_program or dependent_reference_mapping is None
+                or any(value not in dependent_reference_mapping for value in owned_script_services))):
+        raise YAMLValidationError('owned_script_service_scope_required')
     if type(template_state_program) is not bool or template_state_program and template_reference_mapping is None:
         raise YAMLValidationError('template_state_source_profile_scope_required')
     if dependent_reference_mapping is not None:
@@ -396,8 +407,7 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
             before.mkdir(mode=0o700)
             after.mkdir(mode=0o700)
             staged = await _settled_executor(hass, _stage, root, plan, before, after,
-                                             *((with_sources,native_helpers) if native_helpers
-                                               else ((True,) if with_sources else ())))
+                                             with_sources, native_helpers, registry_only_template)
             sources, directories = staged[:2]
             if powercalc_bundle is not None:
                 from .powercalc_source_binding import stage_powercalc_bundle
@@ -432,6 +442,13 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                                      '--template-reference-mapping', str(request))
                 if template_state_program:
                     state_source_args += ('--template-state-config-program',)
+                if registry_only_template:
+                    state_source_args += ('--template-state-registry-only',)
+                if owned_script_services:
+                    request = Path(stage) / 'owned-script-services.json'
+                    request.write_text(json.dumps(list(owned_script_services), separators=(',', ':')))
+                    request.chmod(0o600)
+                    state_source_args += ('--template-owned-script-services', str(request))
             worker = str(Path(__file__).with_name('yaml_validation_worker.py'))
             process = await asyncio.create_subprocess_exec(
                 sys.executable, '-I', '-B', worker, str(before), str(after),
@@ -548,7 +565,7 @@ async def async_validate_proposed_with_dependent_config_program(hass, plan, mapp
 
 async def async_validate_proposed_with_template_state_sources(
         hass, plan, mapping, scratch_parent, *, timeout=120, with_state_program=False,
-        with_dependent_program=False):
+        with_dependent_program=False, registry_only_template=False, owned_script_services=()):
     """Explicit internal full-state source preflight; no readiness/activation.
 
     Same staging, isolated native checker, receipt and source/directory fences.
@@ -558,7 +575,8 @@ async def async_validate_proposed_with_template_state_sources(
         raise YAMLValidationError('dependent_config_program_scope_required')
     return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
         with_sources=True, template_reference_mapping=mapping, template_state_program=with_state_program,
-        dependent_reference_mapping=mapping if with_dependent_program else None)
+        dependent_reference_mapping=mapping if with_dependent_program else None,
+        registry_only_template=registry_only_template, owned_script_services=owned_script_services)
 
 
 def assert_proposal_matches(receipt, plan):

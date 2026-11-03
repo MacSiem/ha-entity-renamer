@@ -42,3 +42,64 @@ class DependencyReviewTests(unittest.TestCase):
         composition=SimpleNamespace(mapping=(("sensor.old", "sensor.new"),), yaml_plan=SimpleNamespace(patches=(patch,)))
         with self.assertRaises(Refused):
             dependency_files(composition)
+
+    def _own_script_composition(self):
+        from custom_components.ha_entity_renamer.native_script_program_composition import ScriptTemplateStateComposition
+        from custom_components.ha_entity_renamer.yaml_source_ledger import extract_source_ledger
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / 'configuration.yaml').write_text(
+            'script: !include scripts.yaml\ntemplate: !include template.yaml\n')
+        (root / 'scripts.yaml').write_text(
+            "'worker':\n  alias: worker\n  sequence:\n  - event: probe\n"
+            'caller:\n  sequence:\n  - action: script.worker\n')
+        (root / 'template.yaml').write_text(
+            '- sensor:\n  - name: Observer\n    state: "{{ states(\'script.worker\') }}"\n')
+        mapping = {'script.worker': 'script.new_worker'}
+        plan = plan_yaml(root, mapping, owned_script_services=('script.worker',))
+        self.assertTrue(plan.ready, plan.issues)
+        original = {row.path: (root / row.path).read_bytes() for row in plan.files}
+        ledger = extract_source_ledger(plan, original)
+        composition = object.__new__(ScriptTemplateStateComposition)
+        object.__setattr__(composition, 'mapping', tuple(mapping.items()))
+        object.__setattr__(composition, 'yaml_plan', plan)
+        object.__setattr__(composition, 'evidence', SimpleNamespace(ledger=ledger))
+        return composition, original
+
+    def test_owned_script_key_review_exposes_definition_and_references_separately(self):
+        composition, _ = self._own_script_composition()
+        rows = {row['path']: row for row in dependency_files(composition)}
+        self.assertEqual(rows['scripts.yaml']['references'], [
+            {'before': 'script.worker', 'after': 'script.new_worker', 'occurrences': 1},
+            {'kind': 'script_key', 'before': 'worker', 'after': 'new_worker', 'occurrences': 1}])
+        self.assertEqual(rows['scripts.yaml']['edit_count'], 2)
+        self.assertEqual(rows['template.yaml']['references'], [
+            {'before': 'script.worker', 'after': 'script.new_worker', 'occurrences': 1}])
+        self.assertNotIn('alias', json.dumps(list(rows.values())))
+
+    def test_equal_unowned_scalar_edit_refuses_full_review(self):
+        composition, originals = self._own_script_composition()
+        plan = composition.yaml_plan
+        patch = next(row for row in plan.patches if row.path == 'scripts.yaml')
+        raw = originals['scripts.yaml']
+        start = raw.index(b'worker', raw.index(b'alias:'))
+        foreign = Edit(start, start + len(b'worker'), b'worker', b'new_worker')
+        edits = tuple(sorted((*patch.edits, foreign), key=lambda item: item.start))
+        proposed, cursor = [], 0
+        for edit in edits:
+            proposed.extend((raw[cursor:edit.start], edit.after))
+            cursor = edit.end
+        proposed.append(raw[cursor:])
+        forged = replace(patch, edits=edits, proposed_bytes=b''.join(proposed))
+        object.__setattr__(composition, 'yaml_plan', replace(plan, patches=tuple(
+            forged if row is patch else row for row in plan.patches)))
+        with self.assertRaises(Refused):
+            dependency_files(composition)
+
+    def test_script_key_without_typed_owned_composition_refuses(self):
+        composition, _ = self._own_script_composition()
+        unowned = SimpleNamespace(mapping=composition.mapping, yaml_plan=composition.yaml_plan,
+                                  evidence=composition.evidence)
+        with self.assertRaises(Refused):
+            dependency_files(unowned)

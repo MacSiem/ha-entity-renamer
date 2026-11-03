@@ -31,8 +31,10 @@ class NativeScriptPrefixPhase:
         sample = self.observer.sample(root.chain, input_state=root.observation_state)
         self.mask = sample.prefix.active
         from .native_script_config_transport import assert_idle_script_program_targets
+        trace_admission = []
         self.admission = assert_idle_script_program_targets(root.hass, self.program,
-            active=self.mask if self.mask else None)
+            active=self.mask if self.mask else None, trace_sink=trace_admission)
+        self.trace_admission = tuple(trace_admission)
         self.sample = sample.registry_rows, (), sample.native_tokens
         _need(self._read(self.mask) == self.sample)
 
@@ -41,15 +43,25 @@ class NativeScriptPrefixPhase:
         from .yaml_runtime_observer import NativeYAMLRuntimeReadback
         from .yaml_validation_worker import _normal
         from .yaml_source_binding import _runtime_rows_sample
-        expected = self.program.rows(mask)
-        native = NativeYAMLRuntimeReadback(self.root.hass)
+        fence = getattr(self.root, 'own_dependent_fence', None)
+        from .native_own_script_key_view import key_view
+        expected, source_key_moves = key_view(self.program, mask, fence, self.active)
+        node = None if fence is None else fence.node
+        handoff = None if node is None or node.witness is None else node.witness.source_handoff
+        dispatch = (node if handoff is not None and handoff.in_native and handoff.new_row is not None
+                    and handoff.hass.states.get(handoff.new) is None else None)
+        native = NativeYAMLRuntimeReadback(self.root.hass, script_dispatch=dispatch)
         for domain, rows in expected:
             component = self.root.hass.data.get(DATA_INSTANCES, {}).get(domain)
             projection = native._projection(domain)[0] if component is not None else []
             _need(_normal(projection) == rows, 'script_prefix_phase_native_rows_changed')
-        result = _runtime_rows_sample(self.root.hass, self.root.evidence,
-            self.root.chain.accepted_documents()['core.entity_registry']['data']['entities'],
-            expected_projections=tuple((domain, _digest(rows)) for domain, rows in expected))
+        registry_rows = (self.root.chain.accepted_documents()['core.entity_registry']['data']['entities']
+                         if fence is None else fence.rows())
+        result = _runtime_rows_sample(self.root.hass, self.root.evidence, registry_rows,
+            expected_projections=tuple((domain, _digest(rows)) for domain, rows in expected),
+            source_key_moves=source_key_moves, script_dispatch=dispatch)
+        if fence is not None:
+            result = fence.normalize(result)
         _need(not result[1], 'script_prefix_phase_native_inventory_changed')
         return result
 
@@ -166,8 +178,11 @@ class NativeScriptPrefixPhase:
               and node.phase == 'observed_effect' and self.root.chain.active is None)
         target = self.active[2]
         sample = self.observer.sample(self.root.chain)
-        _need(sample.prefix.active == target
-              and (sample.registry_rows, (), sample.native_tokens) == self.sample)
+        observed = (sample.registry_rows, (), sample.native_tokens)
+        fence = getattr(self.root, 'own_dependent_fence', None)
+        if fence is not None:
+            observed = fence.normalize(observed)
+        _need(sample.prefix.active == target and observed == self.sample)
         self.mask, self.active = target, None
         self.check()
 

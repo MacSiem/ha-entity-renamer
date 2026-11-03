@@ -108,7 +108,9 @@ class NativeRegistryEffectAudit:
     Merely constructing this class proves none of those facts. Digests bind the
     exact observed bytes and original PreparedRegistryChange. modified_at values
     are exact strings, or None for field absence (JSON null is unsupported).
-    Only this single target-row audit field is supported by this mapping.
+    The timestamp remains the only generally normalized audit field. The
+    exact Script-key structural profile separately derives Core's directional
+    previous_unique_id; it never treats that field as an arbitrary timestamp.
     """
     kind: str
     identity: str
@@ -172,6 +174,58 @@ def _audit_value(row, expected):
             and row['modified_at'] == expected)
 
 
+def _native_script_default_name_move(before, after):
+    """Native unnamed Script's exact default-name change alongside its key."""
+    return (type(before) is dict and type(after) is dict
+            and type(before.get('unique_id')) is str and type(after.get('unique_id')) is str
+            and before.get('unique_id') != after.get('unique_id')
+            and before.get('original_name') == before['unique_id']
+            and after.get('original_name') == after['unique_id']
+            and after.get('name') == (before.get('name') or before['unique_id']))
+
+
+def _native_script_suggested_move(before, after):
+    """Exact Core 2026 Script key-derived suggested object ID transition."""
+    return (type(before) is dict and type(after) is dict
+            and type(before.get('unique_id')) is str and type(after.get('unique_id')) is str
+            and before['unique_id'] != after['unique_id']
+            and before.get('suggested_object_id') == before['unique_id']
+            and after.get('suggested_object_id') == after['unique_id'])
+
+
+def _native_script_unique_move(before, after):
+    """Recognize a structural native Script-key move, never authorize one.
+
+    Script's YAML key and registered service are its unique ID. Core records
+    the immediately preceding unique ID on *each* native update, including the
+    reverse call. The caller must independently own the exact service,
+    lifecycle, callers and Root intent; this pure comparison proves none of
+    those. No generic registry field is made mutable by this predicate.
+    """
+    if type(before) is not dict or type(after) is not dict:
+        return False
+    if not {'entity_id', 'unique_id', 'previous_unique_id', 'platform', 'id'} <= before.keys():
+        return False
+    old, new = before.get('unique_id'), after.get('unique_id')
+    if (type(old) is not str or type(new) is not str or old == new
+            or re.fullmatch(r'[a-z0-9_]+', old) is None
+            or re.fullmatch(r'[a-z0-9_]+', new) is None
+            or before.get('platform') != 'script' or after.get('platform') != 'script'
+            or before.get('entity_id') != 'script.' + old
+            or after.get('entity_id') != 'script.' + new
+            or after.get('previous_unique_id') != old
+            or before.keys() != after.keys()):
+        return False
+    if before['previous_unique_id'] is not None and type(before['previous_unique_id']) is not str:
+        return False
+    ignored = {'entity_id', 'unique_id', 'previous_unique_id'}
+    if _native_script_default_name_move(before, after):
+        ignored.update(('original_name', 'name'))
+    if _native_script_suggested_move(before, after):
+        ignored.add('suggested_object_id')
+    return all(_equal(before[key], after[key]) for key in before if key not in ignored)
+
+
 def validate_registry_transition(source_raw, result_raw, prepared, *, version,
                                  direction, native_effect_audit):
     """Validate exactly one entity/device rename in two full storage envelopes.
@@ -206,7 +260,15 @@ def validate_registry_transition(source_raw, result_raw, prepared, *, version,
         after = _loads(prepared.after_json.encode('utf-8'))
     except UnicodeError:
         _fail('registry_transition_preparation_invalid')
-    allowed = {'entity_id', 'name'} if prepared.kind == 'entity' else {'name_by_user'}
+    script_unique_move = prepared.kind == 'entity' and _native_script_unique_move(before, after)
+    allowed = ({'entity_id', 'name', 'unique_id', 'previous_unique_id'} if script_unique_move else
+               {'entity_id', 'name'} if prepared.kind == 'entity' else {'name_by_user'})
+    if script_unique_move and _native_script_default_name_move(before, after):
+        allowed.add('original_name')
+    if script_unique_move and _native_script_suggested_move(before, after):
+        if version not in ('2026.10.2', '2026.10.4'):
+            _fail('registry_transition_preparation_invalid')
+        allowed.add('suggested_object_id')
     if (type(before) is not dict or type(after) is not dict
             or before.get('id') != prepared.identity or after.get('id') != prepared.identity
             or not allowed <= before.keys() or before.keys() != after.keys()):
@@ -242,11 +304,22 @@ def validate_registry_transition(source_raw, result_raw, prepared, *, version,
             row['id'] != prepared.identity and row.get('entity_id') == destination['entity_id']
             for row in source['data']['entities']):
         _fail('registry_transition_destination_occupied')
+    if script_unique_move and any(
+            row['id'] != prepared.identity and row.get('platform') == 'script'
+            and type(row.get('entity_id')) is str and row['entity_id'].startswith('script.')
+            and row.get('unique_id') == destination['unique_id']
+            for row in source['data']['entities']):
+        _fail('registry_transition_unique_destination_occupied')
     # Derive the only acceptable result from IMMUTABLE SOURCE, never result/current.
     expected = deepcopy(source)
     expected_row = _target(expected, lists, prepared.identity)
     for key in changed:
         expected_row[key] = deepcopy(destination[key])
+    if script_unique_move and direction == 'reverse':
+        # Native _async_update_entity sets previous_unique_id to its source
+        # unique_id. This value is a deterministic native audit effect, not the
+        # original preparation's older historical value.
+        expected_row['previous_unique_id'] = source_row['unique_id']
     if audit.modified_at_after is not None:
         expected_row['modified_at'] = audit.modified_at_after
     if prepared.kind == 'entity' and 'entity_id' in changed:

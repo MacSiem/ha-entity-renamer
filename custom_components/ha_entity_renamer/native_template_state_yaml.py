@@ -62,7 +62,8 @@ def decode_mixed_template_state_yaml(data):
     if type(data) is not dict or set(data) != {'receipt', 'files', 'source_program_sha256'}:
         raise ValueError('invalid_prepared_template_mixed_state_yaml')
     program_sha = _sha(data['source_program_sha256'])
-    base = _decode_yaml({key: data[key] for key in ('receipt', 'files')}, mixed_state_mode=True)
+    base = _decode_yaml({key: data[key] for key in ('receipt', 'files')}, mixed_state_mode=True,
+                        dependent_owner_mode=True)
     return PreparedMixedTemplateStateYAML(base.receipt, base.files, program_sha)
 
 
@@ -211,6 +212,13 @@ class NativeTemplateStateYAMLRuntimeReadback:
         for domain, key, entity_id in self.physical_consumers:
             _need((domain, key) not in self.identities, 'template_state_original_identity_ambiguous')
             self.identities[domain, key] = (entity_id, None)
+
+    def identities_at(self, active):
+        _need(type(active) is frozenset and active <= set(dict(self.composition.mapping)),
+              'template_state_identity_prefix_changed')
+        mapping = dict(self.composition.mapping)
+        return {(mapping[entity_id] if entity_id in active else entity_id, identity)
+                for entity_id, identity in self.identities.values()}
 
     def assert_change(self, change):
         _need(type(change) is PreparedTemplateStateYAML,
@@ -400,7 +408,8 @@ class ReceiptedTemplateStateYAMLTransactionAdapter(ReceiptedYAMLTransactionAdapt
         return await self.observer.position_at_inputs(change, state)
 
 
-def compose_template_state_yaml_coordinator(adapters, journal, guard, *, required_scopes, lock=None):
+def compose_template_state_yaml_coordinator(adapters, journal, guard, *, required_scopes, lock=None,
+                                            record_admission=None):
     from .transaction import Coordinator
     adapter = adapters.get('yaml')
     _need(type(adapter) is ReceiptedTemplateStateYAMLTransactionAdapter
@@ -408,7 +417,8 @@ def compose_template_state_yaml_coordinator(adapters, journal, guard, *, require
           'template_state_yaml_composition_required')
     completion = _TemplateStateCompletionGuard(guard)
     adapter._template_completion = completion
-    return Coordinator(adapters, journal, completion, required_scopes=required_scopes, lock=lock)
+    return Coordinator(adapters, journal, completion, required_scopes=required_scopes, lock=lock,
+                       record_admission=record_admission)
 
 
 # Short root composition API; each alias names the SAME exact class/function.

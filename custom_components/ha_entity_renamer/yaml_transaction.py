@@ -116,16 +116,17 @@ def decode_yaml(data):
     return _decode_yaml(data)
 
 
-def _assert_mixed_state_scope(receipt):
+def _assert_mixed_state_scope(receipt, *, allow_dependent_only=False):
     """Private codec scope only; full Template source proof lives in composition.
 
     Template may retain genuine missing legacy projections. Automation/script
     still require the same exact checker seals as the legacy mixed profile.
     """
     domains, expected = receipt.changed_domains, receipt.runtime_expected
-    if (type(domains) is not tuple or len(domains) not in (2, 3)
+    dependent_only = allow_dependent_only and domains in (('script',), ('automation',), ('automation', 'script'))
+    if (type(allow_dependent_only) is not bool or type(domains) is not tuple
+            or not (dependent_only or len(domains) in (2, 3) and 'template' in domains)
             or any(type(domain) is not str for domain in domains)
-            or 'template' not in domains
             or set(domains) - {'automation', 'script', 'template'}
             or domains != tuple(sorted(set(domains)))
             or type(expected) is not tuple
@@ -143,9 +144,9 @@ def _assert_mixed_state_scope(receipt):
                 _sha(value)
 
 
-def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False):
+def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_owner_mode=False):
     """Shared bounded file codec, with explicit disjoint selective gates."""
-    if state_mode and mixed_state_mode:
+    if state_mode and mixed_state_mode or dependent_owner_mode and not mixed_state_mode:
         raise ValueError('ambiguous_prepared_yaml_mode')
     _keys(data, ('receipt', 'files'))
     raw = data['receipt']
@@ -247,7 +248,7 @@ def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False):
     receipt = ValidationReceipt(root, tuple(sources), tuple(directories), tuple(proposed),
                                 domains, tuple(raw['unsupported_domains']), _text(raw['version']), tuple(runtime_expected))
     if mixed_state_mode:
-        _assert_mixed_state_scope(receipt)
+        _assert_mixed_state_scope(receipt, allow_dependent_only=dependent_owner_mode)
     return PreparedYAML(receipt, tuple(files))
 
 

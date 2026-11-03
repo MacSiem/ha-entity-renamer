@@ -266,7 +266,7 @@ def _runtime_sample(hass, evidence, observed, *, owned_automation=None):
     return _runtime_rows_sample(hass, evidence, rows(), owned_automation=owned_automation)
 
 
-def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=(), owned_automation=None):
+def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=(), owned_automation=None, source_key_moves=(), script_dispatch=None):
     """Same native projections, plus full ORIGINAL registry/object bijection."""
     import hashlib
     import json
@@ -280,11 +280,20 @@ def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=
     registry_rows = tuple(registry_rows)
     registry = hass.data.get(er.DATA_REGISTRY)
     _need(type(registry) is er.EntityRegistry)
-    observer = NativeYAMLRuntimeReadback(hass, owned_automation=owned_automation)
+    observer = NativeYAMLRuntimeReadback(hass, owned_automation=owned_automation, script_dispatch=script_dispatch)
     rows, tokens, blockers = [], [], set()
     for expected in evidence.domains:
         domain = expected.domain
         source_keys = set(evidence.ledger.keys_for_native_projection(domain))
+        _need(type(source_key_moves) is tuple and all(type(edge) is tuple and len(edge) == 3
+              and all(type(part) is str and part for part in edge) for edge in source_key_moves))
+        selected = tuple((old, new) for edge_domain, old, new in source_key_moves if edge_domain == domain)
+        _need(all(edge_domain == 'script' for edge_domain, _, _ in source_key_moves)
+              and len({old for old, _ in selected}) == len(selected)
+              and len({new for _, new in selected}) == len(selected)
+              and all(old in source_keys and new not in source_keys and old != new for old, new in selected))
+        source_keys.difference_update(old for old, _ in selected)
+        source_keys.update(new for _, new in selected)
         component = hass.data.get(DATA_INSTANCES, {}).get(domain)
         entities = tuple(component.entities) if component is not None else ()
         if component is None:
@@ -316,7 +325,13 @@ def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=
                       and row.get('entity_id', '').split('.', 1)[0] == domain]
         grouped = {}
         for row in candidates:
-            grouped.setdefault(row['unique_id'], []).append(row)
+            key = row['unique_id']
+            if (script_dispatch is not None and domain == 'script'
+                    and row['id'] == script_dispatch.change.identity):
+                handoff = script_dispatch.witness.source_handoff
+                entity = handoff.script_dispatch_image(script_dispatch)
+                key = entity.unique_id
+            grouped.setdefault(key, []).append(row)
         for key in sorted(source_keys | set(grouped) | set(live)):
             entries = grouped.get(key, ())
             if len(entries) != 1:
@@ -324,8 +339,12 @@ def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=
                 continue
             row, entity = entries[0], live.get(key)
             current = registry.async_get(row['entity_id'])
+            dispatch_row = (script_dispatch is not None and domain == 'script'
+                            and row['id'] == script_dispatch.change.identity)
             _need(current is not None and current.id == row['id']
-                  and current.unique_id == key and current.platform == domain)
+                  and (current.unique_id == key or dispatch_row
+                       and current is script_dispatch.witness.source_handoff.new_row)
+                  and current.platform == domain)
             if key not in source_keys:
                 disposition = 'runtime_only' if entity is not None else 'registry_only'
                 if entity is not None:

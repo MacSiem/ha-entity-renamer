@@ -282,6 +282,8 @@ def plan_yaml(
     entrypoints: tuple[str, ...] = ("configuration.yaml",),
     yaml_dashboards: tuple[str, ...] = (),
     limits: Limits = Limits(),
+    stable_script_services: tuple[str, ...] = (),
+    owned_script_services: tuple[str, ...] = (),
 ) -> Plan:
     """Plan source edits without writing, secret resolution, or HA imports.
 
@@ -296,10 +298,21 @@ def plan_yaml(
     if type(entrypoints) is not tuple or type(yaml_dashboards) is not tuple:
         raise YAMLPlanError("entrypoints must be tuples")
     mapping = _mapping(mapping)
+    if (type(stable_script_services) is not tuple
+            or any(type(value) is not str or re.fullmatch(r'script\.[a-z0-9_]+', value) is None
+                   for value in stable_script_services)
+            or len(set(stable_script_services)) != len(stable_script_services)):
+        raise YAMLPlanError('invalid stable script service scope')
+    if (type(owned_script_services) is not tuple or len(owned_script_services) > 1
+            or any(type(value) is not str or value not in mapping or not value.startswith('script.')
+                   for value in owned_script_services)
+            or set(owned_script_services) & set(stable_script_services)):
+        raise YAMLPlanError('invalid owned script service scope')
     reader = None
     try:
         reader = _Reader(config_root, limits)
-        return _plan(reader, mapping, entrypoints + yaml_dashboards, limits)
+        return _plan(reader, mapping, entrypoints + yaml_dashboards, limits,
+                     stable_script_services, owned_script_services)
     except (OSError, UnicodeError, yaml.YAMLError, RecursionError) as exc:
         # Do not leak YAML content or secret values through parser exception text.
         raise YAMLPlanError("unreadable, unsafe or invalid YAML graph") from None
@@ -865,7 +878,8 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes):
     return producers, used, unsafe, templates, observed, consumers, template_variables, template_outputs
 
 
-def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limits: Limits) -> Plan:
+def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limits: Limits,
+          stable_script_services=(), owned_script_services=()) -> Plan:
     files: dict[str, FileSnapshot] = {}
     patches = []
     edges = []
@@ -876,10 +890,11 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
     nodes_count = 0
     binding_proofs = []
     template_binding_specs = []
+    owned_definition_count = 0
 
     def visit(path: str, graph_depth: int = 0, inherited_field=False, inherited_key="",
-              inherited_lovelace=False, inherited_variable=False) -> None:
-        nonlocal total_bytes, nodes_count
+              inherited_lovelace=False, inherited_variable=False, inherited_script_root=False) -> None:
+        nonlocal total_bytes, nodes_count, owned_definition_count
         path = _relative(path)
         if PurePosixPath(path).name == "secrets.yaml":
             raise YAMLPlanError("secret stores are outside source planning scope")
@@ -887,7 +902,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
             raise YAMLPlanError("include graph depth limit")
         if path in active:
             raise YAMLPlanError("include graph cycle")
-        context = (inherited_field, inherited_key, inherited_lovelace, inherited_variable)
+        context = (inherited_field, inherited_key, inherited_lovelace, inherited_variable, inherited_script_root)
         if path in files:
             if contexts_seen[path] != context:
                 raise YAMLPlanError("same include has different semantic contexts")
@@ -907,6 +922,8 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
         files[path] = FileSnapshot(path, hashlib.sha256(data).hexdigest(), len(data), info.st_dev, info.st_ino)
         active.add(path)
         candidates: dict[int, tuple[ScalarNode, list[bool]]] = {}
+        stable_services: dict[int, int] = {}
+        owned_script_keys: dict[int, tuple[str, int]] = {}
         visiting: set[int] = set()
         includes_seen: dict[int, tuple] = {}
         dashboard_paths = set()
@@ -935,8 +952,8 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
             issues.add(Issue(path, node.start_mark.line + 1, code))
 
         def walk(node, depth=0, field=False, parent_key="", lovelace=False,
-                 variable_definition=False):
-            nonlocal nodes_count
+                 variable_definition=False, script_root=False):
+            nonlocal nodes_count, owned_definition_count
             if node is None:
                 return
             nodes_count += 1
@@ -948,7 +965,9 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
             try:
                 if isinstance(node, ScalarNode):
                     if node.tag in _INCLUDE:
-                        include_context = (field, parent_key, lovelace, variable_definition)
+                        if script_root and owned_script_services and node.tag != '!include':
+                            issue(node, 'owned_script_include_scope_unsupported')
+                        include_context = (field, parent_key, lovelace, variable_definition, script_root)
                         if id(node) in includes_seen:
                             if includes_seen[id(node)] != include_context:
                                 raise YAMLPlanError("include alias context conflict")
@@ -961,14 +980,20 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                             child_key = ('__utility_meter_entry__'
                                          if parent_key == 'utility_meter' and node.tag == '!include_dir_named'
                                          else parent_key)
-                            visit(child, graph_depth + 1, field, child_key, lovelace, variable_definition)
+                            visit(child, graph_depth + 1, field, child_key, lovelace, variable_definition, script_root)
                     elif node.tag == '!secret':
                         if field:
                             issue(node, "secret_reference_unresolved")
                     elif not node.tag.startswith(_STANDARD):
                         issue(node, "unsupported_yaml_tag")
                     elif node.tag == _STR:
-                        candidates.setdefault(id(node), (node, []))[1].append(field and id(node) not in template_outputs)
+                        owned_service = (not variable_definition and parent_key in ('action', 'service')
+                                         and node.value in owned_script_services)
+                        candidates.setdefault(id(node), (node, []))[1].append(
+                            (field or owned_service) and id(node) not in template_outputs)
+                        if (not variable_definition and parent_key in ('action', 'service')
+                                and node.value in stable_script_services):
+                            stable_services[id(node)] = stable_services.get(id(node), 0) + 1
                     return
                 if not node.tag.startswith(_STANDARD):
                     issue(node, "unsupported_yaml_tag")
@@ -981,6 +1006,18 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                     if len(raw_keys) != len(set(raw_keys)):
                         issue(node, "duplicate_mapping_keys")
                     merged_keys = effective_keys(node)
+                    if script_root and owned_script_services:
+                        old_service = owned_script_services[0]
+                        old_key, new_key = old_service.split('.', 1)[1], mapping[old_service].split('.', 1)[1]
+                        if old_key in merged_keys and new_key in merged_keys:
+                            issue(node, 'owned_script_key_collision')
+                        for key, _ in node.value:
+                            if isinstance(key, ScalarNode) and key.tag == _STR and key.value == old_key:
+                                prior = owned_script_keys.get(id(key), (new_key, 0))
+                                if prior[0] != new_key:
+                                    issue(key, 'owned_script_key_conflict')
+                                owned_script_keys[id(key)] = (new_key, prior[1] + 1)
+                                owned_definition_count += 1
                     projected = [mapping.get(k, k) if parent_key in _ENTITY_KEY_MAPS else k for k in merged_keys]
                     if len(projected) != len(set(projected)):
                         issue(node, "entity_key_collision")
@@ -1029,9 +1066,12 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                                                        and parent_key == '__utility_meter_entry__')
                         child_key = '__utility_meter_entry__' if parent_key == 'utility_meter' else key.value
                         child_variable = variable_definition or key.value in ('variables', 'trigger_variables')
+                        child_script_root = (bool(owned_script_services) and path == 'configuration.yaml'
+                                             and node is tree and key.value == 'script'
+                                             and not variable_definition)
                         walk(value, depth + 1,
                              (key.value in _FIELDS or source_field) and not child_variable, child_key,
-                             lovelace or key.value == 'lovelace', child_variable)
+                             lovelace or key.value == 'lovelace', child_variable, child_script_root)
                 else:
                     issue(node, "unsupported_yaml_node")
             finally:
@@ -1041,7 +1081,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
          template_variables, template_outputs) = _yaml_bindings(
             tree, inherited_key, mapping, issue, limits.max_nodes)
         walk(tree, field=inherited_field, parent_key=inherited_key, lovelace=inherited_lovelace,
-             variable_definition=inherited_variable)
+             variable_definition=inherited_variable, script_root=inherited_script_root)
         for identity, (_, _, count, origins) in variable_templates.items():
             if identity in candidates and count != len(candidates[identity][1]):
                 variable_unsafe.update(origins)
@@ -1052,6 +1092,25 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
         edits = []
         for node, contexts in candidates.values():
             value = node.value
+            if id(node) in owned_script_keys:
+                new_key, count = owned_script_keys[id(node)]
+                if count != len(contexts):
+                    issue(node, 'owned_script_key_alias_conflict')
+                    continue
+                token = tokens.get(node.end_mark.index)
+                if token is None or token.value != value or token.style in ('|', '>'):
+                    issue(node, 'owned_script_key_source_unknown')
+                    continue
+                raw = text[token.start_mark.index:token.end_mark.index]
+                content = raw[1:-1] if token.style in ("'", '"') else raw
+                if content != value:
+                    issue(node, 'owned_script_key_source_unknown')
+                    continue
+                replacement = (raw[0] + new_key + raw[-1]) if token.style in ("'", '"') else new_key
+                start = len(text[:token.start_mark.index].encode('utf-8'))
+                end = len(text[:token.end_mark.index].encode('utf-8'))
+                edits.append(Edit(start, end, raw.encode('utf-8'), replacement.encode('utf-8')))
+                continue
             if any(x in value for x in ('{{', '{%', '{#', '[[[')):
                 if '[[[' in value:
                     issue(node, "template_requires_reference_parser")
@@ -1102,6 +1161,11 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                     start = len(text[:token.start_mark.index].encode('utf-8'))
                     end = len(text[:token.end_mark.index].encode('utf-8'))
                     edits.append(Edit(start, end, raw.encode('utf-8'), replacement.encode('utf-8')))
+                continue
+            if stable_services.get(id(node), 0) == len(contexts) and id(node) in stable_services:
+                # Internal opt-in: caller proves the actual unchanged Script
+                # service owner. YAML aliases used in any other context are
+                # intentionally NOT skipped.
                 continue
             mentioned = any(m.group(1) in mapping for m in _TOKEN.finditer(value))
             if not mentioned:
@@ -1181,6 +1245,8 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
 
     for root in roots:
         visit(root)
+    if owned_script_services and owned_definition_count != 1:
+        issues.add(Issue('configuration.yaml', 0, 'owned_script_definition_missing_or_ambiguous'))
     # These source-only locators belong to this same whole-input Plan. A partial
     # proposal with any issue must never expose an approved runtime projection.
     if issues:

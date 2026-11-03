@@ -137,7 +137,8 @@ def _compare(result, original, reverse):
 
 
 async def _checker(before, after, timeout, checkpoint, *, with_sources=False,
-                   state_mapping=None):
+                   state_mapping=None, registry_only_template=False, stable_script_services=(),
+                   owned_script_services=()):
     """Execute the existing native worker by path, without copying its source."""
     worker = str(Path(__file__).with_name('yaml_validation_worker.py'))
     state_args = ()
@@ -153,6 +154,31 @@ async def _checker(before, after, timeout, checkpoint, *, with_sources=False,
         request.chmod(0o600)
         state_args = ('--template-state-source-v3', '--template-reference-mapping',
                       str(request), '--template-state-config-program')
+        if registry_only_template:
+            state_args += ('--template-state-registry-only',)
+        if stable_script_services:
+            if (type(stable_script_services) is not tuple or len(stable_script_services) != 1
+                    or type(stable_script_services[0]) is not str):
+                _fail('stable_script_service_scope')
+            request = Path(before).parent / 'stable-script-services.json'
+            with request.open('x', encoding='utf-8') as stream:
+                json.dump(list(stable_script_services), stream, separators=(',', ':'))
+            request.chmod(0o600)
+            state_args += ('--template-stable-script-services', str(request))
+        if owned_script_services:
+            if (type(owned_script_services) is not tuple or len(owned_script_services) != 1
+                    or owned_script_services[0] not in mapping or registry_only_template):
+                _fail('owned_script_service_scope')
+            dependent_request = Path(before).parent / 'dependent-reference-mapping.json'
+            with dependent_request.open('x', encoding='utf-8') as stream:
+                json.dump(mapping, stream, sort_keys=True, separators=(',', ':'), allow_nan=False)
+            dependent_request.chmod(0o600)
+            owned_request = Path(before).parent / 'owned-script-services.json'
+            with owned_request.open('x', encoding='utf-8') as stream:
+                json.dump(list(owned_script_services), stream, separators=(',', ':'))
+            owned_request.chmod(0o600)
+            state_args += ('--dependent-config-program', '--dependent-reference-mapping', str(dependent_request),
+                           '--template-owned-script-services', str(owned_request))
     # Shield spawning too: cancellation must not orphan a checker with secrets.
     spawning = asyncio.create_task(asyncio.create_subprocess_exec(
         sys.executable, '-I', '-B', worker, str(before), str(after),
@@ -223,7 +249,19 @@ async def async_revalidate_accepted_candidate(hass, chain, phase_loader,
     Returned private proof is evidence only. It has no ready/receipt/permission
     API, cannot authorize mutation, and does not close runtime verification.
     """
-    if type(chain) is not RegistryReceiptChain or chain.yaml_index != len(chain.plan.steps) - 1:
+    if type(chain) is not RegistryReceiptChain:
+        _fail('chain_binding')
+    registry_only = chain.yaml_index is None
+    if registry_only:
+        from .native_template_state_composition import TemplateStateComposition
+        baseline, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
+        if (type(composition) is not TemplateStateComposition or baseline != chain.baseline
+                or composition.state_config_program != _state_program
+                or chain.original_receipt.proposed_files or chain.original_receipt.changed_domains
+                or any(step.adapter != 'registry' for step in chain.plan.steps)):
+            _fail('registry_only_binding')
+        composition.assert_baseline(baseline)
+    elif chain.yaml_index != len(chain.plan.steps) - 1:
         _fail('chain_binding')
     original = chain.original_receipt
     original_json = _receipt_bytes(original)
@@ -275,10 +313,18 @@ async def async_revalidate_accepted_candidate(hass, chain, phase_loader,
     try:
         await observe()
         reverse = record.direction == 'rollback'
-        change = chain._original_change(chain.yaml_index).checked()
-        if change.receipt != original:
-            _fail('original_preparation')
-        if _state_program is not None:
+        if registry_only:
+            # This is only an input to the read-only staging helper. It is not
+            # a prepared YAML change, a transaction step, or an effect grant.
+            @dataclass(frozen=True)
+            class NoYAMLFiles:
+                files: tuple = ()
+            change = NoYAMLFiles()
+        else:
+            change = chain._original_change(chain.yaml_index).checked()
+            if change.receipt != original:
+                _fail('original_preparation')
+        if _state_program is not None and not registry_only:
             from .native_template_state_yaml import (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML,
                                                      assert_state_yaml_composition)
             if type(change) not in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
@@ -302,12 +348,30 @@ async def async_revalidate_accepted_candidate(hass, chain, phase_loader,
                 mapping = dict(_state_program.mapping)
                 if reverse:
                     mapping = {new: old for old, new in mapping.items()}
+                stable = tuple(change.after['entity_id'] for index, step in enumerate(chain.plan.steps)
+                    if step.adapter == 'registry'
+                    for change in (chain._original_change(index),)
+                    if (change.kind == 'entity' and change.mapping
+                        and change.before.get('platform') == 'script'
+                        and change.after['entity_id'] == 'script.' + change.before['unique_id']))
+                if len(stable) > 1:
+                    _fail('stable_script_service_scope')
+                from .native_registry_transition import _native_script_unique_move
+                owned = tuple((item.after if reverse else item.before)['entity_id']
+                    for index, step in enumerate(chain.plan.steps) if step.adapter == 'registry'
+                    for item in (chain._original_change(index),)
+                    if item.kind == 'entity' and _native_script_unique_move(item.before, item.after))
+                if len(owned) > 1:
+                    _fail('owned_script_service_scope')
                 result = await _checker(before, after, timeout, checkpoint,
-                    with_sources=True, state_mapping=mapping)
+                    with_sources=True, state_mapping=mapping, registry_only_template=registry_only,
+                    stable_script_services=stable, owned_script_services=owned)
             await checkpoint()
             await observe()
             runtime_hash = (_compare(result, original, reverse) if _state_program is None
-                            else (_compare_mixed_state(result, original, reverse, _state_program)
+                            else (_compare_state_full(result, original, reverse, _state_program, ())
+                                  if registry_only else
+                                  _compare_mixed_state(result, original, reverse, _state_program)
                                   if type(change) is PreparedMixedTemplateStateYAML
                                   else _compare_state(result, original, reverse, _state_program)))
             fence()
@@ -334,7 +398,7 @@ def _compare_state(result, original, reverse, program):
 
 def _compare_mixed_state(result, original, reverse, program):
     from .yaml_transaction import _assert_mixed_state_scope
-    _assert_mixed_state_scope(original)
+    _assert_mixed_state_scope(original, allow_dependent_only=True)
     return _compare_state_full(result, original, reverse, program, original.changed_domains)
 
 
@@ -385,11 +449,20 @@ async def async_revalidate_accepted_template_state_candidate(hass, chain, phase_
     full prefix observer and its completion suffix. Every pending intent refuses.
     """
     from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, assert_state_yaml_composition
-    if type(chain) is not RegistryReceiptChain or chain.yaml_index != len(chain.plan.steps) - 1:
+    if type(chain) is not RegistryReceiptChain:
         _fail('chain_binding')
-    change = chain._original_change(chain.yaml_index)
-    if type(change) not in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
-        _fail('state_preparation_required')
-    composition = assert_state_yaml_composition(chain, change)
+    if chain.yaml_index is None:
+        from .native_template_state_composition import TemplateStateComposition
+        baseline, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
+        if type(composition) is not TemplateStateComposition or baseline != chain.baseline:
+            _fail('state_preparation_required')
+        composition.assert_baseline(baseline)
+    else:
+        if chain.yaml_index != len(chain.plan.steps) - 1:
+            _fail('chain_binding')
+        change = chain._original_change(chain.yaml_index)
+        if type(change) not in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
+            _fail('state_preparation_required')
+        composition = assert_state_yaml_composition(chain, change)
     return await async_revalidate_accepted_candidate(hass, chain, phase_loader,
         scratch_parent, guard, timeout=timeout, _state_program=composition.state_config_program)

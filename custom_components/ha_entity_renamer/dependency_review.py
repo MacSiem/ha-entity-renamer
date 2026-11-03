@@ -17,8 +17,10 @@ def dependency_files(composition):
         re.escape(old.encode("ascii")) for old in sorted(mapping, key=len, reverse=True))
         + rb")(?![a-zA-Z0-9_.])")
     files = []
+    key_edits = None
+    accounted_keys = set()
     for patch in composition.yaml_plan.patches:
-        counts = {}
+        counts, definitions = {}, []
         for edit in patch.edits:
             if edit.before == edit.after:
                 raise Refused("review_dependency_change_unavailable")
@@ -32,11 +34,33 @@ def dependency_files(composition):
                     counts[old] = counts.get(old, 0) + count
                     changed = True
             if not changed:
-                # Never advertise a full review while silently omitting an edit.
-                raise Refused("review_dependency_change_unavailable")
-        if not counts:
+                # Only the exact source-ledger Script definition key may be
+                # reported without a full entity-ID token. Another equal scalar
+                # elsewhere remains an unaccounted edit and refuses review.
+                if key_edits is None:
+                    from .native_script_program_composition import ScriptTemplateStateComposition
+                    from .native_automation_program_composition import AutomationTemplateStateComposition
+                    from .dependent_config_program import verified_script_key_edits
+                    if type(composition) not in (ScriptTemplateStateComposition,
+                                                 AutomationTemplateStateComposition):
+                        raise Refused("review_dependency_change_unavailable")
+                    try:
+                        key_edits = verified_script_key_edits(composition.evidence,
+                                                              composition.yaml_plan, mapping)
+                    except (ValueError, UnicodeError, AttributeError, KeyError, TypeError):
+                        raise Refused("review_dependency_change_unavailable") from None
+                identity = (patch.path, edit.start, edit.end, edit.before, edit.after)
+                matches = [old for old, coordinate in key_edits.items() if coordinate == identity]
+                if len(matches) != 1 or matches[0] in accounted_keys:
+                    raise Refused("review_dependency_change_unavailable")
+                old = matches[0]
+                accounted_keys.add(old)
+                definitions.append({"kind": "script_key", "before": old.split('.', 1)[1],
+                                    "after": mapping[old].split('.', 1)[1], "occurrences": 1})
+        references = [{"before": old, "after": mapping[old], "occurrences": count}
+                      for old, count in sorted(counts.items())] + definitions
+        if not references:
             raise Refused("review_dependency_change_unavailable")
         files.append({"path": patch.path, "edit_count": len(patch.edits),
-            "references": [{"before": old, "after": mapping[old], "occurrences": count}
-                           for old, count in sorted(counts.items())]})
+                      "references": references})
     return files

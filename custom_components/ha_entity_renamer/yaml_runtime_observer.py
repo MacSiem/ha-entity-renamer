@@ -258,7 +258,7 @@ class NativeYAMLRuntimeReadback:
     active scripts, unsupported triggers and mixed runtime versions fail closed.
     """
 
-    def __init__(self, hass, *, inventory_verifier: IndependentYAMLInventoryVerifier | None = None, owned_automation=None):
+    def __init__(self, hass, *, inventory_verifier: IndependentYAMLInventoryVerifier | None = None, owned_automation=None, script_dispatch=None):
         if inventory_verifier is not None and not callable(
                 getattr(inventory_verifier, 'verify_inventory', None)):
             raise ValueError('independent_inventory_verifier_required')
@@ -269,6 +269,7 @@ class NativeYAMLRuntimeReadback:
             if type(owned_automation) is not OwnedAutomationGraph or owned_automation.hass is not hass:
                 raise ValueError('typed_owned_automation_graph_required')
         self.owned_automation = owned_automation
+        self.script_dispatch = script_dispatch
 
     def _projection(self, domain):
         from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -295,7 +296,10 @@ class NativeYAMLRuntimeReadback:
             entities = tuple(component.entities)
         for entity in entities:
             if entity.hass is not self.hass or self.hass.states.get(entity.entity_id) is None:
-                raise ValueError('native_entity_missing')
+                node = self.script_dispatch
+                handoff = None if node is None or node.witness is None else node.witness.source_handoff
+                if domain != 'script' or handoff is None or handoff.script_dispatch_image(node) is not entity:
+                    raise ValueError('native_entity_missing')
             identities.append((entity.entity_id, id(entity)))
             if domain == 'script':
                 from homeassistant.components.script import ScriptEntity

@@ -131,7 +131,7 @@ def _idle_census(root):
     return tuple(result)
 
 
-def assert_idle_script_program_targets(hass, program, *, active=None):
+def assert_idle_script_program_targets(hass, program, *, active=None, trace_sink=None):
     """Read-only target admission; unrelated executions grant no write authority."""
     from homeassistant.helpers.entity_component import DATA_INSTANCES, EntityComponent
     from homeassistant.components.script import ScriptEntity
@@ -139,20 +139,29 @@ def assert_idle_script_program_targets(hass, program, *, active=None):
     _need(type(program) is DependentConfigProgram
           and (active is None or type(active) is frozenset))
     mask = frozenset(program.source_order) if active is None else active
-    before = {row[0]: row for row in dict(program.rows(frozenset()))['script']}
-    after = {row[0]: row for row in dict(program.rows(mask))['script']}
-    _need(before.keys() == after.keys(), 'native_script_config_target_inventory_changed')
-    changed = {key for key in before if before[key] != after[key]}
+    before_mask, after_mask = frozenset(), mask
+    before = {row[0]: row for row in dict(program.rows(before_mask))['script']}
+    after = {row[0]: row for row in dict(program.rows(after_mask))['script']}
     component = hass.data.get(DATA_INSTANCES, {}).get('script')
     _need(type(component) is EntityComponent and component.hass is hass)
     entities = tuple(component.entities)
     _need(all(type(entity) is ScriptEntity for entity in entities))
     keyed = {entity.unique_id: entity for entity in entities}
-    _need(len(keyed) == len(entities) and changed <= keyed.keys())
+    if before.keys() != after.keys() and keyed.keys() == after.keys():
+        before_mask, after_mask = after_mask, before_mask
+    from .dependent_config_program import pair_sealed_images
+    paired = dict(pair_sealed_images(program, before_mask, after_mask))['script']
+    changed = {old[0] for old, new in paired if old != new}
+    _need(len(keyed) == len(entities) and changed <= keyed.keys(),
+          'native_script_config_target_inventory_changed')
     from .native_active_execution_pins import capture_census
     from .native_active_execution_transport import _entities, validate_active_program
     scope = frozenset(('script', key) for key in changed)
-    validate_active_program(hass, program, _entities(hass), scope, scope)
+    trace_proof = validate_active_program(hass, program, _entities(hass), scope, scope)
+    if trace_sink is not None:
+        _need(type(trace_sink) is list, 'active_trace_invalid_sink')
+        if trace_proof is not None:
+            trace_sink.append(trace_proof)
     return tuple((keyed[key].script, capture_census(keyed[key].script)) for key in sorted(changed))
 
 
@@ -176,21 +185,27 @@ class NativeScriptConfigTransport:
         _need(before['automation'] == after['automation'], 'native_script_config_automation_change_unsupported')
         component = observer.hass.data.get(DATA_INSTANCES, {}).get('script')
         actors = {entity.unique_id: entity for entity in component.entities} if component is not None else {}
-        changed = {old[0] for old, new in zip(before['script'], after['script'], strict=True) if old != new}
+        paired = observer.program.paired_rows(active, target, source)
+        changed = {old[0] for old, new in dict(paired)['script'] if old != new}
         if any(key in actors and actors[key].script.is_running for key in changed):
+            script_changes = [(old, new) for old, new in dict(paired)['script'] if old != new]
+            if (len(script_changes) == 1 and script_changes[0][0][0] != script_changes[0][1][0]
+                    and script_changes[0][0][1:] == script_changes[0][1][1:]):
+                from .native_active_execution_transport import ActiveScriptIdentityTransport
+                return ActiveScriptIdentityTransport.capture(observer, chain, source, reverse=reverse,
+                                                              guard=guard, input_state=input_state)
             from .native_active_execution_transport import ActiveScriptTransport
             return ActiveScriptTransport.capture(observer, chain, source, reverse=reverse,
                                                  guard=guard, input_state=input_state)
         obj = object.__new__(cls)
         obj.observer, obj.chain, obj.guard, obj.sample = observer, chain, guard, sample
         obj.input_state = input_state
-        obj.before, obj.after, obj.active, obj.target = before, after, active, target
+        obj.before, obj.after, obj.active, obj.target, obj.paired = before, after, active, target, paired
         obj.task, obj.phase, obj.operations, obj.actors = asyncio.current_task(), 'captured', [], []
         obj._projected = {}
         component = observer.hass.data.get(DATA_INSTANCES, {}).get('script')
         entities = {entity.unique_id: entity for entity in component.entities} if component is not None else {}
-        _need([row[0] for row in before['script']] == [row[0] for row in after['script']])
-        for old, new in zip(before['script'], after['script'], strict=True):
+        for old, new in dict(paired)['script']:
             if old == new:
                 continue
             _need(old[0] in entities and old[3:6] == new[3:6] and old[7:] == new[7:],
@@ -296,6 +311,11 @@ class NativeScriptConfigTransport:
             from homeassistant.helpers.entity_component import DATA_INSTANCES
             component = self.observer.hass.data.get(DATA_INSTANCES, {}).get(domain)
             actual, identities = observer._projection(domain) if component is not None else ([], ())
+            if domain == 'script' and expected is self.after:
+                redirects = {new[0]: old[0] for old, new in dict(self.paired)['script'] if old[0] != new[0]}
+                if redirects:
+                    rows = sorted(([redirects.get(row[0], row[0]), *row[1:]] for row in rows),
+                                  key=lambda row: row[0])
             _need(_normal(actual) == rows, 'native_script_config_projection_mismatch')
             _need((id(component), identities) == pinned[domain], 'native_script_config_actor_identity_changed')
 

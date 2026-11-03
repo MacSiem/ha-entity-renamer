@@ -15,7 +15,7 @@ class _Actor:
     changed: bool
 
 
-def _call_scope(hass, before, after):
+def _call_scope(hass, before, after, *, paired=None):
     """Static transitive calls, including unchanged callers into affected Scripts.
 
     Reject dynamic/cyclic calls and enabled event/system callers before effects.
@@ -30,9 +30,15 @@ def _call_scope(hass, before, after):
         for entity in component.entities if component is not None else ():
             _need((domain, entity.unique_id) not in entities)
             entities[domain, entity.unique_id] = entity
-    changed = {(domain, old[0]) for domain in ('automation', 'script')
-        for old, new in zip(before[domain], after[domain], strict=True) if old != new}
-    calls = {}
+    if paired is None:
+        _need(all({row[0] for row in before[domain]} == {row[0] for row in after[domain]}
+                  for domain in ('automation', 'script')), 'automation_actor_key_changed')
+        paired = tuple((domain, tuple((row, next(candidate for candidate in after[domain]
+            if candidate[0] == row[0])) for row in before[domain])) for domain in ('automation', 'script'))
+    _need(type(paired) is tuple and tuple(domain for domain, _ in paired) == ('automation', 'script'))
+    changed = {(domain, old[0]) for domain, rows in paired for old, new in rows if old != new}
+    _need(changed <= entities.keys(), 'automation_actor_key_changed')
+    calls, automation_service = {}, []
     def literal(value):
         if type(value) is Template:
             _need(value.is_static, 'automation_dynamic_script_call_unsupported')
@@ -55,15 +61,32 @@ def _call_scope(hass, before, after):
                     _need(service not in ('script.toggle', 'script.turn_off', 'script.reload'),
                           'automation_script_system_call_unsupported')
                     found.add(('script', service.split('.', 1)[1]))
-                elif service in ('script.turn_on', 'homeassistant.turn_on'):
+                elif service in ('script.turn_on', 'homeassistant.turn_on', 'automation.trigger'):
                     target = value.get('target', {})
                     data = value.get('data', {})
                     _need(type(target) in (dict, NodeDictClass) and type(data) in (dict, NodeDictClass)
-                          and not set(target) - {'entity_id'}, 'automation_opaque_script_target_unsupported')
+                          and not set(target) - {'entity_id'} and not (
+                              'entity_id' in target and 'entity_id' in data),
+                          'automation_opaque_script_target_unsupported')
                     ids = targets(target.get('entity_id', data.get('entity_id')))
                     if service == 'script.turn_on':
                         _need(all(item.startswith('script.') for item in ids))
-                    found.update(('script', item.split('.', 1)[1]) for item in ids if item.startswith('script.'))
+                    if service == 'automation.trigger':
+                        _need(all(item.startswith('automation.') for item in ids))
+                        if not automation_service:
+                            from .native_own_automation_service import capture
+                            automation_service.append(capture(hass))
+                    for item in ids:
+                        if item.startswith('script.'):
+                            found.add(('script', item.split('.', 1)[1]))
+                        elif item.startswith('automation.'):
+                            _need(service == 'automation.trigger', 'automation_opaque_service_caller_unsupported')
+                            matches = [key for key, actor in entities.items()
+                                       if key[0] == 'automation' and actor.entity_id == item]
+                            _need(len(matches) == 1, 'automation_static_target_missing')
+                            found.add(matches[0])
+                        else:
+                            _need(False, 'automation_opaque_service_caller_unsupported')
                 else:
                     # automation.trigger/turn_on, python_script, shell/REST and
                     # unknown integration services can enter an affected Script
@@ -78,6 +101,9 @@ def _call_scope(hass, before, after):
         scan(script.sequence, found)
         _need(found <= entities.keys(), 'automation_script_call_target_missing')
         calls[key] = found
+    if automation_service:
+        from .native_own_automation_service import check
+        check(hass, automation_service[0])
     closure = {}
     def visit(key, path=()):
         _need(key not in path, 'automation_script_call_cycle_unsupported')
@@ -109,12 +135,25 @@ def _call_scope(hass, before, after):
     return entities, frozenset(admitted), frozenset(changed)
 
 
-def assert_idle_automation_program_targets(hass, program, *, active=None):
+def assert_idle_automation_program_targets(hass, program, *, active=None, trace_sink=None):
     target = frozenset(program.source_order) if active is None else active
-    before, after = dict(program.rows(frozenset())), dict(program.rows(target))
-    entities, admitted, changed = _call_scope(hass, before, after)
+    before_mask, after_mask = frozenset(), target
+    before, after = dict(program.rows(before_mask)), dict(program.rows(after_mask))
+    from homeassistant.helpers.entity_component import DATA_INSTANCES
+    component = hass.data.get(DATA_INSTANCES, {}).get('script')
+    live_keys = {entity.unique_id for entity in component.entities} if component else set()
+    before_keys, after_keys = ({row[0] for row in rows['script']} for rows in (before, after))
+    if before_keys != after_keys and live_keys == after_keys:
+        before_mask, after_mask, before, after = after_mask, before_mask, after, before
+    from .dependent_config_program import pair_sealed_images
+    paired = pair_sealed_images(program, before_mask, after_mask)
+    entities, admitted, changed = _call_scope(hass, before, after, paired=paired)
     from .native_active_execution_transport import validate_active_program
-    validate_active_program(hass, program, entities, admitted, changed)
+    trace_proof = validate_active_program(hass, program, entities, admitted, changed)
+    if trace_sink is not None:
+        _need(type(trace_sink) is list, 'active_trace_invalid_sink')
+        if trace_proof is not None:
+            trace_sink.append(trace_proof)
     from .native_active_execution_pins import capture_census
     return tuple((script, capture_census(script)) for key in sorted(admitted)
                  for script in (entities[key].action_script if key[0] == 'automation'
@@ -140,27 +179,32 @@ class NativeAutomationConfigTransport:
         target = active - {source} if reverse else active | {source}
         observer.program.assert_edge(active, target, source)
         before, after = dict(observer.program.rows(active)), dict(observer.program.rows(target))
-        entities, admitted, changed = _call_scope(observer.hass, before, after)
-        if any((entities[key].action_script if key[0] == 'automation' else entities[key].script).is_running
-               for key in admitted):
+        paired = observer.program.paired_rows(active, target, source)
+        entities, admitted, changed = _call_scope(observer.hass, before, after, paired=paired)
+        running = {key for key in admitted
+                   if (entities[key].action_script if key[0] == 'automation'
+                       else entities[key].script).is_running}
+        changed_bodies = {(domain, old[0]) for domain, rows in paired for old, new in rows
+                          if old[1:] != new[1:]}
+        if running & changed_bodies:
             from .native_active_execution_transport import ActiveAutomationTransport
             return ActiveAutomationTransport.capture(observer, chain, source, reverse=reverse,
                                                      guard=guard, input_state=input_state)
         self = object.__new__(cls)
         self.observer, self.chain, self.guard, self.sample = observer, chain, guard, sample
-        self.input_state, self.before, self.after = input_state, before, after
+        self.input_state, self.before, self.after, self.paired = input_state, before, after, paired
         self.task, self.phase, self.operations, self._projected = asyncio.current_task(), 'captured', [], {}
         self.actors = []
         self.duration_edges = ()
         for domain, key in sorted(admitted):
             entity = entities[domain, key]
             script = entity.action_script if domain == 'automation' else entity.script
-            self.actors.append(_Actor(entity, script, _idle_census(script),
+            from .native_active_execution_pins import capture_census
+            self.actors.append(_Actor(entity, script, capture_census(script),
                 tuple((name, getattr(script, name), tuple(getattr(script, name).items()))
                       for name in _cache_names()), (domain, key) in changed))
-        for domain in ('automation', 'script'):
-            _need([r[0] for r in before[domain]] == [r[0] for r in after[domain]])
-            for old, new in zip(before[domain], after[domain], strict=True):
+        for domain, pairs in paired:
+            for old, new in pairs:
                 if old == new:
                     continue
                 entity = entities[domain, old[0]]
@@ -411,8 +455,9 @@ class NativeAutomationConfigTransport:
                 owner.check()
         _need(self._actor_graph() == self.original)
         _need(self.observer.sample(self.chain, input_state=self.input_state) == self.sample)
+        from .native_active_execution_pins import check_census
         for actor in self.actors:
-            _need(_idle_census(actor.script) == actor.census)
+            check_census(actor.script, actor.census)
         for route in self.graph.routes:
             route.binding.assert_original()
 
@@ -448,11 +493,60 @@ class NativeAutomationConfigTransport:
             pinned = {name: (component_id, tokens) for name, component_id, tokens in self.sample.native_tokens}
             _need(id(component) == pinned[domain][0], 'automation_component_identity_changed')
             previous = pinned[domain][1]
+            fence = getattr(self.graph.node.root, 'own_dependent_fence', None) if self.graph.node else None
+            if domain == 'script' and fence is not None and fence.node is self.graph.node:
+                move = self.graph.node.script_service_move
+                if move is not None and move.phase == 'moved':
+                    move.check_moved()
+                    originals = [item for item in previous if item[1] == id(fence.entity)]
+                    actuals = [item for item in identities if item[1] == id(fence.entity)]
+                    _need(len(originals) == len(actuals) == 1
+                          and actuals[0][:4] == (self.graph.node.target, *originals[0][1:4])
+                          and actuals[0][4] == id(move.handoff.new_row)
+                          and actuals[0][5:] == (id(move.inventory.service_registry), id(move.replacement),
+                              id(move.replacement.job), id(move.replacement.job.target),
+                              id(move.replacement.schema)), 'automation_script_service_identity_changed')
+                    identities = tuple(sorted(originals[0] if item is actuals[0] else item for item in identities))
+            if (domain == 'automation' and fence is not None
+                    and fence.domain == 'automation' and fence.node is self.graph.node):
+                node = self.graph.node
+                originals = [item for item in previous if item[1] == id(fence.entity)]
+                actuals = [item for item in identities if item[1] == id(fence.entity)]
+                _need(len(originals) == len(actuals) == 1,
+                      'automation_own_actor_identity_changed')
+                original, current = originals[0], actuals[0]
+                if current[:5] != original[:5]:
+                    from .native_own_dependent_fence import NativeOwnDependentFence
+                    from .native_source_handoff import NativeSourceHandoff
+                    handoff = None if node.witness is None else node.witness.source_handoff
+                    _need(expected is self.after
+                          and type(fence) is NativeOwnDependentFence and fence.root is node.root
+                          and node.change == fence.change and node.dependent_entity is fence.entity
+                          and type(handoff) is NativeSourceHandoff and handoff.source is fence.entity
+                          and original[0] == node.source and current[0] == node.target
+                          and current[1:4] == original[1:4]
+                          and current[4] == id(handoff.new_row)
+                          and original[4] == id(handoff.row)
+                          and fence.entity.registry_entry is handoff.new_row
+                          and fence.entity.entity_id == node.target,
+                          'automation_own_actor_identity_changed')
+                    # Checks the exact live intent/native handoff, or the same
+                    # authenticated accepted row; no foreign row is normalized.
+                    fence.rows()
+                    identities = tuple(sorted(original if item is current else item for item in identities))
             # Automation registration tokens change explicitly with our wrapper;
-            # entity/root/raw/registry identities may NEVER be adopted anew.
+            # all other native identities are exact or this one witnessed move.
             same = (tuple(row[:5] for row in identities) == tuple(row[:5] for row in previous)
                     if domain == 'automation' else identities == previous)
             _need(same, 'automation_actor_identity_changed')
+            if domain == 'script' and expected is self.after:
+                redirects = {new[0]: old[0] for edge_domain, pairs in self.paired
+                             if edge_domain == 'script' for old, new in pairs
+                             if old[0] != new[0] and any(actor.entity.unique_id == old[0]
+                                 for actor in self.actors if actor.entity.entity_id.startswith('script.'))}
+                if redirects:
+                    rows = sorted(([redirects.get(row[0], row[0]), *row[1:]] for row in rows),
+                                  key=lambda row: row[0])
             _need(_normal(actual) == rows, 'automation_full_native_row_mismatch')
 
     def install(self, witness):
@@ -490,7 +584,8 @@ class NativeAutomationConfigTransport:
                       if actor.entity.entity_id.startswith('automation.')
                       else actor.entity.script is actor.script,
                       'automation_cleanup_script_changed')
-                _idle_census(actor.script)
+                from .native_active_execution_pins import check_census
+                check_census(actor.script, actor.census, allow_elapsed=True)
             _need(all(getattr(script,name) is cache and cache_token(items)==token
                       for script,name,cache,items,token in saved), 'automation_cleanup_cache_changed')
             for edge in self.duration_edges:
@@ -521,9 +616,10 @@ class NativeAutomationConfigTransport:
                           'automation_duration_after_stable_changed')
                     _need(route.binding._duration.pending(route.binding)[1] == route.duration_snapshot,
                           'automation_duration_after_pending_changed')
+            from .native_active_execution_pins import ActiveWaitPins, check_census
             for actor in self.actors:
-                _idle_census(actor.script)
-                if actor.changed:
+                check_census(actor.script, actor.census)
+                if actor.changed and type(actor.census) is not ActiveWaitPins:
                     for _, cache, _ in actor.caches:
                         log.write('dict',cache,(),cache.clear)
             self.graph.install(witness)
@@ -551,9 +647,10 @@ class NativeAutomationConfigTransport:
         _need(self.phase == 'installed' and asyncio.current_task() is self.task)
         _need(self._actor_graph() == self.installed)
         self._rows(self.after)
+        from .native_active_execution_pins import ActiveWaitPins, check_census
         for actor in self.actors:
-            _idle_census(actor.script)
-            if actor.changed:
+            check_census(actor.script, actor.census, allow_elapsed=True)
+            if actor.changed and type(actor.census) is not ActiveWaitPins:
                 _need(all(not cache for _, cache, _ in actor.caches))
         plan, graph_plan=self._config_cleanup_plan()
         try:

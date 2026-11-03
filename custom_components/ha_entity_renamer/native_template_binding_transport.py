@@ -188,6 +188,7 @@ class _Runtime:
             self.refs += [(te.TemplateEntity, '_get_this_variable')]
         self.methods, self.codes = prove_methods(native.root, native.pins, self.refs)
         self.event, self.te, self.template = event, te, template
+        self.ThisState = template.TemplateStateFromEntityId
         self.ScriptVariables = script_variables.ScriptVariables
         self.HassJob = HassJob
         self.RateLimit = ratelimit.KeyedRateLimit
@@ -201,7 +202,9 @@ class _Runtime:
         self.native.bindings()
         unchanged(self.refs, self.methods, self.codes)
         event, te = self.event, self.te
-        _need(te.TrackTemplate is event.TrackTemplate
+        _need(self.template.TemplateStateFromEntityId is self.ThisState
+              and te.TemplateStateFromEntityId is self.ThisState
+              and te.TrackTemplate is event.TrackTemplate
               and te.async_track_template_result is event.async_track_template_result
               and event.TrackTemplateResultInfo.__init__.__globals__ is vars(event)
               and event.KeyedRateLimit is self.RateLimit
@@ -431,14 +434,26 @@ class NativeTemplateBindingTransport:
     """
     @classmethod
     def capture(cls, hass, entities, *, source_pairs, caller_context,
-                configured_variable_pairs=(), rendered_variable_pairs=(), rename_witness=None):
+                configured_variable_pairs=(), rendered_variable_pairs=(), rename_witness=None,
+                own_identity=None):
         _need(type(caller_context) is _BindingCallerContext,
               'template_binding_internal_caller_required')
         entities, source_pairs = tuple(entities), tuple(source_pairs)
         configured_variable_pairs = tuple(configured_variable_pairs)
         rendered_variable_pairs = tuple(rendered_variable_pairs)
+        if own_identity is not None:
+            from .native_rename_emission_classifier import NativeRenameEmissions
+            _need(type(own_identity) is tuple and len(own_identity) == 3
+                  and any(entity is own_identity[0] for entity in entities)
+                  and type(own_identity[1]) is str and type(own_identity[2]) is str
+                  and type(rename_witness) is NativeRenameEmissions
+                  and rename_witness.source is own_identity[0]
+                  and rename_witness.source_id == own_identity[1]
+                  and rename_witness.target_id == own_identity[2]
+                  and not rename_witness.attempted and not rename_witness.closed,
+                  'template_binding_own_identity_unqualified')
         _need(bool(entities) and len({id(e) for e in entities}) == len(entities)
-              and bool(source_pairs or configured_variable_pairs or rendered_variable_pairs)
+              and bool(source_pairs or configured_variable_pairs or rendered_variable_pairs or own_identity)
               and all(type(p) is BindingSourcePair for p in source_pairs),
               'template_binding_qualified_sources_required')
         caller_context.check('capture', source_pairs, entities)
@@ -764,6 +779,15 @@ class NativeTemplateBindingTransport:
                 entity._template_attrs = {row['replacements'][id(t)]: slots for t, slots in row['attrs'].items()}
                 entity._template_result_info = row['new']
                 entity._on_remove[row['index']] = row['new'].async_remove
+                # Retain the exact installed graph for the final pre-API fence
+                # and for a checked pre-attempt undo. Strong references prevent
+                # a replaced child from being confused with an id-reused value.
+                from .native_script_config_transport import _graph
+                row['installed_bindings'] = {name: getattr(entity, name) for name in row['bindings']}
+                row['installed_attrs'] = entity._template_attrs
+                row['installed_cleanup'] = tuple(entity._on_remove)
+                row['installed_graph'] = (_graph(row['installed_bindings']), _graph(row['installed_attrs']))
+                row['installed_holds'] = self._retain_graph((row['installed_bindings'], row['installed_attrs']))
             self.phase = 'installed'
         except BaseException as error:
             # A native factory may fail after constructing its filtered tracker
@@ -784,6 +808,56 @@ class NativeTemplateBindingTransport:
             self._restore_before_effect()
             self.phase = 'failed'
             raise
+
+    @staticmethod
+    def _retain_graph(roots):
+        from homeassistant.helpers.script_variables import ScriptVariables
+        from homeassistant.helpers.template import Template
+        from homeassistant.util.yaml.objects import NodeDictClass, NodeListClass
+        held, seen = [], set()
+        def walk(value):
+            if id(value) in seen:
+                return
+            seen.add(id(value)); held.append(value)
+            if type(value) in (dict, NodeDictClass):
+                for key, child in value.items():
+                    walk(key); walk(child)
+            elif type(value) in (list, tuple, NodeListClass):
+                for child in value:
+                    walk(child)
+            elif type(value) is Template:
+                walk(value.template); walk(value.hass)
+            elif type(value) is ScriptVariables:
+                walk(value.variables)
+        walk(roots)
+        return tuple(held)
+
+    def check_installed_before_registry(self):
+        from .native_script_config_transport import _graph
+        _need(self.phase in ('installed', 'registry_attempted'), 'template_binding_install_required')
+        self.runtime.bindings()
+        for row in self.rows:
+            entity = row['entity']
+            cleanup = row['installed_cleanup']
+            _need(entity._template_result_info is row['new']
+                  and entity._template_attrs is row['installed_attrs']
+                  and len(entity._on_remove) == len(cleanup)
+                  and all(actual is expected for actual, expected in zip(entity._on_remove, cleanup))
+                  and all(getattr(entity, name) is value for name, value in row['installed_bindings'].items())
+                  and all(slot.template is row['replacements'][id(original)]
+                          for slot, original in row['slots'] + row['declarations'])
+                  and (_graph(row['installed_bindings']), _graph(row['installed_attrs'])) == row['installed_graph'],
+                  'template_binding_installed_owner_changed')
+            tracker = row['new']
+            ingress = getattr(self.rename_witness, 'ingress', None)
+            if ingress is not None:
+                from .native_template_rename_ingress import NativeTemplateRenameIngress
+                _need(type(ingress) is NativeTemplateRenameIngress and ingress.live
+                      and ingress.transport is self, 'template_binding_ingress_changed')
+                ingress.assert_native_action(tracker, tracker._track_state_changes)
+            self.runtime.rate_timers(tracker)
+            for template, remove in tracker._time_listeners.items():
+                self.runtime.time_owner(tracker, template, remove)
 
     @staticmethod
     def _stop(tracker):

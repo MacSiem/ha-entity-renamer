@@ -677,7 +677,8 @@ def template_state_source_projection(checked, root=None):
         'states': sorted(states, key=lambda r: (r[0], r[1]))}
 
 
-def _template_reference_proof(before_root, proposed_root, mapping):
+def _template_reference_proof(before_root, proposed_root, mapping, *, stable_script_services=(),
+                              owned_script_services=()):
     """Reuse actual source planner/dataflow, bind exact ORIGINAL/proposal files.
 
     A native-validated config says nothing about source rewrite safety. Rebuild
@@ -688,7 +689,8 @@ def _template_reference_proof(before_root, proposed_root, mapping):
     import hashlib
     from pathlib import Path
     planner = _source_module('yaml_plan')
-    plan = planner.plan_yaml(before_root, mapping)
+    plan = planner.plan_yaml(before_root, mapping, stable_script_services=stable_script_services,
+                             owned_script_services=owned_script_services)
     if not plan.ready:
         raise ValueError('template_state_profile_source_plan_rejected')
     proposed = {p.path: p.proposed_bytes for p in plan.patches}
@@ -1019,7 +1021,8 @@ def _check_template_entries(root, request, version):
 async def check(before_root, proposed_root, *, with_sources=False, powercalc_profiles=False,
                 powercalc_candidate=False, native_helpers=(), template_source_profile=None,
                 template_reference_mapping=None, template_state_program=False,
-                dependent_reference_mapping=None):
+                dependent_reference_mapping=None, registry_only_template=False,
+                stable_script_services=(), owned_script_services=()):
     from homeassistant.const import __version__
     from homeassistant.scripts.check_config import async_check_config
     if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4'):
@@ -1030,15 +1033,31 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
         raise ValueError('template_state_profile_request_invalid')
     if template_source_profile is None and template_reference_mapping is not None:
         raise ValueError('template_state_profile_request_invalid')
+    if (type(registry_only_template) is not bool or registry_only_template
+            and (not template_state_program or dependent_reference_mapping is not None)):
+        raise ValueError('template_registry_only_scope_required')
     if type(template_state_program) is not bool or template_state_program and template_source_profile is None:
         raise ValueError('template_state_profile_request_invalid')
-    reference_proof = (_template_reference_proof(before_root, proposed_root, template_reference_mapping)
+    if (type(stable_script_services) is not tuple or len(stable_script_services) > 1
+            or any(type(value) is not str for value in stable_script_services)
+            or stable_script_services and (not template_state_program or dependent_reference_mapping is not None
+                or any(value not in set(template_reference_mapping) | set(template_reference_mapping.values())
+                       for value in stable_script_services))):
+        raise ValueError('template_stable_script_service_scope_invalid')
+    if (type(owned_script_services) is not tuple or len(owned_script_services) > 1
+            or owned_script_services and (not template_state_program or dependent_reference_mapping is None
+                or any(value not in dependent_reference_mapping for value in owned_script_services))):
+        raise ValueError('template_owned_script_service_scope_invalid')
+    reference_proof = (_template_reference_proof(before_root, proposed_root, template_reference_mapping,
+                                                   stable_script_services=stable_script_services,
+                                                   owned_script_services=owned_script_services)
                        if template_source_profile is not None else None)
     dependent_proof = None
     if dependent_reference_mapping is not None:
         if not with_sources or native_helpers or powercalc_profiles or powercalc_candidate:
             raise ValueError('dependent_config_program_rejected')
-        dependent_proof = _template_reference_proof(before_root, proposed_root, dependent_reference_mapping)
+        dependent_proof = _template_reference_proof(before_root, proposed_root, dependent_reference_mapping,
+                                                      owned_script_services=owned_script_services)
         program_module = _source_module('dependent_config_program')
         paths = tuple(row[0] for row in dependent_proof['files'])
         program_module.assert_reference_only(before_root, paths)
@@ -1051,8 +1070,10 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
     before, after = await _effective(before_root), await _effective(proposed_root)
     changed, unsupported = changed_domains(before, after)
     helper_seal = _check_template_entries(before_root,native_helpers,__version__) if native_helpers else None
-    if not changed and helper_seal is None:
+    if not changed and helper_seal is None and not registry_only_template:
         return {'status': 'no_effective_config_change'}
+    if registry_only_template and (changed or helper_seal is not None):
+        raise ValueError('template_registry_only_effective_config_changed')
     source_rows = {} if with_sources else None
     original_domains = sorted(set(changed) | {'automation', 'script'}) if with_sources else changed
     template_sources = {} if with_sources else None
@@ -1087,7 +1108,7 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
     if dependent_proof is not None:
         result['dependent_config_program'] = await program_module.native_prefix_images(
             before_root, dependent_reference_mapping, dependent_proof, old_dependent, new_dependent,
-            _expected_runtime)
+            _expected_runtime, owned_script_services=owned_script_services)
     if template_source_profile is not None:
         if template_state_program:
             result['template_state_config_program'] = old_state_profile.pop('_config_program')
@@ -1150,6 +1171,44 @@ def _template_mapping_request(arguments, *, flag='--template-reference-mapping',
     return value
 
 
+def _stable_script_services_request(arguments):
+    flag = '--template-stable-script-services'
+    if flag not in arguments:
+        return ()
+    if arguments.count(flag) != 1:
+        raise ValueError('template_stable_script_service_scope_invalid')
+    index = arguments.index(flag)
+    if index + 1 >= len(arguments):
+        raise ValueError('template_stable_script_service_scope_invalid')
+    with open(arguments[index + 1], 'rb') as stream:
+        raw = stream.read(4097)
+    if len(raw) > 4096:
+        raise ValueError('template_stable_script_service_scope_invalid')
+    value = json.loads(raw)
+    if type(value) is not list or len(value) != 1 or type(value[0]) is not str:
+        raise ValueError('template_stable_script_service_scope_invalid')
+    return tuple(value)
+
+
+def _owned_script_services_request(arguments):
+    flag = '--template-owned-script-services'
+    if flag not in arguments:
+        return ()
+    if arguments.count(flag) != 1:
+        raise ValueError('template_owned_script_service_scope_invalid')
+    index = arguments.index(flag)
+    if index + 1 >= len(arguments):
+        raise ValueError('template_owned_script_service_scope_invalid')
+    with open(arguments[index + 1], 'rb') as stream:
+        raw = stream.read(4097)
+    if len(raw) > 4096:
+        raise ValueError('template_owned_script_service_scope_invalid')
+    value = json.loads(raw)
+    if type(value) is not list or len(value) != 1 or type(value[0]) is not str:
+        raise ValueError('template_owned_script_service_scope_invalid')
+    return tuple(value)
+
+
 def main():
     logging.disable(logging.CRITICAL)
     try:
@@ -1163,6 +1222,9 @@ def main():
                                            if '--template-state-source-v3' in sys.argv[3:] else None),
                                        template_reference_mapping=_template_mapping_request(sys.argv[3:]),
                                        template_state_program='--template-state-config-program' in sys.argv[3:],
+                                       registry_only_template='--template-state-registry-only' in sys.argv[3:],
+                                       stable_script_services=_stable_script_services_request(sys.argv[3:]),
+                                       owned_script_services=_owned_script_services_request(sys.argv[3:]),
                                        dependent_reference_mapping=_template_mapping_request(sys.argv[3:],
                                            flag='--dependent-reference-mapping', selected='--dependent-config-program'),
                                        native_helpers=(json.load(open(sys.argv[sys.argv.index('--native-helpers')+1]))

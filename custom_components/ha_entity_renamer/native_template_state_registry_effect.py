@@ -62,7 +62,9 @@ class NativeTemplateStateRegistryEffect:
         obj.expected = replace(snapshot.prefix, active=target,
             registry_ids=tuple((identity, obj.target if identity == change.identity else value)
                                for identity, value in snapshot.prefix.registry_ids))
-        obj.transport = None
+        obj.transport = obj.this_transfer = None
+        obj.own_entity = obj.dependent_entity = obj.script_service_move = None
+        obj.transfer_entities = transition.entities
         obj.witness = obj.delivery = obj.ingress = None
         from .native_script_program_composition import ScriptTemplateStateComposition
         from .native_automation_program_composition import AutomationTemplateStateComposition
@@ -74,9 +76,25 @@ class NativeTemplateStateRegistryEffect:
         elif type(root.composition) is ScriptTemplateStateComposition:
             from .native_script_prefix_phase import NativeScriptPrefixPhase
             _need(type(obj.script_phase) is NativeScriptPrefixPhase, 'typed_script_phase_required')
-        pure = ({key: value for key, value in change.before.items() if key not in ('entity_id', 'modified_at')}
+        from .native_registry_transition import _native_script_unique_move
+        script_unique_move = _native_script_unique_move(change.before, change.after)
+        pure = (script_unique_move or
+                {key: value for key, value in change.before.items() if key not in ('entity_id', 'modified_at')}
                 == {key: value for key, value in change.after.items() if key not in ('entity_id', 'modified_at')})
-        if (transition.entities or obj.script_phase is not None) and pure:
+        if change.before.get('platform') == 'template':
+            hits = [row.entity for row in snapshot.rows if row.registry_id == change.identity]
+            _need(len(hits) == 1 and pure, 'own_template_identity_unqualified')
+            obj.own_entity = hits[0]
+        if change.before.get('platform') in ('automation', 'script'):
+            dependent = getattr(root, 'own_dependent_fence', None)
+            _need(dependent is not None and dependent.change == change and pure,
+                  'own_dependent_identity_unqualified')
+            obj.dependent_entity = dependent.entity
+        producer_entities = transition.entities
+        if obj.own_entity is not None and not any(e is obj.own_entity for e in producer_entities):
+            producer_entities = (*producer_entities, obj.own_entity)
+        if (transition.entities or obj.script_phase is not None or obj.own_entity is not None
+                or obj.dependent_entity is not None) and pure:
             from .native_rename_emission_classifier import NativeRenameEmissions
             from .native_template_rename_ingress import NativeTemplateProducerDelivery
             from .native_source_handoff import NativeSourceHandoff
@@ -86,8 +104,8 @@ class NativeTemplateStateRegistryEffect:
             # until the separate full program/phase transport is integrated.
             from .native_template_state_composition import TemplateStateComposition
             supported = NativeSourceHandoff.supports_source(io, change, target_image)
-            if obj.script_phase is not None:
-                _need(supported, 'script_prefix_source_handoff_unsupported')
+            if obj.script_phase is not None or obj.own_entity is not None or obj.dependent_entity is not None:
+                _need(supported, 'dependent_prefix_source_handoff_unsupported')
             if (type(root.composition) in (TemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)
                     and supported):
                 handoff = await NativeSourceHandoff.prepare(io, change, target_image, guard=guard)
@@ -99,17 +117,24 @@ class NativeTemplateStateRegistryEffect:
                     source = next(iter(change.mapping))
                     target_mask = mask - {source} if reverse else mask | {source}
                     actors, admitted, _ = _call_scope(root.hass,
-                        dict(program.rows(mask)), dict(program.rows(target_mask)))
+                        dict(program.rows(mask)), dict(program.rows(target_mask)),
+                        paired=program.paired_rows(mask, target_mask, source))
                     await graph.prepare(tuple(actors[key] for key in sorted(admitted)
                         if key[0] == 'automation'), guard=guard,
                         actors=tuple(actors[key] for key in sorted(admitted)))
                 obj.witness = await NativeRenameEmissions.prepare(io, change, target_image,
                     guard=guard, source_handoff=handoff, automation_graph=graph)
+                if script_unique_move:
+                    from .native_own_script_service_move import NativeOwnScriptServiceMove
+                    _need(handoff is not None and obj.dependent_entity is handoff.source,
+                          'own_script_service_handoff_required')
+                    obj.script_service_move = await NativeOwnScriptServiceMove.capture(obj, handoff)
+                    handoff.bind_script_service_move(obj.script_service_move)
                 if graph is not None:
                     from .native_automation_producer_delivery import NativeAutomationProducerDelivery
-                    obj.delivery = NativeAutomationProducerDelivery(obj.runtime, transition.entities, obj.witness, graph)
-                elif transition.entities:
-                    obj.delivery = NativeTemplateProducerDelivery(obj.runtime, transition.entities, obj.witness)
+                    obj.delivery = NativeAutomationProducerDelivery(obj.runtime, producer_entities, obj.witness, graph)
+                elif producer_entities:
+                    obj.delivery = NativeTemplateProducerDelivery(obj.runtime, producer_entities, obj.witness)
             except BaseException:
                 if obj.witness is not None:
                     obj.witness.close()
@@ -125,6 +150,12 @@ class NativeTemplateStateRegistryEffect:
     def abort_before_attempt(self):
         _need(self.phase in ('captured', 'failed_before_attempt'), 'attempt_cannot_be_aborted')
         try:
+            # This path must plan all Template/this ownership checks before
+            # touching even our own temporary ingress or configuration slots.
+            if self.this_transfer is not None and self.this_transfer.phase == 'installed':
+                self.this_transfer.assert_installed_before_attempt()
+            if self.transport is not None and self.transport.phase in ('installed', 'registry_attempted'):
+                self.transport.check_installed_before_registry()
             if self.ingress is not None:
                 self.ingress.retire()
             # Reverse the installation order. Duration journals retain exact global
@@ -134,6 +165,9 @@ class NativeTemplateStateRegistryEffect:
                     and self.script_phase.active[0] is self):
                 self.script_phase.abort(self)
             self._restore_own_pre_attempt()
+            fence = getattr(self.root, 'own_dependent_fence', None)
+            if fence is not None and fence.node is self:
+                fence.node = None
             self.phase = 'failed_before_attempt'
         finally:
             # A refused foreign-alias cleanup must preserve its unknown graph,
@@ -175,18 +209,30 @@ class NativeTemplateStateRegistryEffect:
             self.delivery.retire_at_final_fence()
         self.state.assert_current(self.root.receipt)
         self.root.chain.verify_intent_source(self.intent, self.context, self.before)
+        admission = getattr(self.root, 'own_record_admission', None)
+        if admission is not None:
+            admission.check_execution()
+            if self.snapshot.prefix.head == self.root.own_record_head:
+                admission.check()
+        dependent = getattr(self.root, 'own_dependent_fence', None)
+        if dependent is not None:
+            dependent.check_sources()
         self.runtime.sources()
         fresh = sample_state_bindings(self.runtime, self.root.program, self.snapshot.prefix,
             self.snapshot.yaml_position, self.root.chain.accepted_documents())
         _need(self.snapshot.same_bindings(fresh), 'source_identity_changed')
         self.snapshot = fresh
         self.transition = fresh.transition_pairs(self.root.program, self.expected.active)
-        if self.transition.entities:
+        self.transfer_entities = self.transition.entities
+        if self.own_entity is not None and not any(e is self.own_entity for e in self.transfer_entities):
+            self.transfer_entities = (*self.transfer_entities, self.own_entity)
+        if self.transfer_entities:
             self.caller = _BindingCallerContext(self.task, self._fence)
             self.transport = NativeTemplateBindingTransport.capture(self.root.hass,
-                self.transition.entities, source_pairs=self.transition.source_pairs,
+                self.transfer_entities, source_pairs=self.transition.source_pairs,
                 caller_context=self.caller,
                 rename_witness=self.witness,
+                own_identity=None if self.own_entity is None else (self.own_entity, self.source, self.target),
                 configured_variable_pairs=tuple(BindingVariablePair(p.container, p.name,
                     p.before, p.after, p.source_identity) for p in self.transition.configured_variables),
                 rendered_variable_pairs=tuple(BindingVariablePair(p.variables, p.name,
@@ -195,7 +241,7 @@ class NativeTemplateStateRegistryEffect:
     def _fence(self, stage, sources, entities):
         self.guard()
         _need(asyncio.current_task() is self.task and self.root.chain.active is self.intent
-              and sources == self.transition.source_pairs and entities == self.transition.entities,
+              and sources == self.transition.source_pairs and entities == self.transfer_entities,
               'live_node_changed')
         self.root.chain.verify_intent_source(self.intent, self.context, self.before)
         self.state.assert_current(self.root.receipt)
@@ -236,14 +282,22 @@ class NativeTemplateStateRegistryEffect:
 
     def _restore_own_pre_attempt(self):
         transfer = self.transport
-        if transfer is None or transfer.phase not in ('installed', 'registry_attempted'):
+        has_this = self.this_transfer is not None and self.this_transfer.phase == 'installed'
+        has_transfer = transfer is not None and transfer.phase in ('installed', 'registry_attempted')
+        if not has_this and not has_transfer:
             return
-        _need(self.phase in ('captured', 'failed_before_attempt')
-              and not self._registry_attempted(),
+        _need(self.phase in ('captured', 'failed_before_attempt') and not self._registry_attempted(),
               'cleanup_after_attempt_forbidden')
-        # Revoked request authorization cannot prevent restoring our own
-        # unpublished synchronous cutover. No await/reentry happened since it.
+        # Validate every owned Template slot before the first rollback write.
         _need(asyncio.current_task() is self.task, 'cleanup_task_changed')
+        if has_this:
+            self.this_transfer.assert_installed_before_attempt()
+        if has_transfer:
+            transfer.check_installed_before_registry()
+        if has_this:
+            self.this_transfer.restore_before_attempt()
+        if not has_transfer:
+            return
         for row in transfer.rows:
             _need(row['entity']._template_result_info is row['new']
                   and row['entity']._on_remove[row['index']] == row['new'].async_remove,
@@ -272,10 +326,34 @@ class NativeTemplateStateRegistryEffect:
             if self.transport is not None and self.witness is not None:
                 from .native_template_rename_ingress import NativeTemplateRenameIngress
                 self.ingress = NativeTemplateRenameIngress.install(self.transport, self.witness, self.caller)
+            if self.own_entity is not None:
+                # The original cleanup list was pinned before the await. Admit
+                # only our tracker's exact substitution, then bind the retained
+                # native this slot immediately before the registry attempt.
+                from .native_source_handoff import NativeSourceHandoff
+                from .native_own_id_this import NativeOwnIDThisTransport
+                handoff = self.witness.source_handoff if self.witness is not None else None
+                _need(type(handoff) is NativeSourceHandoff and handoff.source is self.own_entity,
+                      'own_template_handoff_required')
+                handoff.bind_installed_template_tracker(self.transport)
+                self.this_transfer = NativeOwnIDThisTransport.capture(
+                    self.root.hass, self.own_entity, self.target, guard=self.guard, ingress=self.ingress)
+                self.this_transfer.install()
+                handoff.bind_installed_this(self.this_transfer)
         except BaseException:
             self.abort_before_attempt()
             raise
+        if self.dependent_entity is not None:
+            try:
+                fence = self.root.own_dependent_fence
+                _need(fence.node is None and fence.entity is self.dependent_entity,
+                      'own_dependent_node_changed')
+            except BaseException:
+                self.abort_before_attempt()
+                raise
         self.phase = 'registry_attempted'
+        if self.dependent_entity is not None:
+            fence.node = self
         # Exact NativeRegistryIO, not a callable supplied by an import/request.
         try:
             if self.witness is not None:
@@ -343,4 +421,21 @@ class NativeTemplateStateRegistryEffect:
               'accepted_effect_changed')
         if self.script_phase is not None:
             self.script_phase.accepted(self)
+        if self.dependent_entity is not None:
+            fence = self.root.own_dependent_fence
+            _need(fence.node is self, 'own_dependent_node_changed')
+            if self.script_service_move is not None:
+                from .native_own_id_inventory import NativeOwnIDInventory
+                move = self.script_service_move
+                move.check_moved()
+                fence.accepted_script_service = (id(move.inventory.service_registry), id(move.replacement),
+                    id(move.replacement.job), id(move.replacement.job.target), id(move.replacement.schema))
+                admission = getattr(self.root, 'own_record_admission', None)
+                if admission is not None:
+                    _need(admission.entity is self.dependent_entity, 'own_dependent_admission_changed')
+                    fresh = NativeOwnIDInventory.capture(self.root.hass, {self.target: self.source}, moving_change=self.change)
+                    _need(fresh.selected_entity is self.dependent_entity and fresh.service is move.replacement,
+                          'own_dependent_service_rebind_changed')
+                    admission.inventory = fresh
+            fence.node = None
         self.phase = 'accepted'

@@ -108,7 +108,8 @@ class _Projection:
         The active child.sequence edge is explicitly authorized by the pin.
         """
         from homeassistant.helpers.template import Template
-        from homeassistant.helpers.script_variables import ScriptVariables, ScriptRunVariables
+        from collections import ChainMap
+        from homeassistant.helpers.script_variables import ScriptVariables, ScriptRunVariables, _ParallelData
         from homeassistant.helpers.script import Script
         from homeassistant.core import State, Event
         from homeassistant.util.read_only_dict import ReadOnlyDict
@@ -149,8 +150,14 @@ class _Projection:
             elif kind is ScriptVariables:
                 walk(value.variables, value, 'variables', (*path, 'variables'), ancestry)
             elif kind is ScriptRunVariables:
-                walk(value._local_data, value, '_local_data', (*path, 'local'), ancestry)
-                walk(value._previous, value, '_previous', (*path, 'previous'), ancestry)
+                for name in ('_local_data', '_previous', '_parent', '_parallel_data',
+                             '_non_parallel_scope', '_full_scope'):
+                    walk(getattr(value, name), value, name, (*path, name), ancestry)
+            elif kind is _ParallelData:
+                for name in ('protected', 'outer_scope_writes'):
+                    walk(getattr(value, name), value, name, (*path, name), ancestry)
+            elif kind is ChainMap:
+                walk(value.maps, value, 'maps', (*path, 'maps'), ancestry)
             elif kind is State:
                 walk(value.attributes, value, 'attributes', (*path, 'attributes'), ancestry)
             elif kind is Event:
@@ -283,6 +290,24 @@ def _project_actor(hass, entity, script, pin, key, old, new, source_ids, entitie
     return projector, aliases
 
 
+
+def _trace_keys(program, entity, domain):
+    """Accepted pre-rename runs retain their original native trace key."""
+    current = domain + '.' + entity.unique_id
+    keys = {current}
+    if domain == 'script':
+        before = {row[0] for row in dict(program.rows(frozenset()))['script']}
+        after = {row[0] for row in dict(program.rows(frozenset(program.source_order)))['script']}
+        for old, new in program.mapping:
+            if not old.startswith('script.') or not new.startswith('script.'):
+                continue
+            a, b = old.split('.', 1)[1], new.split('.', 1)[1]
+            if a in before and a not in after and b in after and entity.unique_id in (a, b):
+                keys.update((old, new))
+    _need(len(keys) <= 2, 'active_trace_key_scope_unqualified')
+    return frozenset(keys)
+
+
 def validate_active_program(hass, program, entities, admitted, changed):
     """Read-only pre-record admission of the actual future slots and owners."""
     from .yaml_validation_worker import _normal
@@ -290,16 +315,53 @@ def validate_active_program(hass, program, entities, admitted, changed):
             (entities[key].action_script if key[0] == 'automation' else entities[key].script).is_running]
     if not busy:
         return
-    _need(len(program.source_order) == 1 and len(changed) == 1 and busy == list(changed),
+    _need(len(program.source_order) in (1, 2) and len(busy) == 1 and busy[0] in changed,
           'active_config_single_busy_actor_required')
-    source, = program.source_order
-    key, = changed
+    key, = busy
     entity = entities[key]
     script = entity.action_script if key[0] == 'automation' else entity.script
     pin = ActiveWaitPins.capture(script)
-    before, after = dict(program.rows(frozenset())), dict(program.rows(frozenset((source,))))
-    old = next(row for row in before[key[0]] if row[0] == key[1])
-    new = next(row for row in after[key[0]] if row[0] == key[1])
+    # The own-ID + one-source profile has two registry steps, but only the
+    # ordinary source edge is allowed to rewrite this active future action.
+    # Compare the SAME sealed consecutive prefixes, not a guessed actor or a
+    # positional zip across a changed native Script key.
+    edges, mask, key_move = [], frozenset(), False
+    aliases = {key[1]}
+    if key[0] == 'script':
+        for old, new in program.mapping:
+            if old.startswith('script.') and new.startswith('script.'):
+                a, b = old.split('.', 1)[1], new.split('.', 1)[1]
+                if key[1] in (a, b):
+                    aliases.update((a, b))
+    for candidate in program.source_order:
+        target = mask | {candidate}
+        paired = program.paired_rows(mask, target, candidate)
+        actor_pairs = []
+        for domain, pairs in paired:
+            for old, new in pairs:
+                actor = domain == key[0] and (old[0] in aliases or new[0] in aliases)
+                if old != new and not actor:
+                    other = entities.get((domain, old[0])) or entities.get((domain, new[0]))
+                    _need(other is not None, 'active_config_other_actor_missing')
+                    other_script = other.action_script if domain == 'automation' else other.script
+                    _need(not other_script.is_running and not other_script._runs,
+                          'active_config_multiple_busy_actors_unsupported')
+                if actor:
+                    actor_pairs.append((old, new))
+        _need(len(actor_pairs) == 1, 'active_config_actor_key_changed')
+        old, new = actor_pairs[0]
+        if old[0] != new[0]:
+            _need(key[0] == 'script' and candidate.startswith('script.'),
+                  'active_config_actor_key_changed')
+            key_move = True
+        if old[1:] != new[1:]:
+            edges.append((candidate, old, new))
+        mask = target
+    if not edges:
+        _need(key_move, 'active_config_single_source_edge_required')
+        return None
+    _need(len(edges) == 1, 'active_config_single_source_edge_required')
+    source, old, new = edges[0]
     seq_index = 3 if key[0] == 'automation' else 2
     actual = _normal(entity.raw_config), _normal(script.sequence)
     if actual == (new[1], new[seq_index]):
@@ -309,8 +371,14 @@ def validate_active_program(hass, program, entities, admitted, changed):
     if key[0] == 'automation':
         _need(all('for' not in cfg for actor_key in admitted if actor_key[0] == 'automation'
                   for cfg in entities[actor_key]._trigger_config), 'active_config_duration_unsupported')
-    _project_actor(hass, entity, script, pin, key, old, new,
-                   (source, dict(program.mapping)[source]), entities)
+    projector, _ = _project_actor(hass, entity, script, pin, key, old, new,
+                                  (source, dict(program.mapping)[source]), entities)
+    # Trace owners must be proved at review/record admission, before an earlier
+    # own-ID registry step can write. A later source edge repeats this census at
+    # its own final fence and owns the actual planned detachment/undo.
+    from .native_active_trace_protection import NativeActiveTraceProtection
+    return NativeActiveTraceProtection.capture(hass, entity, script, pin, projector,
+                                               trace_keys=_trace_keys(program, entity, key[0]))
 
 
 class _ActiveBase:
@@ -379,6 +447,7 @@ class _ActiveBase:
         self.guard()
         self._check_pins()
         self._check_aliases()
+        self.trace_protection.check_before()
         _need(self._actor_graph() == self.original, 'active_config_before_graph_changed')
         _need(self.observer.sample(self.chain, input_state=self.input_state) == self.sample,
               'active_config_before_sample_changed')
@@ -407,6 +476,10 @@ class _ActiveBase:
         else:
             self._check_pins()
             self._check_aliases()
+        if self.trace_protection.phase == 'captured':
+            self.trace_protection.check_before()
+        else:
+            self.trace_protection.check_installed(strict=before_attempt or not attempted)
         self._check_untouched_slots()
         _need(self._actor_graph(slots=self.original_slots) == self.original,
               'active_config_retained_original_changed')
@@ -431,9 +504,11 @@ class _ActiveBase:
         from .native_automation_duration_binding import _PreEffectLog
         self._check_before()
         self.log = _PreEffectLog()
+        self.trace_protection.retain(self.log)
         for container, key, _, _ in self.projector.operations:
             self.log.retain('entry', (container, key))
         try:
+            self.trace_protection.install(self.log)
             for container, key, before, after in self.projector.operations:
                 self.log.write('entry', (container, key), after,
                                lambda container=container, key=key, after=after: container.__setitem__(key, after))
@@ -448,6 +523,7 @@ class _ActiveBase:
                 if graph_plan is not None:
                     self.graph.apply_retire(graph_plan, before_attempt=True)
                 self.log.undo(plan)
+                self.trace_protection.restored()
                 _need(self._actor_graph() == self.original, 'active_config_restore_graph_changed')
                 self._rows(self.before)
                 self.phase = 'failed_before_attempt'
@@ -470,6 +546,7 @@ class _ActiveBase:
             if graph_plan is not None:
                 self.graph.apply_retire(graph_plan, before_attempt=True)
             self.log.undo(plan)
+            self.trace_protection.restored()
             _need(self._actor_graph() == self.original, 'active_config_restore_graph_changed')
             self._rows(self.before)
             self.phase = 'restored_before_attempt'
@@ -506,6 +583,9 @@ def _capture(observer, chain, source, *, reverse, guard, input_state, automation
     obj.observer, obj.chain, obj.guard, obj.sample = observer, chain, guard, sample
     obj.input_state, obj.before, obj.after = input_state, before, after
     obj.task, obj.phase, obj.actors, obj.projector = asyncio.current_task(), 'captured', tuple(actor_rows), projector
+    from .native_active_trace_protection import NativeActiveTraceProtection
+    obj.trace_protection = NativeActiveTraceProtection.capture(observer.hass, entity, script, pin, projector,
+        trace_keys=_trace_keys(observer.program, entity, key[0]))
     obj.original = obj._actor_graph()
     obj.original_slots = {id(container): tuple(container.items())
                           for container, _, _, _ in projector.operations}
@@ -560,3 +640,59 @@ class ActiveAutomationTransport(_ActiveBase):
 
     def install(self, witness):
         self._install(witness)
+
+
+class ActiveScriptIdentityTransport:
+    """Keep two accepted native runs untouched for a key-only Script edge."""
+
+    @classmethod
+    def capture(cls, observer, chain, source, *, reverse, guard, input_state):
+        from .native_active_execution_pins import ActiveWaitPins
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        guard()
+        sample = observer.sample(chain, input_state=input_state)
+        active = sample.prefix.active
+        _need((source in active) == reverse, 'active_identity_prefix_changed')
+        target = active - {source} if reverse else active | {source}
+        pairs = observer.program.paired_rows(active, target, source)
+        _need(all(old == new for domain, rows in pairs if domain == 'automation' for old, new in rows),
+              'active_identity_other_actor_changed')
+        changed = [(old, new) for domain, rows in pairs if domain == 'script'
+                   for old, new in rows if old != new]
+        _need(len(changed) == 1, 'active_identity_actor_changed')
+        old, new = changed[0]
+        _need(old[0] != new[0] and old[1:] == new[1:]
+              and source.startswith('script.'), 'active_identity_program_changed')
+        component = observer.hass.data.get(DATA_INSTANCES, {}).get('script')
+        matches = [entity for entity in component.entities if entity.unique_id == old[0]] if component else []
+        _need(len(matches) == 1 and matches[0].entity_id == 'script.' + old[0],
+              'active_identity_native_actor_changed')
+        obj = object.__new__(cls)
+        obj.observer, obj.chain, obj.source, obj.guard, obj.input_state = observer, chain, source, guard, input_state
+        obj.sample, obj.entity, obj.script = sample, matches[0], matches[0].script
+        obj.pin, obj.task, obj.phase = ActiveWaitPins.capture(obj.script), asyncio.current_task(), 'captured'
+        obj.check_before()
+        return obj
+
+    def check_before(self):
+        _need(asyncio.current_task() is self.task and self.phase == 'captured'
+              and self.entity.script is self.script, 'active_identity_owner_changed')
+        self.guard()
+        self.pin.check()
+        _need(self.observer.sample(self.chain, input_state=self.input_state) == self.sample,
+              'active_identity_prefix_changed')
+
+    def install(self):
+        self.check_before()
+        self.phase = 'installed'
+
+    def retain_after_attempt(self):
+        _need(asyncio.current_task() is self.task and self.phase == 'installed',
+              'active_identity_owner_changed')
+        self.phase = 'attempted'
+
+    def restore_before_attempt(self):
+        _need(asyncio.current_task() is self.task and self.phase == 'installed'
+              and self.entity.script is self.script, 'active_identity_owner_changed')
+        self.pin.check(allow_elapsed=True)
+        self.phase = 'restored_before_attempt'

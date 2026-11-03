@@ -36,6 +36,12 @@ _SENSOR_PINS = {
     '2026.10.4': 'c3cbda48f1cdfae2401e800ab0dd77399b12a64b654b728d0de28f2c07b5fd09',
 }
 _SENSOR_PINS['2026.10.2'] = _SENSOR_PINS['2026.10.4']  # actual installed source readback is exact
+_RESTORE_PINS = {'2025.6.0': 'e3fad462c178587e3f2d669d8b5fc58c3ebea64af3d477dfacd1109432fb53d3',
+                 '2026.10.4': '9f6fcdca1a1b0b7301e2bb9d9ede036241ac06330bd041c54397b0c9eee78128'}
+_RESTORE_PINS['2026.10.2'] = _RESTORE_PINS['2026.10.4']
+_SCRIPT_PINS = {'2025.6.0': '94117b6187907c14e64b77e86342a128010c5c5e04198fac6c0df37eb110768e',
+                '2026.10.4': '8afceb2f5a092830ca98f5ddd6349f131f5d8d555dda92c31782e71efc8df69e'}
+_SCRIPT_PINS['2026.10.2'] = _SCRIPT_PINS['2026.10.4']
 _NAME = 'ha_entity_renamer.source_binding_handoff'
 
 
@@ -82,12 +88,65 @@ class NativeSourceHandoff:
         if len(candidates) != 1:
             return False
         source = candidates[0]
-        return (isinstance(source, SensorEntity) and getattr(source, 'group', None) is None
-            and getattr(source, '_Entity__group', None) is None and len(source._on_remove) == 2
+        callbacks = source._on_remove
+        if row.platform in ('automation', 'script'):
+            try:
+                from homeassistant.components.automation import AutomationEntity
+                from homeassistant.components.script import ScriptEntity
+                from homeassistant.helpers.restore_state import RestoreEntity, RestoreStateData, DATA_RESTORE_STATE
+                from .native_active_execution_pins import capture_census
+                from .yaml_runtime_observer import NativeYAMLRuntimeReadback
+                expected = AutomationEntity if row.platform == 'automation' else ScriptEntity
+                _need(type(source) is expected and type(callbacks) is list and len(callbacks) == 2
+                      and inspect.getattr_static(source, 'async_registry_entry_updated')
+                          is Entity.async_registry_entry_updated
+                      and inspect.getattr_static(source, 'async_on_remove') is Entity.async_on_remove
+                      and inspect.getattr_static(source, 'async_internal_added_to_hass')
+                          is RestoreEntity.async_internal_added_to_hass, 'dependent_owner_unqualified')
+                restore = io.hass.data.get(DATA_RESTORE_STATE)
+                _need(type(restore) is RestoreStateData and restore.hass is io.hass
+                      and type(restore.entities) is dict and restore.entities.get(row.entity_id) is source
+                      and target['entity_id'] not in restore.entities
+                      and sum(value is source for value in restore.entities.values()) == 1,
+                      'dependent_restore_unqualified')
+                readback = NativeYAMLRuntimeReadback(io.hass)
+                readback._projection(row.platform)
+                capture_census(source.action_script if row.platform == 'automation' else source.script)
+                return True
+            except Exception:
+                return False
+        internal_added = SensorEntity.async_internal_added_to_hass
+        basic = (isinstance(source, SensorEntity) and getattr(source, 'group', None) is None
+            and getattr(source, '_Entity__group', None) is None and type(callbacks) is list
             and all(inspect.getattr_static(source, name) is getattr(SensorEntity, name)
                     for name in ('async_registry_entry_updated', '_async_read_entity_options',
-                                 '_update_suggested_precision', 'async_internal_added_to_hass'))
+                                 '_update_suggested_precision'))
+            and inspect.getattr_static(source, 'async_internal_added_to_hass') is internal_added
             and inspect.getattr_static(source, 'async_on_remove') is Entity.async_on_remove)
+        if not basic:
+            return False
+        if row.platform != 'template':
+            return len(callbacks) == 2
+        # A Template producer also owns its retained tracker cleanup. Its full
+        # native graph is proved at prepare and again at the final fence.
+        try:
+            from .native_template_binding_transport import _Runtime
+            runtime = _Runtime(io.hass)
+            qualified = (type(source) is runtime.native.sensor and len(callbacks) == 3
+                    and runtime.graph(source) is source._template_result_info
+                    and sum(cb == source._template_result_info.async_remove for cb in callbacks) == 1)
+            if qualified and __version__ != '2025.6.0':
+                from homeassistant.helpers import restore_state
+                restore = io.hass.data.get(restore_state.DATA_RESTORE_STATE)
+                qualified = (type(restore) is restore_state.RestoreStateData and restore.hass is io.hass
+                    and type(restore.entities) is dict and restore.entities.get(row.entity_id) is source
+                    and target['entity_id'] not in restore.entities
+                    and sum(value is source for value in restore.entities.values()) == 1
+                    and inspect.getattr_static(source, 'async_internal_will_remove_from_hass')
+                        is restore_state.RestoreEntity.async_internal_will_remove_from_hass)
+            return qualified
+        except (Exception,):
+            return False
 
     @classmethod
     async def prepare(cls, io, change, target, *, guard):
@@ -118,23 +177,60 @@ class NativeSourceHandoff:
         obj.registry_calls, obj.api_calls, obj.handler_calls, obj.handler_done = 0, 0, 0, False
         obj.new_row = obj.payload = obj.registry_event = None
         obj.new_unsub, obj.old_retired = None, False
+        obj.own_this = obj.own_template_transfer = None
         obj.tool = None
-        refs = [(SensorEntity, 'async_registry_entry_updated'),
-                (SensorEntity, '_async_read_entity_options'), (SensorEntity, '_update_suggested_precision'),
-                (Entity, 'async_on_remove'), (SensorEntity, 'async_internal_added_to_hass'),
-                (event_helper, 'async_track_entity_registry_updated_event'), (StateMachine, 'async_available'),
+        dependent = obj.row.platform in ('automation', 'script')
+        restore = dependent or obj.row.platform == 'template' and __version__ != '2025.6.0'
+        if restore:
+            from homeassistant.helpers import restore_state
+        if dependent:
+            refs = [(Entity, 'async_registry_entry_updated'), (Entity, '_async_registry_updated'),
+                    (Entity, '_async_process_registry_update_or_remove'), (Entity, 'async_on_remove'),
+                    (restore_state.RestoreEntity, 'async_internal_added_to_hass')]
+        else:
+            refs = [(SensorEntity, 'async_registry_entry_updated'),
+                    (SensorEntity, '_async_read_entity_options'), (SensorEntity, '_update_suggested_precision'),
+                    (Entity, 'async_on_remove'), (SensorEntity, 'async_internal_added_to_hass')]
+        refs += [(event_helper, 'async_track_entity_registry_updated_event'), (StateMachine, 'async_available'),
                 (event_helper, '_async_track_event'), (event_helper, '_remove_listener'),
                 (Entity, 'async_internal_added_to_hass')]
         pins = dict(_SOURCES[__version__])
         pins.update({'helpers/event.py': _EVENT_PINS[__version__],
                      'components/sensor/__init__.py': _SENSOR_PINS[__version__]})
+        if restore:
+            pins['helpers/restore_state.py'] = _RESTORE_PINS[__version__]
+            refs.extend([(restore_state.RestoreEntity, 'async_internal_added_to_hass'),
+                         (restore_state.RestoreEntity, 'async_internal_will_remove_from_hass'),
+                         (restore_state.RestoreStateData, 'async_restore_entity_added'),
+                         (restore_state.RestoreStateData, 'async_restore_entity_removed')])
+        obj.dependent_refs = ()
+        if dependent:
+            if obj.row.platform == 'automation':
+                from homeassistant.components.automation import AutomationEntity
+                from .native_automation_state_binding import _PINS
+                pins['components/automation/__init__.py'] = _PINS[__version__]['components/automation/__init__.py']
+                obj.dependent_refs = ((AutomationEntity, 'async_added_to_hass'),
+                    (AutomationEntity, 'async_will_remove_from_hass'),
+                    (AutomationEntity, '_async_trigger_if_enabled'))
+            else:
+                from homeassistant.components.script import ScriptEntity
+                pins['components/script/__init__.py'] = _SCRIPT_PINS[__version__]
+                obj.dependent_refs = ((ScriptEntity, 'async_added_to_hass'),
+                    (ScriptEntity, 'async_will_remove_from_hass'), (ScriptEntity, '_service_handler'))
+            refs.extend(obj.dependent_refs)
         obj.refs = refs
         obj.methods, obj.codes, obj.globals = await obj.hass.async_add_executor_job(
             _extra_audit, Path(homeassistant.__file__).resolve().parent, pins, refs)
         obj.subscribe = obj.methods[5]
         guard()
-        _need(isinstance(obj.source, SensorEntity) and type(obj.source).__setattr__ is object.__setattr__,
-              'sensor_source_required')
+        if dependent:
+            from homeassistant.components.automation import AutomationEntity
+            from homeassistant.components.script import ScriptEntity
+            expected = AutomationEntity if obj.row.platform == 'automation' else ScriptEntity
+            _need(type(obj.source) is expected, 'dependent_source_required')
+        else:
+            _need(isinstance(obj.source, SensorEntity), 'sensor_source_required')
+        _need(type(obj.source).__setattr__ is object.__setattr__, 'source_setattr_unqualified')
         for name in ('entity_id', 'registry_entry'):
             _need(inspect.getattr_static(type(obj.source), name, None) is None, 'source_descriptor_unqualified')
         for index in range(3):
@@ -154,9 +250,40 @@ class NativeSourceHandoff:
               'source_info_unqualified')
         obj.info_items = tuple(obj.info.items())
         obj.state_info, obj.remove_future = obj.source._state_info, obj.source._Entity__remove_future
+        obj.dependent_script = obj.dependent_census = None
+        if dependent:
+            from .native_active_execution_pins import capture_census
+            obj.dependent_script = (obj.source.action_script if obj.row.platform == 'automation'
+                                    else obj.source.script)
+            obj.dependent_census = capture_census(obj.dependent_script)
+        obj.restore_owner = obj.restore_map = obj.restore_key = None
+        if restore:
+            obj.restore_key = restore_state.DATA_RESTORE_STATE
+            obj.restore_owner = obj.hass.data.get(obj.restore_key)
+            _need(type(obj.restore_owner) is restore_state.RestoreStateData
+                  and obj.restore_owner.hass is obj.hass
+                  and type(obj.restore_owner.entities) is dict
+                  and obj.restore_owner.entities.get(obj.old) is obj.source
+                  and obj.new not in obj.restore_owner.entities
+                  and sum(value is obj.source for value in obj.restore_owner.entities.values()) == 1
+                  and inspect.getattr_static(obj.source, 'async_internal_will_remove_from_hass')
+                      is restore_state.RestoreEntity.async_internal_will_remove_from_hass,
+                  'restore_owner_unqualified')
+            obj.restore_map = obj.restore_owner.entities
         obj.callbacks = tuple(obj.source._on_remove)
         obj.remove_callbacks = obj.source._on_remove
-        _need(type(obj.source._on_remove) is list and len(obj.callbacks) == 2, 'extra_cleanup_unqualified')
+        obj.template_runtime = obj.template_tracker = None
+        if obj.row.platform == 'template':
+            from .native_template_binding_transport import _Runtime
+            obj.template_runtime = _Runtime(obj.hass)
+            _need(type(obj.source) is obj.template_runtime.native.sensor,
+                  'template_source_type_unqualified')
+            obj.template_tracker = obj.template_runtime.graph(obj.source)
+            _need(len(obj.callbacks) == 3 and sum(cb == obj.template_tracker.async_remove
+                  for cb in obj.callbacks) == 1, 'template_source_cleanup_unqualified')
+        else:
+            _need(len(obj.callbacks) == 2, 'extra_cleanup_unqualified')
+        _need(type(obj.source._on_remove) is list, 'source_cleanup_list_unqualified')
         candidates = {code for method in audit.methods.values() for code in _nested(method.__code__)
                       if code.co_name == 'remove_entity_cb'}
         cleanups = [item for item in obj.callbacks if type(item) is FunctionType and item.__code__ in candidates]
@@ -185,6 +312,7 @@ class NativeSourceHandoff:
             sys.monitoring.register_callback(obj.tool, sys.monitoring.events.PY_RETURN, obj._returned)
             sys.monitoring.set_local_events(obj.tool, audit.codes['fire'], sys.monitoring.events.PY_START)
             sys.monitoring.set_local_events(obj.tool, audit.codes['registry_update'], sys.monitoring.events.PY_START)
+            sys.monitoring.set_local_events(obj.tool, audit.codes['registry_writer'], sys.monitoring.events.PY_START)
             sys.monitoring.set_local_events(obj.tool, audit.codes['source'],
                 sys.monitoring.events.PY_START | sys.monitoring.events.PY_RETURN)
         except BaseException:
@@ -210,11 +338,64 @@ class NativeSourceHandoff:
                       for name in ('entity_id', 'registry_entry'))
               and all(inspect.getattr_static(self.source, self.refs[index][1]) is self.methods[index]
                       for index in range(5)), 'source_hook_changed')
+        if self.restore_owner is not None:
+            from homeassistant.helpers import restore_state
+            _need(restore_state.DATA_RESTORE_STATE is self.restore_key
+                  and self.hass.data.get(self.restore_key) is self.restore_owner,
+                  'restore_global_changed')
+        for owner, name in self.dependent_refs:
+            _need(inspect.getattr_static(self.source, name) is getattr(owner, name),
+                  'dependent_source_hook_changed')
 
     def _callbacks_current(self):
         return (self.source._on_remove is self.remove_callbacks
                 and len(self.remove_callbacks) == len(self.callbacks)
                 and all(actual is expected for actual, expected in zip(self.remove_callbacks, self.callbacks)))
+
+    def bind_installed_template_tracker(self, transport):
+        """Accept one exact Root-owned tracker swap before the registry call."""
+        from .native_template_binding_transport import NativeTemplateBindingTransport
+        self._owner()
+        _need(self.template_runtime is not None and type(transport) is NativeTemplateBindingTransport
+              and transport.hass is self.hass and transport.phase in ('installed', 'registry_attempted')
+              and not self.attempted and not self.closed, 'template_transfer_unqualified')
+        matches = [row for row in transport.rows if row['entity'] is self.source]
+        _need(len(matches) == 1, 'template_transfer_owner_missing')
+        row = matches[0]
+        index = row['index']
+        current = self.source._on_remove
+        _need(row['tracker'] is self.template_tracker and row['detached']
+              and self.source._template_result_info is row['new']
+              and row['cleanup'] == self.callbacks and current is self.remove_callbacks
+              and len(current) == len(self.callbacks) and 0 <= index < len(current)
+              and self.callbacks[index] == self.template_tracker.async_remove
+              and current[index] == row['new'].async_remove
+              and all(current[i] is self.callbacks[i] for i in range(len(current)) if i != index),
+              'template_transfer_cleanup_changed')
+        transport.check_installed_before_registry()
+        self.template_tracker = row['new']
+        self.callbacks = tuple(current)
+        self.own_template_transfer = transport
+        self._before()
+
+    def bind_script_service_move(self, move):
+        from .native_own_script_service_move import NativeOwnScriptServiceMove
+        _need(type(move) is NativeOwnScriptServiceMove and move.handoff is self
+              and move.node.change is self.change and self.row.platform == 'script'
+              and getattr(self, 'script_service_move', None) is None
+              and not self.attempted and not self.closed, 'script_service_move_unqualified')
+        move.before()
+        self.script_service_move = move
+
+    def bind_installed_this(self, transport):
+        from .native_own_id_this import NativeOwnIDThisTransport
+        _need(type(transport) is NativeOwnIDThisTransport and self.template_runtime is not None
+              and transport.entity is self.source and transport.old == self.old
+              and transport.destination == self.new and transport.tracker is self.template_tracker
+              and self.own_this is None and not self.attempted and not self.closed,
+              'template_this_owner_unqualified')
+        transport.assert_installed_before_attempt()
+        self.own_this = transport
 
     def _subscription(self, unsub, entity_id):
         from homeassistant.core import HassJob
@@ -262,6 +443,21 @@ class NativeSourceHandoff:
               and self.hass.states.get(self.old) is not None and self.hass.states.async_available(self.new)
               and not getattr(self.bus, '_dispatching', False), 'source_preflight_changed')
         self._subscription(self.unsub, self.old)
+        if self.own_template_transfer is not None:
+            self.own_template_transfer.check_installed_before_registry()
+        if self.own_this is not None:
+            self.own_this.assert_installed_before_attempt()
+        if self.dependent_script is not None:
+            from .native_active_execution_pins import check_census
+            actual = (self.source.action_script if self.row.platform == 'automation' else self.source.script)
+            _need(actual is self.dependent_script, 'dependent_script_owner_changed')
+            check_census(actual, self.dependent_census)
+        if self.restore_owner is not None:
+            _need(self.hass.data.get(self.restore_key) is self.restore_owner
+                  and self.restore_owner.entities is self.restore_map
+                  and self.restore_map.get(self.old) is self.source and self.new not in self.restore_map
+                  and sum(value is self.source for value in self.restore_map.values()) == 1,
+                  'restore_owner_changed')
 
     def _monitor_current(self):
         monitor = sys.monitoring
@@ -270,12 +466,43 @@ class NativeSourceHandoff:
               and all(monitor.get_local_events(self.tool, self.audit.codes[name]) == events
                   for name, events in (('fire', monitor.events.PY_START),
                     ('registry_update', monitor.events.PY_START),
+                    ('registry_writer', monitor.events.PY_START),
                     ('source', monitor.events.PY_START | monitor.events.PY_RETURN))), 'monitor_lost')
 
     def _overlap_current(self):
         expected = self.callbacks + (self.new_unsub,)
         return (self.source._on_remove is self.remove_callbacks and len(self.remove_callbacks) == len(expected)
                 and all(actual is item for actual, item in zip(self.remove_callbacks, expected)))
+
+    def script_dispatch_image(self, node):
+        """Prove the one synchronous registry-to-State transition for this node."""
+        import asyncio
+        move = getattr(self, 'script_service_move', None)
+        _need(asyncio.current_task() is self.owner and threading.get_ident() == self.thread
+              and asyncio.get_running_loop() is self.loop, 'owner_changed')
+        # Called inside the owning guard itself: do not recursively call it.
+        self._native_check()
+        _need(move is not None and move.node is node and node.witness.source_handoff is self
+              and asyncio.current_task() is node.task and node.root.chain.active is node.intent
+              and node.phase == 'registry_attempted' and self.in_native and self.attempted
+              and not self.closed and self.error is None and self.api_calls == self.registry_calls == 1
+              and self.handler_calls == 0 and self.new_row is not None
+              and self.registry.async_get(self.new) is self.new_row and self.registry.async_get(self.old) is None
+              and self.source.registry_entry is self.new_row and self.source.entity_id == self.new
+              and self.source._state_info is self.state_info
+              and self.source._Entity__remove_future is self.remove_future
+              and self.source.platform is self.platform and self.source.hass is self.hass
+              and self._overlap_current() and self.id_cell.cell_contents == self.new
+              and self.sources.get(self.new) is self.info and self.old not in self.sources
+              and len(self.info) == len(self.info_items)
+              and all(key is old_key and value is old_value for (key, value), (old_key, old_value)
+                      in zip(self.info.items(), self.info_items))
+              and all(mapping.get(self.new) is self.source and self.old not in mapping for mapping in self.maps)
+              and self.original_state is not None and self.hass.states.get(self.old) is self.original_state
+              and self.hass.states.get(self.new) is None, 'script_dispatch_image_changed')
+        self._subscription(self.unsub, self.old)
+        self._subscription(self.new_unsub, self.new)
+        return self.source
 
     def _retire_old(self):
         """Retire only the old native job, including after an uncertain attempt."""
@@ -307,7 +534,9 @@ class NativeSourceHandoff:
         try:
             if not self.in_native:
                 return
-            if code is self.audit.codes['registry_update']:
+            from .native_registry_transition import _native_script_suggested_move
+            private_writer = _native_script_suggested_move(self.change.before, self.change.after)
+            if code is self.audit.codes['registry_writer' if private_writer else 'registry_update']:
                 if (frame.f_locals.get('self') is self.registry
                         and frame.f_locals.get('entity_id') in (self.old, self.new)):
                     self.api_calls += 1
@@ -334,10 +563,10 @@ class NativeSourceHandoff:
                 return
             self.registry_calls += 1
             public = parent.f_back
-            caller = public.f_back if public is not None else None
+            caller = public if private_writer else (public.f_back if public is not None else None)
             owning = caller.f_back if caller is not None else None
             _need(self.registry_calls == 1 and parent.f_lasti in self.audit.sites['registry_fire']
-                  and public is not None and public.f_code is self.audit.codes['registry_update']
+                  and (private_writer or public is not None and public.f_code is self.audit.codes['registry_update'])
                   and caller is not None and caller.f_code is self.audit.io_mutate_code
                   and caller.f_locals.get('self') is self.io
                   and caller.f_locals.get('prepared') is self.change and caller.f_locals.get('target') is self.target
@@ -345,7 +574,14 @@ class NativeSourceHandoff:
                   and owning.f_locals.get('self') is self
                   and parent.f_locals.get('self') is self.registry and parent.f_locals.get('old') is self.row
                   and payload.get('action') == 'update' and payload.get('old_entity_id') == self.old
-                  and payload.get('changes') == {'entity_id': self.old}, 'registry_callsite_unqualified')
+                  and payload.get('changes') == (
+                      {'entity_id': self.old, 'unique_id': self.row.unique_id,
+                       **({'original_name': self.row.original_name,
+                            **({'name': self.row.name} if self.change.before.get('name') != self.change.after.get('name') else {})}
+                          if self.script_service_move.inventory.default_name else {}),
+                       **({'suggested_object_id': self.row.suggested_object_id} if private_writer else {})}
+                      if getattr(self, 'script_service_move', None) is not None
+                      else {'entity_id': self.old}), 'registry_callsite_unqualified')
             new = parent.f_locals.get('new')
             _need(new is self.registry.async_get(self.new) and new is not None and new.id == self.row.id
                   and self.registry.async_get(self.old) is None and self.source.registry_entry is self.row
@@ -371,8 +607,21 @@ class NativeSourceHandoff:
             del self.sources[self.old]
             self.sources[self.new] = self.info
             self.id_cell.cell_contents = self.new
+            if self.restore_owner is not None:
+                _need(self.hass.data.get(self.restore_key) is self.restore_owner
+                      and self.restore_owner.entities is self.restore_map
+                      and self.restore_map.get(self.old) is self.source and self.new not in self.restore_map
+                      and sum(value is self.source for value in self.restore_map.values()) == 1,
+                      'restore_owner_changed')
+                del self.restore_map[self.old]
+                self.restore_map[self.new] = self.source
             self.source.entity_id = self.new
             self.source.registry_entry = new
+            # The native handler now sees the new row and will not unload the
+            # retained entity/runs, even if the service subeffect is uncertain.
+            move = getattr(self, 'script_service_move', None)
+            if move is not None:
+                move.move_in_registry_dispatch()
         except BaseException as error:
             if self.error is None:
                 self.error = (error.args[0] if type(error) is NativeSourceHandoffError
@@ -393,8 +642,22 @@ class NativeSourceHandoff:
             self._before()
             self._monitor_current()
             self.original_state = self.hass.states.get(self.old)
+            move = getattr(self, 'script_service_move', None)
+            if move is not None:
+                from .native_own_script_service_move import NativeOwnScriptServiceMove
+                _need(type(move) is NativeOwnScriptServiceMove and move.handoff is self
+                      and not hasattr(self.io, '_script_service_capability'),
+                      'script_service_move_owner_changed')
             self.attempted, self.in_native = True, True
-            mutation = self.io.mutate(self.change, self.target)
+            if move is not None:
+                self.io._script_service_capability = move
+            try:
+                mutation = self.io.mutate(self.change, self.target)
+            finally:
+                if move is not None:
+                    _need(getattr(self.io, '_script_service_capability', None) is move,
+                          'script_service_move_capability_changed')
+                    del self.io._script_service_capability
             if self.error is not None:
                 raise NativeSourceHandoffError(self.error)
             _need(self.registry_calls == 1, 'registry_dispatch_not_observed')
@@ -415,12 +678,20 @@ class NativeSourceHandoff:
             # Native handler has written NEW first, without lifecycle removal.
             self.hass.states.async_remove(self.old, context=state.context)
             self._owner()
+            if move is not None:
+                move.check_moved()
             _need(self.error is None and self.api_calls == self.registry_calls == self.handler_calls == 1
                   and self.source.registry_entry is self.new_row and self.registry.async_get(self.new) is self.new_row
                   and self.hass.states.get(self.old) is None and self.hass.states.get(self.new) is state
                   and all(mapping.get(self.new) is self.source and self.old not in mapping for mapping in self.maps)
                   and self.sources.get(self.new) is self.info and self.old not in self.sources
                   and self.id_cell.cell_contents == self.new, 'source_handoff_readback_uncertain')
+            if self.restore_owner is not None:
+                _need(self.hass.data.get(self.restore_key) is self.restore_owner
+                      and self.restore_owner.entities is self.restore_map
+                      and self.restore_map.get(self.new) is self.source and self.old not in self.restore_map
+                      and sum(value is self.source for value in self.restore_map.values()) == 1,
+                      'restore_handoff_readback_uncertain')
             return mutation
         finally:
             self.in_native = False
@@ -434,7 +705,8 @@ class NativeSourceHandoff:
             return
         self.closed = True
         if self.tool is not None and sys.monitoring.get_tool(self.tool) == _NAME:
-            for code in (self.audit.codes['fire'], self.audit.codes['source'], self.audit.codes['registry_update']):
+            for code in (self.audit.codes['fire'], self.audit.codes['source'], self.audit.codes['registry_update'],
+                         self.audit.codes['registry_writer']):
                 sys.monitoring.set_local_events(self.tool, code, 0)
             sys.monitoring.register_callback(self.tool, sys.monitoring.events.PY_START, None)
             sys.monitoring.register_callback(self.tool, sys.monitoring.events.PY_RETURN, None)

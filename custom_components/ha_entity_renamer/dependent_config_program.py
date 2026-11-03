@@ -26,6 +26,126 @@ def _need(value, reason='dependent_config_program_rejected'):
         raise ValueError(reason) from None
 
 
+def _pair_program_rows(previous, following, source, mapping, *, reverse):
+    _need(source in mapping and type(reverse) is bool, 'dependent_config_key_edge_unqualified')
+    result = []
+    for domain in _DOMAINS:
+        left, right = previous[domain], following[domain]
+        left_keys, right_keys = [row[0] for row in left], [row[0] for row in right]
+        _need(len(left_keys) == len(set(left_keys)) and len(right_keys) == len(set(right_keys)),
+              'dependent_config_key_ambiguous')
+        redirect = {}
+        if set(left_keys) != set(right_keys):
+            _need(domain == 'script' and source.startswith('script.')
+                  and mapping[source].startswith('script.'), 'dependent_config_key_edge_unqualified')
+            old, new = source.split('.', 1)[1], mapping[source].split('.', 1)[1]
+            old_key, new_key = (new, old) if reverse else (old, new)
+            _need(set(left_keys) - set(right_keys) == {old_key}
+                  and set(right_keys) - set(left_keys) == {new_key},
+                  'dependent_config_key_edge_unqualified')
+            redirect[old_key] = new_key
+        target = {row[0]: row for row in right}
+        pairs = tuple((row, target[redirect.get(row[0], row[0])]) for row in left)
+        _need(len(pairs) == len(right), 'dependent_config_key_edge_unqualified')
+        result.append((domain, pairs))
+    return tuple(result)
+
+
+
+def pair_sealed_images(program, before, after):
+    """Pair two sealed prefixes by native identity, including one Script key move."""
+    _need(type(program) is DependentConfigProgram and type(before) is frozenset
+          and type(after) is frozenset, 'dependent_config_key_interval_unqualified')
+    previous, following = dict(program.rows(before)), dict(program.rows(after))
+    pairs = []
+    for domain in _DOMAINS:
+        left, right = previous[domain], following[domain]
+        old_keys, new_keys = {row[0] for row in left}, {row[0] for row in right}
+        _need(len(old_keys) == len(left) and len(new_keys) == len(right),
+              'dependent_config_key_ambiguous')
+        removed, added = old_keys - new_keys, new_keys - old_keys
+        redirect = {}
+        if removed or added:
+            _need(domain == 'script' and len(removed) == len(added) == 1,
+                  'dependent_config_key_interval_unqualified')
+            old_key, = removed
+            new_key, = added
+            approved = {(old.split('.', 1)[1], new.split('.', 1)[1])
+                        for old, new in program.mapping
+                        if old.startswith('script.') and new.startswith('script.')
+                        and (old in before) != (old in after)}
+            _need((old_key, new_key) in approved or (new_key, old_key) in approved,
+                  'dependent_config_key_interval_unqualified')
+            redirect[old_key] = new_key
+        targets = {row[0]: row for row in right}
+        result = tuple((row, targets[redirect.get(row[0], row[0])]) for row in left)
+        _need(len(result) == len(right), 'dependent_config_key_interval_unqualified')
+        pairs.append((domain, result))
+    return tuple(pairs)
+
+
+def _verified_script_key_evidence(evidence, plan, mapping):
+    """Validate exact ORIGINAL ledger coordinates for each Script key edge."""
+    script_keys = set(evidence.ledger.keys_for_native_projection('script'))
+    key_moves, key_edits = {}, {}
+    for old, new in mapping.items():
+        if not old.startswith('script.'):
+            continue
+        old_key, new_key = old.split('.', 1)[1], new.split('.', 1)[1]
+        definitions = [row for row in evidence.ledger.definitions
+                       if row.domain == 'script' and row.native_key == old_key]
+        if len(definitions) != 1:
+            continue
+        edits = []
+        for patch in plan.patches:
+            if patch.path != definitions[0].key_origin.path:
+                continue
+            # Reconstruct the exact ORIGINAL from the sealed proposed bytes,
+            # checking each edit and the original digest. Match the ledger's
+            # actual key coordinates, not merely an equal scalar elsewhere in
+            # the same file (which would not prove ownership of this key).
+            cursor = delta = 0
+            pieces = []
+            for edit in patch.edits:
+                start, end = edit.start + delta, edit.start + delta + len(edit.after)
+                _need(start >= cursor and end <= len(patch.proposed_bytes)
+                      and patch.proposed_bytes[start:end] == edit.after,
+                      'dependent_script_key_edit_invalid')
+                pieces.extend((patch.proposed_bytes[cursor:start], edit.before))
+                cursor, delta = end, delta + len(edit.after) - len(edit.before)
+            pieces.append(patch.proposed_bytes[cursor:])
+            original_bytes = b''.join(pieces)
+            _need(hashlib.sha256(original_bytes).hexdigest() == patch.expected_sha256,
+                  'dependent_script_key_original_changed')
+            for edit in patch.edits:
+                if (edit.before.strip(b"'\"") != old_key.encode()
+                        or edit.after.strip(b"'\"") != new_key.encode()):
+                    continue
+                try:
+                    prefix = original_bytes[:edit.start].decode('utf-8')
+                except UnicodeDecodeError:
+                    _need(False, 'dependent_script_key_coordinate_invalid')
+                origin = definitions[0].key_origin
+                if (prefix.count('\n') + 1 == origin.start_line
+                        and len(prefix.rsplit('\n', 1)[-1]) + 1 == origin.start_column):
+                    edits.append((patch.path, edit))
+        if len(edits) == 1:
+            _need(new_key not in script_keys and not key_moves, 'dependent_script_key_collision')
+            key_moves[old] = (old_key, new_key)
+            path, edit = edits[0]
+            key_edits[old] = (path, edit.start, edit.end, edit.before, edit.after)
+    return key_moves, key_edits
+
+
+def verified_script_key_moves(evidence, plan, mapping):
+    return _verified_script_key_evidence(evidence, plan, mapping)[0]
+
+
+def verified_script_key_edits(evidence, plan, mapping):
+    """Exact sealed definition edit coordinates; this is not write authority."""
+    return _verified_script_key_evidence(evidence, plan, mapping)[1]
+
+
 def assert_reference_only(root, paths):
     """Refuse expanded-secret descriptors BEFORE native normalization/export."""
     from pathlib import Path
@@ -52,7 +172,8 @@ def assert_reference_only(root, paths):
             visit(node)
 
 
-async def native_prefix_images(before_root, mapping, proof, before, after, expected_runtime):
+async def native_prefix_images(before_root, mapping, proof, before, after, expected_runtime, *,
+                               owned_script_services=()):
     """Worker-only: compile intermediate images from ORIGINAL, never cumulative."""
     from pathlib import Path
     import shutil
@@ -72,7 +193,8 @@ async def native_prefix_images(before_root, mapping, proof, before, after, expec
         shutil.copytree(before_root, root)
         for count in range(1, len(order) + 1):
             active = order[:count]
-            partial = plan_yaml(before_root, {old: mapping[old] for old in active})
+            partial = plan_yaml(before_root, {old: mapping[old] for old in active},
+                owned_script_services=tuple(value for value in owned_script_services if value in active))
             _need(partial.ready and tuple(sorted(row.path for row in partial.files)) == paths,
                   'dependent_config_prefix_plan_unqualified')
             changes = {patch.path: patch.proposed_bytes for patch in partial.patches}
@@ -129,6 +251,17 @@ class DependentConfigProgram:
         _need(before ^ after == frozenset({source}) and abs(len(before) - len(after)) == 1,
               'dependent_config_edge_unqualified')
 
+    def paired_rows(self, before, after, source):
+        """Pair native actors across a sealed prefix, including a key move.
+
+        Sorted projections can move a renamed Script to a different list index.
+        Pairing by position could assign another actor's config to it. This is
+        structural source data only, never live-owner authority.
+        """
+        self.assert_edge(before, after, source)
+        previous, following = dict(self.rows(before)), dict(self.rows(after))
+        return _pair_program_rows(previous, following, source, dict(self.mapping), reverse=source in before)
+
     def assert_sources(self, receipt, evidence, *, plan, mapping, source_order):
         _need(seal_dependent_config_program(receipt, evidence,
             json.loads(self.descriptor_json), plan=plan, mapping=mapping,
@@ -174,6 +307,11 @@ def seal_dependent_config_program(receipt, evidence, descriptor, *, plan, mappin
     _need(type(images) is list and len(images) == len(source_order) + 1)
     source_files = {row[0]: row[1:] for row in receipt.source_files}
     _need(all(source_files.get(row.path) == (row.sha256, row.device, row.inode) for row in plan.files))
+    # A Script's native key may change only if the exact source definition key
+    # is an explicit byte edit in this same sealed proposal. This is source
+    # evidence, not an authorization to move a live service or registry row.
+    key_moves = verified_script_key_moves(evidence, plan, mapping)
+    script_keys = set(evidence.ledger.keys_for_native_projection('script'))
     for index, image in enumerate(images):
         _need(type(image) is dict and set(image) == {'active', 'domains', 'files'}
               and image['active'] == list(source_order[:index])
@@ -187,7 +325,15 @@ def seal_dependent_config_program(receipt, evidence, descriptor, *, plan, mappin
                   and type(row[0]) is str for row in rows))
             keys = tuple(row[0] for row in rows)
             _need(keys == tuple(sorted(set(keys))))
-            evidence.ledger.match_native_keys(domain, keys)
+            if domain == 'script' and key_moves:
+                expected_keys = set(script_keys)
+                for source, (old_key, new_key) in key_moves.items():
+                    if source in image['active']:
+                        expected_keys.remove(old_key)
+                        expected_keys.add(new_key)
+                _need(keys == tuple(sorted(expected_keys)), 'dependent_script_key_inventory_changed')
+            else:
+                evidence.ledger.match_native_keys(domain, keys)
             if index == 0:
                 native = next(row for row in evidence.domains if row.domain == domain)
                 _need(_digest(rows) == native.projection
@@ -200,9 +346,15 @@ def seal_dependent_config_program(receipt, evidence, descriptor, *, plan, mappin
         if index == len(source_order):
             _need(image['files'] == [[r[0], r[2]] for r in proof['files']])
     locations = _bytes([asdict(row) for row in evidence.ledger.definitions])
-    return DependentConfigProgram(_receipt_bytes(receipt), evidence.sha256,
+    program = DependentConfigProgram(_receipt_bytes(receipt), evidence.sha256,
         source_graph_digest(plan), tuple(sorted(mapping.items())), source_order,
         _bytes(descriptor), locations)
+    for index, source in enumerate(source_order):
+        before = dict(images[index]['domains'])
+        after = dict(images[index + 1]['domains'])
+        _pair_program_rows(before, after, source, mapping, reverse=False)
+        _pair_program_rows(after, before, source, mapping, reverse=True)
+    return program
 
 
 def encode_dependent_config_program(program):

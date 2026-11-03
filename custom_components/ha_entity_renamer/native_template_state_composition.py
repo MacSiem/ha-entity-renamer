@@ -52,14 +52,25 @@ class TemplateStateComposition:
         return False
 
     def _assert_changed_scope(self, receipt):
-        _need(receipt.changed_domains == ('template',) and bool(receipt.proposed_files)
-              and set(receipt.unsupported_domains) <= {'template'})
+        if not receipt.proposed_files:
+            _need(receipt.changed_domains == () and receipt.unsupported_domains == ()
+                  and receipt.runtime_expected == ())
+            return
+        _need(receipt.changed_domains == ('template',) and set(receipt.unsupported_domains) <= {'template'})
 
     def assert_baseline(self, baseline):
         _need(type(baseline) is NativeInputBaseline and type(self.yaml_plan) is Plan
               and self.yaml_plan.ready and self.yaml_plan.powercalc_inputs is None)
         receipt, evidence = baseline.receipt, self.evidence
         self._assert_changed_scope(receipt)
+        if not receipt.proposed_files:
+            documents = {row.key: json.loads(row.raw) for row in baseline.files}
+            rows = documents['core.entity_registry']['data']['entities']
+            selected = [row for row in rows if row['entity_id'] in dict(self.mapping)]
+            _need(len(selected) == len(self.mapping) and len(selected) in (1, 2)
+                  and sum(row.get('platform') in ('template', 'automation', 'script')
+                          for row in selected) == 1
+                  and not self.yaml_plan.patches)
         _need(type(evidence) is OriginalSourceEvidence
               and evidence.powercalc_sources is None and evidence.powercalc_candidate_sources is None
               and evidence.template_sources is not None
@@ -69,6 +80,17 @@ class TemplateStateComposition:
               and self.mapping == tuple(sorted(self.mapping))
               and len(dict(self.mapping)) == len(self.mapping))
         mapping = _mapping(dict(self.mapping))
+        if 'template' not in receipt.changed_domains and receipt.changed_domains:
+            native = next((item for item in baseline.files if item.key == 'core.entity_registry'), None)
+            _need(native is not None)
+            rows = json.loads(native.raw)['data']['entities']
+            owners = [row for row in rows if row.get('entity_id') in mapping
+                      and row.get('platform') in ('template', 'automation', 'script')]
+            _need(len(owners) == 1 and (owners[0].get('platform') == 'template'
+                  or owners[0].get('entity_id', '').split('.', 1)[0] == owners[0].get('platform')))
+            if owners[0]['platform'] == 'script' and owners[0]['entity_id'] == 'script.' + owners[0]['unique_id']:
+                from .dependent_config_program import verified_script_key_moves
+                _need(owners[0]['entity_id'] in verified_script_key_moves(evidence, self.yaml_plan, mapping))
         _ledger(evidence.ledger, 1)
         original = evidence.template_sources
         _ledger(original.ledger, 2)
@@ -129,7 +151,7 @@ class MixedTemplateStateComposition(TemplateStateComposition):
 
     def _assert_changed_scope(self, receipt):
         from .yaml_transaction import _assert_mixed_state_scope
-        _assert_mixed_state_scope(receipt)
+        _assert_mixed_state_scope(receipt, allow_dependent_only=True)
         _need(bool(receipt.proposed_files))
 
 
