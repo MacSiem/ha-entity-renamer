@@ -306,12 +306,6 @@ class NativeAutomationStructuredDurationRootTests(unittest.IsolatedAsyncioTestCa
             attach_vars = before.listener_cells['_variables']
             self.assertEqual(source_renders(), [])
             self.assertEqual(cap.pending(before)[0], ())
-            hass.states.async_set('sensor.duration_control', '17')
-            hass.states.async_set('sensor.duration_control', '29')
-            await hass.async_block_till_done()
-            control_binding = cap.capture(control)
-            control_pending, = cap.pending(control_binding)[0]
-            control_image = pending_image(control_pending, control_binding)
             strict = self.module('yaml_runtime_observer')._automation_registrations
             with self.assertRaises(ValueError):
                 strict(hass, source)
@@ -353,6 +347,24 @@ class NativeAutomationStructuredDurationRootTests(unittest.IsolatedAsyncioTestCa
                 retained = pending_image(pending, current)
                 self.assertGreater(retained[5], hass.loop.time(), 'retain pending across actual Root timing')
                 self.assertEqual((actions, scripts), ([], []))
+                # The independent control starts through the same real native
+                # state producer after the forward handoff and before the fresh
+                # inverse. Its identical 629 s H must still cross the inverse,
+                # but is not consumed by forward's unrelated execution time.
+                hass.states.async_set('sensor.duration_control', '17')
+                control_before = hass.states.get('sensor.duration_control')
+                hass.states.async_set('sensor.duration_control', '29')
+                control_after = hass.states.get('sensor.duration_control')
+                await hass.async_block_till_done()
+                control_binding = cap.capture(control)
+                control_pending, = cap.pending(control_binding)[0]
+                control_image = pending_image(control_pending, control_binding)
+                self.assertGreater(control_image[5], hass.loop.time())
+                self.assertGreater(retained[5], hass.loop.time(), 'own H must survive control start')
+                current = cap.capture(source)
+                still_pending, = cap.pending(current)[0]
+                same_pending(pending_image(still_pending, current), retained)
+                self.assertEqual((actions, scripts, controls), ([], [], []))
                 source_rows = source_renders()
                 self.assertEqual(len(source_rows), 1)
                 variables = native_result(source_rows[0], retained[14], duration)
@@ -375,6 +387,8 @@ class NativeAutomationStructuredDurationRootTests(unittest.IsolatedAsyncioTestCa
                 control_rows = [row for row in renders if row[0] == 'control_root']
                 self.assertEqual(len(control_rows), 1)
                 control_vars = native_result(control_rows[0], control_image[14], duration)
+                self.assertIs(control_vars['trigger']['from_state'], control_before)
+                self.assertIs(control_vars['trigger']['to_state'], control_after)
                 self.assertEqual((control_vars['trigger']['from_state'].state,
                                   control_vars['trigger']['to_state'].state), ('17', '29'))
                 count = len(renders), len(template_calls), len(validations)
@@ -435,6 +449,7 @@ class NativeAutomationStructuredDurationRootTests(unittest.IsolatedAsyncioTestCa
                 self.assertEqual(str(actions[0].data['to_id']), new)
                 self.assertEqual(float(actions[0].data['seconds']), duration)
                 self.assertEqual(float(controls[0].data['seconds']), duration)
+                self.assertEqual(controls[0].context.parent_id, control_image[12].context.id)
                 self.assertEqual(str(actions[0].data['configured']), '29')
                 self.assertEqual(str(scripts[0].data['value']), '29')
                 self.assertEqual(actions[0].context.parent_id, retained[12].context.id)

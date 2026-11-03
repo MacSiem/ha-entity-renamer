@@ -308,8 +308,16 @@ class NativeAutomationDurationCapability:
             from .native_automation_configured_duration import ConfiguredOwner
             object.__setattr__(b, '_duration_config_owner', ConfiguredOwner(b))
             self.scalar.check_configured(cfg['for'])
-        object.__setattr__(b,'_original',b._read())
-        b.assert_original()
+        # A capture is a single synchronous, read-only census. Keep BOTH
+        # native graph reads and compare them, and bracket the complete census
+        # with full source checks. Nested reads below must not each re-hash the
+        # same source files: no await or native transport effect occurs here.
+        original = self._original_checked(b)
+        object.__setattr__(b, '_original', original)
+        b._native.check()
+        current = self._original_checked(b)
+        self.check_sources()
+        _need(current == original, 'original_graph_changed')
         return b
 
     def stable(self,b, *, configured_view=None):
@@ -334,8 +342,13 @@ class NativeAutomationDurationCapability:
 
     def pending(self,b, *, configured_view=None):
         """Full native census; only registered active-route H may enter ready."""
-        from homeassistant.core import Event,State,Context,HassJobType
         self.check_sources()
+        return self._pending_checked(b, configured_view=configured_view)
+
+    def _pending_checked(self, b, *, configured_view=None):
+        # Called only inside the checked public census or a source-bracketed
+        # synchronous original/capture; never an authorization by itself.
+        from homeassistant.core import Event,State,Context,HassJobType
         from contextvars import Context as TimerContext
         n,e=self.native,self.native.event
         self.stable(b, configured_view=configured_view)
@@ -484,6 +497,13 @@ class NativeAutomationDurationCapability:
 
     def original(self,b):
         self.check_sources()
+        value = self._original_checked(b)
+        self.check_sources()
+        return value
+
+    def _original_checked(self, b):
+        # Full graph and native pending census; caller brackets with source
+        # checks. This helper neither adopts a baseline nor authorizes effects.
         target=b.action_job.target
         _need(getattr(target,'__self__',None) is b.entity
               and getattr(target,'__func__',None) is self.native.AutomationEntity._async_trigger_if_enabled
@@ -495,7 +515,7 @@ class NativeAutomationDurationCapability:
               and b.entity._trigger_config[0] is b.config and b.config['entity_id'] is b.config_ids
               and b.keyed_job.target is b.listener and b.config_ids==b.original_keys,'duration_original_owner')
         return (_value(b.entity.raw_config),_value(b.entity._trigger_config),self.stable(b),
-            _value(b.unsubscribe),_job(b.action_job),self.pending(b)[1])
+            _value(b.unsubscribe),_job(b.action_job),self._pending_checked(b)[1])
 
     def tokens(self,entity):
         b=self.capture(entity)
