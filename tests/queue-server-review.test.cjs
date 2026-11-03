@@ -812,3 +812,30 @@ test('completed inspection is explicitly invalidated when its card is later repl
   assert.equal(card._migration.inspection,undefined);assert.ok(!card._migration.restoreConsent);
   assert.equal(card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);assert.equal(restores(f).length,0);
 });
+
+// A wide changes table must stay reachable inside the confirmation's focus loop.
+test('forward and inverse review keyboard loop reaches the named changes scroll region without writing',async t=>{
+  for(const inverse of [false,true]) {
+    const f=await fixture(t,inverse?'pl':'en');
+    await f.card._prepareMigration();
+    if(inverse) {await f.card._applyMigration();f.card._reviewMigrationRestore();}
+    const root=f.card.shadowRoot,dialog=root.querySelector('[role="dialog"]');
+    const cancel=root.getElementById(inverse?'cancelMigrationRestore':'cancelRenameDialog');
+    const apply=root.getElementById(inverse?'restoreMigration':'applyMigration');
+    const region=dialog.querySelector('[role="region"]');
+    assert.ok(region,'server changes table needs a focusable scroll region');
+    assert.equal(region.tabIndex,0);
+    assert.equal(root.getElementById(region.getAttribute('aria-labelledby')).textContent,inverse?'Zmiany serwera':'Server changes');
+    assert.equal(region.querySelectorAll('tbody tr').length,1);
+    assert.equal(root.activeElement,cancel);
+    const key=(key,shiftKey=false)=>root.activeElement.dispatchEvent(new f.dom.window.KeyboardEvent('keydown',{key,shiftKey,bubbles:true}));
+    apply.focus();key('Tab');assert.equal(root.activeElement,region);
+    key('Tab',true);assert.equal(root.activeElement,apply);
+    key('Tab');key('Tab');assert.equal(root.activeElement,dialog.querySelector('summary'));
+    key('Tab',true);assert.equal(root.activeElement,region);
+    const beforeWrites=writes(f).length;
+    key('Escape');assert.equal(writes(f).length,beforeWrites);assert.equal(restores(f).length,0);
+    assert.equal(f.card._renameQueue.length,1);
+    assert.equal(root.activeElement.id,inverse?'reviewMigrationRestore':'executeRenames');
+  }
+});
