@@ -6,7 +6,7 @@ const {JSDOM} = require('jsdom');
 const fingerprint = 'a'.repeat(64);
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function gate() { let resolve, reject; const promise = new Promise((a,b) => {resolve=a; reject=b;}); return {promise,resolve,reject}; }
-async function fixture(t, language='en') {
+async function fixture(t, language='en', connected=true) {
   const dom = new JSDOM('', {runScripts:'dangerously', pretendToBeVisual:true, url:'http://localhost/'});
   t.after(() => dom.window.close());
   dom.window.eval(readFileSync(join(__dirname,'../ha-entity-renamer.js'),'utf8'));
@@ -16,7 +16,7 @@ async function fixture(t, language='en') {
   const devices=[{id:'dev',name:'QA',name_by_user:null}];
   const review={operation_id:'review_qa',fingerprint,changes:[{entity_id:'sensor.a',fields:{entity_id:{before:'sensor.a',after:'sensor.b'}}}],
     dependencies:{domains:['template','automation','script'],yaml_file_count:3,template_consumer_count:2,files:['template.yaml','automation.yaml','script.yaml'].map(path=>({path,edit_count:1,references:[{before:'sensor.a',after:'sensor.b',occurrences:1}]}))},migration_ready:false,family_complete:false};
-  const connection=new dom.window.EventTarget(); connection.connected=true;
+  const connection=new dom.window.EventTarget(); connection.connected=connected;
   const handlers={};
   const hass={language,connection,user:{id:'admin-a',is_admin:true},states:{},callWS:async message => {
     requests.push(message);
@@ -714,4 +714,32 @@ test('a definite role revocation after unresolved authority discards suspended i
   f.card.hass={...f.hass,user:{id:'admin-a'}};f.card.hass={...f.hass,user:{id:'admin-a',is_admin:false}};
   f.card.hass={...f.hass};await tick();assert.equal(f.card._migration,null);
   inspect.resolve({operation_id:'review_qa',fingerprint,state:'refused',reason:'prewrite_refused'});await read;assert.equal(writes(f).length,0);
+});
+
+
+test('inventory enables on initial connection ready and reconnect without another render',async t=>{
+  const f=await fixture(t,'en',false);
+  const button=()=>f.card.shadowRoot.getElementById('findMigrationRecovery');
+  assert.equal(f.card._migration,null);assert.equal(button().disabled,true);
+  f.connection.dispatchEvent(new f.dom.window.Event('ready'));assert.equal(button().disabled,true);
+  f.connection.connected=true;f.connection.dispatchEvent(new f.dom.window.Event('ready'));
+  assert.equal(button().disabled,false);
+  button().click();await tick();assert.ok(f.card.shadowRoot.querySelector('[data-recovery-index]'));
+  f.connection.connected=false;f.connection.dispatchEvent(new f.dom.window.Event('disconnected'));
+  assert.equal(button().disabled,true);
+  f.connection.connected=true;f.connection.dispatchEvent(new f.dom.window.Event('ready'));
+  assert.equal(button().disabled,false);assert.equal(writes(f).length,0);assert.equal(restores(f).length,0);
+});
+
+test('online enables inventory only when connection and admin authority are current',async t=>{
+  const f=await fixture(t);const button=()=>f.card.shadowRoot.getElementById('findMigrationRecovery');
+  Object.defineProperty(f.dom.window.navigator,'onLine',{configurable:true,value:false});
+  f.dom.window.dispatchEvent(new f.dom.window.Event('offline'));assert.equal(button().disabled,true);
+  Object.defineProperty(f.dom.window.navigator,'onLine',{configurable:true,value:true});
+  f.dom.window.dispatchEvent(new f.dom.window.Event('online'));assert.equal(button().disabled,false);
+  f.connection.connected=false;f.connection.dispatchEvent(new f.dom.window.Event('disconnected'));
+  f.dom.window.dispatchEvent(new f.dom.window.Event('online'));assert.equal(button().disabled,true);
+  f.card.hass={...f.hass,user:{id:'admin-a',is_admin:false}};
+  f.connection.connected=true;f.connection.dispatchEvent(new f.dom.window.Event('ready'));
+  assert.equal(button(),null);assert.equal(writes(f).length,0);assert.equal(restores(f).length,0);
 });

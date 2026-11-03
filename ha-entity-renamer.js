@@ -1760,9 +1760,22 @@ class HAEntityRenamer extends HTMLElement {
       this._exportEventCleanups.push(() => target.removeEventListener(event, handler));
     };
     listen(window, 'offline', () => { this._exportBrowserOnline = false; this._cancelRenameAuthority(); this.render(); });
-    listen(window, 'online', () => { this._exportBrowserOnline = navigator.onLine === true; this._invalidateRenameExport(); if (this._migration?.attempted) this.render(); this._resumePermittedRegistryRead(); });
-    listen(connection, 'ready', () => { this._exportConnectionOnline = true; this._invalidateRenameExport(); if (this._migration?.attempted) this.render(); this._resumePermittedRegistryRead(); });
+    listen(window, 'online', () => { this._exportBrowserOnline = navigator.onLine === true; this._restoreRenameAvailability(); });
+    listen(connection, 'ready', () => { this._exportConnectionOnline = true; this._restoreRenameAvailability(); });
     listen(connection, 'disconnected', () => { this._exportConnectionOnline = false; this._cancelRenameAuthority(); this.render(); });
+  }
+
+  _restoreRenameAvailability() {
+    this._invalidateRenameExport();
+    // A handoff may have been waiting for this connection to become available.
+    this._registerRecoveryCard();
+    if (this._migration?.attempted) this.render();
+    else {
+      // Update the authority-dependent control without replacing unrelated drafts.
+      const button = this.shadowRoot.getElementById('findMigrationRecovery');
+      if (button) button.disabled = !!this._recoveryInventory?.busy || !this._renameAuthorityAvailable();
+    }
+    this._resumePermittedRegistryRead();
   }
 
   _renameExportContext() {
