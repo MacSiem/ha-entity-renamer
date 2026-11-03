@@ -3308,7 +3308,8 @@ class HAEntityRenamer extends HTMLElement {
     this._confirmation = null; this._confirmDialogOpen = false; this._entityEditor = null;
     this._migration = {owner: this._hass.user.id, operation_id: row.operation_id,
       fingerprint: row.fingerprint, attempted: true, recoveredIdentity: true,
-      restoreRevoked: true, stage: 'unknown', invalidated: true, busy: false};
+      restoreRevoked: true, stage: 'unknown', invalidated: true, busy: false,
+      journal: JSON.parse(JSON.stringify(row))};
     this._recoveryInventory = null; this.render();
   }
 
@@ -3336,9 +3337,11 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   async _refreshMigrationProgress(m = this._migration, hass = this._hass) {
-    if (!m?.attempted || !this._migrationCurrent(m) || m.progressBusy) return;
-    m.progressBusy = true;
+    if (!m?.attempted || !this._migrationCurrent(m)) return;
     const observation = m.observation;
+    if (m.progressObservation?.observation === observation) return;
+    clearTimeout(m.pollTimer); m.pollTimer = null;
+    const progress = {observation}; m.progressObservation = progress;
     try {
       const status = await this._migrationRequest(hass, {type: 'ha_entity_renamer/status'});
       if (!this._migrationCurrent(m) || m.observation !== observation) return;
@@ -3349,11 +3352,12 @@ class HAEntityRenamer extends HTMLElement {
       // Do not present an older snapshot as the current observation.
       if (this._migrationCurrent(m) && m.observation === observation) m.journal = null;
     } finally {
-      m.progressBusy = false;
-      if (this._migrationCurrent(m)) {
+      if (m.progressObservation === progress) m.progressObservation = null;
+      if (this._migrationCurrent(m) && m.observation === observation) {
         const journal = this.shadowRoot.getElementById('migrationJournal');
-        if (journal) journal.innerHTML = this._renderMigrationProgress(m);
-        if (m.applying || m.restoring) m.pollTimer = setTimeout(() => this._refreshMigrationProgress(m, hass), 2000);
+        if (m.busy) { if (journal) journal.innerHTML = this._renderMigrationProgress(m); }
+        else this.render();
+        if (m.applying || m.restoring || m.inspecting) m.pollTimer = setTimeout(() => this._refreshMigrationProgress(m, hass), 2000);
       }
     }
   }
@@ -3516,19 +3520,23 @@ class HAEntityRenamer extends HTMLElement {
     // Rebind read authority only. This cannot revive apply or restore consent.
     m.epoch = this._authorityEpoch; m.session = this._readSession(); m.invalidated = false;
     m.observation = (m.observation || 0) + 1;
-    m.busy = true; this.render();
+    m.busy = true; m.inspecting = true; m.inspection = null;
+    m.registryRead = false; m.registryMatches = false; this.render();
     const hass = this._hass;
-    const results = await Promise.allSettled([
-      this._migrationRequest(hass, {type: 'ha_entity_renamer/status'}),
+    // Status is independently readable while inspection waits for the operation lock.
+    void this._refreshMigrationProgress(m, hass);
+    const [inspectionResult] = await Promise.allSettled([
       this._migrationRequest(hass, {type: 'ha_entity_renamer/recovery/inspect', operation_id: m.operation_id, fingerprint: m.fingerprint}),
+    ]);
+    if (!this._migrationCurrent(m)) return;
+    // Registry verification must be newer than the inspection, not concurrent with it.
+    const results = await Promise.allSettled([
       this._migrationRequest(hass, {type: 'config/entity_registry/list'}),
       this._migrationRequest(hass, {type: 'config/device_registry/list'}),
     ]);
     if (!this._migrationCurrent(m)) return;
     const value = i => results[i].status === 'fulfilled' ? results[i].value : null;
-    const inventory = value(0)?.operations;
-    m.journal = (Array.isArray(inventory) ? inventory.find(row => row?.operation_id === m.operation_id && row?.fingerprint === m.fingerprint) : null) || null;
-    const inspection = value(1);
+    const inspection = inspectionResult.status === 'fulfilled' ? inspectionResult.value : null;
     m.inspection = inspection?.operation_id === m.operation_id && inspection?.fingerprint === m.fingerprint ? inspection : null;
     if ((m.recoveredIdentity || m.restoreAttempted) && m.inspection
         && ((m.inspection.eligible === true && ['applied', 'recoverable_complete'].includes(m.inspection.state))
@@ -3548,7 +3556,7 @@ class HAEntityRenamer extends HTMLElement {
       }
     }
     // Fresh reads refresh the projection; they do not prove dependencies.
-    const entities = value(2), devices = value(3);
+    const entities = value(0), devices = value(1);
     m.registryRead = Array.isArray(entities) && Array.isArray(devices);
     m.registryMatches = false;
     if (m.registryRead) {
@@ -3570,6 +3578,7 @@ class HAEntityRenamer extends HTMLElement {
       : m.restoreAttempted ? ((m.restoreAcknowledged || (m.inspection?.state === 'rolled_back'
         && m.inspection?.reason === 'restored_verified')) && m.registryMatches ? 'restored' : 'unknown')
       : m.inspection?.state === 'applied' && m.registryMatches ? 'applied' : 'unknown';
+    m.inspecting = false; clearTimeout(m.pollTimer); m.pollTimer = null;
     m.busy = false; this.render();
   }
 
@@ -3653,11 +3662,11 @@ class HAEntityRenamer extends HTMLElement {
         : this._migrationText('Restore is unavailable until a fresh inspection permits it. Check status and inspect; do not repeat the write.', 'Wycofanie jest niedostępne, dopóki świeża inspekcja go nie dopuści. Sprawdź stan i inspekcję; nie powtarzaj zapisu.');
     return `<section class="apply-result ${['applied', 'restored'].includes(m.stage) && !m.busy ? '' : 'migration-pending'}" aria-labelledby="migrationResultTitle" aria-busy="${m.busy}">
       <h2 id="migrationResultTitle">${this._migrationText('Dependency operation', 'Operacja zależności')}</h2>
-      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan…', 'Wykonywanie zatwierdzonego planu…') : m.stage === 'restoring' ? this._migrationText('Restoring the confirmed scope…', 'Wycofywanie potwierdzonego zakresu…') : m.busy ? this._migrationText('Checking current status, inspection and registry…', 'Sprawdzanie bieżącego stanu, inspekcji i rejestru…') : m.stage === 'refused' ? this._migrationText('The server confirmed refusal before applying any changes.', 'Serwer potwierdził odmowę przed zastosowaniem zmian.') : m.stage === 'restored' ? this._migrationText('Restored scope confirmed; original registry fields independently verified.', 'Wycofanie zakresu potwierdzone; oryginalne pola rejestru niezależnie zweryfikowane.') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
+      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan…', 'Wykonywanie zatwierdzonego planu…') : m.stage === 'restoring' ? this._migrationText('Restoring the confirmed scope…', 'Wycofywanie potwierdzonego zakresu…') : m.busy ? this._migrationText('Checking current status, inspection and registry…', 'Sprawdzanie bieżącego stanu, inspekcji i rejestru…') : m.stage === 'refused' ? this._migrationText('The server confirmed refusal before applying any changes.', 'Serwer potwierdził odmowę przed zastosowaniem zmian.') : m.stage === 'restored' ? this._migrationText('Restored scope confirmed; original registry fields independently verified.', 'Wycofanie zakresu potwierdzone; oryginalne pola rejestru niezależnie zweryfikowane.') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : m.recoveredIdentity && !m.inspection ? this._migrationText('Previous operation selected. Check status and inspect; do not repeat the write.', 'Wybrano poprzednią operację. Sprawdź stan i inspekcję; nie powtarzaj zapisu.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
       <p>${this._migrationText('Full dependency coverage is unconfirmed. Restore covers only this current operation.', 'Pełne pokrycie zależności jest niepotwierdzone. Wycofanie obejmuje tylko bieżącą operację.')}</p>
       ${m.recoveredIdentity ? `<p>${this._migrationText('A previous operation is available for fresh inspection. Apply consent was not retained; do not repeat the write.', 'Poprzednia operacja jest dostępna do świeżej inspekcji. Zgoda na zastosowanie nie została zachowana; nie powtarzaj zapisu.')}</p>` : ''}
       <code>${_esc(m.operation_id)}</code>
-      <p>${this._migrationText('Apply observation', 'Obserwacja zapisu')}: ${_esc(m.applyState || 'UNKNOWN')}. ${this._migrationText('Inspection', 'Inspekcja')}: ${_esc(m.inspection?.state || observation)}.</p>
+      <p>${this._migrationText('Apply observation', 'Obserwacja zapisu')}: ${_esc(m.applyState || (m.busy || (m.recoveredIdentity && !m.inspection) ? observation : 'UNKNOWN'))}. ${this._migrationText('Inspection', 'Inspekcja')}: ${_esc(m.inspection?.state || observation)}.</p>
       <p>${this._migrationText('Registry read', 'Odczyt rejestru')}: ${m.registryRead ? this._migrationText('received', 'otrzymany') : observation}. ${this._migrationText('Requested fields match', 'Zgodność żądanych pól')}: ${m.registryMatches ? this._migrationText('yes', 'tak') : this._migrationText('unconfirmed', 'niepotwierdzona')}.</p>
       ${m.recoveredIdentity && m.review ? `<details><summary>${this._migrationText('Admitted original review (read-only)', 'Dopuszczony oryginalny przegląd (tylko odczyt)')}</summary>
         <ul>${m.review.changes.flatMap(change => Object.entries(change.fields).map(([field, value]) => `<li>${_esc(change.entity_id || change.device_id)} — ${_esc(field)}: ${_esc(value.before ?? '(default)')} → ${_esc(value.after ?? '(default)')}</li>`)).join('')}</ul>

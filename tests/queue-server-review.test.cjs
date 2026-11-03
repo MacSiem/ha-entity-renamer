@@ -584,3 +584,41 @@ for (const state of ['applied','rolled_back']) test('finishing recovered '+state
   assert.deepEqual(JSON.parse(JSON.stringify(f.card._deviceRenameQueue)),{dev:'Unrelated device name'});
   assert.equal(f.card._impactResults,impact);assert.equal(writes(f).length,0);assert.equal(restores(f).length,0);
 });
+
+test('recovered operation shows changing journal while inspection waits and clears a failed read',async t=>{
+  const f=fixture(t);const inspect=gate();let state='prepared';
+  const row=()=>({operation_id:'review_qa',fingerprint,status:state,direction:'forward',phases:[{adapter:'registry',phase:state==='prepared'?'pending':'intent'}],progress:{total_steps:2,verified_steps:0,undone_steps:0}});
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[row()]});
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>inspect.promise;
+  await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();
+  assert.match(f.card.shadowRoot.getElementById('migrationJournal').textContent,/prepared/);
+  const pending=f.card._inspectMigration();await tick();
+  assert.match(f.card.shadowRoot.getElementById('migrationJournal').textContent,/pending/);
+  state='applying';await f.card._refreshMigrationProgress();
+  assert.match(f.card.shadowRoot.getElementById('migrationJournal').textContent,/applying/);
+  assert.match(f.card.shadowRoot.getElementById('migrationJournal').textContent,/intent/);
+  assert.doesNotMatch(f.card.shadowRoot.textContent,/Partial or unknown outcome|Apply observation: UNKNOWN/);
+  assert.equal(f.card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);
+  assert.equal(f.card.shadowRoot.getElementById('applyMigration'),null);
+  f.handlers['ha_entity_renamer/status']=()=>Promise.reject(new Error('offline'));
+  await f.card._refreshMigrationProgress();assert.match(f.card.shadowRoot.getElementById('migrationJournal').textContent,/unavailable/);
+  assert.doesNotMatch(f.card.shadowRoot.getElementById('migrationJournal').textContent,/intent/);
+  inspect.resolve({operation_id:'review_qa',fingerprint,state:'refused',reason:'prewrite_refused'});await pending;
+  assert.equal(f.card._migration.stage,'refused');assert.equal(writes(f).length,0);
+  f.card._finishMigration();assert.equal(f.card._migration,null);assert.equal(f.card._renameQueue.length,1);
+});
+
+test('late recovered status and inspection cannot update after disconnect or role change',async t=>{
+  for(const change of ['disconnect','role']) {
+    const f=fixture(t),inspect=gate(),status=gate();let calls=0;
+    f.handlers['ha_entity_renamer/status']=()=>++calls===1?{operations:[{operation_id:'review_qa',fingerprint,status:'prepared'}]}:status.promise;
+    f.handlers['ha_entity_renamer/recovery/inspect']=()=>inspect.promise;
+    await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();
+    const pending=f.card._inspectMigration();await tick();
+    if(change==='disconnect') f.card.remove(); else f.card.hass={...f.hass,user:{id:'admin-a',is_admin:false}};
+    status.resolve({operations:[{operation_id:'review_qa',fingerprint,status:'applied'}]});
+    inspect.resolve({operation_id:'review_qa',fingerprint,state:'refused',reason:'prewrite_refused'});await pending;await tick();
+    assert.notEqual(f.card._migration?.stage,'refused');assert.notEqual(f.card._migration?.journal?.status,'applied');
+    assert.equal(writes(f).length,0);
+  }
+});
