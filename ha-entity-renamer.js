@@ -3339,7 +3339,7 @@ class HAEntityRenamer extends HTMLElement {
   async _refreshMigrationProgress(m = this._migration, hass = this._hass) {
     if (!m?.attempted || !this._migrationCurrent(m)) return;
     const observation = m.observation;
-    if (m.progressObservation?.observation === observation) return;
+    if (m.progressObservation && m.progressObservation.observation === observation) return;
     clearTimeout(m.pollTimer); m.pollTimer = null;
     const progress = {observation}; m.progressObservation = progress;
     try {

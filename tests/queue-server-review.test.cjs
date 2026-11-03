@@ -622,3 +622,18 @@ test('late recovered status and inspection cannot update after disconnect or rol
     assert.equal(writes(f).length,0);
   }
 });
+
+test('first apply status starts once and a pending read cannot overlap within its observation',async t=>{
+  const f=fixture(t);await f.card._prepareMigration();const apply=gate(),status=gate();
+  f.handlers['ha_entity_renamer/apply']=()=>apply.promise;
+  f.handlers['ha_entity_renamer/status']=()=>status.promise;
+  const operation=f.card._applyMigration();await tick();
+  assert.equal(f.requests.filter(m=>m.type==='ha_entity_renamer/status').length,1);
+  await f.card._refreshMigrationProgress();
+  assert.equal(f.requests.filter(m=>m.type==='ha_entity_renamer/status').length,1);
+  status.resolve({operations:[{operation_id:'review_qa',fingerprint,status:'applying',phases:[{adapter:'registry',phase:'intent'}]}]});await tick();
+  assert.match(f.card.shadowRoot.getElementById('migrationJournal').textContent,/intent/);
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'unknown'}]});
+  apply.reject(new Error('uncertain'));await operation;
+  assert.equal(f.card._migration.journal.status,'unknown');assert.equal(writes(f).length,1);
+});
