@@ -3283,6 +3283,7 @@ class HAEntityRenamer extends HTMLElement {
         .rename-target code { flex:1; }
         .automatic-target code { min-width:0;flex:1; }
         .confirm-dialog code { min-width:0;max-width:100%; }
+        .confirm-dialog [tabindex="0"]:focus-visible { outline:3px solid var(--primary-color,#1769aa);outline-offset:2px; }
 
         :host .btn-primary { background:var(--_hat-primary-fill);color:var(--_hat-on-primary); }
         :host input[type=checkbox] { accent-color:var(--_hat-primary-fill); }
@@ -3777,8 +3778,8 @@ class HAEntityRenamer extends HTMLElement {
     const domains = review?.dependencies.domains.map(domain => ({template: 'Template', automation: this._migrationText('Automations', 'Automatyzacje'), script: this._migrationText('Scripts', 'Skrypty')}[domain] || domain)).join(', ');
     return `<section class="confirm-dialog" role="dialog" aria-labelledby="migrationReviewTitle" aria-busy="${m.busy}">
       <h2 id="migrationReviewTitle">${title}</h2><p role="status">${body}</p>
-      ${review ? `<h3>${this._migrationText('Server changes', 'Zmiany serwera')}</h3>
-        <div style="max-width:100%;overflow:auto"><table class="queue-table"><thead><tr><th scope="col">${this._migrationText('Target', 'Cel')}</th><th scope="col">${this._migrationText('Field', 'Pole')}</th><th scope="col">${this._migrationText('Before', 'Przed')}</th><th scope="col">${this._migrationText('After', 'Po')}</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${review ? `<h3 id="migrationChangesTitle">${this._migrationText('Server changes', 'Zmiany serwera')}</h3>
+        <div role="region" tabindex="0" aria-labelledby="migrationChangesTitle" style="max-width:100%;overflow:auto"><table class="queue-table"><thead><tr><th scope="col">${this._migrationText('Target', 'Cel')}</th><th scope="col">${this._migrationText('Field', 'Pole')}</th><th scope="col">${this._migrationText('Before', 'Przed')}</th><th scope="col">${this._migrationText('After', 'Po')}</th></tr></thead><tbody>${rows}</tbody></table></div>
         <h3>${this._migrationText('Dependencies', 'Zależności')}</h3><p>${_esc(domains || this._migrationText('None admitted', 'Brak przyjętych'))}</p>
         <p>${this._migrationText('YAML files', 'Pliki YAML')}: ${review.dependencies.yaml_file_count}. ${this._migrationText('Template consumers', 'Odbiorcy Template')}: ${review.dependencies.template_consumer_count}.</p>
         ${review.dependencies.files.map(file => `<details open><summary><code>${_esc(file.path)}</code> — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li><code>${_entityIdHtml(ref.before)}</code> → <code>${_entityIdHtml(ref.after)}</code> (${ref.occurrences} ${this._migrationText('references', 'odwołań')})</li>`).join('')}</ul></details>`).join('')}` : ''}
@@ -4205,7 +4206,7 @@ class HAEntityRenamer extends HTMLElement {
         else this._cancelRenameConfirmation();
       } else if (e.key === 'Tab') {
         e.preventDefault();
-        const controls = Array.from(e.currentTarget.querySelectorAll('summary, button:not(:disabled)'));
+        const controls = Array.from(e.currentTarget.querySelectorAll('summary, button:not(:disabled), [tabindex="0"]'));
         const current = controls.indexOf(root.activeElement);
         const next = current < 0 ? (e.shiftKey ? controls.length - 1 : 0)
           : (current + (e.shiftKey ? -1 : 1) + controls.length) % controls.length;
