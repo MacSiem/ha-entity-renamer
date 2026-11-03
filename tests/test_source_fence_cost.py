@@ -27,6 +27,15 @@ class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(receipts._exact_json_equal(changed, evidence))
         self.assertTrue(receipts._exact_json_equal(deepcopy(original), evidence))
 
+    def test_receipt_tuple_snapshot_catches_nested_identity_and_type_changes(self):
+        original = ('/config', (('file', 1, 2),), (('dir', (('file', 33188),)),))
+        evidence = receipts._freeze_json(original)
+        self.assertTrue(receipts._exact_json_equal(original, evidence))
+        self.assertFalse(receipts._exact_json_equal(('/config', (('file', True, 2),), original[2]), evidence))
+        self.assertFalse(receipts._exact_json_equal(('/config', (('file', 1, 3),), original[2]), evidence))
+        self.assertFalse(receipts._exact_json_equal(('/config', [['file', 1, 2]], original[2]), evidence))
+        self.assertTrue(receipts._exact_json_equal(original, evidence))
+
     async def test_reconstruction_skips_only_yaml_decode_and_returns_detached_value(self):
         f = await mixed.mixed_fixture()
         chain = f['chain']

@@ -7,7 +7,7 @@ Only the genuine receipted adapter owns writes and captures file CAS returns.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 import inspect
 import logging
 import json
@@ -106,6 +106,14 @@ def _capture_template_state_yaml(bundle, plan, mapping, prepared_type):
         os.close(reader.root)
 
 
+def _receipt_values(receipt):
+    """Expose every field of the exact typed receipt for immutable comparison."""
+    from .yaml_validation import ValidationReceipt
+    if type(receipt) is not ValidationReceipt:
+        raise Refused('template_state_yaml_original_composition_mismatch')
+    return tuple(getattr(receipt, field.name) for field in fields(ValidationReceipt))
+
+
 def assert_state_yaml_composition(chain, change):
     """Every root/reopen binds the exact new preparation to retained sources."""
     from .native_template_state_composition import (TemplateStateComposition,
@@ -134,11 +142,14 @@ def assert_state_yaml_composition(chain, change):
             raise Refused('template_state_yaml_original_baseline_changed')
         composition = decode_composition(payload.get('composition'), baseline)
         wire, check = retain_state_composition(composition, baseline)
+        # Parse the authenticated receipt once; its detached recursively frozen
+        # fields are checked against both live receipt objects at every fence.
+        original_receipt = _freeze_json(_receipt_values(baseline.receipt))
         binding = (reference, _baseline_stamp(baseline), composition, wire, check,
-                   _freeze_json(payload))
+                   _freeze_json(payload), original_receipt)
         chain._template_state_original_binding = binding
     else:
-        if (type(binding) is not tuple or len(binding) != 6 or binding[0] != reference
+        if (type(binding) is not tuple or len(binding) != 7 or binding[0] != reference
                 or binding[1] != _baseline_stamp(baseline)):
             raise Refused('template_state_yaml_original_baseline_changed')
         if not _exact_json_equal(payload, binding[5]):
@@ -148,7 +159,8 @@ def assert_state_yaml_composition(chain, change):
     if binding[3] != payload.get('composition'):
         raise Refused('template_state_yaml_original_composition_changed')
     if (type(composition) not in expected[type(change)] or baseline != chain.baseline
-            or change.receipt != chain.original_receipt or baseline.receipt != change.receipt
+            or not _exact_json_equal(_receipt_values(chain.original_receipt), binding[6])
+            or not _exact_json_equal(_receipt_values(change.receipt), binding[6])
             or change.source_program_sha256 != composition.state_config_program.sha256):
         raise Refused('template_state_yaml_original_composition_mismatch')
     patches = composition.yaml_plan.patches

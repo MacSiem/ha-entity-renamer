@@ -76,8 +76,8 @@ def _freeze_json(value):
     """Freeze a previously validated JSON tree into immutable builtins."""
     if type(value) is dict:
         return (dict, tuple((key, _freeze_json(child)) for key, child in value.items()))
-    if type(value) is list:
-        return (list, tuple(_freeze_json(child) for child in value))
+    if type(value) in (list, tuple):
+        return (type(value), tuple(_freeze_json(child) for child in value))
     return (type(value), value)
 
 
@@ -96,7 +96,7 @@ def _exact_json_equal(value, evidence):
                 if key not in current:
                     return False
                 pending.append((current[key], child))
-        elif kind is list:
+        elif kind in (list, tuple):
             if len(current) != len(original):
                 return False
             pending.extend(zip(current, original))

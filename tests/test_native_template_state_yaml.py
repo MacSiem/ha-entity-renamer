@@ -204,6 +204,18 @@ class SelectiveYAMLNativeRootTests(unittest.IsolatedAsyncioTestCase):
             module.assert_state_yaml_composition(readonly, change)
             module.assert_state_yaml_composition(readonly, change)
             self.assertEqual(digest.call_count, 0)
+        baseline_module = self.module('native_input_baseline')
+        with patch.object(baseline_module, '_receipt', wraps=baseline_module._receipt) as decode:
+            module.assert_state_yaml_composition(readonly, change)
+            module.assert_state_yaml_composition(readonly, change)
+            self.assertEqual(decode.call_count, 0)
+        previous_root = readonly.original_receipt.config_root
+        try:
+            object.__setattr__(readonly.original_receipt, 'config_root', '/foreign')
+            with self.assertRaises(tx.Refused):
+                module.assert_state_yaml_composition(readonly, change)
+        finally:
+            object.__setattr__(readonly.original_receipt, 'config_root', previous_root)
         saved_payload = copy.deepcopy(reopened_store.plans[native_ref[0]]['payload'])
         try:
             row = reopened_store.plans[native_ref[0]]['payload']
