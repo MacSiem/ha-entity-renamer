@@ -8,7 +8,9 @@ No timing/admission claim follows from this source or an ordinary exception.
 """
 import asyncio
 import sys
+from types import CodeType, FunctionType
 import unittest
+from unittest.mock import patch
 
 import test_native_automation_source_duration_root as source_fixture
 import test_native_template_mixed_yaml_server as mixed
@@ -132,18 +134,23 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
         need = duration_module._need
         code = {
             'root': root_type._install.__code__,
+            'prepare': root_type._prepare.__code__,
             'graph': graph_type.__init__.__code__,
             'location': expiry_type.location.__code__,
             'registry': registry_type.mutate.__code__,
             'handoff': self.module('native_source_handoff').NativeSourceHandoff.mutate.__code__,
             'install': graph_type.install.__code__,
             'config_install': self.module('native_automation_config_transport').NativeAutomationConfigTransport.install.__code__,
+            'template_install': self.module('native_template_binding_transport').NativeTemplateBindingTransport.install_before_registry.__code__,
+            'effect_mutate': self.module('native_template_state_registry_effect').NativeTemplateStateRegistryEffect.mutate.__code__,
             'attach': cap.native.event.async_track_same_state.__code__,
         }
         render_codes = (template.render_complex.__code__, template.Template.async_render.__code__,
                         type(cv.positive_time_period).__call__.__code__)
-        roots, graphs, entries, raised, timeline = [], [], [], [], []
-        effects = {key: [] for key in ('registry', 'handoff', 'install', 'config_install')}
+        roots, root_installs, graphs, entries, raised, timeline, gate = [], [], [], [], [], [], []
+        root_times, expiry_times = [], []
+        effects = {key: [] for key in ('registry', 'handoff', 'install', 'config_install',
+                                       'template_install', 'effect_mutate')}
         renders, template_calls, validations, attachments = [], [], [], []
         starts, returns = {'source': [], 'control': []}, {'source': [], 'control': []}
         pending = {}
@@ -169,14 +176,36 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
         def observed_leaf(value):
             return value is leaf or value is control_leaf
 
-        def location_image(actor, binding, handle):
+        def owning_scope_stack(frame, owner):
+            """Read the real caller chain: location -> this scope -> this _prepare."""
+            scope_seen = False
+            while frame is not None:
+                if (frame.f_code is owner._scope.__code__
+                        and frame.f_locals.get('obj') is owner):
+                    scope_seen = True
+                if (frame.f_code is code['prepare']
+                        and frame.f_locals.get('self') is owner):
+                    return scope_seen, True
+                frame = frame.f_back
+            return scope_seen, False
+
+        def location_image(actor, binding, handle, frame):
             # Only read existing objects. No product methods or native stimuli.
             matching = tuple(graph for graph in graphs if graph.duration is actor.capability)
+            owner = gate[0]['owner'] if gate else None
+            stack = owning_scope_stack(frame, owner) if owner is not None else (False, False)
             return dict(actor=actor, binding=binding, handle=handle, count=membership(handle),
+                        observed_at=hass.loop.time(),
                         graphs=matching, live=tuple(graph.live for graph in matching),
                         roots=tuple(roots), records=tuple(actor.records), witness=actor.witness,
                         owners=tuple(bound for bound in roots
-                            if getattr(bound.consumers, 'owned_automation', None) in matching),
+                            if getattr(getattr(bound, 'consumers', None), 'owned_automation', None) in matching),
+                        owning_stack=stack,
+                        gate_owner=owner,
+                        post_start=bool(gate and getattr(owner, 'chain', None) is gate[0]['chain']),
+                        owner_task=bool(gate and asyncio.current_task() is gate[0]['task']
+                                        and owner.task is gate[0]['task']),
+                        preinstall=bool(owner is not None and not owner.bound and not root_installs),
                         history=image(native_pending, before),
                         configured=binding.config['for'],
                         configured_items=tuple(binding.config['for'].items()),
@@ -188,15 +217,18 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
             frame = sys._getframe(1)
             try:
                 local, actor = frame.f_locals, frame.f_locals.get('self')
-                if actual is code['root'] and actor.hass is hass:
+                if actual is code['prepare'] and actor.hass is hass:
                     roots.append(actor)
+                    root_times.append(hass.loop.time())
+                elif actual is code['root'] and actor.hass is hass:
+                    root_installs.append(actor)
                 elif actual is code['graph'] and local.get('hass') is hass:
                     # Store identity at entry; __init__ completes normally before
                     # any location census can use graph.duration.
                     graphs.append(actor)
                 elif actual is code['location'] and native_pending is not None:
                     if local.get('handle') is native_pending['handle']:
-                        row = location_image(actor, local['binding'], local['handle'])
+                        row = location_image(actor, local['binding'], local['handle'], frame)
                         entries.append(row)
                         timeline.append(('location', row['count']))
                 elif actual is code['attach'] and local.get('hass') is hass:
@@ -206,6 +238,7 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
                 elif actual is expiry_code:
                     for label, (p, binding, saved) in pending.items():
                         if local.get('job') is p['same_job']:
+                            expiry_times.append((label, hass.loop.time()))
                             stack, parent = [], frame.f_back
                             while parent is not None:
                                 stack.append((parent.f_code, parent.f_locals.get('self'),
@@ -219,7 +252,8 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
                 else:
                     for key in effects:
                         if (actual is code[key] and (getattr(actor, 'hass', None) is hass
-                                or getattr(getattr(actor, 'observer', None), 'hass', None) is hass)):
+                                or getattr(getattr(actor, 'observer', None), 'hass', None) is hass
+                                or getattr(getattr(actor, 'root', None), 'hass', None) is hass)):
                             effects[key].append(actor)
             finally:
                 del frame
@@ -262,7 +296,7 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
                         or frame.f_locals.get('reason') != 'duration_timer_not_scheduled'):
                     return
                 local = caller.f_locals
-                row = location_image(local['self'], local['binding'], local['handle'])
+                row = location_image(local['self'], local['binding'], local['handle'], caller)
                 row['exception'] = exception
                 raised.append(row)
                 timeline.append(('raise', row['count']))
@@ -365,43 +399,119 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
             private_before = {path: path.read_bytes() for path in private_paths}
             counts = len(renders), len(template_calls), len(validations)
             roots.clear()
+            root_installs.clear()
+            # Pause only after the authentic last awaited preparation has
+            # completed. Yield to the real loop until its unmodified timer is
+            # naturally promoted; this task's continuation is already ready
+            # ahead of H. The actual Root _prepare then resumes synchronously,
+            # executing its original owning _scope before any _install/effect.
+            # No clock, job, Handle, queue or product guard is changed.
+            chain_type = self.module('native_registry_receipts').RegistryReceiptChain
+            original_start = chain_type.__dict__['start'].__func__
+
+            async def start_at_native_ready(cls, *args, **kwargs):
+                result = await original_start(cls, *args, **kwargs)
+                self.assertEqual(len(roots), 1, 'the actual Root _prepare must have entered once')
+                owner, = roots
+                self.assertIs(type(owner), root_type)
+                self.assertIs(owner.hass, hass)
+                self.assertIs(owner.runtime, runtime)
+                self.assertIs(owner.task, asyncio.current_task())
+                self.assertEqual(len(args), 5)
+                self.assertFalse(kwargs)
+                self.assertIs(args[0], owner.receipt_store)
+                self.assertEqual(args[1], owner.operation_id)
+                self.assertIs(args[2], owner.plan)
+                self.assertIs(args[3], owner.receipt)
+                self.assertIs(args[4], owner.digests)
+                self.assertIs(result.store, owner.receipt_store)
+                self.assertIs(result.plan, owner.plan)
+                self.assertIs(result.original_receipt, owner.receipt)
+                self.assertEqual(result.operation_id, owner.operation_id)
+                scope = owner._scope
+                self.assertIs(type(scope), FunctionType)
+                yaml_server = self.module('native_template_yaml_server')
+                open_code = yaml_server.NativeTemplateYAMLServer._open.__func__.__code__
+                scope_codes = tuple(value for value in open_code.co_consts if type(value) is CodeType
+                    and value.co_qualname == 'NativeTemplateYAMLServer._open.<locals>.scope')
+                self.assertEqual(len(scope_codes), 1)
+                self.assertIs(scope.__code__, scope_codes[0])
+                self.assertIs(scope.__globals__, vars(yaml_server))
+                closure = dict(zip(scope.__code__.co_freevars,
+                    (value.cell_contents for value in scope.__closure__ or ()), strict=True))
+                self.assertIs(closure['obj'], owner)
+                self.assertIs(closure['hass'], hass)
+                self.assertIs(closure['runtime'], runtime)
+                self.assertIs(closure['guard'], owner.guard)
+                self.assertEqual(membership(retained[4]), (1, 0),
+                                 'native timer expired before final preparation')
+                remaining = retained[5] - hass.loop.time()
+                if remaining > 1:
+                    await asyncio.sleep(remaining - 1)
+                while membership(retained[4]) == (1, 0):
+                    await asyncio.sleep(0)
+                ready = membership(retained[4])
+                self.assertEqual(ready, (0, 1), 'native H must be ready, not run')
+                gate.append({'owner': owner, 'chain': result, 'task': asyncio.current_task(),
+                             'count': ready, 'observed_at': hass.loop.time()})
+                timeline.append(('gate', ready))
+                return result
+
             error = None
             try:
-                await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
+                with patch.object(chain_type, 'start', classmethod(start_at_native_ready)):
+                    await runtime.native_forward(hass, mapping, guard=lambda: None, refresh=refresh)
             except ValueError as caught:
                 error = caught
+            self.assertEqual(len(gate), 1)
+            self.assertEqual(gate[0]['count'], (0, 1))
             self.assertIsNotNone(error, 'must refuse; an applied/unknown return is not this proof')
             self.assertIs(type(error), ValueError)
             self.assertEqual(str(error), reason)
-            self.assertTrue(roots, 'must reach the real NativeTemplateStateServer install')
+            self.assertEqual(len(roots), 1, 'must enter the real NativeTemplateStateServer _prepare once')
             self.assertTrue(all(type(bound) is root_type for bound in roots))
-            ready_entries = [row for row in entries if row['count'] == (0, 1) and row['roots']]
-            ready_raises = [row for row in raised if row['count'] == (0, 1) and row['roots']]
+            self.assertIs(gate[0]['owner'], roots[0])
+            self.assertEqual(root_installs, [], 'preinstall refusal must precede the real _install')
+            ready_entries = [row for row in entries if row['count'] == (0, 1) and row['post_start']]
+            ready_raises = [row for row in raised if row['count'] == (0, 1) and row['post_start']]
             self.assertTrue(ready_entries, 'UNPROVED TIMING: exact native H never reached preinstall ready')
             self.assertTrue(ready_raises, 'generic duration error does not prove ready refusal')
+            self.assertEqual(len(ready_entries), 1)
+            self.assertEqual(len(ready_raises), 1)
             self.assertTrue(any(row['exception'] is error for row in ready_raises),
                             'the observed original ready refusal must propagate to the API caller')
             for row in ready_entries + ready_raises:
                 self.assertIs(row['handle'], retained[4])
                 self.assertTrue(row['graphs'], 'must belong to the actual Root graph capability')
                 self.assertTrue(row['owners'], 'the exact capability must be owned by this actual Root')
+                self.assertEqual(row['owners'], (roots[0],))
+                self.assertIs(row['gate_owner'], roots[0])
+                self.assertEqual(row['owning_stack'], (True, True),
+                                 'actual owning _scope and its Root _prepare must both be on the stack')
+                self.assertTrue(row['post_start'], 'this exact returned chain must already be bound')
+                self.assertTrue(row['owner_task'], 'scope and chain must run in the same owning task')
+                self.assertTrue(row['preinstall'], 'no install or binding may precede this refusal')
                 self.assertEqual(row['live'], (False,) * len(row['graphs']))
                 self.assertEqual(row['records'], ())
+                self.assertIsNone(row['witness'])
                 self.assertEqual(row['keys'], (old,))
                 self.assertIs(row['configured'], configured)
                 assert_configured_items(row['configured_items'], configured_items)
                 self.assertIs(row['listener'], configured)
-                self.assertEqual(row['effect_counts'], (0, 0, 0, 0))
+                self.assertEqual(row['effect_counts'], (0,) * len(effects))
                 assert_image(row['history'], retained)
             # Root may await during refusal unwinding: native F may already have
             # run by this return. Order is attested below from actual entries.
             await asyncio.sleep(max(0, max(retained[5], control_image[5]) - hass.loop.time()) + 0.05)
             await hass.async_block_till_done()
             self.assertFalse(runtime.operation_lock.locked())
+            self.assertEqual(root_installs, [])
             self.assertEqual(effects, {key: [] for key in effects})
             self.assertEqual((len(actions), len(scripts), len(controls), len(slow)), (1, 1, 1, 0))
             self.assertEqual(attachments, [old, 'sensor.duration_control'])
             first_refusal = timeline.index(('raise', (0, 1)))
+            self.assertLess(timeline.index(('gate', (0, 1))), timeline.index(('location', (0, 1))))
+            self.assertLess(timeline.index(('location', (0, 1))), first_refusal)
             self.assertGreater(timeline.index(('F', 'source')), first_refusal)
             self.assertGreater(timeline.index(('F', 'control')), first_refusal)
             for label, (p, binding, saved) in pending.items():
@@ -478,9 +588,35 @@ class NativeAutomationSourceDurationPreinstallReadyRefusalRootTests(unittest.Iso
                              tuple(name if key == tool else value
                                    for key, value in enumerate(tools_before)))
         finally:
+            # Diagnostic only: all times are reads from the existing loop and
+            # actual Handle. Keep preinstall and live-route samples distinct.
+            if retained is not None:
+                deadline = retained[5]
+                preinstall = [row['observed_at'] for row in entries
+                              if row['post_start'] and row['owners'] and row['live']
+                              and not any(row['live'])]
+                active = [row['observed_at'] for row in entries
+                          if row['post_start'] and row['owners'] and any(row['live'])]
+                def relative_span(values):
+                    return None if not values else (len(values),
+                        round(min(values) - deadline, 6), round(max(values) - deadline, 6))
+                print('NATIVE_PREINSTALL_READY_TIMING', {
+                    'root_prepare_vs_deadline': [round(at - deadline, 6) for at in root_times],
+                    'gate_vs_deadline': [round(row['observed_at'] - deadline, 6) for row in gate],
+                    'preinstall_span_vs_deadline': relative_span(preinstall),
+                    'active_span_vs_deadline': relative_span(active),
+                    'expiry_vs_source_deadline': [(label, round(at - deadline, 6))
+                                                  for label, at in expiry_times],
+                })
             print('NATIVE_PREINSTALL_READY_REFUSAL', {
                 'entry_counts': [row['count'] for row in entries],
                 'raise_counts': [row['count'] for row in raised],
+                'post_start_entries': [(row['count'], row['owning_stack'], row['owner_task'], row['preinstall'])
+                                       for row in entries if row['post_start']],
+                'post_start_raises': [(row['count'], row['owning_stack'], row['owner_task'], row['preinstall'])
+                                      for row in raised if row['post_start']],
+                'prepare_roots': len(roots), 'root_installs': len(root_installs),
+                'gate': [(id(row['owner']), id(row['chain']), id(row['task']), row['count']) for row in gate],
                 'timeline': timeline,
                 'effects': {key: len(value) for key, value in effects.items()},
                 'F': {key: len(value) for key, value in starts.items()},
