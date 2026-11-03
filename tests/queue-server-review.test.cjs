@@ -743,3 +743,72 @@ test('online enables inventory only when connection and admin authority are curr
   f.connection.connected=true;f.connection.dispatchEvent(new f.dom.window.Event('ready'));
   assert.equal(button(),null);assert.equal(writes(f).length,0);assert.equal(restores(f).length,0);
 });
+
+for (const transition of ['remount','authority','connection']) for (const finish of ['before-return','after-return']) test('invalidated inspection has an honest terminal and requires a new explicit check: '+transition+' '+finish,async t=>{
+  const f=await fixture(t),pending=gate();f.handlers['ha_entity_renamer/recovery/inspect']=()=>pending.promise;
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'unknown',direction:'forward',progress:{total_steps:2,verified_steps:2,undone_steps:0}}]});
+  await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();
+  const old=f.card._inspectMigration();await tick();let card=f.card;
+  if(transition==='remount') f.card.remove();
+  if(transition==='authority') f.card.hass={...f.hass,user:{id:'admin-a'}};
+  if(transition==='connection') {f.connection.connected=false;f.connection.dispatchEvent(new f.dom.window.Event('disconnected'));}
+  const resume=()=>{
+    if(transition==='remount') {card=f.dom.window.document.createElement('ha-entity-renamer');card.setConfig({show_support:false});f.dom.window.document.body.append(card);card.hass=f.hass;}
+    if(transition==='authority') f.card.hass={...f.hass};
+    if(transition==='connection') {f.connection.connected=true;f.connection.dispatchEvent(new f.dom.window.Event('ready'));}
+  };
+  if(finish==='after-return') {resume();await tick();assert.equal(card._migration.busy,true);await card._inspectMigration();assert.equal(f.requests.filter(r=>r.type==='ha_entity_renamer/recovery/inspect').length,1);}
+  pending.resolve({operation_id:'review_qa',fingerprint,state:'refused',reason:'prewrite_refused'});await old;
+  if(finish==='before-return') resume();
+  await tick();assert.equal(card._migration.busy,false);assert.equal(card._migration.inspection,undefined);
+  assert.match(card.shadowRoot.textContent,/previous inspection result cannot be used after the card or authority changed/i);
+  assert.doesNotMatch(card.shadowRoot.textContent,/Previous operation selected\. Check status/);
+  assert.equal(card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);
+  assert.equal(card.shadowRoot.getElementById('inspectMigration').disabled,false);
+  assert.equal(writes(f).length,0);assert.equal(restores(f).length,0);
+  f.entries[0].entity_id='sensor.b';f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'recoverable_complete',eligible:true,restore_attempt_available:true,
+    frozen_review:{changes:f.review.changes,dependencies:f.review.dependencies,identities:[['entry-a','mqtt','a','dev']]}});
+  await card._inspectMigration();assert.equal(f.requests.filter(r=>r.type==='ha_entity_renamer/recovery/inspect').length,2);
+  assert.equal(card._migration.registryMatches,true);assert.equal(card.shadowRoot.getElementById('reviewMigrationRestore').disabled,false);
+  assert.ok(!card._migration.restoreConsent);await card._restoreMigration();assert.equal(restores(f).length,0);
+  card._reviewMigrationRestore();assert.equal(card._migration.restoreConsent,true);assert.equal(restores(f).length,0);
+});
+
+for(const failure of ['rejected','mismatched','registry']) test('completed inspection explains '+failure+' without treating it as a selected operation',async t=>{
+  const f=await fixture(t);f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'applied'}]});
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>failure==='rejected'?Promise.reject(new Error('offline')):failure==='mismatched'?{operation_id:'other',fingerprint,state:'applied'}:{operation_id:'review_qa',fingerprint,state:'applied'};
+  if(failure==='registry') f.handlers['config/entity_registry/list']=()=>Promise.reject(new Error('offline'));
+  await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();await f.card._inspectMigration();
+  const text=f.card.shadowRoot.textContent;
+  assert.match(text,failure==='registry'?/fresh registry read failed/i:/Inspection failed or returned a mismatched response/i);
+  assert.doesNotMatch(text,/Previous operation selected\. Check status/);
+  assert.equal(f.card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);
+  assert.equal(f.card.shadowRoot.getElementById('inspectMigration').disabled,false);assert.equal(writes(f).length,0);
+});
+
+test('connection replacement drains old inspection before any fresh check and exposes no old result',async t=>{
+  const f=await fixture(t),pending=gate();f.handlers['ha_entity_renamer/recovery/inspect']=()=>pending.promise;
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'applied'}]});
+  await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();const old=f.card._inspectMigration();await tick();
+  const connection=new f.dom.window.EventTarget();connection.connected=true;f.card.hass={...f.hass,connection};await tick();
+  assert.equal(f.card._migration.busy,true);assert.equal(f.card.shadowRoot.getElementById('inspectMigration').disabled,true);
+  await f.card._inspectMigration();assert.equal(f.requests.filter(r=>r.type==='ha_entity_renamer/recovery/inspect').length,1);
+  pending.resolve({operation_id:'review_qa',fingerprint,state:'refused',reason:'prewrite_refused'});await old;await tick();
+  assert.equal(f.card._migration.busy,false);assert.equal(f.card._migration.inspection,undefined);
+  assert.match(f.card.shadowRoot.textContent,/previous inspection result cannot be used after the card or authority changed/i);
+  assert.equal(f.card.shadowRoot.getElementById('inspectMigration').disabled,false);
+  assert.equal(f.card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);assert.equal(writes(f).length,0);
+});
+
+test('completed inspection is explicitly invalidated when its card is later replaced',async t=>{
+  const f=await fixture(t);f.entries[0].entity_id='sensor.b';
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'unknown',direction:'forward'}]});
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'recoverable_complete',eligible:true,restore_attempt_available:true,
+    frozen_review:{changes:f.review.changes,dependencies:f.review.dependencies,identities:[['entry-a','mqtt','a','dev']]}});
+  await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();await f.card._inspectMigration();
+  assert.equal(f.card.shadowRoot.getElementById('reviewMigrationRestore').disabled,false);f.card._reviewMigrationRestore();assert.equal(f.card._migration.restoreConsent,true);
+  f.card.remove();const card=f.dom.window.document.createElement('ha-entity-renamer');card.setConfig({show_support:false});f.dom.window.document.body.append(card);card.hass=f.hass;await tick();
+  assert.match(card.shadowRoot.textContent,/previous inspection result cannot be used after the card or authority changed/i);
+  assert.equal(card._migration.inspection,undefined);assert.ok(!card._migration.restoreConsent);
+  assert.equal(card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);assert.equal(restores(f).length,0);
+});

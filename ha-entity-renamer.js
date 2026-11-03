@@ -1534,9 +1534,13 @@ class HAEntityRenamer extends HTMLElement {
       clearTimeout(m.pollTimer);
       // Consent expires on every authority fence. Retain attempted identity only
       // for same-account status/inspect, never to revive apply consent.
+      if (m.lifecycleEntry && (m.inspecting || m.lifecycleEntry.pending?.kind === 'inspect' || m.lifecycleEntry.inspectionObserved))
+        m.lifecycleEntry.inspectionInterrupted = true;
       this._migration = m.attempted ? {owner: m.owner, operation_id: m.operation_id,
         fingerprint: m.fingerprint, review: m.review, identities: m.identities, attempted: true,
         recoveredIdentity: m.recoveredIdentity, restoreAttempted: m.restoreAttempted, restoreRevoked: true,
+        lifecycleEntry: m.lifecycleEntry,
+        inspectionIssue: (m.inspecting || m.lifecycleEntry?.inspectionInterrupted) ? 'interrupted' : m.inspectionIssue,
         stage: 'unknown', invalidated: true, busy: false} : null;
     }
     this._recoveryInventory = null;
@@ -1677,7 +1681,10 @@ class HAEntityRenamer extends HTMLElement {
     if (!scope) return;
     scope.cards.delete(this);
     for (const entry of scope.entries) if (entry.owner === this) {
-      if (orphan) entry.owner = null; else scope.entries.delete(entry);
+      if (orphan) {
+        if (entry.pending?.kind === 'inspect' || entry.inspectionObserved) entry.inspectionInterrupted = true;
+        entry.owner = null;
+      } else scope.entries.delete(entry);
     }
     this._recoveryCardScope = null;
     this._offerRecoveryCards(scope);
@@ -1711,7 +1718,8 @@ class HAEntityRenamer extends HTMLElement {
     const m = {owner: entry.actor, operation_id: entry.operation_id, fingerprint: entry.fingerprint,
       attempted: true, recoveredIdentity: true, restoreRevoked: true, stage: 'unknown',
       epoch: card._authorityEpoch, session: card._readSession(), invalidated: false,
-      observation: 1, busy: !!entry.pending, inspecting: !!entry.pending, lifecycleEntry: entry};
+      observation: 1, busy: !!entry.pending, inspecting: entry.pending?.kind === 'inspect',
+      inspectionIssue: entry.inspectionInterrupted ? 'interrupted' : null, lifecycleEntry: entry};
     card._migration = m; card.render();
     void card._refreshMigrationProgress(m, card._hass);
   }
@@ -1725,22 +1733,31 @@ class HAEntityRenamer extends HTMLElement {
     scope.entries.add(entry); m.lifecycleEntry = entry; return entry;
   }
 
-  _startRecoveryRead(m) {
+  _startRecoveryRead(m, kind) {
     const entry = this._trackRecoveryOperation(m);
     if (!entry) return null;
-    const token = {}; entry.pending = token; return {entry, token, original: m};
+    const token = {kind}; entry.pending = token;
+    if (kind === 'inspect') { entry.inspectionInterrupted = false; entry.inspectionObserved = false; }
+    return {entry, token, original: m, origin: this};
   }
 
   _endRecoveryRead(read) {
     if (!read || read.entry.pending !== read.token) return;
     const entry = read.entry; entry.pending = null;
+    if (read.token.kind === 'inspect') {
+      if (!read.origin._migrationCurrent(read.original)) entry.inspectionInterrupted = true;
+      else entry.inspectionObserved = true;
+    }
     // Observers see completion, never the old response or consent.
-    for (const card of entry.scope.cards) {
+    for (const card of new Set([...entry.scope.cards, ...(entry.watchers || [])])) {
       const m = card._migration;
-      if (m && m !== read.original && m.lifecycleEntry === entry && card._migrationCurrent(m)) {
-        m.inspecting = false; m.busy = false; clearTimeout(m.pollTimer); m.pollTimer = null; card.render();
+      if (m && m !== read.original && m.lifecycleEntry === entry) {
+        if (read.token.kind === 'inspect' && entry.inspectionInterrupted) m.inspectionIssue = 'interrupted';
+        m.inspecting = false; m.busy = false; clearTimeout(m.pollTimer); m.pollTimer = null;
+        if (card._migrationCurrent(m)) card.render();
       }
     }
+    entry.watchers?.clear();
   }
 
   _invalidateRenameExport() {
@@ -1765,10 +1782,26 @@ class HAEntityRenamer extends HTMLElement {
     listen(connection, 'disconnected', () => { this._exportConnectionOnline = false; this._cancelRenameAuthority(); this.render(); });
   }
 
+  _rebindRecoveryObservation() {
+    const m = this._migration, entry = m?.lifecycleEntry;
+    if (!m?.invalidated || !entry || entry.actor !== this._hass?.user?.id || !this._renameAuthorityAvailable()) return;
+    // Rebind observation only. Results and consent from the prior epoch stay revoked.
+    m.epoch = this._authorityEpoch; m.session = this._readSession(); m.invalidated = false;
+    m.observation = (m.observation || 0) + 1;
+    m.busy = !!entry.pending; m.inspecting = entry.pending?.kind === 'inspect';
+    if (entry.inspectionInterrupted) m.inspectionIssue = 'interrupted';
+    if (m.busy) {
+      // A changed connection is a new scope, but its predecessor must drain.
+      if (this._recoveryCardScope !== entry.scope) (entry.watchers ||= new Set()).add(this);
+      void this._refreshMigrationProgress(m, this._hass);
+    }
+  }
+
   _restoreRenameAvailability() {
     this._invalidateRenameExport();
     // A handoff may have been waiting for this connection to become available.
     this._registerRecoveryCard();
+    this._rebindRecoveryObservation();
     if (this._migration?.attempted) this.render();
     else {
       // Update the authority-dependent control without replacing unrelated drafts.
@@ -1958,6 +1991,7 @@ class HAEntityRenamer extends HTMLElement {
     this._bindRenameExportEvents();
     if (sessionChanged) this._invalidateRenameExport();
     this._registerRecoveryCard();
+    this._rebindRecoveryObservation();
     if (hass?.language) this._lang = hass.language.startsWith('pl') ? 'pl' : 'en';
     const displayFormatKey = this._formatUi.key;
     this._displayFormatKey = displayFormatKey;
@@ -3421,7 +3455,8 @@ class HAEntityRenamer extends HTMLElement {
     if (matches.length === 1) {
       const entry = matches[0], m = this._migration;
       m.lifecycleEntry = entry; m.epoch = this._authorityEpoch; m.session = this._readSession();
-      m.invalidated = false; m.observation = 1; m.busy = !!entry.pending; m.inspecting = !!entry.pending;
+      m.invalidated = false; m.observation = 1; m.busy = !!entry.pending; m.inspecting = entry.pending?.kind === 'inspect';
+      m.inspectionIssue = entry.inspectionInterrupted ? 'interrupted' : null;
       if (!entry.owner) entry.owner = this;
       if (entry.pending) void this._refreshMigrationProgress(m, this._hass);
     } else this._trackRecoveryOperation(this._migration);
@@ -3557,7 +3592,7 @@ class HAEntityRenamer extends HTMLElement {
     if (!m || m.stage !== 'review' || m.busy || m.attempted || !this._migrationCurrent(m)) return;
     // Consume locally before the first await, including transport failures.
     m.attempted = true; m.stage = 'applying'; m.busy = true; m.applying = true;
-    const lifecycleRead = this._startRecoveryRead(m);
+    const lifecycleRead = this._startRecoveryRead(m, 'apply');
     this._confirmation = null; this._confirmDialogOpen = false;
     const hass = this._hass;
     this.render();
@@ -3609,7 +3644,7 @@ class HAEntityRenamer extends HTMLElement {
     // Consume before IO. Neither failed transport nor inspection can revive consent.
     m.restoreConsent = false; m.restoreAttempted = true; m.restoreAcknowledged = false;
     m.stage = 'restoring'; m.busy = true; m.restoring = true; m.registryMatches = false;
-    const lifecycleRead = this._startRecoveryRead(m);
+    const lifecycleRead = this._startRecoveryRead(m, 'restore');
     const hass = this._hass;
     this.render();
     void this._refreshMigrationProgress(m, hass);
@@ -3634,10 +3669,15 @@ class HAEntityRenamer extends HTMLElement {
 
   async _inspectMigration() {
     const m = this._migration;
-    if (!m?.attempted || m.busy || m.owner !== this._hass?.user?.id || !this._renameAuthorityAvailable()) return;
-    const read = this._startRecoveryRead(m);
+    if (!m?.attempted || m.busy || m.lifecycleEntry?.pending || m.owner !== this._hass?.user?.id || !this._renameAuthorityAvailable()) return;
+    const read = this._startRecoveryRead(m, 'inspect');
     try { return await this._runMigrationInspection(m); }
-    finally { this._endRecoveryRead(read); }
+    catch (_) {
+      if (this._migrationCurrent(m)) {
+        m.inspectionIssue = 'unavailable'; m.inspection = null; m.registryRead = false; m.registryMatches = false;
+        m.stage = 'unknown'; m.busy = false; m.inspecting = false; clearTimeout(m.pollTimer); m.pollTimer = null; this.render();
+      }
+    } finally { this._endRecoveryRead(read); }
   }
 
   async _runMigrationInspection(m) {
@@ -3645,7 +3685,7 @@ class HAEntityRenamer extends HTMLElement {
     // Rebind read authority only. This cannot revive apply or restore consent.
     m.epoch = this._authorityEpoch; m.session = this._readSession(); m.invalidated = false;
     m.observation = (m.observation || 0) + 1;
-    m.busy = true; m.inspecting = true; m.inspection = null;
+    m.busy = true; m.inspecting = true; m.inspection = null; m.inspectionIssue = null;
     m.registryRead = false; m.registryMatches = false; this.render();
     const hass = this._hass;
     // Status is independently readable while inspection waits for the operation lock.
@@ -3663,6 +3703,7 @@ class HAEntityRenamer extends HTMLElement {
     const value = i => results[i].status === 'fulfilled' ? results[i].value : null;
     const inspection = inspectionResult.status === 'fulfilled' ? inspectionResult.value : null;
     m.inspection = inspection?.operation_id === m.operation_id && inspection?.fingerprint === m.fingerprint ? inspection : null;
+    if (!m.inspection) m.inspectionIssue = 'unavailable';
     if ((m.recoveredIdentity || m.restoreAttempted) && m.inspection
         && ((m.inspection.eligible === true && ['applied', 'recoverable_complete'].includes(m.inspection.state))
           || (m.inspection.state === 'rolled_back' && m.inspection.reason === 'restored_verified'))) {
@@ -3683,6 +3724,7 @@ class HAEntityRenamer extends HTMLElement {
     // Fresh reads refresh the projection; they do not prove dependencies.
     const entities = value(0), devices = value(1);
     m.registryRead = Array.isArray(entities) && Array.isArray(devices);
+    if (!m.registryRead && !m.inspectionIssue) m.inspectionIssue = 'registry';
     m.registryMatches = false;
     if (m.registryRead) {
       this._entities = entities; this._devices = devices;
@@ -3788,7 +3830,7 @@ class HAEntityRenamer extends HTMLElement {
         : this._migrationText('Restore is unavailable until a fresh inspection permits it. Check status and inspect; do not repeat the write.', 'Wycofanie jest niedostępne, dopóki świeża inspekcja go nie dopuści. Sprawdź stan i inspekcję; nie powtarzaj zapisu.');
     return `<section class="apply-result ${['applied', 'restored'].includes(m.stage) && !m.busy ? '' : 'migration-pending'}" aria-labelledby="migrationResultTitle" aria-busy="${m.busy}">
       <h2 id="migrationResultTitle">${this._migrationText('Dependency operation', 'Operacja zależności')}</h2>
-      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan…', 'Wykonywanie zatwierdzonego planu…') : m.stage === 'restoring' ? this._migrationText('Restoring the confirmed scope…', 'Wycofywanie potwierdzonego zakresu…') : m.busy ? this._migrationText('Checking current status, inspection and registry…', 'Sprawdzanie bieżącego stanu, inspekcji i rejestru…') : m.stage === 'refused' ? this._migrationText('The server confirmed refusal before applying any changes.', 'Serwer potwierdził odmowę przed zastosowaniem zmian.') : m.stage === 'restored' ? this._migrationText('Restored scope confirmed; original registry fields independently verified.', 'Wycofanie zakresu potwierdzone; oryginalne pola rejestru niezależnie zweryfikowane.') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : m.recoveredIdentity && !m.inspection ? this._migrationText('Previous operation selected. Check status and inspect; do not repeat the write.', 'Wybrano poprzednią operację. Sprawdź stan i inspekcję; nie powtarzaj zapisu.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
+      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan…', 'Wykonywanie zatwierdzonego planu…') : m.stage === 'restoring' ? this._migrationText('Restoring the confirmed scope…', 'Wycofywanie potwierdzonego zakresu…') : m.busy ? this._migrationText('Checking current status, inspection and registry…', 'Sprawdzanie bieżącego stanu, inspekcji i rejestru…') : m.stage === 'refused' ? this._migrationText('The server confirmed refusal before applying any changes.', 'Serwer potwierdził odmowę przed zastosowaniem zmian.') : m.stage === 'restored' ? this._migrationText('Restored scope confirmed; original registry fields independently verified.', 'Wycofanie zakresu potwierdzone; oryginalne pola rejestru niezależnie zweryfikowane.') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : m.inspectionIssue === 'interrupted' ? (m.lifecycleEntry?.pending?.kind === 'inspect' ? this._migrationText('The previous inspection is still in progress after the card or authority changed. Its result cannot be used; wait for it to finish before checking again.', 'Poprzednia inspekcja nadal trwa po zmianie karty lub uprawnień. Jej wynik nie może zostać użyty; poczekaj na zakończenie przed ponownym sprawdzeniem.') : this._migrationText('A previous inspection result cannot be used after the card or authority changed. The outcome remains unconfirmed. Check status and inspect again.', 'Wynik poprzedniej inspekcji nie może zostać użyty po zmianie karty lub uprawnień. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.')) : m.inspectionIssue === 'unavailable' ? this._migrationText('Inspection failed or returned a mismatched response. The outcome remains unconfirmed. Check status and inspect again.', 'Inspekcja nie powiodła się lub zwróciła niedopasowaną odpowiedź. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.') : m.inspectionIssue === 'registry' ? this._migrationText('Inspection returned, but a fresh registry read failed. The outcome remains unconfirmed. Check status and inspect again.', 'Inspekcja zwróciła wynik, ale świeży odczyt rejestru nie powiódł się. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.') : m.recoveredIdentity && !m.inspection ? this._migrationText('Previous operation selected. Check status and inspect; do not repeat the write.', 'Wybrano poprzednią operację. Sprawdź stan i inspekcję; nie powtarzaj zapisu.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
       <p>${this._migrationText('Full dependency coverage is unconfirmed. Restore covers only this current operation.', 'Pełne pokrycie zależności jest niepotwierdzone. Wycofanie obejmuje tylko bieżącą operację.')}</p>
       ${m.recoveredIdentity ? `<p>${this._migrationText('A previous operation is available for fresh inspection. Apply consent was not retained; do not repeat the write.', 'Poprzednia operacja jest dostępna do świeżej inspekcji. Zgoda na zastosowanie nie została zachowana; nie powtarzaj zapisu.')}</p>` : ''}
       <code>${_esc(m.operation_id)}</code>
