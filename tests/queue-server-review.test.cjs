@@ -6,7 +6,7 @@ const {JSDOM} = require('jsdom');
 const fingerprint = 'a'.repeat(64);
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function gate() { let resolve, reject; const promise = new Promise((a,b) => {resolve=a; reject=b;}); return {promise,resolve,reject}; }
-function fixture(t, language='en') {
+async function fixture(t, language='en') {
   const dom = new JSDOM('', {runScripts:'dangerously', pretendToBeVisual:true, url:'http://localhost/'});
   t.after(() => dom.window.close());
   dom.window.eval(readFileSync(join(__dirname,'../ha-entity-renamer.js'),'utf8'));
@@ -29,14 +29,18 @@ function fixture(t, language='en') {
     if(message.type==='ha_entity_renamer/recovery/inspect') return {operation_id:review.operation_id,fingerprint,state:'applied',eligible:true,restore_attempt_available:true,migration_ready:false,family_complete:false};
     throw new Error('Unexpected '+message.type);
   }};
-  card._hass=hass;card._lang=language;card._entities=entries.map(row=>({...row}));card._devices=devices;card._deviceEntities={dev:card._entities};card._bindRenameExportEvents();
+  // Exercise HA's real connected + public hass setter path, including registry reads.
+  card.hass=hass;await tick();
+  assert.equal(card._loading,false);
+  assert.deepEqual(Array.from(card._entities, row=>row.entity_id),['sensor.a']);
+  assert.deepEqual(Array.from(card._devices, row=>row.id),['dev']);
   card._renameQueue=[{oldId:'sensor.a',newId:'sensor.b'}];card._showRenameConfirmation();
   return {card,dom,hass,connection,requests,entries,devices,review,handlers};
 }
 const writes = f => f.requests.filter(m=>m.type==='ha_entity_renamer/apply'||m.type.endsWith('/update'));
 
 test('ordinary confirmation keeps registry-only and explicit server prepare as separate actions',async t=>{
-  const f=fixture(t);assert.ok(f.card.shadowRoot.getElementById('confirmRenameApply'));assert.ok(f.card.shadowRoot.getElementById('prepareMigration'));
+  const f=await fixture(t);assert.ok(f.card.shadowRoot.getElementById('confirmRenameApply'));assert.ok(f.card.shadowRoot.getElementById('prepareMigration'));
   f.card.shadowRoot.getElementById('prepareMigration').click();await tick();
   const request=f.requests.find(m=>m.type==='ha_entity_renamer/prepare');
   assert.deepEqual(JSON.parse(JSON.stringify(request)),{type:'ha_entity_renamer/prepare',entities:[{entity_id:'sensor.a',new_entity_id:'sensor.b'}],devices:[]});
@@ -44,7 +48,7 @@ test('ordinary confirmation keeps registry-only and explicit server prepare as s
 });
 
 test('review displays every server change and all dependency aggregates with PL/EN escaping',async t=>{
-  const f=fixture(t,'pl');const literal='<img src=x onerror="alert(1)">';
+  const f=await fixture(t,'pl');const literal='<img src=x onerror="alert(1)">';
   f.review.changes=Array.from({length:12},(_,i)=>({entity_id:'sensor.server_'+i,fields:{name:{before:null,after:literal+i}}}));
   await f.card._prepareMigration();
   let dialog=f.card.shadowRoot.querySelector('[role="dialog"]');assert.match(dialog.textContent,/Zmiany serwera/);assert.match(dialog.textContent,/Zależności/);
@@ -58,7 +62,7 @@ test('review displays every server change and all dependency aggregates with PL/
 });
 
 test('unsupported prepare refuses honestly and cannot silently use registry-only',async t=>{
-  const f=fixture(t);f.handlers['ha_entity_renamer/prepare']=()=>Promise.reject({code:'unsupported_selection',message:'<private>'});
+  const f=await fixture(t);f.handlers['ha_entity_renamer/prepare']=()=>Promise.reject({code:'unsupported_selection',message:'<private>'});
   await f.card._prepareMigration();assert.equal(f.card._migration.stage,'refused');
   assert.match(f.card.shadowRoot.textContent,/refused or could not be verified/);assert.ok(!f.card.shadowRoot.textContent.includes('<private>'));
   await f.card._executeRenames(true);await f.card._applyMigration();assert.equal(writes(f).length,0);
@@ -66,13 +70,13 @@ test('unsupported prepare refuses honestly and cannot silently use registry-only
 });
 
 test('malformed server review cannot offer apply',async t=>{
-  const f=fixture(t);f.review.changes[0].fields=null;
+  const f=await fixture(t);f.review.changes[0].fields=null;
   await f.card._prepareMigration();assert.equal(f.card._migration.stage,'refused');assert.equal(f.card.shadowRoot.getElementById('applyMigration'),null);
   assert.equal(writes(f).length,0);
 });
 
 test('prepare and review block all queue mutations and duplicate prepare',async t=>{
-  const f=fixture(t);const pending=gate();f.handlers['ha_entity_renamer/prepare']=()=>pending.promise;
+  const f=await fixture(t);const pending=gate();f.handlers['ha_entity_renamer/prepare']=()=>pending.promise;
   const first=f.card._prepareMigration();await f.card._prepareMigration();
   const attempt=()=>{f.card._addToQueue('sensor.a','sensor.other');f.card._removeFromQueue('sensor.a');f.card._clearQueue();f.card._queueAutomaticIds();};
   attempt();assert.equal(f.card._renameQueue[0].newId,'sensor.b');assert.equal(f.requests.filter(m=>m.type==='ha_entity_renamer/prepare').length,1);
@@ -83,7 +87,7 @@ test('prepare and review block all queue mutations and duplicate prepare',async 
 });
 
 test('apply sends only retained identity once and refreshes registry plus journal and inspect',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();const pending=gate();
+  const f=await fixture(t);await f.card._prepareMigration();const pending=gate();
   f.handlers['ha_entity_renamer/apply']=()=>{f.entries[0].entity_id='sensor.b';return pending.promise;};
   const first=f.card._applyMigration();await f.card._applyMigration();await f.card._executeRenames(true);
   assert.equal(writes(f).length,1);assert.deepEqual(JSON.parse(JSON.stringify(writes(f)[0])),{type:'ha_entity_renamer/apply',operation_id:'review_qa',fingerprint});
@@ -95,7 +99,7 @@ test('apply sends only retained identity once and refreshes registry plus journa
 });
 
 test('lost apply response uses status/inspect only, retaining unknown and locking queue',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();
+  const f=await fixture(t);await f.card._prepareMigration();
   f.handlers['ha_entity_renamer/apply']=()=>Promise.reject(new Error('lost response'));
   f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'recoverable_prefix',eligible:true});
   await f.card._applyMigration();assert.equal(f.card._migration.stage,'unknown');assert.match(f.card.shadowRoot.textContent,/Partial or unknown/);
@@ -106,13 +110,13 @@ test('lost apply response uses status/inspect only, retaining unknown and lockin
 });
 
 test('unobserved registry read cannot turn an ACK or applied inspect into complete',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();f.handlers['config/entity_registry/list']=()=>Promise.reject(new Error('offline'));
+  const f=await fixture(t);await f.card._prepareMigration();f.handlers['config/entity_registry/list']=()=>Promise.reject(new Error('offline'));
   await f.card._applyMigration();assert.equal(f.card._migration.stage,'unknown');assert.equal(f.card._migration.registryRead,false);
   f.card._finishMigration();assert.equal(f.card._renameQueue.length,1);assert.equal(writes(f).length,1);
 });
 
 for(const fence of ['account','role','connection','disconnect']) test('late prepare cannot revive review after '+fence,async t=>{
-  const f=fixture(t);const pending=gate();f.handlers['ha_entity_renamer/prepare']=()=>pending.promise;
+  const f=await fixture(t);const pending=gate();f.handlers['ha_entity_renamer/prepare']=()=>pending.promise;
   const first=f.card._prepareMigration();
   if(fence==='account') f.card.hass={...f.hass,user:{id:'other-admin',is_admin:true}};
   if(fence==='role') f.card.hass={...f.hass,user:{id:'admin-a',is_admin:false}};
@@ -123,7 +127,7 @@ for(const fence of ['account','role','connection','disconnect']) test('late prep
 });
 
 test('disconnect after apply consumes intent, ignores late ACK and reconnect offers reads only',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();const pending=gate();f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
+  const f=await fixture(t);await f.card._prepareMigration();const pending=gate();f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
   const first=f.card._applyMigration();f.connection.connected=false;f.connection.dispatchEvent(new f.dom.window.Event('disconnected'));
   pending.resolve({operation_id:'review_qa',fingerprint,state:'applied'});await first;
   assert.equal(f.card._migration.stage,'unknown');assert.equal(f.card._migration.applyState,undefined);
@@ -133,7 +137,7 @@ test('disconnect after apply consumes intent, ignores late ACK and reconnect off
 });
 
 test('late status and inspect cannot populate a different account',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();const pending=gate();
+  const f=await fixture(t);await f.card._prepareMigration();const pending=gate();
   f.handlers['ha_entity_renamer/recovery/inspect']=()=>pending.promise;
   const first=f.card._applyMigration();await tick();f.card.hass={...f.hass,user:{id:'other-admin',is_admin:true}};
   pending.resolve({operation_id:'review_qa',fingerprint,state:'applied',change_summary:{name:'private previous actor'}});await first;await tick();
@@ -142,7 +146,7 @@ test('late status and inspect cannot populate a different account',async t=>{
 
 
 test('pending apply reads journal progress without timing out or repeating the write',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();const pending=gate();
+  const f=await fixture(t);await f.card._prepareMigration();const pending=gate();
   f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
   const first=f.card._applyMigration();await tick();
   assert.equal(f.card._migration.stage,'applying');
@@ -154,14 +158,14 @@ test('pending apply reads journal progress without timing out or repeating the w
 });
 
 test('a detached registry-only button cannot dismiss a prepared migration or write',async t=>{
-  const f=fixture(t);const oldButton=f.card.shadowRoot.getElementById('confirmRenameApply');
+  const f=await fixture(t);const oldButton=f.card.shadowRoot.getElementById('confirmRenameApply');
   await f.card._prepareMigration();oldButton.click();f.card.render();
   assert.ok(f.card.shadowRoot.getElementById('applyMigration'));assert.equal(writes(f).length,0);
 });
 
 
 test('mixed queue sends only ordinary name fields and review includes server device changes',async t=>{
-  const f=fixture(t);f.card._renameQueue[0].newName='Literal <name>';f.card._deviceRenameQueue={dev:'Literal <device>'};f.card._showRenameConfirmation();
+  const f=await fixture(t);f.card._renameQueue[0].newName='Literal <name>';f.card._deviceRenameQueue={dev:'Literal <device>'};f.card._showRenameConfirmation();
   f.review.changes.push({device_id:'dev',fields:{name_by_user:{before:null,after:'Literal <device>'}}});
   await f.card._prepareMigration();const sent=f.requests.find(m=>m.type==='ha_entity_renamer/prepare');
   assert.deepEqual(JSON.parse(JSON.stringify(sent.entities)),[{entity_id:'sensor.a',new_entity_id:'sensor.b',name:'Literal <name>'}]);
@@ -171,7 +175,7 @@ test('mixed queue sends only ordinary name fields and review includes server dev
 });
 
 test('cancel during read-only prepare releases queue and ignores its late review',async t=>{
-  const f=fixture(t);const pending=gate();f.handlers['ha_entity_renamer/prepare']=()=>pending.promise;
+  const f=await fixture(t);const pending=gate();f.handlers['ha_entity_renamer/prepare']=()=>pending.promise;
   const first=f.card._prepareMigration();await tick();
   f.card._cancelRenameConfirmation();assert.equal(f.card._migration,null);
   f.card._addToQueue('sensor.a','sensor.other');
@@ -181,7 +185,7 @@ test('cancel during read-only prepare releases queue and ignores its late review
 });
 
 test('replacement of queued source identity refuses before preparing migration',async t=>{
-  const f=fixture(t);
+  const f=await fixture(t);
   f.card._renameQueue[0].sourceIdentity=f.card._sourceIdentity(f.entries[0]);
   f.card._showRenameConfirmation();
   f.entries[0]={...f.entries[0],id:'foreign-replacement',unique_id:'foreign'};
@@ -192,7 +196,7 @@ test('replacement of queued source identity refuses before preparing migration',
 });
 
 test('changed automatic target refuses before preparing migration',async t=>{
-  const f=fixture(t);
+  const f=await fixture(t);
   Object.assign(f.card._renameQueue[0],{automatic:true,uniqueId:'a',deviceId:'dev',sourceIdentity:f.card._sourceIdentity(f.entries[0])});
   f.card._showRenameConfirmation();
   f.handlers['config/entity_registry/get_automatic_entity_ids']=()=>({'sensor.a':'sensor.another_target'});
@@ -203,7 +207,7 @@ test('changed automatic target refuses before preparing migration',async t=>{
 });
 
 test('unassigned source is reachable through ordinary list and editor without a synthetic device',async t=>{
-  const f=fixture(t);f.card._cancelRenameConfirmation();f.card._renameQueue=[];
+  const f=await fixture(t);f.card._cancelRenameConfirmation();f.card._renameQueue=[];
   f.entries[0].device_id=null;f.card._entities=f.entries.map(r=>({...r}));f.card._deviceEntities={};f.card._searchQuery='sensor.a';
   const groups=f.card._getFilteredDevices();assert.equal(groups.length,1);assert.equal(groups[0].unassigned,true);
   assert.equal(f.card._devices.length,1,'real device inventory unchanged');
@@ -220,7 +224,7 @@ test('unassigned source is reachable through ordinary list and editor without a 
 });
 
 test('dependency files and every reference change are visible; missing file review refuses',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();
+  const f=await fixture(t);await f.card._prepareMigration();
   const dialog=f.card.shadowRoot.querySelector('[role="dialog"]');
   for(const name of ['template.yaml','automation.yaml','script.yaml']) assert.ok(dialog.textContent.includes(name));
   assert.equal(dialog.querySelectorAll('details li').length,3);
@@ -231,7 +235,7 @@ test('dependency files and every reference change are visible; missing file revi
 
 const restores = f => f.requests.filter(m=>m.type==='ha_entity_renamer/recovery/restore');
 async function appliedFixture(t, language='en') {
-  const f=fixture(t,language);await f.card._prepareMigration();await f.card._applyMigration();
+  const f=await fixture(t,language);await f.card._prepareMigration();await f.card._applyMigration();
   assert.equal(f.card._migration.stage,'applied');return f;
 }
 const restoreAck = () => ({operation_id:'review_qa',fingerprint,state:'rolled_back'});
@@ -241,7 +245,7 @@ function finishedInspection(f) {
 }
 
 test('restore review reverses registry and dependency deltas with escaping, PL/EN and focused Cancel',async t=>{
-  const f=fixture(t,'pl');const literal='<img src=x onerror="alert(1)">';
+  const f=await fixture(t,'pl');const literal='<img src=x onerror="alert(1)">';
   f.review.changes[0].fields.name={before:null,after:literal};
   f.review.dependencies.files[0].path=literal+'.yaml';
   f.review.dependencies.files[0].references[0]={before:'sensor.<old>',after:'sensor.<new>',occurrences:3};
@@ -344,7 +348,7 @@ test('revoked confirmation and previously applied operation cannot authorize res
 
 
 test('restored read verifies original entity name and device name in addition to ID',async t=>{
-  const f=fixture(t);f.review.changes[0].fields.name={before:null,after:'Applied entity'};
+  const f=await fixture(t);f.review.changes[0].fields.name={before:null,after:'Applied entity'};
   f.review.changes.push({device_id:'dev',fields:{name_by_user:{before:null,after:'Applied device'}}});
   f.handlers['ha_entity_renamer/apply']=()=>{Object.assign(f.entries[0],{entity_id:'sensor.b',name:'Applied entity'});f.devices[0].name_by_user='Applied device';return {operation_id:'review_qa',fingerprint,state:'applied'};};
   await f.card._prepareMigration();await f.card._applyMigration();
@@ -356,7 +360,7 @@ test('restored read verifies original entity name and device name in addition to
 
 
 async function completeUnknownFixture(t) {
-  const f=fixture(t);await f.card._prepareMigration();
+  const f=await fixture(t);await f.card._prepareMigration();
   f.handlers['ha_entity_renamer/apply']=()=>{f.entries[0].entity_id='sensor.b';throw new Error('uncertain final verifier');};
   f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'unknown',direction:'forward'}]});
   f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'recoverable_complete',eligible:true,restore_attempt_available:true});
@@ -402,7 +406,7 @@ test('complete UNKNOWN restore lost ACK never becomes success or a second write'
 
 test('all verified applying steps remain pending final confirmation in both languages',async t=>{
   for(const language of ['en','pl']) {
-    const f=fixture(t,language);await f.card._prepareMigration();const pending=gate();
+    const f=await fixture(t,language);await f.card._prepareMigration();const pending=gate();
     f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
     f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'applying',direction:'forward',phases:[{adapter:'registry',phase:'verified'},{adapter:'yaml',phase:'verified'}],progress:{total_steps:2,verified_steps:2,undone_steps:0}}]});
     const first=f.card._applyMigration();await tick();
@@ -428,7 +432,7 @@ test('unknown complete remains unknown and recovery guidance follows fresh eligi
 });
 
 test('only matching current status is shown and server phases are explained without treating counts as success',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();const pending=gate();
+  const f=await fixture(t);await f.card._prepareMigration();const pending=gate();
   f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
   f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'other',fingerprint,status:'applied',phases:[{adapter:'foreign',phase:'verified'}],progress:{total_steps:2,verified_steps:2,undone_steps:0}},{operation_id:'review_qa',fingerprint,status:'applying',direction:'forward',phases:[{adapter:'registry',phase:'intent'},{adapter:'yaml',phase:'pending'}],progress:{total_steps:2,verified_steps:0,undone_steps:0}}]});
   const first=f.card._applyMigration();await tick();let text=f.card.shadowRoot.getElementById('migrationJournal').textContent;
@@ -440,7 +444,7 @@ test('only matching current status is shown and server phases are explained with
 });
 
 test('late progress from before inspection cannot replace a fresh journal',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();const apply=gate(),oldStatus=gate();let calls=0;
+  const f=await fixture(t);await f.card._prepareMigration();const apply=gate(),oldStatus=gate();let calls=0;
   f.handlers['ha_entity_renamer/apply']=()=>apply.promise;
   f.handlers['ha_entity_renamer/status']=()=>++calls===1?oldStatus.promise:{operations:[{operation_id:'review_qa',fingerprint,status:'unknown',direction:'forward'}]};
   const first=f.card._applyMigration();await tick();
@@ -452,7 +456,7 @@ test('late progress from before inspection cannot replace a fresh journal',async
 });
 
 test('failed progress read no longer presents a stale snapshot as current',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();const pending=gate();
+  const f=await fixture(t);await f.card._prepareMigration();const pending=gate();
   f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
   const first=f.card._applyMigration();await tick();assert.match(f.card.shadowRoot.getElementById('migrationJournal').textContent,/1 \/ 2/);
   f.handlers['ha_entity_renamer/status']=()=>Promise.reject(new Error('offline'));
@@ -462,7 +466,7 @@ test('failed progress read no longer presents a stale snapshot as current',async
 });
 
 test('server inventory rediscovers a lost card without storage and never authorizes a write',async t=>{
-  const f=fixture(t);const storage=f.dom.window.Storage.prototype;const original=storage.setItem;
+  const f=await fixture(t);const storage=f.dom.window.Storage.prototype;const original=storage.setItem;
   storage.setItem=()=>{throw new Error('blocked');};t.after(()=>{storage.setItem=original;});
   f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'old_qa',fingerprint,status:'prepared',direction:'forward'}]});
   await f.card._findMigrationRecovery();const button=f.card.shadowRoot.querySelector('[data-recovery-index]');
@@ -473,7 +477,7 @@ test('server inventory rediscovers a lost card without storage and never authori
 });
 
 test('recovered complete operation needs fresh restore confirmation after inspection',async t=>{
-  const f=fixture(t);f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'unknown',direction:'forward'}]});
+  const f=await fixture(t);f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'unknown',direction:'forward'}]});
   f.entries[0].entity_id='sensor.b';
   f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'recoverable_complete',eligible:true,restore_attempt_available:true,
     frozen_review:{changes:f.review.changes,dependencies:f.review.dependencies,identities:[['entry-a','mqtt','a','dev']]}});
@@ -485,21 +489,21 @@ test('recovered complete operation needs fresh restore confirmation after inspec
 });
 
 test('late inventory response cannot populate a different account',async t=>{
-  const f=fixture(t);const pending=gate();f.handlers['ha_entity_renamer/status']=()=>pending.promise;
+  const f=await fixture(t);const pending=gate();f.handlers['ha_entity_renamer/status']=()=>pending.promise;
   const read=f.card._findMigrationRecovery();f.card.hass={...f.hass,user:{id:'other-admin',is_admin:true}};
   pending.resolve({operations:[{operation_id:'old_qa',fingerprint,status:'unknown'}]});await read;
   assert.doesNotMatch(f.card.shadowRoot.textContent,/old_qa/);assert.equal(f.card._migration,null);
 });
 
 test('unavailable browser storage does not block ordinary reviewed apply',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();const storage=f.dom.window.Storage.prototype;const original=storage.setItem;
+  const f=await fixture(t);await f.card._prepareMigration();const storage=f.dom.window.Storage.prototype;const original=storage.setItem;
   storage.setItem=()=>{throw new Error('blocked');};t.after(()=>{storage.setItem=original;});
   await f.card._applyMigration();assert.equal(writes(f).length,1);
 });
 
 test('recovered legacy or consumed attempt never offers another restore',async t=>{
   for(const available of [false,undefined]) {
-    const f=fixture(t);f.entries[0].entity_id='sensor.b';
+    const f=await fixture(t);f.entries[0].entity_id='sensor.b';
     f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'applied',direction:'forward'}]});
     f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'applied',eligible:true,restore_attempt_available:available,
       frozen_review:{changes:f.review.changes,dependencies:f.review.dependencies,identities:[['entry-a','mqtt','a','dev']]}});
@@ -510,7 +514,7 @@ test('recovered legacy or consumed attempt never offers another restore',async t
 });
 
 test('recreated card can finish lost restore ACK only with server terminal proof and original identity',async t=>{
-  const f=fixture(t);f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'rolled_back',direction:'rollback'}]});
+  const f=await fixture(t);f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'rolled_back',direction:'rollback'}]});
   f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'rolled_back',reason:'restored_verified',eligible:false,
     frozen_review:{changes:f.review.changes,dependencies:f.review.dependencies,identities:[['entry-a','mqtt','a','dev']]}});
   await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();await f.card._inspectMigration();
@@ -519,7 +523,7 @@ test('recreated card can finish lost restore ACK only with server terminal proof
 });
 
 test('restored server proof cannot finish when original registry identity changed',async t=>{
-  const f=fixture(t);f.entries[0].unique_id='foreign';
+  const f=await fixture(t);f.entries[0].unique_id='foreign';
   f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'rolled_back',direction:'rollback'}]});
   f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'rolled_back',reason:'restored_verified',eligible:false,
     frozen_review:{changes:f.review.changes,dependencies:f.review.dependencies,identities:[['entry-a','mqtt','a','dev']]}});
@@ -528,7 +532,7 @@ test('restored server proof cannot finish when original registry identity change
 });
 
 test('only server-proven prewrite refusal finishes and preserves the queue',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();
+  const f=await fixture(t);await f.card._prepareMigration();
   f.handlers['ha_entity_renamer/apply']=()=>Promise.reject(new Error('prewrite'));
   f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'refused',reason:'prewrite_refused',eligible:false});
   await f.card._applyMigration();assert.equal(f.card._migration.stage,'refused');
@@ -537,24 +541,34 @@ test('only server-proven prewrite refusal finishes and preserves the queue',asyn
 });
 
 test('replacement requires fresh admission and separate consent before inverse',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();const pending=gate();f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
+  const f=await fixture(t);await f.card._prepareMigration();const pending=gate();f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
   f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'unknown',direction:'forward'}]});
   const first=f.card._applyMigration();await tick();f.card.remove();
   const card=f.dom.window.document.createElement('ha-entity-renamer');card.setConfig({show_support:false});f.dom.window.document.body.append(card);card.hass=f.hass;await tick();
-  await card._findMigrationRecovery();card.shadowRoot.querySelector('[data-recovery-index]').click();
-  assert.equal(card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);assert.equal(restores(f).length,0);
+  // A unique same-session operation is handed over directly, without inventory.
+  assert.equal(card._migration?.operation_id,'review_qa');assert.equal(card._migration.fingerprint,fingerprint);
+  assert.equal(card._migration.busy,true);assert.equal(card._migration.restoreRevoked,true);
+  assert.equal(card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);
+  await card._inspectMigration();await card._restoreMigration();
+  assert.equal(f.requests.filter(r=>r.type==='ha_entity_renamer/recovery/inspect').length,0);
+  assert.equal(restores(f).length,0);assert.equal(writes(f).length,1);
+  pending.reject(new Error('late apply response'));await first;await tick();
+  assert.equal(card._migration.busy,false);assert.equal(card._migration.inspection,undefined);
+  assert.equal(card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);
   f.entries[0].entity_id='sensor.b';
   f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'recoverable_complete',eligible:true,restore_attempt_available:true,
     frozen_review:{changes:f.review.changes,dependencies:f.review.dependencies,identities:[['entry-a','mqtt','a','dev']]}});
-  await card._inspectMigration();assert.equal(card.shadowRoot.getElementById('reviewMigrationRestore').disabled,false);
-  card._reviewMigrationRestore();assert.equal(restores(f).length,0);
+  await card._inspectMigration();assert.equal(f.requests.filter(r=>r.type==='ha_entity_renamer/recovery/inspect').length,1);
+  assert.equal(card.shadowRoot.getElementById('reviewMigrationRestore').disabled,false);
+  assert.ok(!card._migration.restoreConsent);await card._restoreMigration();assert.equal(restores(f).length,0);
+  card._reviewMigrationRestore();assert.equal(card._migration.restoreConsent,true);assert.equal(restores(f).length,0);
   f.handlers['ha_entity_renamer/recovery/restore']=()=>{f.entries[0].entity_id='sensor.a';finishedInspection(f);return restoreAck();};
   await card._restoreMigration();await card._restoreMigration();assert.equal(restores(f).length,1);
-  pending.reject(new Error('late apply response'));await first;assert.equal(writes(f).length,1);
+  assert.equal(writes(f).length,1);
 });
 
 test('foreign refusal and unproven restored journal cannot clear the operation',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();
+  const f=await fixture(t);await f.card._prepareMigration();
   f.handlers['ha_entity_renamer/apply']=()=>Promise.reject(new Error('lost response'));
   f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'rolled_back'}]});
   f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'other',fingerprint,state:'refused',reason:'prewrite_refused'});
@@ -564,7 +578,7 @@ test('foreign refusal and unproven restored journal cannot clear the operation',
 });
 
 for (const state of ['applied','rolled_back']) test('finishing recovered '+state+' preserves unrelated queued entity, device name and impact',async t=>{
-  const f=fixture(t);f.entries[0].entity_id=state==='applied'?'sensor.b':'sensor.a';
+  const f=await fixture(t);f.entries[0].entity_id=state==='applied'?'sensor.b':'sensor.a';
   f.entries.push({id:'entry-c',entity_id:'sensor.c',device_id:'dev',unique_id:'c',platform:'mqtt',name:null});
   f.card._entities=f.entries.map(row=>({...row}));
   f.card._renameQueue=[{oldId:'sensor.c',newId:'sensor.d'}];f.card._deviceRenameQueue={dev:'Unrelated device name'};
@@ -586,7 +600,7 @@ for (const state of ['applied','rolled_back']) test('finishing recovered '+state
 });
 
 test('recovered operation shows changing journal while inspection waits and clears a failed read',async t=>{
-  const f=fixture(t);const inspect=gate();let state='prepared';
+  const f=await fixture(t);const inspect=gate();let state='prepared';
   const row=()=>({operation_id:'review_qa',fingerprint,status:state,direction:'forward',phases:[{adapter:'registry',phase:state==='prepared'?'pending':'intent'}],progress:{total_steps:2,verified_steps:0,undone_steps:0}});
   f.handlers['ha_entity_renamer/status']=()=>({operations:[row()]});
   f.handlers['ha_entity_renamer/recovery/inspect']=()=>inspect.promise;
@@ -610,7 +624,7 @@ test('recovered operation shows changing journal while inspection waits and clea
 
 test('late recovered status and inspection cannot update after disconnect or role change',async t=>{
   for(const change of ['disconnect','role']) {
-    const f=fixture(t),inspect=gate(),status=gate();let calls=0;
+    const f=await fixture(t),inspect=gate(),status=gate();let calls=0;
     f.handlers['ha_entity_renamer/status']=()=>++calls===1?{operations:[{operation_id:'review_qa',fingerprint,status:'prepared'}]}:status.promise;
     f.handlers['ha_entity_renamer/recovery/inspect']=()=>inspect.promise;
     await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();
@@ -624,7 +638,7 @@ test('late recovered status and inspection cannot update after disconnect or rol
 });
 
 test('first apply status starts once and a pending read cannot overlap within its observation',async t=>{
-  const f=fixture(t);await f.card._prepareMigration();const apply=gate(),status=gate();
+  const f=await fixture(t);await f.card._prepareMigration();const apply=gate(),status=gate();
   f.handlers['ha_entity_renamer/apply']=()=>apply.promise;
   f.handlers['ha_entity_renamer/status']=()=>status.promise;
   const operation=f.card._applyMigration();await tick();
@@ -636,4 +650,68 @@ test('first apply status starts once and a pending read cannot overlap within it
   f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'unknown'}]});
   apply.reject(new Error('uncertain'));await operation;
   assert.equal(f.card._migration.journal.status,'unknown');assert.equal(writes(f).length,1);
+});
+
+for (const order of ['old-first','new-first','reattach','repeat']) test('pending recovered inspection survives card lifecycle: '+order,async t=>{
+  const f=await fixture(t),inspect=gate();
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'applied',progress:{total_steps:2,verified_steps:2,undone_steps:0}}]});
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>inspect.promise;
+  await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();
+  const oldRead=f.card._inspectMigration();await tick();
+  const make=()=>{const c=f.dom.window.document.createElement('ha-entity-renamer');c.setConfig({show_support:false});f.dom.window.document.body.append(c);c.hass=f.hass;return c;};
+  let card;if(order==='new-first') {card=make();f.card.remove();} else {f.card.remove();card=order==='reattach'?f.card:make();if(order==='reattach')f.dom.window.document.body.append(card);}
+  if(order==='repeat'){card.remove();f.dom.window.document.body.append(card);card.remove();f.dom.window.document.body.append(card);}
+  await tick();assert.equal(card._migration?.operation_id,'review_qa');assert.equal(card._migration.busy,true);
+  assert.match(card.shadowRoot.getElementById('migrationJournal').textContent,/2 \/ 2/);
+  assert.equal(card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);
+  await card._inspectMigration();assert.equal(f.requests.filter(r=>r.type==='ha_entity_renamer/recovery/inspect').length,1);
+  inspect.resolve({operation_id:'review_qa',fingerprint,state:'refused',reason:'prewrite_refused'});await oldRead;await tick();
+  assert.equal(card._migration.busy,false);assert.equal(card._migration.stage,'unknown');assert.equal(card._migration.inspection,undefined);
+  assert.equal(card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);assert.equal(writes(f).length,0);assert.equal(restores(f).length,0);
+});
+
+for (const change of ['account','role','connection','config']) test('recovery handoff is fenced by '+change,async t=>{
+  const f=await fixture(t),inspect=gate();f.handlers['ha_entity_renamer/recovery/inspect']=()=>inspect.promise;
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'applied'}]});
+  await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();const oldRead=f.card._inspectMigration();await tick();f.card.remove();
+  const card=f.dom.window.document.createElement('ha-entity-renamer');card.setConfig(change==='config'?{show_support:true}:{show_support:false});f.dom.window.document.body.append(card);
+  const connection=new f.dom.window.EventTarget();connection.connected=true;
+  card.hass=change==='account'?{...f.hass,user:{id:'other',is_admin:true}}:change==='role'?{...f.hass,user:{id:'admin-a',is_admin:false}}:change==='connection'?{...f.hass,connection}:f.hass;
+  await tick();assert.equal(card._migration,null);assert.doesNotMatch(card.shadowRoot.textContent,/review_qa/);
+  inspect.resolve({operation_id:'review_qa',fingerprint,state:'refused',reason:'prewrite_refused'});await oldRead;assert.equal(writes(f).length,0);
+});
+
+test('multiple replacement cards require explicit inventory choice and never guess',async t=>{
+  const f=await fixture(t),inspect=gate();f.handlers['ha_entity_renamer/recovery/inspect']=()=>inspect.promise;
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'applied'}]});
+  await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();const oldRead=f.card._inspectMigration();await tick();
+  const make=()=>{const c=f.dom.window.document.createElement('ha-entity-renamer');c.setConfig({show_support:false});f.dom.window.document.body.append(c);c.hass=f.hass;return c;};
+  const a=make(),b=make();f.card.remove();await tick();assert.equal(a._migration,null);assert.equal(b._migration,null);
+  await a._findMigrationRecovery();assert.match(a.shadowRoot.querySelector('[data-recovery-index]').textContent,/review_qa/);
+  a.shadowRoot.querySelector('[data-recovery-index]').click();assert.equal(a._migration.busy,true);
+  await a._inspectMigration();assert.equal(f.requests.filter(r=>r.type==='ha_entity_renamer/recovery/inspect').length,1);
+  inspect.resolve({operation_id:'review_qa',fingerprint,state:'refused',reason:'prewrite_refused'});await oldRead;await tick();
+  assert.equal(a._migration.busy,false);assert.equal(a._migration.inspection,undefined);assert.equal(writes(f).length,0);
+});
+
+for(const missing of ['user','id','role']) test('unresolved '+missing+' hides pending identity and same admin can recover without consent',async t=>{
+  const f=await fixture(t),inspect=gate();f.handlers['ha_entity_renamer/recovery/inspect']=()=>inspect.promise;
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'applied'}]});
+  await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();const read=f.card._inspectMigration();await tick();
+  const user=missing==='user'?undefined:missing==='id'?{id:'',is_admin:true}:{id:'admin-a'};
+  f.card.hass={...f.hass,user};assert.equal(f.card._migration,null);assert.doesNotMatch(f.card.shadowRoot.textContent,/review_qa/);
+  f.card.hass={...f.hass};await tick();assert.equal(f.card._migration?.operation_id,'review_qa');assert.equal(f.card._migration.busy,true);
+  assert.equal(f.card.shadowRoot.getElementById('reviewMigrationRestore').disabled,true);
+  await f.card._inspectMigration();assert.equal(f.requests.filter(r=>r.type==='ha_entity_renamer/recovery/inspect').length,1);
+  inspect.resolve({operation_id:'review_qa',fingerprint,state:'refused',reason:'prewrite_refused'});await read;await tick();
+  assert.equal(f.card._migration.busy,false);assert.equal(f.card._migration.inspection,undefined);assert.equal(writes(f).length,0);
+});
+
+test('a definite role revocation after unresolved authority discards suspended identity',async t=>{
+  const f=await fixture(t),inspect=gate();f.handlers['ha_entity_renamer/recovery/inspect']=()=>inspect.promise;
+  f.handlers['ha_entity_renamer/status']=()=>({operations:[{operation_id:'review_qa',fingerprint,status:'applied'}]});
+  await f.card._findMigrationRecovery();f.card.shadowRoot.querySelector('[data-recovery-index]').click();const read=f.card._inspectMigration();await tick();
+  f.card.hass={...f.hass,user:{id:'admin-a'}};f.card.hass={...f.hass,user:{id:'admin-a',is_admin:false}};
+  f.card.hass={...f.hass};await tick();assert.equal(f.card._migration,null);
+  inspect.resolve({operation_id:'review_qa',fingerprint,state:'refused',reason:'prewrite_refused'});await read;assert.equal(writes(f).length,0);
 });

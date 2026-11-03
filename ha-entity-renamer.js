@@ -1367,6 +1367,8 @@ function _restoreListViewport(card, saved) {
   }
 }
 
+// In-memory, connection-scoped read handoff; no review or consent crosses cards.
+const _recoveryCardScopes = new WeakMap();
 const _RENAMER_TABS = ['devices', 'automatic', 'queue', 'log'];
 function _configuredTabs(config) {
   const tabs = Array.isArray(config?.tabs) ? _RENAMER_TABS.filter(tab => config.tabs.includes(tab)) : _RENAMER_TABS;
@@ -1390,7 +1392,7 @@ class HAEntityRenamer extends HTMLElement {
     if (signature !== this._navigationConfig) this._activeTab = _defaultTab(next);
     this._navigationConfig = signature;
     this._config = next;
-    if (this._hass) this.render();
+    if (this._hass) { this._registerRecoveryCard(); this.render(); }
   }
   _visibleTabs() {
     const configured = _configuredTabs(this._config);
@@ -1666,7 +1668,79 @@ class HAEntityRenamer extends HTMLElement {
     // HA may detach/reparent a card while its initial registry read is pending.
     // Retry only reads; a cancelled rename or export never resumes here.
     if (this._hass && !this._applyOperation && (this._loading || (!this._entities.length && !this._devices.length))) this._registryRefreshPending = true;
+    this._registerRecoveryCard();
     this._resumePermittedRegistryRead();
+  }
+
+  _unregisterRecoveryCard(orphan = false) {
+    const scope = this._recoveryCardScope;
+    if (!scope) return;
+    scope.cards.delete(this);
+    for (const entry of scope.entries) if (entry.owner === this) {
+      if (orphan) entry.owner = null; else scope.entries.delete(entry);
+    }
+    this._recoveryCardScope = null;
+    this._offerRecoveryCards(scope);
+  }
+
+  _registerRecoveryCard() {
+    const hass = this._hass, connection = hass?.connection;
+    let key;
+    try { key = JSON.stringify([hass?.user?.id, this._config || {}]); } catch (_) { key = null; }
+    if (!this.isConnected || hass?.user?.is_admin !== true || !hass.user.id || !connection || !key) {
+      this._unregisterRecoveryCard(); return;
+    }
+    let scopes = _recoveryCardScopes.get(connection);
+    if (!scopes) _recoveryCardScopes.set(connection, scopes = new Map());
+    let scope = scopes.get(key);
+    if (!scope) scopes.set(key, scope = {cards: new Set(), entries: new Set()});
+    if (this._recoveryCardScope !== scope) {
+      this._unregisterRecoveryCard(); this._recoveryCardScope = scope; scope.cards.add(this);
+    }
+    this._offerRecoveryCards(scope);
+  }
+
+  _offerRecoveryCards(scope) {
+    const entries = [...scope.entries].filter(entry => !entry.owner);
+    const cards = [...scope.cards].filter(card => card._renameAuthorityAvailable()
+      && (!card._migration || card._migration.invalidated));
+    // Multiple possible operations or cards require the existing inventory choice.
+    if (entries.length !== 1 || cards.length !== 1) return;
+    const entry = entries[0], card = cards[0];
+    entry.owner = card;
+    const m = {owner: entry.actor, operation_id: entry.operation_id, fingerprint: entry.fingerprint,
+      attempted: true, recoveredIdentity: true, restoreRevoked: true, stage: 'unknown',
+      epoch: card._authorityEpoch, session: card._readSession(), invalidated: false,
+      observation: 1, busy: !!entry.pending, inspecting: !!entry.pending, lifecycleEntry: entry};
+    card._migration = m; card.render();
+    void card._refreshMigrationProgress(m, card._hass);
+  }
+
+  _trackRecoveryOperation(m) {
+    const scope = this._recoveryCardScope;
+    if (!scope || !m?.attempted) return null;
+    if (m.lifecycleEntry && scope.entries.has(m.lifecycleEntry)) return m.lifecycleEntry;
+    const entry = {owner: this, actor: m.owner, operation_id: m.operation_id,
+      fingerprint: m.fingerprint, pending: null, scope};
+    scope.entries.add(entry); m.lifecycleEntry = entry; return entry;
+  }
+
+  _startRecoveryRead(m) {
+    const entry = this._trackRecoveryOperation(m);
+    if (!entry) return null;
+    const token = {}; entry.pending = token; return {entry, token, original: m};
+  }
+
+  _endRecoveryRead(read) {
+    if (!read || read.entry.pending !== read.token) return;
+    const entry = read.entry; entry.pending = null;
+    // Observers see completion, never the old response or consent.
+    for (const card of entry.scope.cards) {
+      const m = card._migration;
+      if (m && m !== read.original && m.lifecycleEntry === entry && card._migrationCurrent(m)) {
+        m.inspecting = false; m.busy = false; clearTimeout(m.pollTimer); m.pollTimer = null; card.render();
+      }
+    }
   }
 
   _invalidateRenameExport() {
@@ -1811,6 +1885,23 @@ class HAEntityRenamer extends HTMLElement {
     const previousSession = this._lastSession || this._readSession();
     const nextSession = this._readSession(hass);
     const sessionChanged = this._hass && !this._sameReadSession(previousSession, nextSession);
+    const suspended = this._suspendedRecoveryEntry;
+    if (suspended && (nextSession.connection !== suspended.connection
+        || (nextSession.userId && nextSession.userId !== suspended.entry.actor)
+        || nextSession.admin === false)) {
+      if (!suspended.entry.owner) suspended.entry.scope.entries.delete(suspended.entry);
+      this._suspendedRecoveryEntry = null;
+    }
+    // A temporarily missing user/role is not a new actor. Hide and revoke all
+    // authority now, retaining only a same-connection identity handoff.
+    const unresolved = sessionChanged && previousSession.admin === true && previousSession.userId
+      && previousSession.connection === nextSession.connection
+      && (!nextSession.userId || nextSession.userId === previousSession.userId)
+      && nextSession.admin !== false && (!nextSession.userId || nextSession.admin !== true);
+    if (unresolved && this._migration?.attempted && this._migration.lifecycleEntry) {
+      this._suspendedRecoveryEntry = {connection: previousSession.connection, entry: this._migration.lifecycleEntry};
+      this._unregisterRecoveryCard(true);
+    }
     this._lastSession = nextSession;
     if (sessionChanged) {
       this._cancelRenameAuthority();
@@ -1853,6 +1944,7 @@ class HAEntityRenamer extends HTMLElement {
     if (first || (sessionChanged && (previousSession.userId !== nextSession.userId || previousSession.admin !== nextSession.admin))) this._loadHistoryFromStorage();
     this._bindRenameExportEvents();
     if (sessionChanged) this._invalidateRenameExport();
+    this._registerRecoveryCard();
     if (hass?.language) this._lang = hass.language.startsWith('pl') ? 'pl' : 'en';
     const displayFormatKey = this._formatUi.key;
     this._displayFormatKey = displayFormatKey;
@@ -3310,6 +3402,16 @@ class HAEntityRenamer extends HTMLElement {
       fingerprint: row.fingerprint, attempted: true, recoveredIdentity: true,
       restoreRevoked: true, stage: 'unknown', invalidated: true, busy: false,
       journal: JSON.parse(JSON.stringify(row))};
+    const scope = this._recoveryCardScope;
+    const matches = [...(scope?.entries || [])].filter(entry => entry.operation_id === row.operation_id
+      && entry.fingerprint === row.fingerprint && entry.actor === this._hass.user.id);
+    if (matches.length === 1) {
+      const entry = matches[0], m = this._migration;
+      m.lifecycleEntry = entry; m.epoch = this._authorityEpoch; m.session = this._readSession();
+      m.invalidated = false; m.observation = 1; m.busy = !!entry.pending; m.inspecting = !!entry.pending;
+      if (!entry.owner) entry.owner = this;
+      if (entry.pending) void this._refreshMigrationProgress(m, this._hass);
+    } else this._trackRecoveryOperation(this._migration);
     this._recoveryInventory = null; this.render();
   }
 
@@ -3442,6 +3544,7 @@ class HAEntityRenamer extends HTMLElement {
     if (!m || m.stage !== 'review' || m.busy || m.attempted || !this._migrationCurrent(m)) return;
     // Consume locally before the first await, including transport failures.
     m.attempted = true; m.stage = 'applying'; m.busy = true; m.applying = true;
+    const lifecycleRead = this._startRecoveryRead(m);
     this._confirmation = null; this._confirmDialogOpen = false;
     const hass = this._hass;
     this.render();
@@ -3454,6 +3557,7 @@ class HAEntityRenamer extends HTMLElement {
     } catch (_) {
       // Missing ACK remains UNKNOWN, even a refusal after review consumption.
     } finally {
+      this._endRecoveryRead(lifecycleRead);
       m.applying = false; clearTimeout(m.pollTimer);
       if (this._migrationCurrent(m)) { m.stage = 'unknown'; m.busy = false; await this._inspectMigration(); }
     }
@@ -3492,6 +3596,7 @@ class HAEntityRenamer extends HTMLElement {
     // Consume before IO. Neither failed transport nor inspection can revive consent.
     m.restoreConsent = false; m.restoreAttempted = true; m.restoreAcknowledged = false;
     m.stage = 'restoring'; m.busy = true; m.restoring = true; m.registryMatches = false;
+    const lifecycleRead = this._startRecoveryRead(m);
     const hass = this._hass;
     this.render();
     void this._refreshMigrationProgress(m, hass);
@@ -3504,6 +3609,7 @@ class HAEntityRenamer extends HTMLElement {
     } catch (_) {
       // A missing ACK or refusal remains UNKNOWN. Never replay or use registry writes.
     } finally {
+      this._endRecoveryRead(lifecycleRead);
       m.restoring = false; clearTimeout(m.pollTimer);
       if (this._migrationCurrent(m)) {
         m.stage = 'unknown'; m.busy = false;
@@ -3516,6 +3622,12 @@ class HAEntityRenamer extends HTMLElement {
   async _inspectMigration() {
     const m = this._migration;
     if (!m?.attempted || m.busy || m.owner !== this._hass?.user?.id || !this._renameAuthorityAvailable()) return;
+    const read = this._startRecoveryRead(m);
+    try { return await this._runMigrationInspection(m); }
+    finally { this._endRecoveryRead(read); }
+  }
+
+  async _runMigrationInspection(m) {
     m.restoreConsent = false;
     // Rebind read authority only. This cannot revive apply or restore consent.
     m.epoch = this._authorityEpoch; m.session = this._readSession(); m.invalidated = false;
@@ -3586,6 +3698,7 @@ class HAEntityRenamer extends HTMLElement {
     const m = this._migration;
     if (!m || m.busy || !['applied', 'restored', 'refused'].includes(m.stage) || m.restoreConsent || !this._migrationCurrent(m)) return;
     if (!m.recoveredIdentity && m.stage !== 'refused') { this._renameQueue = []; this._deviceRenameQueue = {}; this._impactResults = null; }
+    if (m.lifecycleEntry) this._recoveryCardScope?.entries.delete(m.lifecycleEntry);
     this._migration = null; this.render();
   }
 
@@ -4062,6 +4175,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this._unregisterRecoveryCard(true);
     this._cancelRenameAuthority();
     _disconnectFamilyNavigation(this);this._familyNavWidth=null;
     this._exportDialog?.cancel();
