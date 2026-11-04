@@ -250,8 +250,17 @@ async def ws_prepare(hass, connection, message):
         connection.send_error(message['id'], 'invalid_selection', 'The rename selection is invalid')
     except Refused as error:
         _log_prepare_failure(error)
-        connection.send_error(message['id'], 'unsupported_selection',
-                              'This selection cannot be verified for migration')
+        code, text = {
+            'template_yaml_server_powercalc_scope_unsupported':
+                ('unsupported_powercalc_scope', 'Powercalc is loaded and its dependencies cannot be verified for this plan'),
+            'template_forward_powercalc_scope_unsupported':
+                ('unsupported_powercalc_scope', 'Powercalc is loaded and its dependencies cannot be verified for this plan'),
+            'template_state_server_template_requires_reference_parser':
+                ('unsupported_template_reference', 'A Template reference could not be safely interpreted'),
+            'template_state_server_affected_unsupported_family':
+                ('unsupported_template_family', 'An affected Template form is not supported'),
+        }.get(str(error), ('unsupported_selection', 'This selection cannot be verified for migration'))
+        connection.send_error(message['id'], code, text)
     except Exception as error:
         _log_prepare_failure(error)
         unavailable = type(error) is ValueError and error.args == ('recovery_runtime_unavailable',)

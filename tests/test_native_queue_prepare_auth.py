@@ -704,3 +704,49 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(runtime.preparations.resolve_composition(plan.native_inputs)[0].receipt_json, receipt)
             self.assertNotIn('template.yaml', json.dumps(denied))
             self.assertNotIn(str(self.f.root), json.dumps(denied))
+
+    async def _registered_unsupported_template(self, trigger):
+        from homeassistant.core import Context
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        runtime, old, new, uuids, _, payload = await self.selection()
+        if trigger:
+            body = ('- unique_id: scope\n  triggers:\n  - trigger: state\n'
+                    '    entity_id: ' + old + '\n  sensor:\n  - unique_id: value\n'
+                    '    name: Runtime consumer\n    state: "{{ trigger.to_state.state }}"\n')
+            code = 'unsupported_template_family'
+        else:
+            suffix = old.split('.', 1)[1]
+            body = ('- unique_id: scope\n  sensor:\n  - unique_id: value\n'
+                    '    name: Runtime consumer\n    state: "{{ (states(\'' + old + '\') | int(0)) + '
+                    '(states(\'sensor.\' ~ \'' + suffix + '\') | int(0)) }}"\n')
+            code = 'unsupported_template_reference'
+        path = self.f.root / 'template.yaml'
+        path.write_text(body)
+        await self.f.hass.services.async_call('template', 'reload', {}, blocking=True, context=Context())
+        await self.f.hass.async_block_till_done()
+        await self._flush_documents()
+        consumer = next(e for p in async_get_platforms(self.f.hass, 'template')
+                        for e in p.entities.values() if e.unique_id == 'scope-value')
+        self.producer._attr_native_value = 7
+        self.producer.async_write_ha_state()
+        await self.f.hass.async_block_till_done()
+        self.assertEqual(self.f.hass.states.get(consumer.entity_id).state, '7' if trigger else '14')
+        async with self._transport() as (ws, _):
+            response = await self._request(ws, 1, 'prepare', **payload)
+            self.assertFalse(response['success'], response)
+            self.assertEqual(response['error']['code'], code)
+            self.assertFalse(runtime.reviews)
+            self.assertFalse(await runtime.journal.active())
+        self.assertEqual(path.read_text(), body)
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.producer._attr_native_value = 9
+        self.producer.async_write_ha_state()
+        await self.f.hass.async_block_till_done()
+        self.assertEqual(self.f.hass.states.get(consumer.entity_id).state, '9' if trigger else '18')
+
+    async def test_registered_dynamic_template_refuses_with_specific_reason(self):
+        await self._registered_unsupported_template(False)
+
+    async def test_registered_trigger_template_refuses_with_specific_reason(self):
+        await self._registered_unsupported_template(True)

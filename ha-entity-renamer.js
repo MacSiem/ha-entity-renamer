@@ -3527,6 +3527,10 @@ class HAEntityRenamer extends HTMLElement {
         || !Number.isSafeInteger(result.dependencies.yaml_file_count)
         || !Number.isSafeInteger(result.dependencies.template_consumer_count)
         || result.dependencies.yaml_file_count < 0 || result.dependencies.template_consumer_count < 0
+        || (result.dependencies.config_entries !== undefined
+          && (!Array.isArray(result.dependencies.config_entries)
+            || !result.dependencies.config_entries.every(entry => entry
+              && ['entity_id', 'before', 'after'].every(key => typeof entry[key] === 'string' && entry[key].length > 0))))
         || !Array.isArray(result.dependencies.files)
         || result.dependencies.files.length !== result.dependencies.yaml_file_count
         || new Set(result.dependencies.files.map(file => file?.path)).size !== result.dependencies.files.length
@@ -3579,8 +3583,9 @@ class HAEntityRenamer extends HTMLElement {
         : this._sourceIdentity(this._entities.find(row => row.entity_id === change.entity_id)));
       m.operation_id = result.operation_id; m.fingerprint = result.fingerprint;
       m.stage = 'review';
-    } catch (_) {
+    } catch (error) {
       if (!this._migrationCurrent(m)) return;
+      m.refusalCode = ['unsupported_template_reference', 'unsupported_template_family', 'unsupported_powercalc_scope'].includes(error?.code) ? error.code : null;
       m.stage = 'refused'; // Cancel explicitly; no registry-only fallback.
     } finally {
       if (this._migrationCurrent(m)) {
@@ -3767,10 +3772,14 @@ class HAEntityRenamer extends HTMLElement {
       changes: m.review.changes.map(change => ({...change, entity_id: change.device_id ? change.entity_id : (change.fields.entity_id?.after || change.entity_id), fields: Object.fromEntries(
         Object.entries(change.fields).map(([key, field]) => [key, {before: field.after, after: field.before}]))})),
       dependencies: {...m.review.dependencies, files: m.review.dependencies.files.map(file => ({...file,
-        references: file.references.map(ref => ({...ref, before: ref.after, after: ref.before}))}))},
+        references: file.references.map(ref => ({...ref, before: ref.after, after: ref.before}))})),
+        config_entries: (m.review.dependencies.config_entries || []).map(entry => ({...entry, before: entry.after, after: entry.before}))},
     } : m.review;
     const title = inverse ? this._migrationText('Restore this operation', 'Wycofaj tę operację') : this._migrationText('Dependency update plan', 'Plan aktualizacji zależności');
     const body = inverse ? this._migrationText('Confirm only the inverse changes below for this current operation. Other operations are excluded.', 'Potwierdź wyłącznie poniższe zmiany odwrotne bieżącej operacji. Inne operacje są wykluczone.') : m.stage === 'preparing' ? this._migrationText('Preparing server review…', 'Przygotowywanie przeglądu na serwerze…')
+      : m.stage === 'refused' && m.refusalCode === 'unsupported_powercalc_scope' ? this._migrationText('Powercalc is loaded and its dependencies cannot be verified for this plan. Nothing was applied.', 'Powercalc jest załadowany i nie można sprawdzić jego zależności dla tego planu. Niczego nie zastosowano.')
+      : m.stage === 'refused' && m.refusalCode === 'unsupported_template_reference' ? this._migrationText('A Template reference could not be safely interpreted. Nothing was applied.', 'Nie można bezpiecznie rozpoznać odwołania Template. Niczego nie zastosowano.')
+      : m.stage === 'refused' && m.refusalCode === 'unsupported_template_family' ? this._migrationText('An affected Template form is not supported. Nothing was applied.', 'Dotknięta postać Template nie jest obsługiwana. Niczego nie zastosowano.')
       : m.stage === 'refused' ? this._migrationText('The selection was refused or could not be verified. Nothing was applied. Cancel to review your queue. No registry-only fallback was performed.', 'Zakres został odrzucony lub nie udało się go zweryfikować. Niczego nie zastosowano. Anuluj, aby wrócić do kolejki. Nie wykonano zastępczego zapisu samego rejestru.')
       : this._migrationText('Review every server change and the admitted dependency scope. Coverage of all dependency families is not confirmed.', 'Sprawdź wszystkie zmiany serwera i przyjęty zakres zależności. Pokrycie wszystkich rodzin zależności nie jest potwierdzone.');
     const fieldName = key => ({entity_id: 'Entity ID', name: this._migrationText('Entity name', 'Nazwa encji'), name_by_user: this._migrationText('Device name', 'Nazwa urządzenia')}[key] || key);
@@ -3784,6 +3793,7 @@ class HAEntityRenamer extends HTMLElement {
         <div role="region" tabindex="0" aria-labelledby="migrationChangesTitle" style="max-width:100%;overflow:auto"><table class="queue-table"><thead><tr><th scope="col">${this._migrationText('Target', 'Cel')}</th><th scope="col">${this._migrationText('Field', 'Pole')}</th><th scope="col">${this._migrationText('Before', 'Przed')}</th><th scope="col">${this._migrationText('After', 'Po')}</th></tr></thead><tbody>${rows}</tbody></table></div>
         <h3>${this._migrationText('Dependencies', 'Zależności')}</h3><p>${_esc(domains || this._migrationText('None admitted', 'Brak przyjętych'))}</p>
         <p>${this._migrationText('YAML files', 'Pliki YAML')}: ${review.dependencies.yaml_file_count}. ${this._migrationText('Template consumers', 'Odbiorcy Template')}: ${review.dependencies.template_consumer_count}.</p>
+        ${(review.dependencies.config_entries || []).map(entry => `<p>${this._migrationText('Template entry', 'Wpis Template')}: <code>${_esc(entry.entity_id)}</code> — <code>${_esc(entry.before)}</code> → <code>${_esc(entry.after)}</code></p>`).join('')}
         ${review.dependencies.files.map(file => `<details open><summary><code>${_esc(file.path)}</code> — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li>${ref.kind === 'script_key' ? this._migrationText('Script key', 'Klucz skryptu') + ': ' : ''}<code>${_entityIdHtml(ref.before)}</code> → <code>${_entityIdHtml(ref.after)}</code> (${ref.occurrences} ${ref.kind === 'script_key' ? this._migrationText('definition', 'definicja') : this._migrationText('references', 'odwołań')})</li>`).join('')}</ul></details>`).join('')}` : ''}
       <button type="button" class="btn btn-outline" id="${inverse ? 'cancelMigrationRestore' : 'cancelRenameDialog'}">${_esc(this._t.cancel)}</button>
       ${inverse ? `<button type="button" class="btn btn-danger" id="restoreMigration">${this._migrationText('Restore this scope once', 'Wycofaj ten zakres jeden raz')}</button>` : ''}
@@ -3842,6 +3852,7 @@ class HAEntityRenamer extends HTMLElement {
       ${m.recoveredIdentity && m.review ? `<details><summary>${this._migrationText('Admitted original review (read-only)', 'Dopuszczony oryginalny przegląd (tylko odczyt)')}</summary>
         <ul>${m.review.changes.flatMap(change => Object.entries(change.fields).map(([field, value]) => `<li>${_esc(change.entity_id || change.device_id)} — ${_esc(field)}: ${_esc(value.before ?? '(default)')} → ${_esc(value.after ?? '(default)')}</li>`)).join('')}</ul>
         <p>${this._migrationText('Dependencies', 'Zależności')}: ${_esc(m.review.dependencies.domains.join(', '))}. ${this._migrationText('Template consumers', 'Odbiorcy Template')}: ${m.review.dependencies.template_consumer_count}.</p>
+        ${(m.review.dependencies.config_entries || []).map(entry => `<p>${this._migrationText('Template entry', 'Wpis Template')}: <code>${_esc(entry.entity_id)}</code> — <code>${_esc(entry.before)}</code> → <code>${_esc(entry.after)}</code></p>`).join('')}
         ${m.review.dependencies.files.map(file => `<details><summary>${_esc(file.path)} — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li>${_esc(ref.before)} → ${_esc(ref.after)} (${ref.occurrences})</li>`).join('')}</ul></details>`).join('')}
       </details>` : ''}
       <div id="migrationJournal" aria-live="polite">${this._renderMigrationProgress(m)}</div>

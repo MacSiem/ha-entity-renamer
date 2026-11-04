@@ -122,12 +122,19 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             inventory.check()
             service_audit.check()
             service_recipients.check()
+        if not yaml.ready and any(issue.code == 'template_requires_reference_parser' for issue in yaml.issues):
+            _need(False, 'template_requires_reference_parser')
         _need(yaml.ready, 'yaml_proposal_required')
         registry_only = not yaml.patches
-        bundle = await async_validate_proposed_with_template_state_sources(
-            self.hass, yaml, self.mapping, root.parent, with_state_program=True,
-            registry_only_template=registry_only, with_dependent_program=bool(owned_script),
-            owned_script_services=owned_script)
+        try:
+            bundle = await async_validate_proposed_with_template_state_sources(
+                self.hass, yaml, self.mapping, root.parent, with_state_program=True,
+                registry_only_template=registry_only, with_dependent_program=bool(owned_script),
+                owned_script_services=owned_script)
+        except ValueError as error:
+            if error.args == ('template_state_affected_unsupported_family',):
+                raise Refused('template_state_server_affected_unsupported_family') from None
+            raise
         if inventory is not None:
             inventory.check()
             service_audit.check()

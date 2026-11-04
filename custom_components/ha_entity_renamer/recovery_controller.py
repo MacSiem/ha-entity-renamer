@@ -58,6 +58,29 @@ def _prepared_scope(record, preparations):
         'consumers': {'count': 1, 'domains': ['sensor']}})
 
 
+def _entry_frozen_review(record, preparations):
+    """Sanitized exact ordinary numeric-entry review from immutable ORIGINAL."""
+    import json
+    from .prepared import decode_change
+    scope = _prepared_scope(record, preparations)
+    baseline, composition = preparations.resolve_composition(record.plan.native_inputs)
+    digests = dict(composition.prepared_digests)
+    change = decode_change(preparations.resolve(record.plan.steps[0].prepared_ref,
+                                                digests[record.plan.steps[0].prepared_ref]))
+    before, after = change.before, change.after
+    docs = {row.key: json.loads(row.manager_json) for row in baseline.files}
+    rows = [row for row in docs['core.entity_registry']['entities']
+            if row.get('config_entry_id') == scope.entry_id]
+    if len(rows) != 1 or before['entity_id'] == after['entity_id']:
+        raise Refused('unsupported_recovery_plan')
+    return {'changes': [{'entity_id': before['entity_id'], 'fields': {
+        'entity_id': {'before': before['entity_id'], 'after': after['entity_id']}}}],
+        'identities': [[before.get(key) for key in ('id', 'platform', 'unique_id', 'device_id')]],
+        'dependencies': {'domains': ['template'], 'yaml_file_count': 0, 'files': [],
+            'template_consumer_count': 1, 'config_entries': [{'entity_id': rows[0]['entity_id'],
+                'before': before['entity_id'], 'after': after['entity_id']}]}}
+
+
 def _yaml_summary(session):
     """Sanitized exact scope after the existing strict server binder admitted it."""
     sources, registry = [], []
@@ -430,6 +453,20 @@ class RecoveryController:
                     return _result(operation_id, fingerprint, 'refused', 'already_finished')
                 # The inner journal alone is not proof of original runtime or
                 # completed outer lifecycle. Reopen and independently verify.
+                if (record.plan.required_scopes == ('registry', 'helpers')
+                        and _ordinary_review_owned(preparations, operation_id)):
+                    if record.restore_attempted is not True:
+                        return _result(operation_id, fingerprint, 'UNKNOWN', 'restored_unproven')
+                    scope = _prepared_scope(record, preparations)
+                    entry = self.hass.config_entries.async_get_entry(scope.entry_id)
+                    if entry is None:
+                        return _result(operation_id, fingerprint, 'UNKNOWN', 'restored_unproven')
+                    lease = await _acquire_lease(self.hass, entry, guard=self.check, refresh=self.refresh)
+                    await NativeTemplateReverse.verify_restored(self.hass, operation_id, fingerprint,
+                        activation_lease=lease, guard=self.check, refresh=self.refresh)
+                    result = _result(operation_id, fingerprint, 'rolled_back', 'restored_verified')
+                    result['frozen_review'] = _entry_frozen_review(record, preparations)
+                    return result
                 if (record.restore_attempted is not True
                         or (record.plan.required_scopes != ('registry', 'yaml')
                             and not _own_registry_plan(preparations, record))
@@ -490,6 +527,9 @@ class RecoveryController:
                     return _result(operation_id, fingerprint, 'UNKNOWN', 'restore_unproven')
                 return _result(operation_id, fingerprint, 'rolled_back', 'restored')
             scope = _prepared_scope(record, preparations)
+            ordinary_entry = _ordinary_review_owned(preparations, operation_id)
+            if restore and ordinary_entry and record.restore_attempted is not False:
+                return _result(operation_id, fingerprint, 'UNKNOWN', 'restore_attempt_unavailable')
             entry = self.hass.config_entries.async_get_entry(scope.entry_id)
             if entry is None:
                 return _result(operation_id, fingerprint, 'UNKNOWN', 'recovery_unproven')
@@ -505,8 +545,12 @@ class RecoveryController:
                 return _result(operation_id, fingerprint, classification.status,
                                'recovery_unproven')
             if not restore:
-                return _result(operation_id, fingerprint, 'applied', classification.reason,
-                               summary=scope.summary)
+                result = _result(operation_id, fingerprint, 'applied', classification.reason,
+                                 summary=scope.summary)
+                result['restore_attempt_available'] = record.restore_attempted is False
+                if ordinary_entry:
+                    result['frozen_review'] = _entry_frozen_review(record, preparations)
+                return result
             if classification.reason == 'setup_ack_missing':
                 await NativeTemplateReverse.recover_setup_ack(
                     self.hass, operation_id, fingerprint, **kwargs)
@@ -515,6 +559,8 @@ class RecoveryController:
             # independent strict bind, even after an ACK marker was recovered.
             session = await NativeTemplateReverse.bind(self.hass, operation_id, fingerprint, **kwargs)
             self.check()
+            if ordinary_entry:
+                await _consume_yaml_restore_intent(session, record, self.check)
             result = await session.rollback()
             self.check()
             if result.status != 'rolled_back':

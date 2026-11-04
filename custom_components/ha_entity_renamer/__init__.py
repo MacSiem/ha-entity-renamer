@@ -33,6 +33,9 @@ def _yaml_factory_for_plan(preparations, plan):
     profile = composition.get('profile') if type(composition) is dict else None
     if profile in ('template_state_binding_v3', 'template_mixed_state_binding_v1', 'template_script_prefix_binding_v1', 'template_automation_prefix_binding_v1'):
         return NativeTemplateStateServer
+    if profile == 'template_numeric_entry_reverse_v1' and plan.required_scopes == ('registry', 'helpers'):
+        from .native_template_forward import NativeTemplateForward
+        return NativeTemplateForward
     if profile in ('template_numeric_entry_reverse_v1', 'template_dependent_yaml_v1'):
         return NativeTemplateYAMLServer
     raise Refused('yaml_original_profile_unavailable')
@@ -49,6 +52,7 @@ class _PreparedReview:
     own_admission: object = None
     trace_admission: tuple = ()
     template_admission: object = None
+    entry_admission: object = None
 
 
 @dataclass
@@ -132,9 +136,16 @@ class Runtime:
             await self.preparations.create('review-' + prefix, review_lease(prefix, actor_id))
             current()
             try:
-                session = await NativeTemplateStateServer.prepare(hass, mapping,
-                    guard=current, refresh=refresh, entity_names=entity_names,
-                    device_names=device_names, review_id=prefix)
+                if hass.config_entries.async_entries('template'):
+                    from .native_template_forward import NativeTemplateForward
+                    if entity_names or device_names:
+                        raise Refused('template_forward_names_unsupported')
+                    session = await NativeTemplateForward.prepare(hass, mapping,
+                        guard=current, refresh=refresh, review_id=prefix)
+                else:
+                    session = await NativeTemplateStateServer.prepare(hass, mapping,
+                        guard=current, refresh=refresh, entity_names=entity_names,
+                        device_names=device_names, review_id=prefix)
             except BaseException:
                 # Revocation/uncertain IO can prevent immediate housekeeping.
                 # Its durable lease remains reclaimable at next prepare/setup.
@@ -147,10 +158,14 @@ class Runtime:
             try:
                 current()
                 plan, operation = session.plan, session.operation_id
-                count = sum(change.kind == 'entity' for change in session.registry_changes)
-                devices = sum(change.kind == 'device' for change in session.registry_changes)
+                registry_changes = getattr(session, 'registry_changes', None)
+                is_entry = registry_changes is None
+                if is_entry:
+                    registry_changes = (session.registry_change,)
+                count = sum(change.kind == 'entity' for change in registry_changes)
+                devices = sum(change.kind == 'device' for change in registry_changes)
                 changes = []
-                for change in session.registry_changes:
+                for change in registry_changes:
                     before, after = change.before, change.after
                     keys = ('entity_id', 'name') if change.kind == 'entity' else ('name_by_user',)
                     fields = {key: {'before': before.get(key), 'after': after.get(key)}
@@ -164,15 +179,19 @@ class Runtime:
                 # Aggregate only the admitted planned YAML scope. Paths, YAML,
                 # native keys, receipts and private consumer configuration stay here.
                 dependencies = {
-                    'domains': sorted(domain for domain in receipt.changed_domains
+                    'domains': ['template'] if is_entry else sorted(domain for domain in receipt.changed_domains
                                       if domain in ('template', 'automation', 'script')),
                     'yaml_file_count': len(receipt.proposed_files),
-                    'files': dependency_files(composition),
-                    'template_consumer_count': sum(
+                    'files': [] if is_entry else dependency_files(composition),
+                    'template_consumer_count': 1 if is_entry else sum(
                         row.domain in ('template.sensor', 'template.binary_sensor')
                         for row in session.evidence.template_sources.ledger.definitions)}
+                if is_entry:
+                    old, new = next(iter(session.mapping.items()))
+                    dependencies['config_entries'] = [{'entity_id': session.observer.rows[0]['entity_id'],
+                                                       'before': old, 'after': new}]
                 current()
-                phases = getattr(session.consumers, 'phases', None)
+                phases = getattr(getattr(session, 'consumers', None), 'phases', None)
                 admission = tuple(getattr(phases, 'admission', ()))
                 from .native_active_execution_pins import check_census
                 for script, census in admission:
@@ -189,7 +208,8 @@ class Runtime:
                 if template_admission is not None:
                     template_admission.check_review()
                 self.reviews[operation] = _PreparedReview(actor_id, plan, count,
-                    hass.loop.time() + 900, admission, own, trace_admission, template_admission)
+                    hass.loop.time() + 900, admission, own, trace_admission, template_admission,
+                    getattr(session, 'review_admission', None))
                 return {'operation_id': operation, 'fingerprint': plan.fingerprint,
                     'entity_count': count, 'device_count': devices, 'changes': changes,
                     'dependencies': dependencies,
@@ -234,10 +254,15 @@ class Runtime:
                         review.template_admission.check_review()
                     if review.own_admission is not None:
                         review.own_admission.check()
+                    if review.entry_admission is not None:
+                        review.entry_admission.check()
                     factory = _yaml_factory_for_plan(self.preparations, review.plan)
                     session = await factory.bind_prepared(hass, operation_id,
                         review.plan, guard=current, refresh=refresh)
                     try:
+                        if review.entry_admission is not None:
+                            review.entry_admission.check()
+                            session.review_record_admission = review.entry_admission
                         for script, census in review.execution_admission:
                             check_census(script, census)
                         for proof in review.trace_admission:
@@ -257,7 +282,7 @@ class Runtime:
                                     or session.own_dependent_fence.entity is not review.own_admission.entity):
                                 raise Refused('review_own_dependent_population_changed')
                             session.own_record_admission = review.own_admission
-                        phases = getattr(session.consumers, 'phases', None)
+                        phases = getattr(getattr(session, 'consumers', None), 'phases', None)
                         actual = tuple(getattr(phases, 'admission', ()))
                         if tuple(script for script, _ in actual) != tuple(
                                 script for script, _ in review.execution_admission):

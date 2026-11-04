@@ -24,7 +24,7 @@ class NativeTemplateForwardTests(unittest.IsolatedAsyncioTestCase):
     with_yaml = False
 
     async def _fixture(self):
-        entry_unique_id = None
+        entry_unique_id = getattr(self, "entry_unique_id", None)
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.components.template.config_flow import TemplateConfigFlowHandler
         from homeassistant.config_entries import ConfigEntry, ConfigEntryState

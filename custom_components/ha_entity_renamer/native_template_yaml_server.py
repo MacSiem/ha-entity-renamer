@@ -180,7 +180,8 @@ class NativeTemplateYAMLServer:
                   and runtime.loaded and not runtime.unloading
                   and runtime.operation_lock is obj.lock and obj.lock.locked(), 'runtime_scope_lost')
             obj.scene_fence.check()
-            _need(not ({'powercalc', 'mqtt', 'rest', 'command_line'}
+            _need('powercalc' not in hass.config.components, 'powercalc_scope_unsupported')
+            _need(not ({'mqtt', 'rest', 'command_line'}
                        & set(hass.config.components)), 'other_consumer_scope_unsupported')
             if hasattr(obj, 'consumers'):
                 obj.consumers.check()

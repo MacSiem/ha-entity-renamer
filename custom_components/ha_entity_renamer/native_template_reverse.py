@@ -60,6 +60,95 @@ class NativeTemplateReverse:
             expected_head=expected_head)
 
     @classmethod
+    async def verify_restored(cls, hass, operation_id, fingerprint, *, activation_lease, guard, refresh):
+        """Read-only proof of both completed lifecycles on the original receipt."""
+        from . import Runtime
+        runtime = hass.data.get(DATA_RUNTIME)
+        _need(type(runtime) is Runtime and runtime.operation_lock.locked()
+              and type(activation_lease) is NativeHelperActivationLease, 'installed_binding_required')
+        obj = object.__new__(cls)
+        obj.hass, obj.runtime, obj.operation_id = hass, runtime, operation_id
+        obj.fingerprint, obj.guard, obj.refresh = fingerprint, guard, refresh
+        obj.lease, obj.bound = activation_lease, False
+        def scope():
+            _authorize(guard)
+            _need(hass.data.get(DATA_RUNTIME) is runtime and runtime.loaded and not runtime.unloading
+                  and runtime.operation_lock.locked() and obj.lease.manager is hass.config_entries,
+                  'runtime_scope_lost')
+            obj.lease.check()
+        obj._scope = scope
+        scope()
+        obj.preparations, obj.journal = native_prepared_store(hass), native_journal(hass)
+        await obj.preparations.initialize()
+        await obj.journal.initialize()
+        obj.record = await obj.journal.load(operation_id)
+        scope()
+        record = obj.record
+        _need(record is not None and record.plan.fingerprint == fingerprint
+              and record.status == 'rolled_back' and record.direction == 'rollback'
+              and record.restore_attempted is True
+              and record.phases == ('undone',) * len(record.plan.steps), 'restored_record_required')
+        obj.plan = record.plan
+        baseline, obj.composition = obj.preparations.resolve_composition(obj.plan.native_inputs)
+        obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
+        obj.digests = dict(obj.composition.prepared_digests)
+        _need(obj.plan.required_scopes == obj.plan.covered_scopes == obj.plan.verification_adapters == ('registry', 'helpers')
+              and tuple(step.adapter for step in obj.plan.steps) == ('registry', 'helpers')
+              and set(obj.digests) == {step.prepared_ref for step in obj.plan.steps}
+              and obj.plan.coverage_evidence == obj.composition.coverage_sha256, 'qualified_plan_required')
+        changes = validate_preparations(obj.preparations, obj.plan, obj.receipt, obj.digests)
+        _need(len(changes) == 1, 'one_numeric_entry_required')
+        obj.entry_id, obj.change = next(iter(changes.items()))
+        obj.registry_change = decode_change(obj.preparations.resolve(obj.plan.steps[0].prepared_ref,
+                                                   obj.digests[obj.plan.steps[0].prepared_ref]))
+        entry = hass.config_entries.async_get_entry(obj.entry_id)
+        _need(entry is not None and obj.lease.entry_ids == (obj.entry_id,)
+              and obj.lease.owns_entry(entry) and read_entry(hass, obj.entry_id) == obj.change.before,
+              'activation_scope')
+        obj.receipt_store = native_registry_receipt_store(hass, obj.preparations)
+        obj.lifecycle_store = native_helper_lifecycle_store(hass, obj.preparations)
+        await obj.receipt_store.initialize()
+        await obj.lifecycle_store.initialize()
+        readonly = RegistryReceiptChain.reopen(obj.receipt_store, operation_id, obj.plan,
+                                               obj.receipt, obj.digests)
+        _need(not readonly.writable and readonly.active is None, 'readonly_reopen_required')
+        obj.chain = readonly
+        state = readonly.reconstruct_inputs()
+        roots = [key for key, row in obj.lifecycle_store.rows.items()
+                 if row['payload'].get('kind') == 'helper_lifecycle_root'
+                 and row['payload']['binding'].get('operation_id') == operation_id
+                 and row['payload']['binding'].get('fingerprint') == fingerprint]
+        _need(len(roots) == 2, 'restored_lifecycle_roots_required')
+        witnesses = [validate_lifecycle_receipt_witness(obj.lifecycle_store, operation_id, obj.plan,
+                      obj.receipt, obj.digests, root_id=key) for key in roots]
+        _need(sum(w.source_authorization is None for w in witnesses) == 1
+              and sum(w.source_authorization is not None for w in witnesses) == 1
+              and all(not w.writable and not w.inspect()['pending']
+                      and w.inspect()['inactive_receipts_complete']
+                      and w.inspect()['activation_receipts_complete'] for w in witnesses),
+              'restored_lifecycle_incomplete')
+        obj.recorder = NativeRecorderGuard(hass)
+        obj.history = NativeHistoryGuard(obj.recorder)
+        obj.observer = NativeTemplateEntryObserver(hass, readonly, obj.evidence, guard=scope)
+        obj.observer.lease = obj.lease
+        async def admit():
+            observed = await obj._observe()
+            readonly.expected(PhaseContext(record, 0), tuple(RegistryRawObservation(
+                f.key, f.raw, f.identity) for f in observed.files))
+            await obj._history_current()
+            await obj._final_loaded_history(obj.change.before)
+            _need(await obj.journal.load(operation_id) == record
+                  and state.same_evidence(readonly.reconstruct_inputs()), 'restored_changed')
+        await admit()
+        await refresh()
+        scope()
+        from .native_template_setup_recovery import check_recovery_disk
+        await check_recovery_disk(obj)
+        scope()
+        await admit()
+        return True
+
+    @classmethod
     async def classify_setup_ack(cls, hass, operation_id, fingerprint, *,
                                  activation_lease, guard, refresh):
         """Read-only classification for a cold, audited setup with missing ACK.

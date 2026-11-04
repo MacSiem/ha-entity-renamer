@@ -88,7 +88,7 @@ class NativeHelperActivationLease:
 
     __slots__ = ('_hass', '_manager', '_entries', '_locks', '_owned', '_guard',
                  '_task', '_loop', '_live', '_entered', '_core', '_template_entries',
-                 '_template_pins')
+                 '_template_pins', '_review_admission')
 
     def __init__(self) -> None:
         _fail('acquisition_required')
@@ -123,6 +123,7 @@ class NativeHelperActivationLease:
                 or len({id(lock) for lock in locks}) != len(locks)):
             _fail('native_lock_required')
         obj = object.__new__(cls)
+        obj._review_admission = None
         obj._hass, obj._manager, obj._entries, obj._locks = hass, manager, entries, locks
         obj._template_entries = tuple(entry.domain == 'template' for entry in entries)
         # Lease checks must not accept a different, still shape-valid consumer.
@@ -250,7 +251,13 @@ class NativeHelperActivationLease:
         self._task_check()
         entry = self._entry(entry_id)
         self.check()
+        admission = getattr(self, '_review_admission', None)
+        if admission is not None:
+            admission.check()
         result = await self._manager.async_unload(entry_id, _lock=False)
+        if admission is not None:
+            admission.check_entry()
+            self._review_admission = None
         self.check()
         self._template_mutation_pin(entry)
         return result

@@ -868,3 +868,31 @@ test('unknown dependency kind and invalid Script key cannot be reviewed',async t
     assert.equal(writes(f).length,0);
   }
 });
+
+test('numeric Template entry dependency is explicit in forward and inverse review', async t => {
+  const f=await fixture(t);
+  f.review.dependencies={domains:['template'],yaml_file_count:0,template_consumer_count:1,files:[],
+    config_entries:[{entity_id:'sensor.consumer',before:'sensor.a',after:'sensor.b'}]};
+  await f.card._prepareMigration();
+  assert.equal(f.card._migration.stage,'review');
+  let text=f.card.shadowRoot.querySelector('[role="dialog"]').textContent;
+  assert.match(text,/sensor.consumer/); assert.match(text,/sensor.a\s*→\s*sensor.b/);
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'applied',eligible:true,restore_attempt_available:true});
+  await f.card._applyMigration();
+  f.card._reviewMigrationRestore();
+  text=f.card.shadowRoot.querySelector('[role="dialog"]').textContent;
+  assert.match(text,/sensor.consumer/); assert.match(text,/sensor.b\s*→\s*sensor.a/);
+});
+
+test('unsupported Template dependency explains the specific refusal without offering apply', async t => {
+  for (const [code, expected] of [['unsupported_template_reference', /Template reference could not be safely interpreted/i],
+                                  ['unsupported_template_family', /Template form is not supported/i],
+                                  ['unsupported_powercalc_scope', /Powercalc is loaded/i]]) {
+    const f=await fixture(t);
+    f.handlers['ha_entity_renamer/prepare']=()=>Promise.reject({code});
+    await f.card._prepareMigration();
+    assert.equal(f.card._migration.stage,'refused');
+    assert.match(f.card.shadowRoot.textContent, expected);
+    assert.equal(f.card.shadowRoot.getElementById('applyMigration'),null);
+  }
+});

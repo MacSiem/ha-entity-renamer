@@ -138,6 +138,63 @@ class _UnchangedConsumers:
         self.native.physical()
 
 
+class NativeTemplateReviewPin:
+    """Retain native identities across the review gap; equality cannot prove ABA."""
+    def __init__(self, session):
+        self.hass, self.entry = session.hass, session.entry
+        self.options = self.entry.options
+        self.setup_lock = self.entry.setup_lock
+        entity, _, _, _ = session.observer.live_sample(session.change.before)
+        self.entity = entity
+        self.tracker = entity._template_result_info
+        self.output_job = self.tracker._job
+        self.filtered = self.tracker._track_state_changes
+        from homeassistant.helpers import event
+        self.remove = self.filtered._listeners[event._ENTITIES_LISTENER]
+        self.job, self.callbacks = self.remove.args[-2:]
+        self.bus_listener = self.hass.data[event._KEYED_TRACK_STATE_CHANGE.key].listener
+        self.action_job = self.filtered._action_as_hassjob
+        self.native = session.observer.native
+        self.snapshot = session.change.before
+        self.snapshot_mapping = dict(session.mapping)
+        self.thread = threading.get_ident()
+        self.check()
+
+    def check_entry(self):
+        if threading.get_ident() != self.thread:
+            return
+        _need(self.hass.config_entries.async_get_entry(self.entry.entry_id) is self.entry
+              and self.entry.options is self.options and self.entry.setup_lock is self.setup_lock,
+              'review_entry_changed')
+
+    def check(self):
+        if threading.get_ident() != self.thread:
+            return
+        self.check_entry()
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        from .helper_native import read_entry
+        from .native_template_consumers import _live_sensor, _registration
+        entries = [e for p in async_get_platforms(self.hass, 'template')
+                   if p.config_entry is self.entry for e in p.entities.values()]
+        _need(self.hass.config_entries.async_get_entry(self.entry.entry_id) is self.entry
+              and self.entry.options is self.options and len(entries) == 1
+              and entries[0] is self.entity
+              and self.entity._template_result_info is self.tracker
+              and self.tracker._job is self.output_job
+              and self.tracker._track_state_changes is self.filtered
+              and read_entry(self.hass, self.entry.entry_id) == self.snapshot, 'review_entry_changed')
+        _, template, _ = _live_sensor(self.native, self.entity)
+        dependencies, _ = _registration(self.native, self.entity, template)
+        from homeassistant.helpers import event
+        remove = self.filtered._listeners[event._ENTITIES_LISTENER]
+        _need(dependencies == (next(iter(self.snapshot_mapping)),)
+              and remove is self.remove and remove.args[-2] is self.job
+              and remove.args[-1] is self.callbacks
+              and self.filtered._action_as_hassjob is self.action_job
+              and self.hass.data[event._KEYED_TRACK_STATE_CHANGE.key].listener is self.bus_listener,
+              'review_dependency_changed')
+
+
 class NativeTemplateForward:
     """Task-local one-shot writer built only by installed native qualification."""
 
@@ -156,7 +213,7 @@ class NativeTemplateForward:
     _coordinator = NativeTemplateReverse._coordinator
 
     @classmethod
-    async def prepare(cls, hass, mapping, *, guard, refresh):
+    async def prepare(cls, hass, mapping, *, guard, refresh, review_id=None):
         from . import Runtime
         from homeassistant.core import HomeAssistant
         from .manifest import parse_manifest
@@ -164,6 +221,9 @@ class NativeTemplateForward:
               and type(mapping) is dict and len(mapping) == 1
               and all(type(k) is str and type(v) is str for k, v in mapping.items())
               and callable(guard) and callable(refresh), 'installed_scope_required')
+        if review_id is not None:
+            from .review_retention import review_lease
+            review_lease(review_id, 'server')
         old, new = next(iter(mapping.items()))
         # Reuse the existing ID/domain/collision syntax policy, not a second
         # loose mapping parser. No private/public manifest import is invoked.
@@ -183,7 +243,9 @@ class NativeTemplateForward:
             _authorize(guard)
             # The four qualified families remain unchanged. No external or
             # other native consumer adapter is supplied by this private slice.
-            _need(not ({'scene', 'powercalc', 'mqtt', 'rest', 'command_line'}
+            _need('powercalc' not in hass.config.components, 'powercalc_scope_unsupported')
+            obj.scene_fence.check()
+            _need(not ({'mqtt', 'rest', 'command_line'}
                        & set(hass.config.components)),
                   'other_consumer_scope_unsupported')
             _need(hass.data.get(DATA_RUNTIME) is runtime and runtime.loaded
@@ -205,6 +267,8 @@ class NativeTemplateForward:
                 _need(composition == obj.composition and baseline.receipt == obj.receipt,
                       'composition_changed')
         obj._scope, obj._runtime_scope = scope, runtime_scope
+        from .native_empty_scene import NativeEmptySceneFence
+        obj.scene_fence = NativeEmptySceneFence(hass)
         try:
             scope()
             await refresh()
@@ -282,12 +346,12 @@ class NativeTemplateForward:
             obj.registry_change = await NativeRegistryBridge(NativeRegistryIO(hass), obj.recorder).prepare(
                 'entity', source_uuid, {'entity_id': new}, scope)
             scope()
-            own = uuid.uuid4().hex
-            obj.operation_id = 'template-forward-' + own
+            own = review_id or uuid.uuid4().hex
+            obj.operation_id = ('template-yaml-' if review_id else 'template-forward-') + own
             obj.digests = {}
             requests = []
-            for suffix, change in (('source', obj.registry_change), ('options', obj.change)):
-                ref = own + '-' + suffix
+            for index, (suffix, change) in enumerate((('source', obj.registry_change), ('options', obj.change))):
+                ref = own + '-' + (str(index) if review_id else suffix)
                 payload = encode_change(change)
                 obj.digests[ref] = await obj.preparations.create(ref, payload)
                 scope()
@@ -314,10 +378,10 @@ class NativeTemplateForward:
                                                                  composition=obj.composition)
             scope()
             scopes = ('registry', 'helpers')
-            steps = tuple(Step(own + '-' + suffix, adapter, change.identity,
-                change.before_revision, change.after_revision, own + '-' + suffix)
-                for suffix, adapter, change in (('source', 'registry', obj.registry_change),
-                                                ('options', 'helpers', obj.change)))
+            steps = tuple(Step(own + '-' + (str(index) if review_id else suffix), adapter, change.identity,
+                change.before_revision, change.after_revision, own + '-' + (str(index) if review_id else suffix))
+                for index, (suffix, adapter, change) in enumerate((('source', 'registry', obj.registry_change),
+                                                ('options', 'helpers', obj.change))))
             obj.plan = Plan(own, scopes, scopes, steps, obj.evidence.sha256, scopes, inputs)
             obj.plan.validate()
             obj.fingerprint = obj.plan.fingerprint
@@ -340,9 +404,114 @@ class NativeTemplateForward:
             await obj._original_fence(inputs, obj.receipt)
             await obj._final_loaded_history(obj.change.before)
             obj._scope()
+            if review_id is not None:
+                obj.review_admission = NativeTemplateReviewPin(obj)
             return obj
         except BaseException:
             obj.failed = True
+            obj.close()
+            raise
+
+    @classmethod
+    async def bind_prepared(cls, hass, operation_id, plan, *, guard, refresh):
+        """Reopen the exact retained review, never minting a replacement ORIGINAL."""
+        from . import Runtime
+        from .prepared import decode_change
+        from .native_template_entry_lifecycle import validate_preparations
+        from .recorder_guard import NativeRecorderGuard
+        from .history_guard import NativeHistoryGuard
+        runtime = hass.data.get(DATA_RUNTIME)
+        _need(cls is NativeTemplateForward and type(runtime) is Runtime
+              and runtime.operation_lock.locked(), 'runtime_required')
+        obj = object.__new__(cls)
+        obj.hass, obj.runtime, obj.guard, obj.refresh = hass, runtime, guard, refresh
+        obj.task, obj.lock = asyncio.current_task(), runtime.operation_lock
+        obj.lease = None
+        obj.bound = obj.used = obj.failed = False
+        def runtime_scope():
+            _authorize(guard)
+            _need('powercalc' not in hass.config.components, 'powercalc_scope_unsupported')
+            obj.scene_fence.check()
+            _need(not ({'mqtt', 'rest', 'command_line'}
+                       & set(hass.config.components)), 'other_consumer_scope_unsupported')
+            _need(hass.data.get(DATA_RUNTIME) is runtime and runtime.loaded
+                  and not runtime.unloading and runtime.operation_lock is obj.lock
+                  and obj.lock.locked(), 'runtime_scope_lost')
+            if hasattr(obj, '_unchanged_consumers'):
+                obj._unchanged_consumers.check()
+        def scope():
+            runtime_scope()
+            if obj.lease is not None:
+                obj.lease.check()
+            if obj.bound:
+                _need(runtime.journal is obj.journal and runtime.preparations is obj.preparations,
+                      'runtime_cache_replaced')
+                baseline, composition = obj.preparations.resolve_composition(obj.plan.native_inputs)
+                _need(composition == obj.composition and baseline.receipt == obj.receipt, 'composition_changed')
+        obj._scope, obj._runtime_scope = scope, runtime_scope
+        from .native_empty_scene import NativeEmptySceneFence
+        obj.scene_fence = NativeEmptySceneFence(hass)
+        try:
+            scope()
+            await refresh()
+            obj.preparations, obj.journal = native_prepared_store(hass), native_journal(hass)
+            await obj.preparations.initialize()
+            await obj.journal.initialize()
+            scope()
+            _need(not await obj.journal.active() and await obj.journal.load(operation_id) is None,
+                  'operation_changed')
+            plan.validate()
+            obj.plan, obj.operation_id, obj.fingerprint = plan, operation_id, plan.fingerprint
+            baseline, obj.composition = obj.preparations.resolve_composition(plan.native_inputs)
+            obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
+            obj.digests = dict(obj.composition.prepared_digests)
+            _need(type(obj.composition) is TemplateComposition
+                  and plan.required_scopes == plan.covered_scopes == plan.verification_adapters == ('registry', 'helpers')
+                  and tuple(step.adapter for step in plan.steps) == ('registry', 'helpers')
+                  and not any(step.caused_by for step in plan.steps)
+                  and set(obj.digests) == {step.prepared_ref for step in plan.steps}
+                  and plan.coverage_evidence == obj.composition.coverage_sha256, 'qualified_plan_required')
+            changes = validate_preparations(obj.preparations, plan, obj.receipt, obj.digests)
+            _need(len(changes) == 1, 'one_numeric_entry_required')
+            obj.entry_id, obj.change = next(iter(changes.items()))
+            obj.mapping = dict(obj.change.mapping)
+            obj.registry_change = decode_change(obj.preparations.resolve(
+                plan.steps[0].prepared_ref, obj.digests[plan.steps[0].prepared_ref]))
+            obj.entry = hass.config_entries.async_get_entry(obj.entry_id)
+            _need(obj.entry is not None, 'entry_missing')
+            obj._unchanged_consumers = await _UnchangedConsumers.capture(hass, obj.mapping, guard=scope)
+            await obj._unchanged_consumers.bind_sources(obj.receipt, obj.evidence, guard=scope)
+            obj.lease = await NativeHelperActivationLease.acquire(hass, hass.config_entries,
+                                                                  (obj.entry,), guard=runtime_scope)
+            scope()
+            obj.recorder = NativeRecorderGuard(hass)
+            obj.history = NativeHistoryGuard(obj.recorder)
+            obj.receipt_store = native_registry_receipt_store(hass, obj.preparations)
+            obj.lifecycle_store = native_helper_lifecycle_store(hass, obj.preparations)
+            await obj.receipt_store.initialize()
+            await obj.lifecycle_store.initialize()
+            readonly = RegistryReceiptChain.reopen(obj.receipt_store, operation_id, plan,
+                                                   obj.receipt, obj.digests)
+            state = readonly.reconstruct_inputs()
+            _need(not readonly.writable and readonly.active is None
+                  and state.head == readonly.root_digest, 'pristine_review_required')
+            obj.chain = readonly
+            obj.observer = NativeTemplateEntryObserver(hass, readonly, obj.evidence, guard=scope)
+            obj.observer.lease = obj.lease
+            runtime.journal, runtime.preparations = obj.journal, obj.preparations
+            obj.bound = True
+            await obj._check_stores()
+            await obj._original_fence(plan.native_inputs, obj.receipt)
+            await obj._final_loaded_history(obj.change.before)
+            writer = RegistryReceiptChain(obj.receipt_store, operation_id, plan, obj.receipt, obj.digests)
+            _need(writer.root == readonly.root and writer.root_digest == readonly.root_digest
+                  and writer.reconstruct_inputs().same_evidence(state), 'head_changed')
+            writer.writable = True
+            obj.chain = writer
+            obj.observer.chain = writer
+            obj.observation_state = state
+            return obj
+        except BaseException:
             obj.close()
             raise
 
@@ -437,11 +606,20 @@ class NativeTemplateForward:
             # unload. A crash/cancel in lifecycle quiescence must remain visible
             # to the ordinary journal inventory, even before registry effects.
             self.plan.validate()
+            admission = getattr(self, 'review_record_admission', None)
+            if admission is not None:
+                admission.check()
+                self.lease._review_admission = admission
             await self.journal.create(Record(self.operation_id, self.plan,
-                phases=('pending',) * len(self.plan.steps)))
+                phases=('pending',) * len(self.plan.steps),
+                restore_attempted=False if admission is not None else None))
             self._scope()
+            if admission is not None:
+                admission.check()
             await self.refresh()
             self._scope()
+            if admission is not None:
+                admission.check()
             self.lifecycle = await NativeHelperLifecycle.start(self.lifecycle_store,
                 self.hass.config_entries, self.operation_id, self.plan, self.receipt, self.digests,
                 activation_lease=self.lease, guard=self._scope,
@@ -479,8 +657,11 @@ class NativeTemplateForward:
     def close(self):
         _need(asyncio.current_task() is self.task, 'owner_task_required')
         self.bound = False
-        if hasattr(self, 'lifecycle'):
-            self.lifecycle.close_source_gaps()
-        if self.lease is not None:
-            self.lease.release()
-            self.lease = None
+        try:
+            if hasattr(self, 'lifecycle'):
+                self.lifecycle.close_source_gaps()
+            if self.lease is not None:
+                self.lease.release()
+                self.lease = None
+        finally:
+            self.scene_fence.close()
