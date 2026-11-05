@@ -29,6 +29,37 @@ CORE_DOMAINS = frozenset(('homeassistant', 'automation', 'script', 'template', '
 # uncertain domains are never silently promoted by being infrastructure.
 NETWORK_CAPABLE = frozenset(('http', 'api', 'websocket_api', 'mobile_app', 'ssdp',
                              'zeroconf', 'dhcp', 'bluetooth', 'network'))
+FRONTEND_SYSTEM = frozenset(('device_automation', 'diagnostics', 'file_upload', 'map_tiles',
+                             'repairs', 'search', 'system_log'))
+
+
+def native_frontend_snapshot(hass, root):
+    """Qualify only the actual isolated frontend's source-free repair store."""
+    from batch_readback import _strict_json
+    unknown = {'status': 'UNKNOWN:frontend_system_sources_unverified'}
+    try:
+        manager = hass.data['issue_registry']
+        store = manager._store
+        path = root / '.storage/repairs.issue_registry'
+        if (path.is_symlink() or not path.is_file() or Path(store.path) != path
+                or store._data is not None or store._delay_handle is not None):
+            return unknown
+        first = path.stat()
+        if first.st_size > 2_000_000:
+            return unknown
+        raw = path.read_bytes()
+        last = path.stat()
+        if (first.st_dev, first.st_ino, first.st_size, first.st_mtime_ns, first.st_ctime_ns) != (
+                last.st_dev, last.st_ino, last.st_size, last.st_mtime_ns, last.st_ctime_ns):
+            return unknown
+        document = _strict_json(raw)
+        data = document['data']
+        if (document.get('key') != 'repairs.issue_registry' or data != manager._data_to_save()
+                or refs(data) or any('{{' in value or '{%' in value for value in _strings(data))):
+            return unknown
+        return {'status': 'COMPLETE', 'disk_sha256': hashlib.sha256(raw).hexdigest()}
+    except (OSError, AttributeError, KeyError, TypeError, ValueError, RecursionError):
+        return unknown
 
 
 def _walk(value, errors, path='$', depth=0, budget=None):
@@ -77,6 +108,14 @@ def refs(value):
     return sorted({match.group(1) for value in _strings(value) for match in ENTITY.finditer(value)})
 
 
+def _dynamic_dashboard_strategy(config):
+    if not isinstance(config, dict):
+        return False
+    views = config.get('views', [])
+    return ('strategy' in config or isinstance(views, list)
+            and any(isinstance(view, dict) and 'strategy' in view for view in views))
+
+
 def audit(observed):
     """Derive source/consumer facts and gaps from collected observations.
 
@@ -90,8 +129,24 @@ def audit(observed):
     unknown_roots = sorted(set(config) - YAML_DOMAINS - {'lovelace'})
     gaps.extend(('config:' + domain, 'unclassified_integration_root') for domain in unknown_roots)
     loaded = set(observed['loaded_components'])
+    auth = observed.get('native_auth')
+    qualified_auth = (type(auth) is dict and set(auth) == {'before', 'after'}
+        and auth['before'] == auth['after'] and type(auth['before']) is dict
+        and auth['before'].get('status') == 'COMPLETE'
+        and type(auth['before'].get('disk_sha256')) is str
+        and re.fullmatch(r'[0-9a-f]{64}', auth['before']['disk_sha256']) is not None)
+    frontend = observed.get('native_frontend')
+    qualified_frontend = (type(frontend) is dict and set(frontend) == {'before', 'after'}
+        and frontend['before'] == frontend['after'] and type(frontend['before']) is dict
+        and frontend['before'].get('status') == 'COMPLETE'
+        and type(frontend['before'].get('disk_sha256')) is str
+        and re.fullmatch(r'[0-9a-f]{64}', frontend['before']['disk_sha256']) is not None
+        and 'frontend' in loaded and not (FRONTEND_SYSTEM & set(config))
+        and not any(row['domain'] in FRONTEND_SYSTEM for row in observed['entries']))
+    classified = (CORE_DOMAINS | ({'auth'} if qualified_auth else set())
+                  | (FRONTEND_SYSTEM if qualified_frontend else set()))
     gaps.extend(('integration:' + domain, 'unclassified_loaded_integration')
-                for domain in sorted(loaded - CORE_DOMAINS))
+                for domain in sorted(loaded - classified))
     # Mere presence of a network-capable integration is not a proof of external
     # inactivity: it remains explicit unless it is a known local bootstrap and
     # there are no actual network interfaces/listeners in the isolated fixture.
@@ -173,11 +228,17 @@ def audit(observed):
             'unverified': sorted(set(tuple(x) for x in gaps)), 'complete': not gaps}
 
 
-def consumer_evidence(original, observed):
+def consumer_evidence(original, observed, *, allow_unrendered=False):
     """Bind comparator checks to independent census observations for this fixture."""
     from batch_readback import ConsumerCheck
-    if not original['complete'] or not observed['complete']:
-        raise ValueError('both independently collected censuses must be complete')
+    for census in (original, observed):
+        if census['complete']:
+            continue
+        gaps = census['unverified']
+        if (not allow_unrendered or not gaps or not census['external']['empty_in_bounded_fixture']
+                or any(not subject.startswith('dashboard:') or not reason.startswith('active_card_render_not_observed:')
+                       for subject, reason in gaps)):
+            raise ValueError('both independently collected censuses must be complete')
     if original['inactive_blueprints'] != observed['inactive_blueprints']:
         raise ValueError('blueprint activity changed')
     inventory, checks = {}, []
@@ -361,6 +422,10 @@ def _dashboard_census(hass, root, config, errors):
                 routes.append({'route': label, 'status': 'storage_runtime_mismatch_or_autogenerated', 'mode': 'storage', 'path': ''})
                 continue
             relative = path.relative_to(root).as_posix()
+            if _dynamic_dashboard_strategy(manager._data['config']):
+                routes.append({'route': label, 'status': 'dynamic_strategy_unverified',
+                               'mode': 'storage', 'path': relative})
+                continue
             routes.append({'route': label, 'status': 'COMPLETE', 'mode': 'storage', 'path': relative,
                            'cards': list(_cards(manager._data['config']))})
         elif type(manager) is LovelaceYAML:
@@ -381,6 +446,10 @@ def _dashboard_census(hass, root, config, errors):
                 continue
             found_yaml.add(route)
             yaml_roots.append(relative)
+            if _dynamic_dashboard_strategy(parsed):
+                routes.append({'route': label, 'status': 'dynamic_strategy_unverified',
+                               'mode': 'yaml', 'path': relative})
+                continue
             routes.append({'route': label, 'status': 'COMPLETE', 'mode': 'yaml', 'path': relative,
                            'cards': list(_cards(parsed))})
         else:
@@ -559,6 +628,9 @@ async def collect_native(hass, root, producer, mapping):
     if producer.hass is not hass or producer.entity_id != source or hass.states.get(source) is None:
         raise ValueError('source is not the actual loaded producer')
     errors = []
+    from batch_readback import native_empty_auth_snapshot
+    auth_before = native_empty_auth_snapshot(hass, root)
+    frontend_before = native_frontend_snapshot(hass, root)
     config = _walk(await asyncio.wait_for(async_hass_config_yaml(hass), 30), errors)
     dashboards, dashboard_roots = _dashboard_census(hass, root, config, errors)
     dashboard_snapshot = json.dumps(dashboards, sort_keys=True, allow_nan=False)
@@ -697,7 +769,11 @@ async def collect_native(hass, root, producer, mapping):
         errors.append(('dashboard', 'inventory_changed_during_census'))
     if _network_evidence() != network:
         errors.append(('external', 'network_changed_during_census'))
+    auth_after = native_empty_auth_snapshot(hass, root)
+    frontend_after = native_frontend_snapshot(hass, root)
     observed = {'configuration': config, 'source': source, 'graph': graph_paths,
+        'native_auth': {'before': auth_before, 'after': auth_after},
+        'native_frontend': {'before': frontend_before, 'after': frontend_after},
         'source_specs': source_specs, 'bindings': bindings, 'entries': entries, 'runtime_entities': runtime_entities,
         'loaded_components': loaded_components, 'network': network,
         'dashboards': dashboards, 'observed_consumers': sorted(observed_consumers), 'samples': samples,

@@ -5,10 +5,26 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from batch_readback import ConsumerCheck, Edit, REQUIRED_FAMILIES, RowChange, capture_tree, compare, discovery_coverage, native_empty_auth_snapshot
+from batch_readback import ConsumerCheck, Edit, JSONStoreEdit, REQUIRED_FAMILIES, RowChange, capture_tree, compare, discovery_coverage, native_empty_auth_snapshot
 
 
 class BatchReadbackTest(unittest.TestCase):
+    def test_explicit_dashboard_store_edit_preserves_all_fields_across_reserialization(self):
+        path = '.storage/lovelace'
+        original = {'key': 'lovelace', 'data': {'config': {'entities': [self.old], 'foreign': {'flag': True}}}}
+        changed = {'key': 'lovelace', 'data': {'config': {'entities': [self.new], 'foreign': {'flag': True}}}}
+        (self.original / path).write_text(json.dumps(original, indent=2))
+        (self.after / path).write_text(json.dumps(changed, separators=(',', ':')))
+        edit = JSONStoreEdit(path, self.old.encode(), self.new.encode(), 1)
+        def check(edits):
+            return compare(self.original, self.after, old=self.old, new=self.new, uuid=self.uuid,
+                           edits=[self.edit, *edits])['findings']
+        self.assertNotIn(('unexpected_change', path), check([edit]))
+        self.assertIn(('unexpected_change', path), check([]))
+        changed['data']['config']['foreign']['flag'] = 1
+        (self.after / path).write_text(json.dumps(changed))
+        self.assertIn(('unexpected_change', path), check([edit]))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

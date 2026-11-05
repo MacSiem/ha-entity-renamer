@@ -71,14 +71,14 @@ class _ConsumerFence:
         self.check()
 
     def check(self):
-        from .native_discovery_consumers import _inventory,_energy_manager
+        from .native_discovery_consumers import _inventory,_energy_manager,_freeze
         from .lovelace_native import revision
         if self.dashboard is not None:
             native,token=self.dashboard
             if _inventory(self.hass,native,self.observed.version)!=token:
                 raise ValueError('discovery_dashboard_manager_changed')
             value=self.observed.dashboard.value
-            if tuple((r,self.plain(m.config)) for r,m in native._managers().items()) != tuple(
+            if tuple((r,self.plain(_freeze(m.config))) for r,m in native._managers().items()) != tuple(
                     (r,self.plain(c)) for r,c in value.registered_metadata):
                 raise ValueError('discovery_dashboard_metadata_changed')
             for row in value.snapshots:

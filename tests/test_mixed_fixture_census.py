@@ -1,11 +1,13 @@
 """Bounded synthetic preflight for the concrete native caller census."""
 import copy
 import json
+from pathlib import Path
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from mixed_fixture_census import _observed_consumers, _plan_graph, _walk, audit, census_coverage, consumer_evidence, fresh_inverse_after_apply, refs
+from mixed_fixture_census import _dynamic_dashboard_strategy, _observed_consumers, _plan_graph, _walk, audit, census_coverage, consumer_evidence, fresh_inverse_after_apply, native_frontend_snapshot, refs
 
 
 def sample():
@@ -26,6 +28,66 @@ def sample():
 
 
 class MixedFixtureCensusTests(unittest.TestCase):
+    def test_dashboard_strategy_is_never_treated_as_empty_static_cards(self):
+        self.assertTrue(_dynamic_dashboard_strategy({'strategy': {'type': 'map'}}))
+        self.assertTrue(_dynamic_dashboard_strategy({'views': [{'strategy': {'type': 'custom'}}]}))
+        self.assertFalse(_dynamic_dashboard_strategy({'views': [{'cards': []}]}))
+        observed = sample()
+        observed['dashboards'] = [{'route': 'dynamic', 'status': 'dynamic_strategy_unverified',
+                                   'mode': 'storage', 'path': '.storage/lovelace.dynamic'}]
+        self.assertIn(('dashboard:dynamic', 'dynamic_strategy_unverified'), audit(observed)['unverified'])
+
+    def test_auth_requires_stable_qualified_native_manager_and_disk(self):
+        observed = sample()
+        observed['loaded_components'].append('auth')
+        good = {'status': 'COMPLETE', 'disk_sha256': 'a' * 64}
+        for before, after, expected in ((good, good, True),
+                (good, {'status': 'COMPLETE', 'disk_sha256': 'b' * 64}, False),
+                ({'status': 'UNKNOWN:private_auth_unverified'}, good, False),
+                ({'status': 'COMPLETE', 'disk_sha256': 'bad'}, good, False)):
+            observed['native_auth'] = {'before': before, 'after': after}
+            result = audit(observed)
+            self.assertEqual(('integration:auth', 'unclassified_loaded_integration')
+                             not in result['unverified'], expected)
+            self.assertEqual(result['external']['empty_in_bounded_fixture'], expected)
+
+    def test_frontend_system_requires_stable_source_free_native_evidence(self):
+        observed = sample()
+        observed['loaded_components'] += ['frontend', 'repairs', 'map_tiles']
+        good = {'status': 'COMPLETE', 'disk_sha256': 'b' * 64}
+        for before, after, expected in ((good, good, True),
+                (good, {'status': 'COMPLETE', 'disk_sha256': 'c' * 64}, False),
+                ({'status': 'UNKNOWN:frontend_system_sources_unverified'}, good, False)):
+            observed['native_frontend'] = {'before': before, 'after': after}
+            result = audit(observed)
+            self.assertEqual(('integration:repairs', 'unclassified_loaded_integration')
+                             not in result['unverified'], expected)
+        observed['native_frontend'] = {'before': good, 'after': good}
+        observed['configuration']['repairs'] = {}
+        self.assertIn(('integration:repairs', 'unclassified_loaded_integration'), audit(observed)['unverified'])
+
+    def test_frontend_repair_store_must_match_manager_and_have_no_references(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.storage').mkdir()
+            path = root / '.storage/repairs.issue_registry'
+            data = {'issues': [{'domain': 'fixture', 'issue_id': 'notice'}]}
+            def save(value):
+                path.write_text(json.dumps({'key': 'repairs.issue_registry', 'data': value}))
+            save(data)
+            store = SimpleNamespace(path=str(path), _data=None, _delay_handle=None)
+            manager = SimpleNamespace(_store=store, _data_to_save=lambda: data)
+            hass = SimpleNamespace(data={'issue_registry': manager})
+            self.assertEqual(native_frontend_snapshot(hass, root)['status'], 'COMPLETE')
+            save({'issues': [{'issue_id': 'sensor.foreign'}]})
+            self.assertNotEqual(native_frontend_snapshot(hass, root)['status'], 'COMPLETE')
+            data['issues'][0]['issue_id'] = 'sensor.foreign'
+            self.assertNotEqual(native_frontend_snapshot(hass, root)['status'], 'COMPLETE')
+            data['issues'][0]['issue_id'] = 'notice'
+            save(data)
+            store._delay_handle = object()
+            self.assertNotEqual(native_frontend_snapshot(hass, root)['status'], 'COMPLETE')
+
     def test_empty_external_scope_and_bindings_are_derived_from_facts(self):
         observed = sample()
         observed['configuration'] = {'automation': [{'entity_id': 'sensor.producer'}],
@@ -48,6 +110,24 @@ class MixedFixtureCensusTests(unittest.TestCase):
         self.assertIn(('dashboard:map', 'active_card_render_not_observed:map'), result['unverified'])
         self.assertIn(('integration:mqtt', 'unclassified_loaded_integration'), result['unverified'])
         self.assertIn(('external', 'network_endpoints_present'), result['unverified'])
+
+    def test_partial_consumer_checks_do_not_qualify_dashboard_or_unknown_external(self):
+        observed = sample()
+        observed['configuration'] = {'automation': [{'entity_id': 'sensor.producer'}],
+                                     'script': {'caller': {'entity_id': 'sensor.producer'}},
+                                     'template': [{'state': "{{ states('sensor.producer') }}"}]}
+        observed['dashboards'] = [{'route': 'map', 'mode': 'storage', 'path': '.storage/lovelace',
+                                   'status': 'COMPLETE', 'cards': [{'type': 'map', 'refs': ['sensor.producer']}]}]
+        census = audit(observed)
+        self.assertFalse(census['complete'])
+        with self.assertRaises(ValueError):
+            consumer_evidence(census, census)
+        consumer_evidence(census, census, allow_unrendered=True)
+        self.assertEqual(census_coverage(census, {'dashboard': 'UNKNOWN'})[0]['dashboard'], 'UNKNOWN')
+        observed['loaded_components'].append('mqtt')
+        bad = audit(observed)
+        with self.assertRaises(ValueError):
+            consumer_evidence(census, bad, allow_unrendered=True)
 
     def test_unclassified_live_entity_prevents_empty_external_inventory(self):
         observed = sample()

@@ -101,8 +101,21 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         from .native_template_state_yaml import capture_template_state_yaml
         from .native_registry import NativeRegistryBridge, NativeRegistryIO
         from .native_input_baseline import async_capture_native_input_baseline
-        self.consumers = await _UnchangedConsumers.capture(self.hass, self.mapping, guard=self._scope)
+        self.consumers = await _UnchangedConsumers.capture(self.hass, self.mapping, guard=self._scope,
+                                                           _dashboard_effects=True)
         self._scope()
+        dashboard_observed = self.consumers.dashboard_observed
+        dashboard_storage = dashboard_yaml = None
+        dashboard_routes = ()
+        if dashboard_observed.dashboard.status == 'COMPLETE':
+            from .dashboard_storage_semantics import qualify_dashboard_storage, async_prepare_dashboard_storage
+            dashboard_routes = tuple(row.filename for row in dashboard_observed.dashboard.value.yaml_sources)
+            changes = qualify_dashboard_storage(dashboard_observed, self.mapping)
+            if changes:
+                dashboard_storage = await async_prepare_dashboard_storage(
+                    self.hass, dashboard_observed, self.mapping, guard=self._scope)
+            _need(not dashboard_routes or dashboard_storage is not None,
+                  'dashboard_yaml_without_storage_effect_unsupported')
         # Identify the native Script-key proposal BEFORE source planning. This
         # is only the source-checker opt-in; the later Root qualifier still
         # refuses this shape until registry/service/lifecycle are implemented.
@@ -132,8 +145,13 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 self.hass, inventory, guard=self._scope, scene_fence=self.scene_fence)
         root = Path(self.hass.config.config_dir).resolve()
         yaml = await _drained(self.hass.async_add_executor_job,
-            lambda: plan_yaml(root, self.mapping, owned_script_services=owned_script))
+            lambda: plan_yaml(root, self.mapping, owned_script_services=owned_script,
+                              yaml_dashboards=dashboard_routes))
         self._scope()
+        if dashboard_routes:
+            from .dashboard_yaml_semantics import async_qualify_registered_dashboard_yaml
+            dashboard_yaml = await async_qualify_registered_dashboard_yaml(
+                self.hass, dashboard_observed, yaml, self.mapping, guard=self._scope)
         if inventory is not None:
             inventory.check()
             service_audit.check()
@@ -142,11 +160,14 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             _need(False, 'template_requires_reference_parser')
         _need(yaml.ready, 'yaml_proposal_required')
         registry_only = not yaml.patches
+        _need(not (registry_only and dashboard_storage is not None),
+              'dashboard_registry_only_unsupported')
         try:
             bundle = await async_validate_proposed_with_template_state_sources(
                 self.hass, yaml, self.mapping, root.parent, with_state_program=True,
                 registry_only_template=registry_only, with_dependent_program=bool(owned_script),
-                owned_script_services=owned_script)
+                owned_script_services=owned_script, dashboard_yaml=dashboard_yaml,
+                dashboard_storage=dashboard_storage)
         except ValueError as error:
             if error.args == ('template_state_affected_unsupported_family',):
                 raise Refused('template_state_server_affected_unsupported_family') from None
@@ -166,7 +187,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             # exact ORIGINAL equality to the preceding legacy admission.
             extended = await async_validate_proposed_with_template_state_sources(
                 self.hass, yaml, self.mapping, root.parent, with_state_program=True,
-                with_dependent_program=True)
+                with_dependent_program=True, dashboard_yaml=dashboard_yaml,
+                dashboard_storage=dashboard_storage)
             _need((extended.receipt, extended.evidence, extended.original_sources,
                    extended.candidate_sources, extended.state_config_program)
                   == (bundle.receipt, bundle.evidence, bundle.original_sources,
@@ -188,13 +210,19 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             from .native_automation_config_transport import assert_idle_automation_program_targets
             assert_idle_automation_program_targets(self.hass, bundle.dependent_config_program)
         self.mixed_state = domains not in ((), ('template',))
-        _need(not ((self.entity_names or self.device_names) and self.mixed_state),
+        mixed_source_names = (bool(self.entity_names) and not self.device_names
+            and not set(self.entity_names) & set(self.mapping)
+            and all(row.get('platform') not in ('automation', 'script')
+                    for row in source_rows if row.get('entity_id') in self.entity_names))
+        _need(not ((self.entity_names or self.device_names) and self.mixed_state)
+              or (dashboard_storage is not None and mixed_source_names),
               'selected_names_mixed_lifecycle_unsupported')
         if self.mixed_state:
             from .yaml_transaction import _assert_mixed_state_scope
             from .mixed_yaml_runtime import MixedYAMLConsumers
             _assert_mixed_state_scope(self.receipt, allow_dependent_only=dependent_only)
-            self.consumers = await MixedYAMLConsumers.capture(self.hass, self.mapping, guard=self._scope)
+            self.consumers = await MixedYAMLConsumers.capture(self.hass, self.mapping, guard=self._scope,
+                                                               _dashboard_effects=dashboard_storage is not None)
             self._scope()
         _need((domains == () and registry_only or ('template' in domains or dependent_only) and not registry_only)
               and bundle.original_sources.source_matched
@@ -204,7 +232,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         await bind_sources(self.receipt, self.evidence, guard=self._scope)
         self._scope()
         if self.entity_names or self.device_names:
-            _need(not self.consumers.runtime_sample[0], 'selected_names_dependent_lifecycle_unsupported')
+            _need((self.mixed_state and dashboard_storage is not None and mixed_source_names)
+                  or not self.consumers.runtime_sample[0], 'selected_names_dependent_lifecycle_unsupported')
         baseline = await async_capture_native_input_baseline(self.hass, self.receipt, guard=self._scope)
         self._scope()
         documents = {f.key: json.loads(f.raw) for f in baseline.files}
@@ -281,12 +310,19 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         own = self.review_id or uuid.uuid4().hex
         self.operation_id = 'template-yaml-' + (self.review_id or uuid.uuid4().hex)
         self.digests, steps = {}, []
-        effects = [('registry', c) for c in registry] + ([] if registry_only else [('yaml', change)])
+        self.dashboard_changes = () if dashboard_storage is None else dashboard_storage.changes
+        effects = ([('registry', c) for c in registry]
+                   + [('dashboard', c) for c in self.dashboard_changes]
+                   + ([] if registry_only else [('yaml', change)]))
         for index, (adapter, item) in enumerate(effects):
             ref = own + '-' + str(index)
             self.digests[ref] = await self.preparations.create(ref, encode_change(item))
             self._scope()
-            steps.append(Step(ref, adapter, item.identity, item.before_revision, item.after_revision, ref))
+            if adapter == 'dashboard':
+                steps.append(Step(ref, adapter, item.before.dashboard.identity,
+                                  item.before.revision, item.after_revision, ref))
+            else:
+                steps.append(Step(ref, adapter, item.identity, item.before_revision, item.after_revision, ref))
         from .native_template_state_binding import _StateRuntime, StateBindingPrefix, sample_state_bindings
         native = _StateRuntime(self.hass)
         await _drained(self.hass.async_add_executor_job, native.sources)
@@ -321,7 +357,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         inputs = await self.preparations.create_native_inputs(own + '-original', baseline,
                                                              composition=self.composition)
         self._scope()
-        scopes = ('registry',) if registry_only else ('registry', 'yaml')
+        scopes = (('registry', 'dashboard', 'yaml') if self.dashboard_changes else
+                  ('registry',) if registry_only else ('registry', 'yaml'))
         self.plan = Plan(own, scopes, scopes, tuple(steps), self.program.sha256, scopes, inputs)
         self.plan.validate()
         self.receipt_store = native_registry_receipt_store(self.hass, self.preparations)
@@ -330,6 +367,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self.chain = await RegistryReceiptChain.start(self.receipt_store, self.operation_id,
             self.plan, self.receipt, self.digests)
         self._scope()
+        if self.dashboard_changes:
+            await self._install_dashboard_fence()
         self._install()
         await self._common(False, initial=True)
         self._scope()
@@ -350,7 +389,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         from .native_template_state_yaml import NativeTemplateStateYAMLRuntimeReadback
         _need(type(self.composition) in (TemplateStateComposition, MixedTemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition), 'state_composition_required')
         self.program = self.composition.state_config_program
-        if any(change.before.get('platform') == 'template' for change in self.registry_changes):
+        if any(change.before.get('platform') == 'template' and change.mapping
+               for change in self.registry_changes):
             _need(type(self.composition) in (TemplateStateComposition, ScriptTemplateStateComposition,
                                                AutomationTemplateStateComposition)
                   and self.receipt.changed_domains in ((), ('template',), ('script',), ('automation',),
@@ -433,6 +473,9 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         expected = self.observer.identities_at(actual.prefix.active)
         _need(all((r.entity.entity_id, r.registry_id) in expected for r in actual.rows),
               'consumer_identity_changed')
+        if getattr(self, 'dashboard_changes', ()):
+            await self.dashboard_phase.verify_yaml(state, self.composition.yaml_plan, self.mapping,
+                self.change, original=rollback or initial, guard=self._scope)
         await self._final_history(state, witness)
         return True
 
@@ -506,5 +549,12 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             self.observer, self.chain, self._observe, self.journal.load, self._scope, context=Context(),
             full_verify=lambda _: self._full(False), full_verify_rollback=lambda _: self._full(True))
         admission = {} if record_admission is None else {'record_admission': record_admission}
-        return compose({'registry': registry, 'yaml': yaml},
-            self.journal, self._scope, required_scopes=('registry', 'yaml'), **admission)
+        adapters = {'registry': registry, 'yaml': yaml}
+        if getattr(self, 'dashboard_changes', ()):
+            from .dashboard_transaction import ReceiptedDashboardAdapter
+            adapters['dashboard'] = ReceiptedDashboardAdapter(
+                self.dashboard_phase.native, self.dashboard_phase, self.chain,
+                self.journal.load, self._scope, lambda _: self._common(False),
+                lambda _: self._common(True))
+        return compose(adapters, self.journal, self._scope,
+            required_scopes=self.plan.required_scopes, **admission)

@@ -28,6 +28,11 @@ class Edit:
 
 
 @dataclass(frozen=True)
+class JSONStoreEdit(Edit):
+    """Explicit native JSON Store edit; only serialization whitespace may differ."""
+
+
+@dataclass(frozen=True)
 class RowChange:
     """Independently specified own field change in a native registry row."""
     document: str
@@ -478,11 +483,16 @@ def compare(original, observed, *, old=None, new=None, uuid=None, mappings=None,
         findings.append(('file_membership', sorted(set(before) ^ set(after))))
     by_path = {}
     for edit in edits:
-        if not edit.before or edit.count <= 0:
+        if (type(edit) not in (Edit, JSONStoreEdit) or not edit.before or edit.count <= 0
+                or (type(edit) is JSONStoreEdit and edit.path != '.storage/lovelace'
+                    and not edit.path.startswith('.storage/lovelace.'))):
             raise ValueError('invalid expected edit')
         by_path.setdefault(edit.path, []).append(edit)
         if edit.path not in before or before[edit.path].count(edit.before) != edit.count:
             raise ValueError('expected edit does not match original: ' + edit.path)
+    if any(any(type(edit) is JSONStoreEdit for edit in group)
+           and not all(type(edit) is JSONStoreEdit for edit in group) for group in by_path.values()):
+        raise ValueError('mixed JSON and byte edits are ambiguous')
     registry = '.storage/core.entity_registry'
     if registry not in before or registry not in after:
         findings.append(('missing_entity_registry', registry))
@@ -512,7 +522,16 @@ def compare(original, observed, *, old=None, new=None, uuid=None, mappings=None,
         if not reverse and name in by_path:
             for edit in by_path[name]:
                 expected = expected.replace(edit.before, edit.after)
-        if expected != after[name]:
+        json_store = name in by_path and all(type(edit) is JSONStoreEdit for edit in by_path[name])
+        if json_store:
+            try:
+                matches = json.dumps(_strict_json(expected), sort_keys=True, separators=(',', ':'), allow_nan=False) == json.dumps(
+                    _strict_json(after[name]), sort_keys=True, separators=(',', ':'), allow_nan=False)
+            except (ValueError, TypeError, UnicodeError):
+                matches = False
+        else:
+            matches = expected == after[name]
+        if not matches:
             findings.append(('unexpected_change', name))
     # Search independently across *all* captured UTF-8 text, not just edits.
     # Exact tokens are useful omissions evidence, but not a semantic inventory.

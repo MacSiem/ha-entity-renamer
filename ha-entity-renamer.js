@@ -3524,6 +3524,16 @@ class HAEntityRenamer extends HTMLElement {
         || !Array.isArray(result.changes) || !result.changes.length || !result.changes.every(validChange)
         || !result.dependencies || !Array.isArray(result.dependencies.domains)
         || !result.dependencies.domains.every(domain => typeof domain === 'string')
+        || (result.dependencies.domains.includes('dashboard') &&
+          (!Array.isArray(result.dependencies.dashboards) || !result.dependencies.dashboards.length))
+        || (result.dependencies.dashboards !== undefined &&
+          (!Array.isArray(result.dependencies.dashboards)
+            || !result.dependencies.dashboards.every(row => row
+              && (row.route === null || typeof row.route === 'string' && row.route.length > 0)
+              && Array.isArray(row.references) && row.references.length > 0
+              && row.references.every(ref => ref && typeof ref.before === 'string'
+                && typeof ref.after === 'string' && Number.isSafeInteger(ref.occurrences)
+                && ref.occurrences > 0))))
         || !Number.isSafeInteger(result.dependencies.yaml_file_count)
         || !Number.isSafeInteger(result.dependencies.template_consumer_count)
         || result.dependencies.yaml_file_count < 0 || result.dependencies.template_consumer_count < 0
@@ -3773,6 +3783,8 @@ class HAEntityRenamer extends HTMLElement {
         Object.entries(change.fields).map(([key, field]) => [key, {before: field.after, after: field.before}]))})),
       dependencies: {...m.review.dependencies, files: m.review.dependencies.files.map(file => ({...file,
         references: file.references.map(ref => ({...ref, before: ref.after, after: ref.before}))})),
+        dashboards: (m.review.dependencies.dashboards || []).map(row => ({...row,
+          references: row.references.map(ref => ({...ref, before: ref.after, after: ref.before}))})),
         config_entries: (m.review.dependencies.config_entries || []).map(entry => ({...entry, before: entry.after, after: entry.before}))},
     } : m.review;
     const title = inverse ? this._migrationText('Restore this operation', 'Wycofaj tę operację') : this._migrationText('Dependency update plan', 'Plan aktualizacji zależności');
@@ -3786,7 +3798,7 @@ class HAEntityRenamer extends HTMLElement {
     const valueText = value => value === null ? this._migrationText('(default)', '(domyślna)') : value;
     const rows = review?.changes.flatMap(change => Object.entries(change.fields).map(([key, field]) =>
       `<tr><td>${_esc(change.entity_id || change.device_id)}</td><td>${_esc(fieldName(key))}</td><td>${_esc(valueText(field.before))}</td><td>${_esc(valueText(field.after))}</td></tr>`)).join('') || '';
-    const domains = review?.dependencies.domains.map(domain => ({template: 'Template', automation: this._migrationText('Automations', 'Automatyzacje'), script: this._migrationText('Scripts', 'Skrypty')}[domain] || domain)).join(', ');
+    const domains = review?.dependencies.domains.map(domain => ({template: 'Template', automation: this._migrationText('Automations', 'Automatyzacje'), script: this._migrationText('Scripts', 'Skrypty'), dashboard: this._migrationText('Dashboards', 'Pulpity')}[domain] || domain)).join(', ');
     return `<section class="confirm-dialog" role="dialog" aria-labelledby="migrationReviewTitle" aria-busy="${m.busy}">
       <h2 id="migrationReviewTitle">${title}</h2><p role="status">${body}</p>
       ${review ? `<h3 id="migrationChangesTitle">${this._migrationText('Server changes', 'Zmiany serwera')}</h3>
@@ -3794,6 +3806,7 @@ class HAEntityRenamer extends HTMLElement {
         <h3>${this._migrationText('Dependencies', 'Zależności')}</h3><p>${_esc(domains || this._migrationText('None admitted', 'Brak przyjętych'))}</p>
         <p>${this._migrationText('YAML files', 'Pliki YAML')}: ${review.dependencies.yaml_file_count}. ${this._migrationText('Template consumers', 'Odbiorcy Template')}: ${review.dependencies.template_consumer_count}.</p>
         ${(review.dependencies.config_entries || []).map(entry => `<p>${this._migrationText('Template entry', 'Wpis Template')}: <code>${_esc(entry.entity_id)}</code> — <code>${_esc(entry.before)}</code> → <code>${_esc(entry.after)}</code></p>`).join('')}
+        ${(review.dependencies.dashboards || []).map(row => `<details open><summary>${this._migrationText('Dashboard', 'Pulpit')}: <code>${_esc(row.route ?? this._migrationText('Default', 'Domyślny'))}</code></summary><ul>${row.references.map(ref => `<li><code>${_entityIdHtml(ref.before)}</code> → <code>${_entityIdHtml(ref.after)}</code> (${ref.occurrences} ${this._migrationText('references', 'odwołań')})</li>`).join('')}</ul></details>`).join('')}
         ${review.dependencies.files.map(file => `<details open><summary><code>${_esc(file.path)}</code> — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li>${ref.kind === 'script_key' ? this._migrationText('Script key', 'Klucz skryptu') + ': ' : ''}<code>${_entityIdHtml(ref.before)}</code> → <code>${_entityIdHtml(ref.after)}</code> (${ref.occurrences} ${ref.kind === 'script_key' ? this._migrationText('definition', 'definicja') : this._migrationText('references', 'odwołań')})</li>`).join('')}</ul></details>`).join('')}` : ''}
       <button type="button" class="btn btn-outline" id="${inverse ? 'cancelMigrationRestore' : 'cancelRenameDialog'}">${_esc(this._t.cancel)}</button>
       ${inverse ? `<button type="button" class="btn btn-danger" id="restoreMigration">${this._migrationText('Restore this scope once', 'Wycofaj ten zakres jeden raz')}</button>` : ''}

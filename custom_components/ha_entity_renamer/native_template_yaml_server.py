@@ -54,12 +54,26 @@ def _registry_only_state_plan(plan, composition, receipt):
             and all(step.adapter == 'registry' and not step.caused_by for step in plan.steps))
 
 
-def _registry_mapping(changes, composition):
+def _dashboard_plan(plan):
+    adapters = tuple(step.adapter for step in plan.steps)
+    if (plan.required_scopes != plan.covered_scopes or
+            plan.required_scopes != plan.verification_adapters or
+            plan.required_scopes != ('registry', 'dashboard', 'yaml') or
+            len(adapters) < 3 or adapters[-1] != 'yaml' or any(step.caused_by for step in plan.steps)):
+        return False
+    registry = adapters.count('registry')
+    dashboards = adapters.count('dashboard')
+    return registry > 0 and dashboards > 0 and adapters == (
+        ('registry',) * registry + ('dashboard',) * dashboards + ('yaml',))
+
+
+def _registry_mapping(changes, composition, *, dashboard_plan=False):
     """Decode only the immutable server-selected registry field scope."""
     from .native_template_state_composition import TemplateStateComposition
     from .native_script_program_composition import ScriptTemplateStateComposition
     from .native_automation_program_composition import AutomationTemplateStateComposition
-    names = type(composition) is TemplateStateComposition
+    mixed_names = dashboard_plan and type(composition) in (ScriptTemplateStateComposition, AutomationTemplateStateComposition)
+    names = type(composition) is TemplateStateComposition or mixed_names
     own_template_profile = type(composition) in (TemplateStateComposition, ScriptTemplateStateComposition,
                                                   AutomationTemplateStateComposition)
     from .native_registry_transition import (_native_script_default_name_move,
@@ -100,8 +114,11 @@ def _registry_mapping(changes, composition):
             if 'name' in delta:
                 _need(default_name_move or names and bool(change.runtime_before_json),
                       'selected_name_runtime_required')
+                if mixed_names and not default_name_move:
+                    _need(not change.mapping and before.get('platform') not in
+                          ('automation', 'script'), 'selected_name_scope_required')
         else:
-            _need(names and change.kind == 'device' and 'name_by_user' in delta
+            _need(names and not mixed_names and change.kind == 'device' and 'name_by_user' in delta
                   and delta <= {'name_by_user', 'modified_at'} and bool(change.runtime_before_json),
                   'selected_device_name_scope_required')
     if own_entity:
@@ -390,6 +407,16 @@ class NativeTemplateYAMLServer:
         self.runtime.journal, self.runtime.preparations = self.journal, self.preparations
         self.bound = True
 
+    async def _install_dashboard_fence(self):
+        from .dashboard_phase import DashboardPhase, DashboardConsumerFence
+        observed = self.consumers.dashboard_observed
+        _need(_dashboard_plan(self.plan) and observed is not None, 'dashboard_evidence_required')
+        phase = await DashboardPhase.capture(self.hass, observed, self.chain, guard=self._scope)
+        self._scope()
+        self.dashboard_phase = phase
+        self.consumers.native = DashboardConsumerFence(self.hass, observed, phase)
+        self._scope()
+
     def _new_observer(self):
         if _mixed_composition(self.composition):
             from .mixed_yaml_runtime import MixedTemplateYAMLRuntimeReadback
@@ -635,22 +662,27 @@ class NativeTemplateYAMLServer:
             obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
             obj.digests = dict(obj.composition.prepared_digests)
             registry_only = _registry_only_state_plan(obj.plan, obj.composition, obj.receipt)
+            dashboard_plan = _dashboard_plan(obj.plan)
             standard = (obj.plan.required_scopes == obj.plan.covered_scopes == obj.plan.verification_adapters == ('registry', 'yaml')
                   and tuple(s.adapter for s in obj.plan.steps) == ('registry',) * (len(obj.plan.steps) - 1) + ('yaml',)
                   and len(obj.plan.steps) >= 2 and not any(s.caused_by for s in obj.plan.steps))
             _need(obj.plan.coverage_evidence == obj.composition.coverage_sha256
-                  and (registry_only or standard), 'qualified_plan_required')
+                  and (registry_only or standard or dashboard_plan), 'qualified_plan_required')
             changes = [decode_change(obj.preparations.resolve(s.prepared_ref, obj.digests[s.prepared_ref]))
                        for s in obj.plan.steps]
-            obj.registry_changes = tuple(changes if registry_only else changes[:-1])
+            obj.registry_changes = tuple(change for step, change in zip(obj.plan.steps, changes, strict=True)
+                                         if step.adapter == 'registry')
+            obj.dashboard_changes = tuple(change for step, change in zip(obj.plan.steps, changes, strict=True)
+                                          if step.adapter == 'dashboard')
             obj.change = changes[-1]
             _need(set(obj.digests) == {s.prepared_ref for s in obj.plan.steps}, 'preparation_scope')
-            obj.mapping = _registry_mapping(obj.registry_changes, obj.composition)
+            obj.mapping = _registry_mapping(obj.registry_changes, obj.composition, dashboard_plan=dashboard_plan)
             consumer_type = _UnchangedConsumers
             if _mixed_composition(obj.composition):
                 from .mixed_yaml_runtime import MixedYAMLConsumers
                 consumer_type = MixedYAMLConsumers
-            obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope)
+            obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope,
+                                                        _dashboard_effects=dashboard_plan)
             from .native_automation_program_composition import AutomationTemplateStateComposition
             if type(obj.composition) is AutomationTemplateStateComposition:
                 from .native_automation_owned_graph import OwnedAutomationGraph
@@ -663,6 +695,8 @@ class NativeTemplateYAMLServer:
                                                    obj.receipt, obj.digests)
             _need(not readonly.writable and readonly.active is None, 'readonly_required')
             obj.chain = readonly
+            if dashboard_plan:
+                await obj._install_dashboard_fence()
             if restored_partial:
                 from .native_template_prefix_recovery import unstarted_rollback_complete
                 _need(unstarted_rollback_complete(readonly, record), 'restored_prefix_unqualified')
@@ -693,6 +727,8 @@ class NativeTemplateYAMLServer:
             writer.writable = True
             obj.chain = writer
             obj.observer.chain = writer
+            if dashboard_plan:
+                obj.dashboard_phase.chain = writer
             obj.observation_state = state
             return obj
         except BaseException:
@@ -714,23 +750,28 @@ class NativeTemplateYAMLServer:
             obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
             obj.digests = dict(obj.composition.prepared_digests)
             registry_only = _registry_only_state_plan(plan, obj.composition, obj.receipt)
+            dashboard_plan = _dashboard_plan(plan)
             standard = (plan.required_scopes == plan.covered_scopes == plan.verification_adapters == ('registry', 'yaml')
                   and len(plan.steps) >= 2
                   and tuple(s.adapter for s in plan.steps) == ('registry',) * (len(plan.steps) - 1) + ('yaml',)
                   and not any(s.caused_by for s in plan.steps))
             _need(plan.coverage_evidence == obj.composition.coverage_sha256
-                  and (registry_only or standard)
+                  and (registry_only or standard or dashboard_plan)
                   and set(obj.digests) == {s.prepared_ref for s in plan.steps}, 'qualified_plan_required')
             changes = [decode_change(obj.preparations.resolve(s.prepared_ref, obj.digests[s.prepared_ref]))
                        for s in plan.steps]
-            obj.registry_changes = tuple(changes if registry_only else changes[:-1])
+            obj.registry_changes = tuple(change for step, change in zip(plan.steps, changes, strict=True)
+                                         if step.adapter == 'registry')
+            obj.dashboard_changes = tuple(change for step, change in zip(plan.steps, changes, strict=True)
+                                          if step.adapter == 'dashboard')
             obj.change = changes[-1]
-            obj.mapping = _registry_mapping(obj.registry_changes, obj.composition)
+            obj.mapping = _registry_mapping(obj.registry_changes, obj.composition, dashboard_plan=dashboard_plan)
             consumer_type = _UnchangedConsumers
             if _mixed_composition(obj.composition):
                 from .mixed_yaml_runtime import MixedYAMLConsumers
                 consumer_type = MixedYAMLConsumers
-            obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope)
+            obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope,
+                                                        _dashboard_effects=dashboard_plan)
             obj._scope()
             bind_sources = (obj.consumers.bind_prefix_sources if _script_prefix_composition(obj.composition)
                             else obj.consumers.bind_sources)
@@ -745,6 +786,8 @@ class NativeTemplateYAMLServer:
             _need(not readonly.writable and readonly.active is None
                   and state.head == readonly.root_digest, 'pristine_review_required')
             obj.chain = readonly
+            if dashboard_plan:
+                await obj._install_dashboard_fence()
             obj._install()
             await refresh()
             obj._scope()
@@ -757,6 +800,8 @@ class NativeTemplateYAMLServer:
             writer.writable = True
             obj.chain = writer
             obj.observer.chain = writer
+            if dashboard_plan:
+                obj.dashboard_phase.chain = writer
             return obj
         except BaseException:
             obj.close()

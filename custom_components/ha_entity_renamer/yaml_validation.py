@@ -90,11 +90,13 @@ def _digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def _stage(config_root, plan, baseline, proposed, with_sources=False, native_helpers=(), registry_only=False):
+def _stage(config_root, plan, baseline, proposed, with_sources=False, native_helpers=(), registry_only=False,
+           dashboard_yaml=None, dashboard_storage=None):
     reader = _Reader(config_root, Limits(max_file_bytes=_MAX_BYTES))
     try:
         return _stage_owned(reader, plan, baseline, proposed, with_sources=with_sources,
-                            native_helpers=native_helpers, registry_only=registry_only)
+                            native_helpers=native_helpers, registry_only=registry_only,
+                            dashboard_yaml=dashboard_yaml, dashboard_storage=dashboard_storage)
     except (OSError, ValueError) as error:
         if isinstance(error, YAMLValidationError):
             raise
@@ -103,12 +105,24 @@ def _stage(config_root, plan, baseline, proposed, with_sources=False, native_hel
         os.close(reader.root)
 
 
-def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native_helpers=(), registry_only=False):
+def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native_helpers=(), registry_only=False,
+                 dashboard_yaml=None, dashboard_storage=None):
     if (type(registry_only) is not bool or not plan.ready
             or (not plan.patches and not native_helpers and not registry_only)
             or registry_only and (not with_sources or plan.patches or native_helpers)):
         raise YAMLValidationError('yaml_plan_not_ready')
     reachable = {'configuration.yaml'}
+    if dashboard_yaml is not None:
+        from .dashboard_yaml_semantics import RegisteredDashboardYAML, qualify_dashboard_yaml
+        if type(dashboard_yaml) is not RegisteredDashboardYAML or not with_sources:
+            raise YAMLValidationError('dashboard_yaml_evidence_required')
+        dashboard_yaml.assert_plan(plan)
+        if len(dashboard_yaml.paths) != len(set(dashboard_yaml.paths)):
+            raise YAMLValidationError('dashboard_yaml_evidence_required')
+        for path in dashboard_yaml.paths:
+            raw, _ = reader.read(path)
+            qualify_dashboard_yaml(plan, path, raw, dict(dashboard_yaml.mapping_items))
+            reachable.add(path)
     while True:
         expanded = reachable | {path for edge in plan.edges
                                 if edge.source in reachable and edge.tag.startswith('!include')
@@ -119,6 +133,17 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native
     if any(patch.path not in reachable for patch in plan.patches):
         raise YAMLValidationError('yaml_activation_outside_native_config')
     paths = {item.path for item in plan.files}
+    dashboard_files = {}
+    if dashboard_storage is not None:
+        from .dashboard_storage_semantics import NativeDashboardStorage
+        if (type(dashboard_storage) is not NativeDashboardStorage or not with_sources
+                or plan.powercalc_inputs is not None):
+            raise YAMLValidationError('dashboard_storage_evidence_required')
+        dashboard_files = {path: (digest, device, inode)
+                           for path, digest, device, inode in dashboard_storage.files}
+        if len(dashboard_files) != len(dashboard_storage.files) or set(dashboard_files) & paths:
+            raise YAMLValidationError('dashboard_storage_evidence_required')
+        paths.update(dashboard_files)
     # Secrets searches walk up from each included YAML to the configuration root.
     for path in tuple(paths):
         parent = Path(path).parent
@@ -160,7 +185,8 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native
             if relative == '.':
                 names.update(_TREES | {'.storage'})
             elif relative == '.storage':
-                names = set(_STORAGE)
+                names = set(_STORAGE) | (set(dashboard_storage.tracked_names)
+                                         if dashboard_storage is not None else set())
         fd = os.dup(reader.root) if relative == '.' else reader.open(relative, directory=True)
         try:
             with os.scandir(fd) as entries:
@@ -257,6 +283,8 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native
         for path in sorted(paths):
             raw, info = reader.read(path)
             digest = _digest(raw)
+            if path in dashboard_files and (digest, info.st_dev, info.st_ino) != dashboard_files[path]:
+                raise YAMLValidationError('dashboard_storage_source_changed')
             total += len(raw)
             if total > _MAX_BYTES:
                 raise YAMLValidationError('validation_input_limit')
@@ -349,13 +377,27 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                                    powercalc_bundle=None, powercalc_candidate_documents=None, native_helpers=(),
                                    template_reference_mapping=None, template_state_program=False,
                                    dependent_reference_mapping=None, registry_only_template=False,
-                                   owned_script_services=()):
+                                   owned_script_services=(), dashboard_yaml=None, dashboard_storage=None):
     """Return only after native validation of the entire proposed graph succeeds.
 
     scratch_parent must be private local storage OUTSIDE config_root. It contains
     temporary secret material with mode 0700 and is erased on every normal exit.
     A failure never invokes file_mutations or a live reload service.
     """
+    if dashboard_yaml is not None:
+        from .dashboard_yaml_semantics import RegisteredDashboardYAML
+        if type(dashboard_yaml) is not RegisteredDashboardYAML or dashboard_yaml.hass is not hass or not with_sources:
+            raise YAMLValidationError('dashboard_yaml_evidence_required')
+        dashboard_yaml.assert_plan(plan)
+        dashboard_yaml.check()
+    if dashboard_storage is not None:
+        from .dashboard_storage_semantics import NativeDashboardStorage
+        if type(dashboard_storage) is not NativeDashboardStorage or dashboard_storage.hass is not hass or not with_sources:
+            raise YAMLValidationError('dashboard_storage_evidence_required')
+        if (dashboard_yaml is not None and
+                dashboard_storage.mapping_items != dashboard_yaml.mapping_items):
+            raise YAMLValidationError('dashboard_mapping_mismatch')
+        dashboard_storage.check()
     if (type(registry_only_template) is not bool or registry_only_template
             and (not template_state_program or plan.patches or dependent_reference_mapping is not None)):
         raise YAMLValidationError('template_registry_only_scope_required')
@@ -378,6 +420,10 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
             raise YAMLValidationError('template_state_source_profile_scope_required')
         # Detach mutable caller data before the first staging/executor await.
         template_reference_mapping = _mapping(template_reference_mapping)
+        items = tuple(sorted(template_reference_mapping.items()))
+        if ((dashboard_yaml is not None and dashboard_yaml.mapping_items != items)
+                or (dashboard_storage is not None and dashboard_storage.mapping_items != items)):
+            raise YAMLValidationError('dashboard_mapping_mismatch')
     if powercalc_candidate_documents is not None:
         from .powercalc_candidate_sources import PlannedPowercalcDocuments
         if (not with_sources or powercalc_bundle is None or plan.powercalc_inputs is None
@@ -407,7 +453,12 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
             before.mkdir(mode=0o700)
             after.mkdir(mode=0o700)
             staged = await _settled_executor(hass, _stage, root, plan, before, after,
-                                             with_sources, native_helpers, registry_only_template)
+                                             with_sources, native_helpers, registry_only_template, dashboard_yaml,
+                                             dashboard_storage)
+            if dashboard_yaml is not None:
+                dashboard_yaml.check()
+            if dashboard_storage is not None:
+                dashboard_storage.check()
             sources, directories = staged[:2]
             if powercalc_bundle is not None:
                 from .powercalc_source_binding import stage_powercalc_bundle
@@ -494,6 +545,14 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 tuple(result['changed_domains']), tuple(result['unsupported_domains']), result['version'],
                 tuple(tuple(row) for row in result.get('runtime_expected', ())))
             await _settled_executor(hass, assert_validation_current, receipt)
+            if dashboard_yaml is not None:
+                dashboard_yaml.check()
+                await _settled_executor(hass, dashboard_yaml.fence.physical)
+                dashboard_yaml.check()
+            if dashboard_storage is not None:
+                dashboard_storage.check()
+                await _settled_executor(hass, dashboard_storage.fence.physical)
+                dashboard_storage.check()
             if with_sources:
                 from .yaml_source_binding import seal_original_sources
                 evidence = seal_original_sources(receipt, plan, staged[2], result['source_runtime'],
@@ -547,14 +606,16 @@ async def async_validate_proposed(hass, plan, scratch_parent, *, timeout=120):
     return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout)
 
 
-async def async_validate_proposed_with_sources(hass, plan, scratch_parent, *, timeout=120, native_helpers=()):
+async def async_validate_proposed_with_sources(hass, plan, scratch_parent, *, timeout=120, native_helpers=(),
+                                               dashboard_yaml=None, dashboard_storage=None):
     """Same ORIGINAL staging/checker, plus detached source evidence for preparation.
 
     This server API never creates a second ValidationReceipt or gains mutation
     authority. The normal receipt/CAS remains independently required by apply.
     """
     return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
-                                         with_sources=True, native_helpers=native_helpers)
+                                         with_sources=True, native_helpers=native_helpers,
+                                         dashboard_yaml=dashboard_yaml, dashboard_storage=dashboard_storage)
 
 
 async def async_validate_proposed_with_dependent_config_program(hass, plan, mapping, scratch_parent, *, timeout=120):
@@ -565,7 +626,8 @@ async def async_validate_proposed_with_dependent_config_program(hass, plan, mapp
 
 async def async_validate_proposed_with_template_state_sources(
         hass, plan, mapping, scratch_parent, *, timeout=120, with_state_program=False,
-        with_dependent_program=False, registry_only_template=False, owned_script_services=()):
+        with_dependent_program=False, registry_only_template=False, owned_script_services=(),
+        dashboard_yaml=None, dashboard_storage=None):
     """Explicit internal full-state source preflight; no readiness/activation.
 
     Same staging, isolated native checker, receipt and source/directory fences.
@@ -576,7 +638,8 @@ async def async_validate_proposed_with_template_state_sources(
     return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
         with_sources=True, template_reference_mapping=mapping, template_state_program=with_state_program,
         dependent_reference_mapping=mapping if with_dependent_program else None,
-        registry_only_template=registry_only_template, owned_script_services=owned_script_services)
+        registry_only_template=registry_only_template, owned_script_services=owned_script_services,
+        dashboard_yaml=dashboard_yaml, dashboard_storage=dashboard_storage)
 
 
 def assert_proposal_matches(receipt, plan):

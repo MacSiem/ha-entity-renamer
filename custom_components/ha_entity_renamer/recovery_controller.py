@@ -160,6 +160,11 @@ def _own_registry_plan(preparations, record):
         return False
 
 
+def _dashboard_yaml_plan(record):
+    from .native_template_yaml_server import _dashboard_plan
+    return _dashboard_plan(record.plan)
+
+
 def _ordinary_review_owned(preparations, operation_id):
     """Require the immutable ordinary-review lease, never infer a public review."""
     import re
@@ -201,14 +206,19 @@ def _yaml_frozen_review(session, *, restored=False):
                           if change.kind == 'entity' else change.identity)
     from .dependency_review import dependency_files
     receipt = session.receipt
-    return {'changes': changes, 'identities': identities, 'dependencies': {
-        'domains': sorted(domain for domain in receipt.changed_domains
-                          if domain in ('template', 'automation', 'script')),
+    result = {'changes': changes, 'identities': identities, 'dependencies': {
+        'domains': sorted([domain for domain in receipt.changed_domains
+                           if domain in ('template', 'automation', 'script')]
+                          + (['dashboard'] if _dashboard_yaml_plan(session.record) else [])),
         'yaml_file_count': len(receipt.proposed_files),
         'files': dependency_files(session.composition),
         'template_consumer_count': sum(
             row.domain in ('template.sensor', 'template.binary_sensor')
             for row in session.evidence.template_sources.ledger.definitions)}}
+    if _dashboard_yaml_plan(session.record):
+        from .dependency_review import dependency_dashboards
+        result['dependencies']['dashboards'] = dependency_dashboards(session.dashboard_changes, session.mapping)
+    return result
 
 
 async def _consume_yaml_restore_intent(session, expected, guard):
@@ -352,7 +362,8 @@ class RecoveryController:
                 continue
             if record.status in ('applied', 'rolled_back'):
                 if (record.status == 'applied' and record.direction == 'forward'
-                        and record.plan.required_scopes == ('registry', 'yaml')):
+                        and (record.plan.required_scopes == ('registry', 'yaml')
+                             or _dashboard_yaml_plan(record))):
                     # Snapshot inventory is never full native/source admission.
                     # Only explicit inspect may qualify this terminal plan.
                     operations.append({'operation_id': record.operation_id,
@@ -499,6 +510,7 @@ class RecoveryController:
                     return result
                 if (record.restore_attempted is not True
                         or (record.plan.required_scopes != ('registry', 'yaml')
+                            and not _dashboard_yaml_plan(record)
                             and not _own_registry_plan(preparations, record))
                         or not _ordinary_review_owned(preparations, operation_id)):
                     return _result(operation_id, fingerprint, 'UNKNOWN', 'restored_unproven')
@@ -513,7 +525,7 @@ class RecoveryController:
                 if session.record.phases == ('undone',) * len(session.record.plan.steps):
                     result['frozen_review'] = _yaml_frozen_review(session, restored=True)
                 return result
-            if (record.plan.required_scopes == ('registry', 'yaml')
+            if (record.plan.required_scopes == ('registry', 'yaml') or _dashboard_yaml_plan(record)
                     or _own_registry_plan(preparations, record)) and record.restore_attempted is not False:
                 # A previous restore may have stopped before its first journal
                 # transition, including inside outer automation lifecycle.
@@ -525,9 +537,12 @@ class RecoveryController:
             uncertain_complete = complete_forward_unknown(record)
             terminal = (record.status == 'applied' and record.direction == 'forward'
                         and record.phases == ('verified',) * len(record.plan.steps))
+            if _dashboard_yaml_plan(record) and not terminal:
+                return _result(operation_id, fingerprint, 'UNKNOWN', 'unsupported_recovery_state')
             if not terminal and not prefix and not uncertain_complete:
                 return _result(operation_id, fingerprint, 'UNKNOWN', 'unsupported_recovery_state')
-            if record.plan.required_scopes == ('registry', 'yaml') or _own_registry_plan(preparations, record):
+            if (record.plan.required_scopes == ('registry', 'yaml') or _dashboard_yaml_plan(record)
+                    or _own_registry_plan(preparations, record)):
                 from . import _yaml_factory_for_plan
                 factory = _yaml_factory_for_plan(preparations, record.plan)
                 # Fresh actual source/history/auth admission, independently repeated

@@ -8,13 +8,32 @@ import shutil
 
 import test_native_template_mixed_yaml_server as mixed
 from mixed_fixture_census import collect_native, consumer_evidence, census_coverage, fresh_inverse_after_apply
-from batch_readback import Edit, capture_tree, compare, discovery_coverage, native_location_snapshot, native_empty_auth_snapshot
+from batch_readback import Edit, JSONStoreEdit, RowChange, capture_tree, compare, discovery_coverage, native_location_snapshot, native_empty_auth_snapshot
 
 
 class NativeMixedFixtureCensusTest(unittest.IsolatedAsyncioTestCase):
     with_yaml = True
     asyncSetUp = mixed.NativeTemplateMixedYAMLServerTests.asyncSetUp
-    _before_start = mixed.NativeTemplateMixedYAMLServerTests._before_start
+    async def _before_start(self, hass, root):
+        if not os.environ.get('RENAMER_RENDER_HANDSHAKE'):
+            return await mixed.NativeTemplateMixedYAMLServerTests._before_start(self, hass, root)
+        # Full frontend loads config itself. Set up the real config component
+        # once, instead of also manually registering the three editor views.
+        import socket
+        from homeassistant import auth
+        from homeassistant.helpers.recorder import async_initialize_recorder
+        from homeassistant.setup import async_setup_component
+        async_initialize_recorder(hass)
+        self.assertTrue(await async_setup_component(hass, 'recorder', {'recorder': {
+            'db_url': 'sqlite:///' + str(root / 'fixture.db'), 'commit_interval': 0,
+            'auto_purge': False, 'auto_repack': False}}))
+        hass.auth = await auth.auth_manager_from_config(hass, [], [])
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0))
+            port = sock.getsockname()[1]
+        self.assertTrue(await async_setup_component(hass, 'http', {'http': {
+            'server_host': '127.0.0.1', 'server_port': port}}))
+        self.assertTrue(await async_setup_component(hass, 'config', {}))
     _flush_documents = mixed.NativeTemplateMixedYAMLServerTests._flush_documents
     prepare = mixed.NativeTemplateMixedYAMLServerTests.prepare
     emit = mixed.NativeTemplateMixedYAMLServerTests.emit
@@ -225,7 +244,7 @@ class NativeMixedFixtureCensusTest(unittest.IsolatedAsyncioTestCase):
             directory.mkdir(parents=True, exist_ok=True)
             (directory / 'outside-census.json').write_text(json.dumps(result, sort_keys=True, indent=2))
 
-    async def _fixture_with_dashboard(self, *, custom=False):
+    async def _fixture_with_dashboard(self, *, custom=False, named=False):
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.components.lovelace.const import LOVELACE_DATA
         from homeassistant.setup import async_setup_component
@@ -239,11 +258,37 @@ class NativeMixedFixtureCensusTest(unittest.IsolatedAsyncioTestCase):
         with (root / 'configuration.yaml').open('a') as stream:
             stream.write('\nlovelace:\n  dashboards:\n    r8-map:\n      mode: yaml\n'
                          '      title: Synthetic map\n      filename: boards/r8-map.yaml\n')
+        if named and os.environ.get('RENAMER_RENDER_HANDSHAKE'):
+            # Completing onboarding after Lovelace setup would create an
+            # additional live dynamic map strategy; initialize it first.
+            from homeassistant.components.onboarding import OnboardingStorage, STORAGE_KEY, STORAGE_VERSION
+            from homeassistant.components.onboarding.const import DOMAIN as ONBOARDING, STEPS
+            from homeassistant.components.onboarding.views import _BaseOnboardingStepView
+            self.assertTrue(await async_setup_component(hass, ONBOARDING, {}))
+            onboarding = hass.data.get(ONBOARDING)
+            if onboarding is not None and not onboarding.onboarded:
+                store = OnboardingStorage(hass, STORAGE_VERSION, STORAGE_KEY, private=True)
+                step_view = _BaseOnboardingStepView(onboarding.steps, store)
+                for step in STEPS:
+                    if step not in onboarding.steps['done']:
+                        step_view.step = step
+                        await step_view._async_mark_done(hass)
+                self.assertTrue(onboarding.onboarded)
+            from homeassistant.components.onboarding import async_is_onboarded
+            self.assertTrue(async_is_onboarded(hass))
+        if named:
+            from homeassistant.helpers.storage import Store
+            metadata = {'id': 'r6_map', 'url_path': 'r6-map', 'mode': 'storage',
+                        'require_admin': False, 'show_in_sidebar': True, 'title': 'Synthetic storage map',
+                        'icon': 'mdi:map'}
+            await Store(hass, 1, 'lovelace_dashboards').async_save({'items': [metadata]})
         config = await async_hass_config_yaml(hass)
         self.assertTrue(await async_setup_component(hass, 'lovelace', config))
         self.assertIn('lovelace', hass.config.components)
         native = hass.data[LOVELACE_DATA]
-        dashboard = native.dashboards[None]
+        if named:
+            await native.dashboards[None].async_save({'views': [{'title': 'Unchanged', 'cards': []}]})
+        dashboard = native.dashboards['r6-map' if named else None]
         card = {'type': 'custom:r8-unknown', 'entity': source} if custom else {
             'type': 'map', 'entities': [source]}
         await dashboard.async_save({'views': [{'title': 'Live map', 'cards': [card]}]})
@@ -283,6 +328,10 @@ class NativeMixedFixtureCensusTest(unittest.IsolatedAsyncioTestCase):
     async def test_active_custom_card_is_identified_and_product_refuses_prepare(self):
         runtime, mapping, _, dashboard = await self._fixture_with_dashboard(custom=True)
         hass, root = self.f.hass, self.f.root
+        observed = await self.module('native_discovery_consumers').async_observe_discovery_consumers(
+            hass, guard=lambda: None)
+        with self.assertRaises(ValueError):
+            self.module('dashboard_storage_semantics').qualify_dashboard_storage(observed, mapping)
         census = await collect_native(hass, root, self.producer, mapping)
         print('MIXED_CENSUS_CUSTOM', json.dumps(census, sort_keys=True), flush=True)
         self.assertIn(('dashboard:<default>', 'custom_card_unsupported:custom:r8-unknown'), census['unverified'])
@@ -305,20 +354,283 @@ class NativeMixedFixtureCensusTest(unittest.IsolatedAsyncioTestCase):
         for name, raw in original_sources.items():
             self.assertEqual((root / name).read_bytes(), raw)
 
-    async def test_active_native_map_prepare_is_refused_without_side_effects(self):
-        runtime, mapping, _, dashboard = await self._fixture_with_dashboard()
+    async def test_active_native_map_forward_and_fresh_inverse(self):
+        diagnostics = mixed.native_diagnostics(self.module)
+        diagnostics.__enter__()
+        self.addCleanup(diagnostics.__exit__, None, None, None)
+        runtime, mapping, uuids, dashboard = await self._fixture_with_dashboard(named=True)
         hass, root = self.f.hass, self.f.root
-        census = await collect_native(hass, root, self.producer, mapping)
-        self.assertIn(('dashboard:<default>', 'active_card_render_not_observed:map'), census['unverified'])
-        before = await self._flush_documents()
-        files = ('configuration.yaml', 'template.yaml', 'mixed_automations.yaml',
-                 'mixed_scripts.yaml', 'boards/r8-map.yaml', '.storage/lovelace')
-        original = {name: (root / name).read_bytes() for name in files}
+        old, new = next(iter(mapping.items()))
+        named_id, named_uuid = self.identities[('sensor', 'scope-value')]
+        original_name = self.f.entity.async_get(named_id).name
+        original_yaml = (root / 'boards/r8-map.yaml').read_bytes()
+        original_dashboard = await dashboard.async_load(False)
+        render_dir = os.environ.get('RENAMER_RENDER_HANDSHAKE')
+        if render_dir:
+            from homeassistant.config import async_hass_config_yaml
+            from homeassistant.setup import async_setup_component
+            config = await async_hass_config_yaml(hass)
+            for domain in ('frontend', 'api'):
+                self.assertTrue(await async_setup_component(hass, domain, config))
+            await hass.async_block_till_done()
+            # A YAML-configured HTTP port starts a native five-minute trial on
+            # this Core. Settle it before ORIGINAL so its timer cannot mutate
+            # the foreign HTTP Store during the long independent proof.
+            from homeassistant.components.http.config import DATA_STORE
+            http_store = hass.data[DATA_STORE]
+            if http_store._pending is not None:
+                await http_store.async_promote_pending()
+            self.assertIsNone(http_store._pending)
+            self.assertIsNone(http_store._revert_unsub)
+            refresh_token = hass.auth.async_get_refresh_token(hass.data['http.auth'])
+            self.assertIsNotNone(refresh_token)
+            token = hass.auth.async_create_access_token(refresh_token, remote_ip='127.0.0.1')
+            token_path = Path(render_dir) / 'render-token'
+            fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, 'w') as stream:
+                stream.write(token)
+            del token
+
+        async def render(label, source):
+            if render_dir:
+                from dashboard_render_handshake import observe_render
+                state = hass.states.get(source)
+                if state is None:
+                    raise ValueError('render_source_missing')
+                result = await observe_render(render_dir, label, source, state.state, hass.http.server_port)
+                print('MAP_RENDER', label, json.dumps(result, sort_keys=True), flush=True)
+        from homeassistant.helpers import area_registry, floor_registry, label_registry
+        for module, member in ((floor_registry, 'floors'), (label_registry, 'labels'), (area_registry, 'areas')):
+            manager = hass.data.get(module.DATA_REGISTRY)
+            if manager is None:
+                await module.async_load(hass)
+                manager = hass.data[module.DATA_REGISTRY]
+            elif not hasattr(manager, member):
+                await manager.async_load()
+            await manager._store.async_save(manager._data_to_save())
+        await hass.auth._store._store.async_save(hass.auth._store._data_to_save())
+        self.assertEqual(native_empty_auth_snapshot(hass, root)['status'], 'COMPLETE')
+        # HA may schedule its first repairs Store write during bootstrap. Bind
+        # the real, settled store to ORIGINAL rather than weakening the fence.
+        from homeassistant.helpers import issue_registry
+        issues = issue_registry.async_get(hass)
+        await issues._store.async_save(issues._data_to_save())
+        self.assertIsNone(issues._store._data)
+        self.assertIsNone(issues._store._delay_handle)
+        self.assertEqual(json.loads(Path(issues._store.path).read_bytes())['data'], issues._data_to_save())
+        editors = self.module('yaml_editor_locks').NativeYAMLEditorLocks(hass).enumerate()
+        print('MAP_NATIVE_EDITOR_LOCKS', [(path, name) for path, name, _, _ in editors], flush=True)
+        self.assertTrue(editors)
+        snapshots = tempfile.TemporaryDirectory(dir=self.scratch_parent)
+        self.addCleanup(snapshots.cleanup)
+
+        async def capture(label, current_mapping):
+            census = await collect_native(hass, root, self.producer, current_mapping)
+            if evidence := os.environ.get('RENAMER_BATCH_EVIDENCE'):
+                (Path(evidence) / (label + '-census.json')).write_text(
+                    json.dumps(census, sort_keys=True, indent=2))
+            await self._flush_documents()
+            graph = self.module('yaml_plan').plan_yaml(root, current_mapping)
+            row = self.f.entity.async_get(old) or self.f.entity.async_get(new)
+            proposal = {'entities': [{'entity_id': old, 'proposed_entity_id': new,
+                                      'device_id': row.device_id}], 'devices': [], 'statistics': []}
+            discovery = await self.module('discovery').async_discover(hass, proposal, guard=lambda: None)
+            families, _ = discovery_coverage(discovery)
+            families, external = census_coverage(census, families)
+            destination = Path(snapshots.name) / label
+            info = capture_tree(root, destination, inventory_files=[(r.path, r.sha256) for r in graph.files],
+                families=families, external_consumers=external,
+                external_inventory_complete=census['external']['empty_in_bounded_fixture'],
+                recorder_databases=('fixture.db',), native_locations=native_location_snapshot(hass, root),
+                native_auth=native_empty_auth_snapshot(hass, root))
+            if evidence := os.environ.get('RENAMER_BATCH_EVIDENCE'):
+                directory = Path(evidence)
+                shutil.copytree(destination, directory / label)
+                (directory / (label + '-census.json')).write_text(json.dumps(census, sort_keys=True, indent=2))
+                (directory / (label + '-inventory.json')).write_text(json.dumps(info, sort_keys=True, indent=2))
+            self.assert_fixture_samples(census)
+            return census, destination, info
+
+        try:
+            await render('before', old)
+        finally:
+            census, before, before_info = await capture('map-before', mapping)
+        self.assertIn(('dashboard:r6-map', 'active_card_render_not_observed:map'), census['unverified'])
+        self.assertEqual(set(map(tuple, census['unverified'])), {
+            ('dashboard:r6-map', 'active_card_render_not_observed:map'),
+            ('dashboard:r8-map', 'active_card_render_not_observed:entity')})
+        self.assertTrue(census['external']['empty_in_bounded_fixture'])
+        edits = [(JSONStoreEdit if path == '.storage/lovelace.r6_map' else Edit)(
+                    path, old.encode(), new.encode(), (before / path).read_bytes().count(old.encode()))
+                 for path in ('template.yaml', 'mixed_automations.yaml', 'mixed_scripts.yaml',
+                              'boards/r8-map.yaml', '.storage/lovelace.r6_map')]
+        self.assertTrue(all(edit.count > 0 for edit in edits))
+        row_changes = [RowChange('.storage/core.entity_registry', named_uuid, 'name',
+                                 original_name, 'Reviewed map consumer')]
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
-        with self.assertRaises(self.module('transaction').Refused) as caught:
-            await runtime.native_yaml_prepare(hass, mapping, actor_id='census-map', guard=lambda: None, refresh=refresh)
-        print('CENSUS_NATIVE_MAP_REFUSAL', str(caught.exception), flush=True)
-        self.assertEqual(str(caught.exception), 'template_forward_dashboard_evidence_unavailable')
-        self.assertEqual(await self._flush_documents(), before)
-        self.assertEqual({name: (root / name).read_bytes() for name in files}, original)
+        review = await runtime.native_yaml_prepare(hass, mapping, entity_names={named_id: 'Reviewed map consumer'},
+                                                   actor_id='census-map', guard=lambda: None, refresh=refresh)
+        self.assertIn('dashboard', review['dependencies']['domains'])
+        self.assertEqual(review['dependencies']['dashboards'], [{'route': 'r6-map',
+            'references': [{'before': old, 'after': new, 'occurrences': 1}]}])
+        self.assertEqual(next(row for row in review['changes'] if row.get('entity_id') == named_id)
+                         ['fields']['name']['after'], 'Reviewed map consumer')
+        applied = None
+        try:
+            applied = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                actor_id='census-map', guard=lambda: None, refresh=refresh)
+            self.assertEqual(applied['state'], 'applied')
+            self.assertEqual((await dashboard.async_load(False))['views'][0]['cards'][0]['entities'], [new])
+            self.assertIn(new.encode(), (root / 'boards/r8-map.yaml').read_bytes())
+            self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+            self.assertEqual(self.f.entity.async_get(named_id).name, 'Reviewed map consumer')
+            try:
+                await render('after', new)
+            finally:
+                after_census, after, after_info = await capture('map-after', {new: old})
+        finally:
+            try:
+                inspected = await runtime.recovery_inspect(hass, review['operation_id'], review['fingerprint'],
+                                                           guard=lambda: None, refresh=refresh)
+                print('MAP_FRESH_INSPECT', json.dumps(inspected, sort_keys=True), flush=True)
+                inverse = None
+                if inspected.get('eligible') and inspected.get('state') == 'applied':
+                    inverse = await runtime.native_yaml_reverse(hass, review['operation_id'], review['fingerprint'],
+                                                               guard=lambda: None, refresh=refresh)
+                    print('MAP_INVERSE_RESULT', json.dumps(inverse, sort_keys=True), flush=True)
+                elif applied is not None and applied.get('state') == 'applied':
+                    raise RuntimeError('applied operation was not eligible for fresh inverse')
+            finally:
+                record = await runtime.journal.load(review['operation_id'])
+                print('MAP_JOURNAL', None if record is None else
+                      (record.status, record.reason, record.direction, record.phases), flush=True)
+                old_row, new_row = self.f.entity.async_get(old), self.f.entity.async_get(new)
+                current = (old if old_row is not None and new_row is None and old_row.id == uuids[old]
+                           else new if new_row is not None and old_row is None and new_row.id == uuids[old]
+                           else None)
+                if current is not None:
+                    direction = mapping if current == old else {new: old}
+                    try:
+                        try:
+                            await render('restore' if current == old else 'final', current)
+                        finally:
+                            restored_census, restored, restored_info = await capture('map-final-readback', direction)
+                    except Exception as error:
+                        print('MAP_FINAL_READBACK_FAILED', type(error).__name__, str(error), flush=True)
+                        raise
+                else:
+                    print('MAP_FINAL_READBACK_FAILED', 'source_identity_ambiguous', flush=True)
+        self.assertTrue(inspected['eligible'])
+        self.assertEqual(await dashboard.async_load(False), original_dashboard)
+        self.assertEqual((root / 'boards/r8-map.yaml').read_bytes(), original_yaml)
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertEqual(self.f.entity.async_get(named_id).name, original_name)
+        inventory, checks, bindings = consumer_evidence(census, after_census, allow_unrendered=True)
+        forward = compare(before, after, old=old, new=new, uuid=uuids[old], edits=edits,
+            row_changes=row_changes, captures=(before_info, after_info), consumer_inventory=inventory,
+            consumer_inventory_complete=False, consumer_checks=checks, source_consumers=bindings)
+        print('MAP_BOUND_FORWARD', json.dumps(forward, sort_keys=True), flush=True)
+        self.assertEqual(forward['findings'], [])
+        omitted = compare(before, after, old=old, new=new, uuid=uuids[old], edits=edits[:-1],
+                          row_changes=row_changes)
+        self.assertIn(('unexpected_change', '.storage/lovelace.r6_map'), omitted['findings'])
+        foreign = Path(snapshots.name) / 'foreign-negative'
+        shutil.copytree(after, foreign)
+        foreign_file = foreign / 'configuration.yaml'
+        foreign_file.write_bytes(foreign_file.read_bytes() + b'\n# independent foreign edit\n')
+        foreign_result = compare(before, foreign, old=old, new=new, uuid=uuids[old], edits=edits,
+                                 row_changes=row_changes)
+        self.assertIn(('unexpected_change', 'configuration.yaml'), foreign_result['findings'])
+        inventory, checks, bindings = consumer_evidence(census, restored_census, allow_unrendered=True)
+        reverse = compare(before, restored, old=old, new=new, uuid=uuids[old], edits=edits,
+            row_changes=row_changes, reverse=True, captures=(before_info, restored_info),
+            consumer_inventory=inventory, consumer_inventory_complete=False,
+            consumer_checks=checks, source_consumers=bindings)
+        print('MAP_BOUND_RESTORE', json.dumps(reverse, sort_keys=True), flush=True)
+        self.assertEqual(reverse['findings'], [])
+
+    async def test_real_yaml_dashboard_metadata_produces_native_evidence(self):
+        _, mapping, _, _ = await self._fixture_with_dashboard()
+        from homeassistant.const import __version__
+        from homeassistant.components.lovelace.const import LOVELACE_DATA
+        module = self.module('native_discovery_consumers')
+        native = self.module('lovelace_native').NativeLovelace(self.f.hass)
+        token = module._inventory(self.f.hass, native, __version__)
+        evidence = await module._dashboards(self.f.hass, native, __version__, token, lambda: None)
+        self.assertEqual(len(evidence.yaml_sources), 1)
+        self.assertEqual(len(evidence.snapshots), 1)
+        source, = evidence.yaml_sources
+        raw = (self.f.root / source.filename).read_bytes()
+        graph = self.module('yaml_plan').plan_yaml(self.f.root, mapping)
+        before, after = self.module('dashboard_yaml_semantics').qualify_dashboard_yaml(
+            graph, source.filename, raw, mapping)
+        manager = self.f.hass.data[LOVELACE_DATA].dashboards[source.route]
+        self.assertEqual(await manager.async_load(False), before)
+        self.assertEqual(before['views'][0]['cards'][0]['entity'], next(iter(mapping)))
+        self.assertEqual(after['views'][0]['cards'][0]['entity'], next(iter(mapping.values())))
+        observed = await module.async_observe_discovery_consumers(self.f.hass, guard=lambda: None)
+        changes = self.module('dashboard_storage_semantics').qualify_dashboard_storage(observed, mapping)
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].before.config['views'][0]['cards'][0]['entities'], [next(iter(mapping))])
+        self.assertEqual(changes[0].after['views'][0]['cards'][0]['entities'], [next(iter(mapping.values()))])
+        storage = await self.module('dashboard_storage_semantics').async_prepare_dashboard_storage(
+            self.f.hass, observed, mapping, guard=lambda: None)
+        self.assertEqual(storage.changes, changes)
+        storage.check()
+        qualify = self.module('dashboard_yaml_semantics').async_qualify_registered_dashboard_yaml
+        admission = await qualify(self.f.hass, observed, graph, mapping, guard=lambda: None)
+        self.assertEqual(admission.paths, (source.filename,))
+        admission.check()
+        validate = self.module('yaml_validation').async_validate_proposed_with_sources
+        with self.assertRaises(ValueError):
+            await validate(self.f.hass, graph, self.f.root.parent)
+        receipt, _ = await validate(self.f.hass, graph, self.f.root.parent,
+                                    dashboard_yaml=admission, dashboard_storage=storage)
+        self.assertIn(source.filename, {path for path, _ in receipt.proposed_files})
+        self.assertIn('.storage/lovelace', {row[0] for row in receipt.source_files})
+        from homeassistant.components.lovelace.dashboard import LovelaceYAML
+        data = self.f.hass.data[LOVELACE_DATA]
+        data.dashboards[source.route] = LovelaceYAML(
+            self.f.hass, source.route, data.yaml_dashboards[source.route])
+        try:
+            with self.assertRaises(ValueError):
+                await qualify(self.f.hass, observed, graph, mapping, guard=lambda: None)
+        finally:
+            data.dashboards[source.route] = manager
+        path = self.f.root / source.filename
+        foreign = raw + b'# foreign edit\n'
+        path.write_bytes(foreign)
+        with self.assertRaises(ValueError):
+            await qualify(self.f.hass, observed, graph, mapping, guard=lambda: None)
+        self.assertEqual(path.read_bytes(), foreign)
+
+    async def test_native_dashboard_storage_foreign_edit_is_not_adopted(self):
+        _, mapping, _, dashboard = await self._fixture_with_dashboard()
+        observed = await self.module('native_discovery_consumers').async_observe_discovery_consumers(
+            self.f.hass, guard=lambda: None)
+        foreign = {'views': [{'title': 'Foreign retained', 'cards': [{'type': 'map',
+                    'entities': [next(iter(mapping))]}]}]}
+        await dashboard.async_save(foreign)
+        before = Path(dashboard._store.path).read_bytes()
+        with self.assertRaises(ValueError):
+            await self.module('dashboard_storage_semantics').async_prepare_dashboard_storage(
+                self.f.hass, observed, mapping, guard=lambda: None)
+        self.assertEqual(Path(dashboard._store.path).read_bytes(), before)
+        self.assertEqual(dashboard._data['config'], foreign)
+
+    async def test_mixed_same_source_name_and_id_refuses_before_effect(self):
+        runtime, mapping, _, dashboard = await self._fixture_with_dashboard()
+        hass, root = self.f.hass, self.f.root
+        old = next(iter(mapping))
+        original = await self._flush_documents()
+        storage = Path(dashboard._store.path).read_bytes()
+        source = (root / 'boards/r8-map.yaml').read_bytes()
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_yaml_prepare(hass, mapping, entity_names={old: 'Same source name'},
+                actor_id='same-source-negative', guard=lambda: None, refresh=refresh)
+        self.assertEqual(await self._flush_documents(), original)
+        self.assertEqual(Path(dashboard._store.path).read_bytes(), storage)
+        self.assertEqual((root / 'boards/r8-map.yaml').read_bytes(), source)

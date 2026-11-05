@@ -61,6 +61,17 @@ test('review displays every server change and all dependency aggregates with PL/
   assert.equal(dialog.querySelector('img'),null);assert.equal(f.requests.filter(m=>m.type==='ha_entity_renamer/prepare').length,1);
 });
 
+test('review names admitted dashboard changes in both languages before apply',async t=>{
+  const f=await fixture(t,'pl');f.review.dependencies.domains.push('dashboard');
+  f.review.dependencies.dashboards=[{route:null,references:[{before:'sensor.a',after:'sensor.b',occurrences:1}]}];
+  await f.card._prepareMigration();
+  assert.match(f.card.shadowRoot.querySelector('[role="dialog"]').textContent,/Pulpity/);
+  assert.match(f.card.shadowRoot.querySelector('[role="dialog"]').textContent,/Domyślny/);
+  f.card.hass={...f.hass,language:'en'};
+  assert.match(f.card.shadowRoot.querySelector('[role="dialog"]').textContent,/Dashboards/);
+  assert.equal(writes(f).length,0);
+});
+
 test('unsupported prepare refuses honestly and cannot silently use registry-only',async t=>{
   const f=await fixture(t);f.handlers['ha_entity_renamer/prepare']=()=>Promise.reject({code:'unsupported_selection',message:'<private>'});
   await f.card._prepareMigration();assert.equal(f.card._migration.stage,'refused');

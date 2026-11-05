@@ -37,7 +37,7 @@ class _UnchangedConsumers:
     """Task-local read comparisons, never an adapter or effect capability."""
 
     @classmethod
-    async def capture(cls, hass, mapping, *, guard, _powercalc_energy=None):
+    async def capture(cls, hass, mapping, *, guard, _powercalc_energy=None, _dashboard_effects=False):
         from .native_discovery_consumers import async_observe_discovery_consumers
         from .discovery import _plain
         from .discovery_final_fence import _ConsumerFence
@@ -50,6 +50,8 @@ class _UnchangedConsumers:
         # Missing readers are never evidence for a loaded/native-present family.
         obj.presence = (id(hass.data.get(LOVELACE_DATA)), id(hass.data.get('energy_manager')))
         observed = await async_observe_discovery_consumers(hass, guard=guard)
+        _need(type(_dashboard_effects) is bool, 'dashboard_scope_invalid')
+        obj.dashboard_observed = observed if _dashboard_effects else None
         guard()
         names = []
         for name, component, present in (
@@ -62,7 +64,7 @@ class _UnchangedConsumers:
             names.append(name)
             if name == 'dashboard':
                 # File/hash inventory alone cannot prove YAML dashboard semantics.
-                _need(not result.value.yaml_sources, 'dashboard_yaml_route_unqualified')
+                _need(_dashboard_effects or not result.value.yaml_sources, 'dashboard_yaml_route_unqualified')
                 configs = [row.config for row in result.value.snapshots if row.config is not None]
                 planner = plan_dashboard
             else:
@@ -79,7 +81,7 @@ class _UnchangedConsumers:
                           and _exact_json_equal(plan.value, _freeze_json(_powercalc_energy.after)),
                           'energy_preparation_mismatch')
                     names.remove(name)  # This exact Energy step has its own receipt/physical CAS.
-                else:
+                elif name != 'dashboard' or not _dashboard_effects:
                     _need(not plan.changes, name + '_dependency_unsupported')
         obj.native = _ConsumerFence(hass, observed, _plain, names=tuple(names))
         obj.runtime_sample = obj.runtime_sampler = None

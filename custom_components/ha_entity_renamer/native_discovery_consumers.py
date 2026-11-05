@@ -53,10 +53,15 @@ class DiscoveryConsumers:
 
 
 def _freeze(value):
-    if type(value) is dict:
-        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
-    if type(value) is list:
+    from homeassistant.util.yaml.objects import NodeDictClass, NodeListClass, NodeStrClass
+    if type(value) in (dict, NodeDictClass):
+        if any(type(key) not in (str, NodeStrClass) for key in value):
+            raise PersistenceError('consumer_json_schema')
+        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+    if type(value) in (list, NodeListClass):
         return tuple(_freeze(item) for item in value)
+    if type(value) is NodeStrClass:
+        return str(value)
     if value is None or type(value) in (str, int, float, bool):
         return value
     raise PersistenceError('consumer_json_schema')
@@ -100,10 +105,11 @@ def _failure(error):
 
 def _inventory(hass, native, version):
     from homeassistant.components.lovelace.dashboard import LovelaceStorage, LovelaceYAML
+    from homeassistant.util.yaml.objects import NodeDictClass
     data = hass.data.get(native._data_key)
     managers = native._managers()
     definitions = data.yaml_dashboards
-    if type(definitions) is not dict or None not in managers:
+    if type(definitions) not in (dict, NodeDictClass) or None not in managers:
         raise PersistenceError('consumer_lovelace_inventory')
     rows, yaml_routes = [], set()
     for route, manager in managers.items():
@@ -124,7 +130,7 @@ def _inventory(hass, native, version):
                 filename = 'ui-lovelace.yaml'
             else:
                 metadata = definitions.get(route)
-                if (type(metadata) is not dict or metadata.get('mode') != 'yaml'
+                if (type(metadata) not in (dict, NodeDictClass) or metadata.get('mode') != 'yaml'
                         or manager.config != {**metadata, 'url_path': route}):
                     raise PersistenceError('consumer_yaml_inventory')
                 filename = metadata.get('filename')
@@ -354,5 +360,10 @@ async def async_observe_discovery_consumers(hass, *, guard):
             energy_native._settled()
         except Exception as error:
             energy = _failure(error)
+    if dashboard.status == 'COMPLETE':
+        # Private, task-local identities from the same two-pass native capture.
+        # Not a dataclass field: never serialized, included in discovery output,
+        # or treated as a persisted authorization after a restart.
+        object.__setattr__(first_dashboard, '_native_inventory_token', dashboard_baseline)
     guard()
     return DiscoveryConsumers(version, dashboard, energy)

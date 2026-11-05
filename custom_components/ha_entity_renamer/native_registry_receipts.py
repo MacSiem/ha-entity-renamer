@@ -222,7 +222,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
 """
 
     def __init__(self, store: RegistryReceiptStore, operation_id: str, plan: Plan,
-                 receipt: ValidationReceipt, prepared_digests: dict[str, str], *, yaml_original_metadata=None):
+                 receipt: ValidationReceipt, prepared_digests: dict[str, str], *, yaml_original_metadata=None,
+                 dashboard_original_metadata=None):
         from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, assert_state_yaml_composition
         if (type(store) is not RegistryReceiptStore or type(plan) is not Plan
                 or type(operation_id) is not str or not operation_id):
@@ -236,7 +237,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         for step in plan.steps:
             if step.caused_by:
                 _fail('gap_native_listeners')
-            if step.adapter not in ('registry', 'helpers', 'yaml', 'energy'):
+            if step.adapter not in ('registry', 'helpers', 'yaml', 'energy', 'dashboard'):
                 _fail({'helper': 'gap_config_entry_mapping', 'yaml': 'gap_yaml_predecessor',
                        'dashboard': 'gap_nonnative_predecessor',
                        'energy': 'gap_nonnative_predecessor'}.get(step.adapter, 'gap_unknown_predecessor'))
@@ -261,14 +262,21 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 _fail('preparation_binding_invalid')
             change = decode_change(original_payload)
             from .energy_native import PreparedEnergy
+            from .lovelace_native import PreparedDashboard
             expected_type = {'helpers': PreparedHelper, 'yaml': PreparedYAML,
-                             'registry': PreparedRegistryChange, 'energy': PreparedEnergy}[step.adapter]
+                             'registry': PreparedRegistryChange, 'energy': PreparedEnergy,
+                             'dashboard': PreparedDashboard}[step.adapter]
             if (type(change) is not expected_type
                     and not (step.adapter == 'helpers' and type(change) is PreparedPowercalcGroupMetadata)
                     and not (step.adapter == 'yaml' and (type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML)
                                                         or _is_powercalc_yaml(change)))):
                 _fail('preparation_mismatch')
-            if step.adapter == 'energy':
+            if step.adapter == 'dashboard':
+                if (step.identity != change.before.dashboard.identity
+                        or change.before.revision != step.before_revision
+                        or change.after_revision != step.after_revision):
+                    _fail('preparation_mismatch')
+            elif step.adapter == 'energy':
                 if (step.identity != 'energy' or change.before.revision != step.before_revision
                         or change.after_revision != step.after_revision):
                     _fail('preparation_mismatch')
@@ -286,6 +294,11 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 validate_prepared_energy(self, change)
                 binding = {'ref': step.prepared_ref, 'digest': digest,
                            'energy_digest': _digest(json.loads(_json(asdict(change))))}
+            elif step.adapter == 'dashboard':
+                from .dashboard_receipts import validate_prepared
+                validate_prepared(self, change)
+                binding = {'ref': step.prepared_ref, 'digest': digest,
+                           'dashboard_digest': _digest(json.loads(_json(asdict(change))))}
             elif step.adapter == 'yaml':
                 change.checked()
                 if type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
@@ -335,6 +348,19 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                                               yaml_original_metadata)
             self.root.update(schema=2, original_receipt_sha256=_sha(self.baseline.receipt_json),
                              yaml_original_metadata=metadata)
+        dashboard_changes = [change for step, change in zip(plan.steps, self.changes, strict=True)
+                             if step.adapter == 'dashboard']
+        if dashboard_changes:
+            if self.yaml_index is None:
+                _fail('dashboard_requires_yaml_scope')
+            if dashboard_original_metadata is None:
+                saved = store.read(self.root_id)
+                if saved is None:
+                    _fail('dashboard_original_metadata_required')
+                dashboard_original_metadata = saved['payload'].get('dashboard_original_metadata')
+            from .dashboard_receipts import validate_original_metadata
+            self.root['dashboard_original_metadata'] = validate_original_metadata(
+                receipt, dashboard_changes, dashboard_original_metadata)
         self.root_digest = _digest(self.root)
         self.writable = False
         self.active = None
@@ -368,7 +394,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
     @classmethod
     async def start(cls, store: RegistryReceiptStore, operation_id: str, plan: Plan,
                     receipt: ValidationReceipt, prepared_digests: dict[str, str], *,
-                    yaml_original_metadata=None) -> RegistryReceiptChain:
+                    yaml_original_metadata=None, dashboard_original_metadata=None) -> RegistryReceiptChain:
         from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML
         yaml_indices = [i for i, step in enumerate(plan.steps) if step.adapter == 'yaml']
         if yaml_indices and yaml_indices != [len(plan.steps) - 1]:
@@ -386,8 +412,18 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             if yaml_original_metadata is not None and canonical(yaml_original_metadata)[0] != captured:
                 _fail('yaml_original_metadata_mismatch')
             yaml_original_metadata = captured
+        dashboard_steps = [step for step in plan.steps if step.adapter == 'dashboard']
+        if dashboard_steps:
+            from .dashboard_receipts import capture_original_metadata
+            changes = [decode_change(store.preparations.resolve(step.prepared_ref,
+                       prepared_digests[step.prepared_ref])) for step in dashboard_steps]
+            captured = capture_original_metadata(receipt, changes)
+            if dashboard_original_metadata is not None and canonical(dashboard_original_metadata)[0] != captured:
+                _fail('dashboard_original_metadata_mismatch')
+            dashboard_original_metadata = captured
         obj = cls(store, operation_id, plan, receipt, prepared_digests,
-                  yaml_original_metadata=yaml_original_metadata)
+                  yaml_original_metadata=yaml_original_metadata,
+                  dashboard_original_metadata=dashboard_original_metadata)
         obj._initial()  # Refuse absence before creating any sidecar state.
         await store.create(obj.root_id, obj.root)
         obj.writable = True
@@ -434,7 +470,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                   'direction': direction, 'phases': list(context.record.phases),
                   'status': context.record.status}
         name = {'helpers': 'helper_digest', 'yaml': 'yaml_digest',
-                'registry': 'registry_digest', 'energy': 'energy_digest'}[context.step.adapter]
+                'registry': 'registry_digest', 'energy': 'energy_digest',
+                'dashboard': 'dashboard_digest'}[context.step.adapter]
         result[name] = binding[name]
         return result
 
@@ -457,6 +494,18 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 assert_state_yaml_composition(self, change)
             if _is_powercalc_yaml(change) and not self._powercalc_preparations_unchanged():
                 _assert_powercalc_yaml(self, change)
+            return change
+        if self.plan.steps[index].adapter == 'dashboard':
+            from .lovelace_native import PreparedDashboard
+            from .dashboard_receipts import validate_prepared
+            binding = self.root['bindings'][index]
+            payload = self.preparations.resolve(binding['ref'], binding['digest'])
+            change = decode_change(payload)
+            if (_digest(payload) != binding['digest'] or type(change) is not PreparedDashboard
+                    or _digest(json.loads(_json(asdict(change)))) != binding['dashboard_digest']
+                    or change != self.changes[index]):
+                _fail('dashboard_preparation_mismatch')
+            validate_prepared(self, change)
             return change
         if self.plan.steps[index].adapter == 'energy':
             from .energy_native import PreparedEnergy
@@ -674,7 +723,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 events.append((key, row))
         while events:
             intents = [(key, row) for key, row in events
-                       if row['payload'].get('kind') in ('registry_intent', 'yaml_intent', 'helper_setup_intent', 'powercalc_energy_intent')
+                       if row['payload'].get('kind') in ('registry_intent', 'yaml_intent', 'helper_setup_intent', 'powercalc_energy_intent', 'dashboard_intent')
                        and row['payload'].get('sequence') == sequence]
             if len(intents) != 1:
                 _fail('chain_graph_invalid')
@@ -724,7 +773,9 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 _fail('intent_binding_mismatch')
             yaml = self.plan.steps[index].adapter == 'yaml'
             energy = self.plan.steps[index].adapter == 'energy'
-            expected_intent = 'yaml_intent' if yaml else ('powercalc_energy_intent' if energy else 'registry_intent')
+            dashboard = self.plan.steps[index].adapter == 'dashboard'
+            expected_intent = ('yaml_intent' if yaml else 'powercalc_energy_intent' if energy
+                               else 'dashboard_intent' if dashboard else 'registry_intent')
             if (intent['kind'] != expected_intent
                     or yaml and intent.get('input_source') != yaml_sources):
                 _fail('intent_binding_mismatch')
@@ -744,7 +795,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 _fail('chain_graph_invalid')
             _, rrow = matches[0]
             receipt = rrow['payload']
-            expected_receipt = 'yaml_receipt' if yaml else ('powercalc_energy_receipt' if energy else 'registry_receipt')
+            expected_receipt = ('yaml_receipt' if yaml else 'powercalc_energy_receipt' if energy
+                                else 'dashboard_receipt' if dashboard else 'registry_receipt')
             if (receipt.get('kind') != expected_receipt
                     or receipt.get('intent') != [ikey, irow['digest']]
                     or receipt.get('binding') != binding
@@ -754,6 +806,9 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             if energy:
                 from .powercalc_energy_receipts import fold_energy_receipt
                 yaml_sources = fold_energy_receipt(self, states, yaml_sources, intent, receipt)
+            elif dashboard:
+                from .dashboard_receipts import fold_receipt
+                yaml_sources = fold_receipt(self, states, yaml_sources, intent, receipt)
             elif yaml:
                 if receipt.get('result') != self._summary(states):
                     _fail('foreign_native_delta')
@@ -1067,6 +1122,14 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         from .powercalc_energy_receipts import complete
         return await complete(self, intent, context, before, after, witness)
 
+    async def begin_dashboard(self, context, observations, dashboard):
+        from .dashboard_receipts import begin
+        return await begin(self, context, observations, dashboard)
+
+    async def complete_dashboard(self, intent, context, before, after, witness):
+        from .dashboard_receipts import complete
+        return await complete(self, intent, context, before, after, witness)
+
     async def begin_helper_setup(self, context, observations, *, lifecycle, entry_id):
         from .native_helper_setup_receipts import begin
         return await begin(self, context, observations, lifecycle=lifecycle, entry_id=entry_id)
@@ -1085,6 +1148,10 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
 
     def _initial_sources(self):
         sources = initial_sources(self.original_receipt, self.root.get('yaml_original_metadata', {}))
+        for path, value in self.root.get('dashboard_original_metadata', {}).items():
+            if path not in sources or sources[path][:4] != value[:4]:
+                _fail('dashboard_original_source_missing')
+            sources[path] = list(value)
         if any(step.adapter == 'energy' for step in self.plan.steps):
             from .powercalc_composition import PowercalcComposition
             baseline, composition = self.preparations.resolve_composition(self.plan.native_inputs)
@@ -1120,11 +1187,14 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         # Follow the same validated sequence, never dict insertion order.
         rows = sorted((row['payload'] for row in self.store.rows.values()
                        if row['payload'].get('chain') == self.root_id
-                       and row['payload'].get('kind') in ('yaml_receipt', 'powercalc_energy_receipt')),
+                       and row['payload'].get('kind') in ('yaml_receipt', 'powercalc_energy_receipt', 'dashboard_receipt')),
                       key=lambda payload: payload['sequence'])
         for payload in rows:
             if payload['kind'] == 'powercalc_energy_receipt':
                 sources['.storage/energy'] = list(payload['energy_after']['physical'])
+            elif payload['kind'] == 'dashboard_receipt':
+                change = self._original_change(payload['binding']['index'])
+                sources['.storage/' + change.before.dashboard.key] = list(payload['dashboard_after']['physical'])
             else:
                 sources = fold_yaml_calls(self._original_change(payload['binding']['index']),
                     sources, payload['calls'], payload['binding']['direction'],

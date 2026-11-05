@@ -64,3 +64,31 @@ def dependency_files(composition):
         files.append({"path": patch.path, "edit_count": len(patch.edits),
                       "references": references})
     return files
+
+
+def dependency_dashboards(changes, mapping):
+    """Expose only exact reviewed route and ID substitutions, not card bodies."""
+    from .dashboard_plan import plan_dashboard
+    rows = []
+    for change in changes:
+        plan = plan_dashboard(change.before.config, mapping)
+        if plan.markers or plan.value != change.after or not plan.changes:
+            raise Refused('review_dashboard_change_unavailable')
+        counts = {}
+        for edit in plan.changes:
+            accounted = False
+            for old, new in mapping.items():
+                token = re.compile(r'(?<![A-Za-z0-9_.])' + re.escape(old) + r'(?![A-Za-z0-9_.])')
+                count = len(token.findall(edit.before)) - len(token.findall(edit.after))
+                if count > 0:
+                    counts[old] = counts.get(old, 0) + count
+                    accounted = True
+            if not accounted:
+                raise Refused('review_dashboard_change_unavailable')
+        route = change.before.dashboard.route
+        if route is not None and (type(route) is not str or not route):
+            raise Refused('review_dashboard_change_unavailable')
+        rows.append({'route': route, 'references': [
+            {'before': old, 'after': mapping[old], 'occurrences': count}
+            for old, count in sorted(counts.items())]})
+    return rows

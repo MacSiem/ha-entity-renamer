@@ -196,6 +196,10 @@ class Runtime:
                     'template_consumer_count': 0 if powercalc else (1 if is_entry else sum(
                         row.domain in ('template.sensor', 'template.binary_sensor')
                         for row in session.evidence.template_sources.ledger.definitions))}
+                if 'dashboard' in plan.required_scopes:
+                    dependencies['domains'] = sorted([*dependencies['domains'], 'dashboard'])
+                    from .dependency_review import dependency_dashboards
+                    dependencies['dashboards'] = dependency_dashboards(session.dashboard_changes, session.mapping)
                 if is_entry:
                     old, new = next(iter(session.mapping.items()))
                     dependencies['config_entries'] = [{'entity_id': session.observer.rows[0]['entity_id'],
