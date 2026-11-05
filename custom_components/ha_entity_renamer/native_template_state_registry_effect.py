@@ -38,22 +38,37 @@ class NativeTemplateStateRegistryEffect:
               and change == root.chain._original_change(context.index), 'root_binding_required')
         guard()
         root.chain.verify_intent_source(intent, context, before)
+        cold_original = getattr(root, 'cold_original_prefix', False)
+        if cold_original:
+            from .native_template_state_composition import TemplateStateComposition
+            _need(type(root.composition) is TemplateStateComposition
+                  and context.record.direction == 'rollback'
+                  and context.record.phases == ('undo_intent', 'pending')
+                  and context.index == 0 and len(root.registry_changes) == 1,
+                  'cold_original_prefix_context_changed')
         snapshot = await async_observe_accepted_state_bindings(root.hass, root.chain,
-            root.program, guard=guard, input_state=state)
+            root.program, guard=guard, input_state=state, runtime_original=cold_original)
         guard()
         root.chain.verify_intent_source(intent, context, before)
         old, new = next(iter(change.mapping.items()))
         reverse = context.record.direction == 'rollback'
         active = set(snapshot.prefix.active)
-        _need((old in active) == reverse, 'source_prefix_changed')
-        if reverse:
-            active.remove(old)
+        if cold_original:
+            _need(reverse and old not in active, 'cold_original_runtime_changed')
+            from .native_template_state_binding import StateBindingTransition
+            target = frozenset(active)
+            transition = StateBindingTransition((), (), (), (), ())
         else:
-            active.add(old)
-        target = frozenset(active)
-        transition = snapshot.transition_pairs(root.program, target)
+            _need((old in active) == reverse, 'source_prefix_changed')
+            if reverse:
+                active.remove(old)
+            else:
+                active.add(old)
+            target = frozenset(active)
+            transition = snapshot.transition_pairs(root.program, target)
         obj = object.__new__(cls)
         obj.root, obj.io, obj.change = root, io, change
+        obj.cold_original = cold_original
         obj.source, obj.target = (new, old) if reverse else (old, new)
         obj.context, obj.intent, obj.before = context, intent, before
         obj.state, obj.guard, obj.snapshot, obj.transition = state, guard, snapshot, transition
@@ -222,7 +237,12 @@ class NativeTemplateStateRegistryEffect:
             self.snapshot.yaml_position, self.root.chain.accepted_documents())
         _need(self.snapshot.same_bindings(fresh), 'source_identity_changed')
         self.snapshot = fresh
-        self.transition = fresh.transition_pairs(self.root.program, self.expected.active)
+        if self.cold_original:
+            from .native_template_state_binding import StateBindingTransition
+            _need(fresh.prefix.active == self.expected.active, 'cold_original_runtime_changed')
+            self.transition = StateBindingTransition((), (), (), (), ())
+        else:
+            self.transition = fresh.transition_pairs(self.root.program, self.expected.active)
         self.transfer_entities = self.transition.entities
         if self.own_entity is not None and not any(e is self.own_entity for e in self.transfer_entities):
             self.transfer_entities = (*self.transfer_entities, self.own_entity)

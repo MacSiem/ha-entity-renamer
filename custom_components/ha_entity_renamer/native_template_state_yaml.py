@@ -197,6 +197,7 @@ class NativeTemplateStateYAMLRuntimeReadback:
         self.composition = composition
         self.hass, self.chain, self.program, self.guard = hass, chain, composition.state_config_program, guard
         self.receipt, self._last_runtime = chain.original_receipt, None
+        self.runtime_original = False
         self.native = _StateRuntime(hass)
         _need(self.native.native.version == self.receipt.version,
               'template_state_native_version_changed')
@@ -249,6 +250,10 @@ class NativeTemplateStateYAMLRuntimeReadback:
         proposed = original | dict(self.receipt.proposed_files)
         _need(current in (original, proposed), 'template_state_physical_yaml_image_changed')
         image = 'original' if current == original else 'proposed'
+        if self.runtime_original:
+            from dataclasses import replace
+            _need(image == 'original', 'template_state_original_projection_requires_original_yaml')
+            prefix = replace(prefix, active=frozenset())
         snapshot = sample_state_bindings(runtime, self.program, prefix, image,
                                          self.chain.accepted_documents())
         return (Position.BEFORE if image == 'original' else Position.AFTER), snapshot
@@ -268,7 +273,8 @@ class NativeTemplateStateYAMLRuntimeReadback:
             self.assert_change(change)
             self._check(state, live)
             snapshot = await async_observe_accepted_state_bindings(self.hass, self.chain,
-                self.program, guard=lambda: self._check(state, live), input_state=state, **live)
+                self.program, guard=lambda: self._check(state, live), input_state=state,
+                runtime_original=self.runtime_original, **live)
             self._check(state, live)
             runtime = self.native
             await _settled_executor(self.hass, runtime.sources)

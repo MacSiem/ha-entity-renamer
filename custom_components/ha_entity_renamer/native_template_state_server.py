@@ -57,15 +57,31 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         state = self.chain.reconstruct_inputs()
         position = await self.observer.position_at_inputs(self.change, state)
         self._scope()
-        _need(position is Position.BEFORE, 'prefix_yaml_or_runtime_changed')
+        if position is not Position.BEFORE:
+            # Only a single acknowledged ordinary source prefix. Original YAML
+            # can reconstruct its original Template bindings after process loss;
+            # prove those live twice rather than trusting a historical receipt.
+            change = self.registry_changes[0]
+            _need(type(self.composition) is TemplateStateComposition
+                  and len(self.registry_changes) == 1
+                  and record.phases == ('verified', 'pending')
+                  and change.before.get('platform') not in ('template', 'automation', 'script')
+                  and len(change.mapping) == 1, 'cold_original_prefix_unsupported')
+            self.observer.runtime_original = True
+            position = await self.observer.position_at_inputs(self.change, state)
+            self._scope()
+            _need(position is Position.BEFORE, 'prefix_yaml_or_runtime_changed')
+            self.cold_original_prefix = True
         witness = self.observer.runtime_check(Position.BEFORE)
         actual = await async_observe_accepted_state_bindings(self.hass, self.chain,
-            self.program, guard=self._scope)
+            self.program, guard=self._scope,
+            runtime_original=getattr(self, 'cold_original_prefix', False))
         self._scope()
         active = frozenset(next(iter(change.mapping)) for index, change in enumerate(self.registry_changes)
                            if change.mapping and record.phases[index] == 'verified')
         identities = self.observer.identities_at(active)
-        _need(actual.prefix.active == active and actual.yaml_position == 'original'
+        runtime_active = frozenset() if getattr(self, 'cold_original_prefix', False) else active
+        _need(actual.prefix.active == runtime_active and actual.yaml_position == 'original'
               and len(actual.rows) == len(identities)
               and {(row.entity.entity_id, row.registry_id) for row in actual.rows} == identities,
               'prefix_consumer_identity_changed')

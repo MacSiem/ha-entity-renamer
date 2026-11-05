@@ -607,7 +607,7 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents):
 
 
 async def async_observe_accepted_state_bindings(hass, chain, program, *, guard,
-        input_state=None, live_intent=None, live_context=None, live_calls=()):
+        input_state=None, live_intent=None, live_context=None, live_calls=(), runtime_original=False):
     """Two samples, code/source pins and SAME accepted whole-input manager fence."""
     from .native_discovery_inputs import (async_observe_discovery_inputs,
         assert_discovery_managers_current)
@@ -616,6 +616,11 @@ async def async_observe_accepted_state_bindings(hass, chain, program, *, guard,
     arguments = dict(live_intent=live_intent, live_context=live_context, live_calls=live_calls)
     state = _state_inputs(chain, input_state, **arguments)
     prefix = accepted_state_prefix(chain, program, input_state=state, **arguments)
+    _need(type(runtime_original) is bool, 'template_state_runtime_projection_invalid')
+    accepted_prefix = prefix
+    if runtime_original:
+        from dataclasses import replace
+        prefix = replace(prefix, active=frozenset())
     receipt = chain.original_receipt
     def check():
         result = guard()
@@ -625,7 +630,7 @@ async def async_observe_accepted_state_bindings(hass, chain, program, *, guard,
             _need(False, 'template_state_synchronous_guard_required')
         _need(result is None or result is True, 'template_state_guard_rejected')
         _state_inputs(chain, state, **arguments)
-        _need(prefix == accepted_state_prefix(chain, program, input_state=state, **arguments),
+        _need(accepted_prefix == accepted_state_prefix(chain, program, input_state=state, **arguments),
               'template_state_accepted_head_changed')
     check()
     runtime = _StateRuntime(hass)
@@ -639,6 +644,7 @@ async def async_observe_accepted_state_bindings(hass, chain, program, *, guard,
     current = {p: r[0] for p, r in state.sources().items() if not p.startswith('.storage/')}
     _need(current in (original, proposed), 'template_state_physical_yaml_image_changed')
     position = 'original' if current == original else 'proposed'
+    _need(not runtime_original or position == 'original', 'template_state_original_projection_requires_original_yaml')
     first = sample_state_bindings(runtime, program, prefix, position, chain.accepted_documents())
     await asyncio.sleep(0)
     check()

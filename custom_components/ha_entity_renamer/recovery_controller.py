@@ -508,7 +508,10 @@ class RecoveryController:
                     guard=self.check, refresh=self.refresh, restored=True)
                 self.check()
                 result = _result(operation_id, fingerprint, 'rolled_back', 'restored_verified')
-                result['frozen_review'] = _yaml_frozen_review(session, restored=True)
+                # A partial inverse restores only an accepted prefix; it must
+                # not be presented as the full original forward review.
+                if session.record.phases == ('undone',) * len(session.record.plan.steps):
+                    result['frozen_review'] = _yaml_frozen_review(session, restored=True)
                 return result
             if (record.plan.required_scopes == ('registry', 'yaml')
                     or _own_registry_plan(preparations, record)) and record.restore_attempted is not False:

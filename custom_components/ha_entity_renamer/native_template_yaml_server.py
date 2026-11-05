@@ -605,11 +605,18 @@ class NativeTemplateYAMLServer:
             obj.prefix_recovery = _acknowledged_registry_prefix(record)
             from .native_template_prefix_recovery import complete_forward_unknown, complete_forward_unknown_scope
             obj.complete_unknown_recovery = complete_forward_unknown(record)
+            # Routing shape only. The actual original composition and full
+            # receipt chain must independently admit partial rollback below.
+            from .transaction import Record
+            restored_partial = (type(record) is Record and restored is True
+                and 0 < record.phases.count('undone') < len(record.phases)
+                and record.phases == (('undone',) * record.phases.count('undone')
+                    + ('pending',) * record.phases.count('pending')))
             _need(type(restored) is bool and record is not None and record.operation_id == operation_id
                   and record.plan.fingerprint == fingerprint
                   and ((restored and record.restore_attempted is True and record.direction == 'rollback'
                         and record.status == 'rolled_back'
-                        and record.phases == ('undone',) * len(record.plan.steps))
+                        and (record.phases == ('undone',) * len(record.plan.steps) or restored_partial))
                        or (not restored and record.direction == 'forward'
                            and ((record.status == 'applied'
                                  and record.phases == ('verified',) * len(record.plan.steps))
@@ -656,6 +663,9 @@ class NativeTemplateYAMLServer:
                                                    obj.receipt, obj.digests)
             _need(not readonly.writable and readonly.active is None, 'readonly_required')
             obj.chain = readonly
+            if restored_partial:
+                from .native_template_prefix_recovery import unstarted_rollback_complete
+                _need(unstarted_rollback_complete(readonly, record), 'restored_prefix_unqualified')
             if obj.complete_unknown_recovery:
                 _need(complete_forward_unknown_scope(readonly, record), 'complete_unknown_profile_unsupported')
             obj._install()
