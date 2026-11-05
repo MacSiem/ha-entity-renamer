@@ -86,21 +86,59 @@ class _ExactFieldsPolicy:
         self.chain, self.evidence, self.original, self.guard = chain, evidence, original, guard
         self.receipt = chain.original_receipt
         self.state = chain.reconstruct_inputs()
+        self.lease = None
+        self.activation_hooks = None
         self.source_hashes_json = None
         self.check()
 
+    def bind_lease(self, lease):
+        """Follow only this live task's receipted inactive prefix."""
+        from .powercalc_activation_lease import PowercalcActivationLease
+        _need(type(lease) is PowercalcActivationLease and lease.chain is self.chain
+              and lease.receipt is self.receipt and lease.evidence is self.evidence
+              and lease.original is self.original and self.lease is None
+              and self.state.same_evidence(lease.state), 'same_live_lease_required')
+        lease._task_check()
+        lease.check()
+        self.lease = lease
+
+    @property
+    def current_state(self):
+        if self.activation_hooks is not None:
+            return self.activation_hooks.state()
+        return self.state if self.lease is None else self.lease.state
+
+    def bind_activation(self, hooks):
+        from .powercalc_yaml_adapter import _PowercalcYAMLHooks
+        _need(type(hooks) is _PowercalcYAMLHooks and self.lease is not None
+              and hooks.adapter.phase.policy is self and hooks.adapter.phase.lease is self.lease
+              and hooks.intent is self.lease.pending and hooks.adapter.chain is self.chain
+              and self.activation_hooks is None, 'typed_activation_inputs_required')
+        self.lease._task_check()
+        self.lease.check()
+        self.activation_hooks = hooks
+
+    def end_activation(self, hooks):
+        self.lease._task_check()
+        _need(self.activation_hooks is hooks, 'activation_inputs_changed')
+        self.activation_hooks = None
+
     def check(self):
         _guard(self.guard)
-        _need(self.chain.active is None
-              and self.chain.original_receipt is self.receipt
-              and self.state.same_evidence(self.chain.reconstruct_inputs()), 'same_chain_head')
+        _need(self.chain.original_receipt is self.receipt, 'same_original_required')
+        if self.lease is None:
+            _need(self.chain.active is None
+                  and self.state.same_evidence(self.chain.reconstruct_inputs()), 'same_chain_head')
+        else:
+            _need(self.lease.chain is self.chain, 'lease_chain_changed')
+            self.lease.check()
         self.evidence.assert_receipt(self.receipt)
 
     def prove(self, vendor):
         # Executor-only source fence. Guard/loop checks run in scope.check on
         # the event loop before and after this job, never inside the executor.
         from .native_utility_setup_audit import _SOURCES
-        _accepted_sources(self.chain, self.state, self.receipt)
+        _accepted_sources(self.chain, self.current_state, self.receipt)
         pins = dict(_SOURCES[self.receipt.version])
         pins.update(vendor.ha_pins)
         self.source_hashes_json = _json({'vendor': _pins(), 'ha': pins})
@@ -120,7 +158,7 @@ class _ExactFieldsOwner:
                       (self.integration.IntegrationSensor,
                        '_schedule_max_sub_interval_exceeded_if_state_is_numeric'))
         self.old = {name: entity for name, entity in scope.old.items() if type(entity) is self.cls}
-        _need(len(self.old) == 3, 'exact_integral_slice')
+        _need(len(self.old) in (2, 3), 'exact_integral_slice')
         self.rows, self.targets, self.open, self.complete = {}, {}, {}, set()
         self.transferred = set()
         self.bound = None
@@ -168,7 +206,14 @@ class _ExactFieldsOwner:
               and scope.hass.config_entries is owner.source_entry_manager,
               'exact_physical_managers_changed')
         active = owner.active_sources()
+        transition = getattr(scope, 'source_transition', None)
+        if transition is not None:
+            from .powercalc_source_transition import PowercalcSourceTransition
+            _need(type(transition) is PowercalcSourceTransition, 'typed_source_transition_required')
         for name, original in owner.sources.items():
+            if transition is not None and transition.handles_input(name):
+                transition.check_exact_source(name, original, owner)
+                continue
             row = registry.async_get(name)
             _need(row is not None and _OriginalPhysicalSource.from_row(row) == original,
                   'exact_physical_source_changed')
@@ -316,7 +361,7 @@ class _ExactFieldsOwner:
         scope = self.scope
         bindings = {'operation_id': self.policy.chain.operation_id,
                     'plan_fingerprint': self.policy.chain.plan.fingerprint,
-                    'root_id': self.policy.chain.root_id, 'head': self.policy.state.head,
+                    'root_id': self.policy.chain.root_id, 'head': self.policy.current_state.head,
                     'evidence_sha256': scope.evidence.sha256,
                     'vendor_code_process_ids': [id(code) for code in self.vc],
                     'ha_code_process_ids': [id(code) for code in self.hc],
@@ -324,7 +369,7 @@ class _ExactFieldsOwner:
                                                   row.source_registry_id] for row in self.bound.rows]}
         _need(type(self.policy.source_hashes_json) is bytes, 'source_proof_required')
         return PowercalcExactFieldsReceipt(scope.evidence.sha256, scope.original.structural_token,
-            self.policy.state.head, self.policy.source_hashes_json, _json(bindings),
+            self.policy.current_state.head, self.policy.source_hashes_json, _json(bindings),
             _json([self.rows[name]['receipt'] for name in sorted(self.rows)]))
 
     def annotate(self, error):

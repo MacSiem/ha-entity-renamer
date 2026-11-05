@@ -223,7 +223,21 @@ def encode_change(change):
     from .helper_transaction import PreparedHelper
     from .yaml_transaction import PreparedYAML
     from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML
-    kinds = {PreparedMixedTemplateStateYAML: 'template_mixed_state_yaml', PreparedTemplateStateYAML: 'template_state_yaml', PreparedRegistryChange: 'registry', PreparedDashboard: 'dashboard', PreparedEnergy: 'energy', PreparedHelper: 'helper', PreparedYAML: 'yaml'}
+    if type(change).__module__ == __package__ + '.powercalc_group_metadata':
+        from .powercalc_group_metadata import PreparedPowercalcGroupMetadata
+        if type(change) is not PreparedPowercalcGroupMetadata:
+            raise ValueError('unsupported_prepared_change')
+        change.plan()
+        return canonical(json.loads(json.dumps({'kind': 'powercalc_group_metadata',
+            'data': asdict(change)}, allow_nan=False)))[0]
+    if type(change).__module__ == __package__ + '.powercalc_prepared_yaml':
+        from .powercalc_prepared_yaml import PreparedPowercalcYAML
+        if type(change) is not PreparedPowercalcYAML:
+            raise ValueError('unsupported_prepared_change')
+        change.checked()
+        return canonical(json.loads(json.dumps({'kind': 'powercalc_yaml',
+            'data': asdict(change)}, allow_nan=False)))[0]
+    kinds = { PreparedMixedTemplateStateYAML: 'template_mixed_state_yaml', PreparedTemplateStateYAML: 'template_state_yaml', PreparedRegistryChange: 'registry', PreparedDashboard: 'dashboard', PreparedEnergy: 'energy', PreparedHelper: 'helper', PreparedYAML: 'yaml'}
     if type(change) in (PreparedYAML, PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
         change.checked()
     if type(change) is PreparedHelper:
@@ -241,6 +255,14 @@ def decode_change(row):
     if type(row) is not dict or set(row) != {'kind', 'data'} or type(row['data']) is not dict:
         raise ValueError('invalid_prepared_change')
     data = deepcopy(row['data'])
+    if row['kind'] == 'powercalc_group_metadata':
+        from .powercalc_group_metadata import PreparedPowercalcGroupMetadata
+        change = PreparedPowercalcGroupMetadata(**data)
+        change.plan()
+        return change
+    if row['kind'] == 'powercalc_yaml':
+        from .powercalc_prepared_yaml import decode_powercalc_yaml
+        return decode_powercalc_yaml(data)
     if row['kind'] == 'template_mixed_state_yaml':
         from .native_template_state_yaml import decode_mixed_template_state_yaml
         return decode_mixed_template_state_yaml(data)

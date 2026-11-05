@@ -279,7 +279,17 @@ class NativeRegistryIO:
                 kwargs['suggested_object_id'] = target['suggested_object_id']
                 updated = registry._async_update_entity(source['entity_id'], **kwargs)
             else:
-                updated = registry.async_update_entity(source["entity_id"], **kwargs)
+                from .native_registry_transition import _powercalc_group_suggested_move
+                if _powercalc_group_suggested_move(prepared.before, prepared.after):
+                    from .powercalc_group_own_id import PowercalcGroupOwnID
+                    capability = getattr(self, '_powercalc_group_capability', None)
+                    if type(capability) is not PowercalcGroupOwnID:
+                        raise RegistryConflict('powercalc_group_suggested_capability_required')
+                    capability.authorize_suggested(self, prepared, target)
+                    kwargs['suggested_object_id'] = target['suggested_object_id']
+                    updated = registry._async_update_entity(source['entity_id'], **kwargs)
+                else:
+                    updated = registry.async_update_entity(source["entity_id"], **kwargs)
         else:
             updated = registry.async_update_device(prepared.identity,
                                          name_by_user=target["name_by_user"])
@@ -537,6 +547,14 @@ class NativeRegistryBridge:
                 from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
                 if type(node) is NativeTemplateStateRegistryEffect:
                     node.abort_before_attempt()
+                elif type(node).__module__ == __package__ + '.powercalc_group_own_id':
+                    from .powercalc_group_own_id import PowercalcGroupOwnID
+                    if type(node) is PowercalcGroupOwnID:
+                        node.abort_before_attempt()
+                elif type(node).__module__ == __package__ + '.powercalc_source_transition':
+                    from .powercalc_source_transition import PowercalcSourceTransition
+                    if type(node) is PowercalcSourceTransition:
+                        node.abort_before_attempt()
                 raise
         # No await between fresh authorization/revision and one native mutation.
         if node is None:
@@ -544,17 +562,24 @@ class NativeRegistryBridge:
         else:
             from .native_helper_placeholder_effect import OwnHelperPlaceholder
             from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
-            if (type(node) not in (OwnHelperPlaceholder, NativeTemplateStateRegistryEffect) or node.io is not self.io
+            accepted = (OwnHelperPlaceholder, NativeTemplateStateRegistryEffect)
+            if type(node).__module__ == __package__ + '.powercalc_group_own_id':
+                from .powercalc_group_own_id import PowercalcGroupOwnID
+                accepted += (PowercalcGroupOwnID,)
+            if type(node).__module__ == __package__ + '.powercalc_source_transition':
+                from .powercalc_source_transition import PowercalcSourceTransition
+                accepted += (PowercalcSourceTransition,)
+            if (type(node) not in accepted or node.io is not self.io
                     or node.change != change or node.source != source['entity_id']
                     or node.target != target['entity_id']):
                 raise RegistryConflict('own_helper_effect_binding_mismatch')
             try:
                 stamp = node.mutate()
             except BaseException:
-                if type(node) is NativeTemplateStateRegistryEffect:
+                if type(node) is not OwnHelperPlaceholder:
                     await node.finish_failed_attempt()
                 raise
-            if type(node) is NativeTemplateStateRegistryEffect:
+            if type(node) is not OwnHelperPlaceholder:
                 self._mutation_node = node
                 try:
                     await node.finish_native()

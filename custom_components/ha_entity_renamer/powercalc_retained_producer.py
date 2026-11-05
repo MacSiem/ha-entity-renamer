@@ -207,9 +207,11 @@ class _RetainedProducerOwner:
             (event, name) for name in ('async_track_state_change_event', '_async_track_state_change_event',
                                       '_async_track_event', '_remove_listener',
                                       '_async_dispatch_entity_id_event')) + (
-            (HomeAssistant, 'async_create_task_internal'), (Entity, 'async_write_ha_state'))
+            (HomeAssistant, 'async_create_task_internal'), (Entity, 'async_write_ha_state'),
+            (event, '_async_state_filter'))
         self.bound = None
         self.bridges, self.active, self.tasks, self.new = {}, {}, set(), {}
+        self._issued_bridges, self._retired_bridges = {}, set()
         self.observed_native_tasks = set()
         self.phase = {name: 'native_old' for name in self.old}
         self.emitted, self.seen = {}, {}
@@ -241,7 +243,7 @@ class _RetainedProducerOwner:
         self.dependencies, self.callbacks, self.inputs, self.identities, self.profiles = {}, {}, {}, {}, {}
         self.profile_data, self.source_fields, self.selector_data, self.semantics = {}, {}, {}, {}
         self.profile_specs = {}
-        graph = json.loads(self.scope.evidence.powercalc_sources.closed_graph_json)
+        graph = json.loads(self.scope.graph_sources.closed_graph_json)
         registry = self.scope.hass.data[er.DATA_REGISTRY]
         self.registry = registry
         active = {name: entity for bucket in self.scope.hass.data[ep.DATA_ENTITY_PLATFORM].values()
@@ -296,7 +298,14 @@ class _RetainedProducerOwner:
         if self.bound is None:
             return
         _need(self.scope.hass.data[er.DATA_REGISTRY] is self.registry, 'input_registry_changed')
+        transition = getattr(self.scope, 'source_transition', None)
+        if transition is not None:
+            from .powercalc_source_transition import PowercalcSourceTransition
+            _need(type(transition) is PowercalcSourceTransition, 'typed_source_transition_required')
         for name, (entity, cls, platform, identity) in self.inputs.items():
+            if transition is not None and transition.handles_input(name):
+                transition.check_input(name, entity, cls, platform, identity)
+                continue
             row = self.registry.async_get(name)
             _need(row is not None and _OriginalPhysicalSource.from_row(row) == identity
                   and type(entity) is cls and entity.entity_id == name and entity.hass is self.scope.hass
@@ -306,6 +315,8 @@ class _RetainedProducerOwner:
         for name, old in self.old.items():
             from .powercalc_source_binding import _dispatch_token
             row, uid, entry, source, profile, selector, factory = self.identities[name]
+            if transition is not None:
+                source = transition.bound_producer_source(name, source, old._source_entity)
             _need(old.registry_entry is row and old.unique_id == uid
                   and old.platform.config_entry is entry and old._source_entity is source
                   and old._power_profile is profile and old._sub_profile_selector is selector
@@ -329,11 +340,15 @@ class _RetainedProducerOwner:
             _need(factory._prepare is self.scope.vendor.classes['PowerCalculatorStrategyFactory']._prepare,
                   'native_factory_instance_dispatch_changed')
             strategy = old._strategy_instance
+            original_source = next(row.source for row in self.bound.rows if row.entity_id == name)
+            expected_source = (transition.expected_source(name, original_source)
+                               if transition is not None else original_source)
             _need(type(strategy) is self.scope.vendor.classes['LutStrategy']
                   and strategy._source_entity is source and strategy._profile is profile
                   and strategy._lut_registry is factory._lut_registry
-                  and source.entity_id == next(row.source for row in self.bound.rows if row.entity_id == name)
-                  and source.entity_entry is self.registry.async_get(source.entity_id),
+                  and source.entity_id == expected_source
+                  and (source.entity_entry is self.registry.async_get(source.entity_id)
+                       or transition is not None and transition.check_pending_source(name, source)),
                   'actual_native_strategy_graph')
             _need((old._multiply_factor, frozenset(old._off_states), old._rounding_digits,
                    old._ignore_unavailable_state, old._availability_entity,
@@ -343,7 +358,9 @@ class _RetainedProducerOwner:
                   and not old._sensor_config.get('power_update_interval')
                   and old._sensor_config.get('unavailable_power') is None,
                   'original_producer_semantics_changed')
-            _need((source.entity_id, source.unique_id, source.domain, source.object_id) == self.source_fields[name]
+            expected_fields = (transition.expected_source_fields(name, self.source_fields[name])
+                               if transition is not None else self.source_fields[name])
+            _need((source.entity_id, source.unique_id, source.domain, source.object_id) == expected_fields
                   and (_json(profile._base_json_data), _json(profile._sub_profiles)) == self.profile_data[name],
                   'original_profile_or_source_data_changed')
             selected = dict(profile._base_json_data)
@@ -480,16 +497,31 @@ class _RetainedProducerOwner:
               and remover.args[0] is self.scope.hass
               and remover.args[1] is self.event._KEYED_TRACK_STATE_CHANGE, 'actual_bridge_remover')
         job, callbacks = remover.args[3:]
-        self.bridges[name] = _Bridge(bridge, remover, job, callbacks, self.dependencies[name])
-        _need(type(job) is HassJob and job.job_type is HassJobType.Callback and job.target is bridge,
+        row = self.bridges[name] = _Bridge(bridge, remover, job, callbacks, self.dependencies[name])
+        data = self.scope.hass.data.get(self.event._TRACK_STATE_CHANGE_DATA)
+        _need(type(job) is HassJob and job.job_type is HassJobType.Callback and job.target is bridge
+              and type(data) is self.event._KeyedEventData and data.callbacks is callbacks,
               'actual_bridge_native_job')
+        # Preserve the exact native issuance independently of mutable rows and
+        # of any later replacement of hass.data's keyed tracker.
+        self._issued_bridges[name] = (row, remover, job, bridge, callbacks, data,
+                                      data.listener, self.event._KEYED_TRACK_STATE_CHANGE, None, None)
+        from .yaml_runtime_observer import _registered_bus_remove
+        (bus_job, event_filter), _ = _registered_bus_remove(self.scope.hass, data.listener, 'state_changed')
+        for actual, expected in ((bus_job.target, self.event._async_dispatch_entity_id_event),
+                                 (event_filter, self.event._async_state_filter)):
+            _need(type(actual) is partial and actual.func is expected and not actual.keywords
+                  and actual.args == (self.scope.hass, callbacks), 'bridge_dispatch_changed')
+        self._issued_bridges[name] = (row, remover, job, bridge, callbacks, data,
+                                      data.listener, self.event._KEYED_TRACK_STATE_CHANGE, bus_job, event_filter)
         self.phase[name] = 'retained'
         self.operations.append(['bridge_add', name, id(job), id(remover)])
 
     def _poison(self, error):
         if self.poison is None:
-            reason = str(error) if type(error) is ValueError and str(error).startswith(
-                'powercalc_retained_producer_') else type(error).__name__
+            message = str(error)
+            reason = message if message.startswith(('powercalc_retained_producer_',
+                'powercalc_source_transition_')) else type(error).__name__
             self.poison = reason
         if self.scope.error is None:
             self.scope.error = 'retained_producer_refused'
@@ -581,10 +613,21 @@ class _RetainedProducerOwner:
         if frame.f_locals.get('self') is not self.scope.hass.bus:
             return
         data = frame.f_locals.get('event_data')
+        transition = getattr(self.scope, 'source_transition', None)
+        if transition is not None:
+            from .powercalc_source_transition import PowercalcSourceTransition
+            _need(type(transition) is PowercalcSourceTransition, 'typed_source_transition_required')
+            if transition.observe_producer_fire(self, frame, data):
+                return
         if type(data) is not dict or data.get('entity_id') not in getattr(self, 'inputs', {}):
             return
         if frame.f_locals.get('event_type') != 'state_changed':
             return  # Native W listeners do not consume state_reported.
+        if transition is not None and transition.phase.lease._cleanup_owner is transition:
+            # This is a new independent sample, not the issued rename's
+            # REMOVE/ADD. It needs the ordinary live authorization fence.
+            from .powercalc_runtime_observer import _guard
+            _guard(transition.phase.lease.guard)
         name = data['entity_id']
         owners = [producer for producer, deps in self.dependencies.items()
                   if name in deps and self.phase[producer] == 'retained']
@@ -594,11 +637,16 @@ class _RetainedProducerOwner:
         _need(frame.f_locals.get('event_type') == 'state_changed', 'only_actual_changed_input')
         parent = frame.f_back
         state = data.get('new_state')
-        _need(parent is not None and parent.f_code is self.hc[0]
-              and parent.f_locals.get('self') is self.scope.hass.states
-              and parent.f_locals.get('state_changed_data') is data
-              and parent.f_locals.get('state') is state and type(state) is State
-              and state is self.scope.hass.states.get(name), 'native_statemachine_emission')
+        checks = (parent is not None, parent is not None and parent.f_code is self.hc[0],
+                  parent is not None and parent.f_locals.get('self') is self.scope.hass.states,
+                  parent is not None and parent.f_locals.get('state_changed_data') is data,
+                  parent is not None and parent.f_locals.get('state') is state,
+                  type(state) is State, state is self.scope.hass.states.get(name))
+        if not all(checks):
+            transition = getattr(self.scope, 'source_transition', None)
+            _need(False, 'native_statemachine_emission:' +
+                  ('mapped_old' if transition is not None and name == transition.old else 'other') + ':' +
+                  ''.join('1' if item else '0' for item in checks))
         ancestor = parent.f_back
         emitter = None
         try:
@@ -647,9 +695,19 @@ class _RetainedProducerOwner:
             del frame
         _need(keyed and bus and job, 'actual_keyed_bus_dispatch')
 
-    def _bridge(self, name, event):
+    def _bridge(self, name, event, *, bridge=None):
         self.check()
-        bridge = self.bridges[name]
+        transition = getattr(self.scope, 'source_transition', None)
+        if transition is not None:
+            from .powercalc_source_transition import PowercalcSourceTransition
+            _need(type(transition) is PowercalcSourceTransition, 'typed_source_transition_required')
+            if transition.consume_structural(self, name, event, bridge):
+                return
+        if bridge is None:
+            bridge = self.bridges[name]
+        else:
+            _need(transition is not None and transition.owns_bridge(self, name, bridge),
+                  'typed_target_bridge_required')
         self._dispatch(bridge, event)
         data = event.data
         emitted = self.emitted.get(id(data))
@@ -760,19 +818,56 @@ class _RetainedProducerOwner:
                 del self.active[name]
 
     def _remove_bridge(self, name):
-        bridge = self.bridges.get(name)
-        if bridge is None or bridge.removed:
+        from homeassistant.core import HassJob, HassJobType
+        from .yaml_runtime_observer import _registered_bus_remove
+        issued = self._issued_bridges.get(name)
+        if issued is None or name in self._retired_bridges:
             return
-        # Cleanup uses the exact native remover/membership, even if guard or
-        # physical inputs drifted. It never adopts/removes a foreign callback.
+        row, remover, job, callback, callbacks, original, listener, tracker, bus_job, event_filter = issued
         unchanged(self.hrefs, self.hm, self.hc)
-        _need(all(sum(job is bridge.job for job in bridge.callbacks.get(key, ())) == 1
-                  for key in bridge.dependencies), 'bridge_membership_changed')
-        bridge.remover()
-        bridge.removed = True
-        _need(all(all(job is not bridge.job for job in members)
-                  for members in bridge.callbacks.values()), 'bridge_remove_failed')
-        self.operations.append(['bridge_remove', name, id(bridge.job), id(bridge.remover)])
+        dependencies = row.dependencies
+        _need(type(remover) is partial and remover.func is self.event._remove_listener
+              and not remover.keywords and len(remover.args) == 5
+              and remover.args[0] is self.scope.hass and remover.args[1] is tracker
+              and set(remover.args[2]) == set(dependencies)
+              and len(tuple(remover.args[2])) == len(dependencies)
+              and remover.args[3] is job and remover.args[4] is callbacks
+              and type(job) is HassJob and job.job_type is HassJobType.Callback and job.target is callback
+              and all(sum(item is job for item in callbacks.get(key, ())) == 1 for key in dependencies),
+              'bridge_issuance_unrecoverable')
+        current = self.scope.hass.data.get(tracker.key)
+        intact = (self.bridges.get(name) is row and not row.removed and row.remover is remover and row.job is job
+                  and row.callback is callback and row.callbacks is callbacks
+                  and current is original and original.callbacks is callbacks and original.listener is listener
+                  and bus_job is not None and event_filter is not None)
+        if intact:
+            try:
+                (actual_job, actual_filter), _ = _registered_bus_remove(self.scope.hass, listener, 'state_changed')
+                intact = actual_job is bus_job and actual_filter is event_filter
+            except (ValueError, KeyError, TypeError, AttributeError):
+                intact = False
+        if intact:
+            remover()
+        else:
+            # A native remover's last-job path pops hass.data[tracker.key].
+            # Remove only our issued jobs from the old actual dispatcher; a
+            # rebound tracker and its callbacks remain untouched.
+            for key in dependencies:
+                members = callbacks[key]
+                members.remove(job)
+                if not members:
+                    del callbacks[key]
+            if not callbacks:
+                _need(bus_job is not None and event_filter is not None, 'bridge_original_listener_unproven')
+                (actual_job, actual_filter), _ = _registered_bus_remove(self.scope.hass, listener, 'state_changed')
+                _need(actual_job is bus_job and actual_filter is event_filter, 'bridge_original_listener_changed')
+                listener()
+        self._retired_bridges.add(name)
+        row.removed = True
+        _need(all(all(item is not job for item in members) for members in callbacks.values()),
+              'bridge_remove_failed')
+        self.operations.append(['bridge_remove', name, id(job), id(remover)])
+        _need(intact, 'bridge_tracker_changed')
 
     def _handoff(self, entity, frame, phase):
         from homeassistant.helpers.entity import EntityPlatformState
@@ -793,6 +888,9 @@ class _RetainedProducerOwner:
                   and set(frame.f_locals.get('entities_to_track', ())) == set(self.dependencies[name]),
                   'prepared_tracking_dependencies')
             self._remove_bridge(name)  # Atomic synchronous handoff to native registration.
+            transition = getattr(self.scope, 'source_transition', None)
+            if transition is not None and transition.handles_producer(name):
+                transition.retire_target(name)
             _need(name not in self.active
                   and all(name not in emission[4] for emission in self.emitted.values()),
                   'pending_calculation_at_native_handoff')
@@ -824,12 +922,12 @@ class _RetainedProducerOwner:
             self._native_tracking(current[name], self.dependencies[name])
         bindings = {'operation_id': self.scope.exact_owner.policy.chain.operation_id,
                     'root_id': self.scope.exact_owner.policy.chain.root_id,
-                    'head': self.scope.exact_owner.policy.state.head,
+                    'head': self.scope.exact_owner.policy.current_state.head,
                     'inputs': {name: vars(binding[3]) for name, binding in self.inputs.items()},
                     'vendor_code_process_ids': [id(code) for code in self.vc],
                     'ha_code_process_ids': [id(code) for code in self.hc]}
         return PowercalcRetainedProducerReceipt(self.scope.evidence.sha256,
-            self.scope.original.structural_token, self.scope.exact_owner.policy.state.head,
+            self.scope.original.structural_token, self.scope.exact_owner.policy.current_state.head,
             self.scope.exact_owner.policy.source_hashes_json, _json(bindings),
             _json(self.operations), tuple(self.results), bool(self.results))
 

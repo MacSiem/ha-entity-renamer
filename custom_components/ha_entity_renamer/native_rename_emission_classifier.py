@@ -369,6 +369,8 @@ class NativeRenameEmissions:
         self.queued = __version__ != '2025.6.0'
         self.error = None
         self.failed_handoff = self.failed_handoff_drained = False
+        self.powercalc_failure_owner = None
+        self.failed_powercalc = False
         self.closed, self.attempted, self.in_mutate, self.finished = False, False, False, False
         self.emissions, self.pending, self.dispatches, self.constructors = [], [], {}, {}
         self.keyed, self.tasks, self.source_runs = {}, {}, 0
@@ -987,12 +989,92 @@ class NativeRenameEmissions:
             # This does not establish a mutation receipt or permit another API.
             if self.automation_graph is not None and self._failed_handoff_complete():
                 self.failed_handoff = True
+            elif self._failed_powercalc_started():
+                # Preserve only this already-issued native delivery.  This is
+                # not a mutation stamp, receipt or authority to retry.
+                self.failed_powercalc = True
             else:
                 self._poison('mutation_uncertain')
                 self.close()
             raise
         finally:
             self.in_mutate = False
+
+    def bind_powercalc_failure_owner(self, owner):
+        from .powercalc_source_transition import PowercalcSourceTransition
+        self._owner_guard()
+        _need(type(owner) is PowercalcSourceTransition and owner.witness is self
+              and owner.io is self.io and owner.change is self.change
+              and owner.live and owner.phase.scope.source_transition is owner
+              and self.powercalc_failure_owner is None and not self.attempted,
+              'powercalc_failure_owner_binding')
+        self.powercalc_failure_owner = owner
+
+    def _failed_powercalc_started(self):
+        """Admit only the registry event actually emitted by this IO frame."""
+        try:
+            from .powercalc_source_transition import PowercalcSourceTransition
+            self._owner_guard(authorize=False)
+            owner = self.powercalc_failure_owner
+            self._check()
+            event = self._registry_emission()
+            row = self.registry.async_get(self.target_id)
+            _need(type(owner) is PowercalcSourceTransition and owner.witness is self
+                  and owner.live and owner.attempted and owner.phase.scope.source_transition is owner
+                  and self.attempted and self.mutation is None and self.source_handoff is None
+                  and event is not None and self._data_current(event)
+                  and row is not None and row.id == self.change.identity
+                  and self.registry.async_get(self.source_id) is None,
+                  'powercalc_failed_effect_unproven')
+            return True
+        except BaseException:
+            return False
+
+    async def finish_failed_powercalc(self):
+        """Finish only genuine callbacks after an uncertain direct effect."""
+        cancelled = False
+
+        async def drain(awaitable):
+            nonlocal cancelled
+            future = asyncio.ensure_future(awaitable)
+            while not future.done():
+                try:
+                    await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception:
+                    break
+            return future.result()
+
+        try:
+            self._owner_guard(authorize=False)
+            _need(self.failed_powercalc and self._failed_powercalc_started(),
+                  'powercalc_failed_delivery_unavailable')
+            await drain(self.io.settle(self.change))
+            while True:
+                self._check()
+                tasks = [task for task in self.tasks if not task.done()]
+                if tasks:
+                    await drain(asyncio.gather(*(asyncio.shield(task) for task in tasks)))
+                    continue
+                self.wake = self.loop.create_future()
+                if self._pending_dispatches():
+                    await drain(self.wake)
+                    self.wake = None
+                    continue
+                self.wake = None
+                break
+            _need(self.source_runs == 1 and len(self.tasks) == 1
+                  and all(task.done() and not task.cancelled() and task.exception() is None
+                          and row[2] for task, row in self.tasks.items())
+                  and len(self.emissions) == 3 and all(item.dispatched for item in self.emissions)
+                  and {item.phase for item in self.emissions} == {'registry', 'remove', 'add'},
+                  'powercalc_failed_delivery_unconfirmed')
+            if cancelled:
+                raise asyncio.CancelledError
+        finally:
+            self._poison('mutation_uncertain')
+            self.close()
 
     def _failed_handoff_complete(self):
         """Narrow read-only admission, never clearing an observer failure."""
@@ -1089,6 +1171,22 @@ class NativeRenameEmissions:
         return pending
 
     async def finish(self):
+        cancelled = False
+
+        async def drain(awaitable):
+            nonlocal cancelled
+            if self.powercalc_failure_owner is None:
+                return await awaitable
+            future = asyncio.ensure_future(awaitable)
+            while not future.done():
+                try:
+                    await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception:
+                    break
+            return future.result()
+
         try:
             # Revocation cannot skip draining our already-issued native call.
             # The caller authorization fence runs after physical completion.
@@ -1098,16 +1196,16 @@ class NativeRenameEmissions:
             self._check()
             # Existing UUID-scoped source fence, supplemented by actual eager
             # Task objects captured at PY_START even if all_tasks misses them.
-            await self.io.settle(self.change)
+            await drain(self.io.settle(self.change))
             while True:
                 self._check()
                 tasks = [task for task in self.tasks if not task.done()]
                 if tasks:
-                    await asyncio.gather(*(asyncio.shield(task) for task in tasks))
+                    await drain(asyncio.gather(*(asyncio.shield(task) for task in tasks)))
                     continue
                 self.wake = self.loop.create_future()
                 if self._pending_dispatches():
-                    await self.wake
+                    await drain(self.wake)
                     self.wake = None
                     continue
                 self.wake = None
@@ -1128,6 +1226,8 @@ class NativeRenameEmissions:
                   and self.platform.entities.get(self.target_id) is self.source
                   and self.hass.states.get(self.target_id) is not None
                   and self.hass.states.get(self.source_id) is None, 'final_source_readback')
+            if cancelled:
+                raise asyncio.CancelledError
             # No await separates the empty own-dispatch scan, caller fence,
             # binding recheck and retirement. Native callbacks never run guard.
             self._owner_guard()

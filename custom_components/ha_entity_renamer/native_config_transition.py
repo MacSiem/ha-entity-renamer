@@ -101,7 +101,8 @@ def prepared_helper_digest(prepared):
     from a substituted preparation is no evidence of its original provenance.
     No second full native baseline is stored in PreparedHelper.
     """
-    if type(prepared) is not PreparedHelper:
+    from .powercalc_group_metadata import PreparedPowercalcGroupMetadata
+    if type(prepared) not in (PreparedHelper, PreparedPowercalcGroupMetadata):
         _fail('preparation_invalid')
     payload = {'before': prepared.before, 'after': prepared.after,
                'mapping': prepared.mapping}

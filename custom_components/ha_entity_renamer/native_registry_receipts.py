@@ -30,6 +30,7 @@ from .native_registry_transition import (
 )
 from .helper_native import NativeConfigMutation
 from .helper_transaction import PreparedHelper
+from .powercalc_group_metadata import PreparedPowercalcGroupMetadata, assert_original_group
 from .native_config_transition import (
     NativeConfigEffectAudit, prepared_helper_digest, validate_config_transition,
     _projection as _config_projection,
@@ -44,6 +45,18 @@ if TYPE_CHECKING:
 
 KEYS = ('core.entity_registry', 'core.device_registry', 'core.config_entries')
 MAX_EVENTS = 4096  # 584 forward + reverse steps: 2337 events, including root.
+
+
+def _is_powercalc_yaml(change):
+    if type(change).__module__ != __package__ + '.powercalc_prepared_yaml':
+        return False
+    from .powercalc_prepared_yaml import PreparedPowercalcYAML
+    return type(change) is PreparedPowercalcYAML
+
+
+def _assert_powercalc_yaml(chain, change):
+    from .powercalc_prepared_yaml import assert_powercalc_yaml_composition
+    assert_powercalc_yaml_composition(chain, change)
 
 
 class RegistryReceiptError(ValueError):
@@ -223,7 +236,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         for step in plan.steps:
             if step.caused_by:
                 _fail('gap_native_listeners')
-            if step.adapter not in ('registry', 'helpers', 'yaml'):
+            if step.adapter not in ('registry', 'helpers', 'yaml', 'energy'):
                 _fail({'helper': 'gap_config_entry_mapping', 'yaml': 'gap_yaml_predecessor',
                        'dashboard': 'gap_nonnative_predecessor',
                        'energy': 'gap_nonnative_predecessor'}.get(step.adapter, 'gap_unknown_predecessor'))
@@ -247,12 +260,19 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             if step.adapter in ('helpers', 'yaml') and _digest(original_payload) != digest:
                 _fail('preparation_binding_invalid')
             change = decode_change(original_payload)
+            from .energy_native import PreparedEnergy
             expected_type = {'helpers': PreparedHelper, 'yaml': PreparedYAML,
-                             'registry': PreparedRegistryChange}[step.adapter]
+                             'registry': PreparedRegistryChange, 'energy': PreparedEnergy}[step.adapter]
             if (type(change) is not expected_type
-                    and not (step.adapter == 'yaml' and type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML))):
+                    and not (step.adapter == 'helpers' and type(change) is PreparedPowercalcGroupMetadata)
+                    and not (step.adapter == 'yaml' and (type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML)
+                                                        or _is_powercalc_yaml(change)))):
                 _fail('preparation_mismatch')
-            if (change.identity != step.identity
+            if step.adapter == 'energy':
+                if (step.identity != 'energy' or change.before.revision != step.before_revision
+                        or change.after_revision != step.after_revision):
+                    _fail('preparation_mismatch')
+            elif (change.identity != step.identity
                     or change.before_revision != step.before_revision
                     or change.after_revision != step.after_revision):
                 _fail('preparation_mismatch')
@@ -261,16 +281,23 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                     _fail('preparation_mismatch')
                 binding = {'ref': step.prepared_ref, 'digest': digest,
                            'registry_digest': prepared_registry_digest(change)}
+            elif step.adapter == 'energy':
+                from .powercalc_energy_receipts import validate_prepared_energy
+                validate_prepared_energy(self, change)
+                binding = {'ref': step.prepared_ref, 'digest': digest,
+                           'energy_digest': _digest(json.loads(_json(asdict(change))))}
             elif step.adapter == 'yaml':
                 change.checked()
                 if type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
                     assert_state_yaml_composition(self, change)
+                if _is_powercalc_yaml(change):
+                    _assert_powercalc_yaml(self, change)
                 if change.receipt != receipt:
                     _fail('yaml_original_receipt_mismatch')
                 binding = {'ref': step.prepared_ref, 'digest': digest,
                            'yaml_digest': _digest(json.loads(_json(asdict(change))))}
             else:
-                if type(change) is not PreparedHelper:
+                if type(change) not in (PreparedHelper, PreparedPowercalcGroupMetadata):
                     _fail('preparation_mismatch')
                 entry_id = change.before['identity']['entry_id']
                 if original_config is None:
@@ -288,6 +315,11 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 self._yaml_evidence = (_freeze_json(original_payload), _freeze_json(binding), deepcopy(change))
             self.changes.append(change)
             bindings.append(binding)
+        for change in self.changes:
+            if type(change) is PreparedPowercalcGroupMetadata:
+                assert_original_group(self, change)
+        if sum(step.adapter == 'energy' for step in plan.steps) > 1:
+            _fail('energy_step_duplicate')
         self.root = {'kind': 'registry_chain', 'schema': 1,
                      'operation_id': operation_id, 'fingerprint': plan.fingerprint,
                      'native_inputs': list(plan.native_inputs), 'bindings': bindings}
@@ -309,6 +341,29 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         self._cache = None  # Derived only from acknowledged immutable durable refs.
         self._setup_history = []
         self._setup_positions = {}
+        self._powercalc_preparation_snapshot = None
+        if self.yaml_index is not None and _is_powercalc_yaml(self.changes[self.yaml_index]):
+            # The constructor has already performed every semantic check on
+            # this exact ORIGINAL and all referenced preparations. Preserve
+            # a fully typed, signed-zero-sensitive immutable proof per chain;
+            # this is not a cache of native files, managers or runtime state.
+            refs = tuple(dict.fromkeys((plan.native_inputs[0], *(step.prepared_ref for step in plan.steps))))
+            self._powercalc_preparation_snapshot = tuple(
+                (ref, _freeze_json(self.preparations.plans[ref])) for ref in refs)
+            self._powercalc_original_objects = (self.plan, self.original_receipt, self.baseline)
+
+    def _powercalc_preparations_unchanged(self):
+        saved = self._powercalc_preparation_snapshot
+        if saved is None:
+            return False
+        self.preparations._ready()
+        if (self.plan is not self._powercalc_original_objects[0]
+                or self.original_receipt is not self._powercalc_original_objects[1]
+                or self.baseline is not self._powercalc_original_objects[2]
+                or any(not _exact_json_equal(self.preparations.plans.get(ref), row)
+                       for ref, row in saved)):
+            _fail('powercalc_original_preparation_changed')
+        return True
 
     @classmethod
     async def start(cls, store: RegistryReceiptStore, operation_id: str, plan: Plan,
@@ -324,7 +379,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             step = yaml_steps[-1]
             change = decode_change(store.preparations.resolve(
                 step.prepared_ref, prepared_digests[step.prepared_ref]))
-            if type(change) not in (PreparedYAML, PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
+            if (type(change) not in (PreparedYAML, PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML)
+                    and not _is_powercalc_yaml(change)):
                 _fail('preparation_mismatch')
             captured = capture_yaml_original_metadata(receipt, change)
             if yaml_original_metadata is not None and canonical(yaml_original_metadata)[0] != captured:
@@ -378,7 +434,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                   'direction': direction, 'phases': list(context.record.phases),
                   'status': context.record.status}
         name = {'helpers': 'helper_digest', 'yaml': 'yaml_digest',
-                'registry': 'registry_digest'}[context.step.adapter]
+                'registry': 'registry_digest', 'energy': 'energy_digest'}[context.step.adapter]
         result[name] = binding[name]
         return result
 
@@ -399,6 +455,21 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             change = deepcopy(original_change)
             if type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
                 assert_state_yaml_composition(self, change)
+            if _is_powercalc_yaml(change) and not self._powercalc_preparations_unchanged():
+                _assert_powercalc_yaml(self, change)
+            return change
+        if self.plan.steps[index].adapter == 'energy':
+            from .energy_native import PreparedEnergy
+            binding = self.root['bindings'][index]
+            payload = self.preparations.resolve(binding['ref'], binding['digest'])
+            change = decode_change(payload)
+            if (_digest(payload) != binding['digest'] or type(change) is not PreparedEnergy
+                    or _digest(json.loads(_json(asdict(change)))) != binding['energy_digest']
+                    or change != self.changes[index]):
+                _fail('energy_preparation_mismatch')
+            if not self._powercalc_preparations_unchanged():
+                from .powercalc_energy_receipts import validate_prepared_energy
+                validate_prepared_energy(self, change)
             return change
         if self.plan.steps[index].adapter != 'helpers':
             binding = self.root['bindings'][index]
@@ -416,7 +487,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             _fail('preparation_binding_invalid')
         change = decode_change(payload)
         step = self.plan.steps[index]
-        if (type(change) is not PreparedHelper
+        if (type(change) not in (PreparedHelper, PreparedPowercalcGroupMetadata)
                 or prepared_helper_digest(change) != binding['helper_digest']
                 or change.before['identity']['entry_id'] != binding['entry_id']
                 or (change.identity, change.before_revision, change.after_revision)
@@ -461,7 +532,11 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         """Replay an already accepted immutable delta, never a fresh image."""
         from .native_helper_placeholder_receipts import validate_placeholder_receipt
         validate_placeholder_receipt(self, payload, change)
-        if type(change) is PreparedHelper:
+        from .powercalc_group_receipts import validate_group_receipt
+        validate_group_receipt(self, payload, change)
+        from .powercalc_source_receipts import validate_source_receipt
+        validate_source_receipt(self, payload, change)
+        if type(change) in (PreparedHelper, PreparedPowercalcGroupMetadata):
             return self._advance_config(states, payload, change)
         key = 'core.' + change.kind + '_registry'
         result = deepcopy(states)
@@ -501,7 +576,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             before.get('modified_at'), after.get('modified_at'))
         validate_registry_transition(source_content, result_content, change,
             version=self.version, direction=content_audit.direction,
-            native_effect_audit=content_audit)
+            native_effect_audit=content_audit,
+            powercalc_group_effect=payload.get('powercalc_group_own_id') is not None)
         source_summary = self._summary(states)
         for item_key in KEYS:
             identity = observed[item_key]['identity']
@@ -598,7 +674,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 events.append((key, row))
         while events:
             intents = [(key, row) for key, row in events
-                       if row['payload'].get('kind') in ('registry_intent', 'yaml_intent', 'helper_setup_intent')
+                       if row['payload'].get('kind') in ('registry_intent', 'yaml_intent', 'helper_setup_intent', 'powercalc_energy_intent')
                        and row['payload'].get('sequence') == sequence]
             if len(intents) != 1:
                 _fail('chain_graph_invalid')
@@ -647,7 +723,9 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                     or ikey != self._slot('intent', index, direction)):
                 _fail('intent_binding_mismatch')
             yaml = self.plan.steps[index].adapter == 'yaml'
-            if (intent['kind'] != ('yaml_intent' if yaml else 'registry_intent')
+            energy = self.plan.steps[index].adapter == 'energy'
+            expected_intent = 'yaml_intent' if yaml else ('powercalc_energy_intent' if energy else 'registry_intent')
+            if (intent['kind'] != expected_intent
                     or yaml and intent.get('input_source') != yaml_sources):
                 _fail('intent_binding_mismatch')
             context = self._historical_context(binding)
@@ -666,15 +744,21 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 _fail('chain_graph_invalid')
             _, rrow = matches[0]
             receipt = rrow['payload']
-            if (receipt.get('kind') != ('yaml_receipt' if yaml else 'registry_receipt')
+            expected_receipt = 'yaml_receipt' if yaml else ('powercalc_energy_receipt' if energy else 'registry_receipt')
+            if (receipt.get('kind') != expected_receipt
                     or receipt.get('intent') != [ikey, irow['digest']]
                     or receipt.get('binding') != binding
                     or receipt.get('sequence') != sequence
                     or receipt.get('source_chain') != head):
                 _fail('receipt_binding_mismatch')
-            if yaml:
+            if energy:
+                from .powercalc_energy_receipts import fold_energy_receipt
+                yaml_sources = fold_energy_receipt(self, states, yaml_sources, intent, receipt)
+            elif yaml:
                 if receipt.get('result') != self._summary(states):
                     _fail('foreign_native_delta')
+                from .powercalc_setup_receipts import validate_setup_receipt
+                validate_setup_receipt(self, receipt, self._original_change(index))
                 yaml_sources = fold_yaml_calls(self._original_change(index), yaml_sources,
                     receipt['calls'], direction, receipt.get('call_operation_ids'))
                 if receipt.get('input_result') != yaml_sources:
@@ -698,8 +782,37 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                                    tuple(binding['phases']), direction=binding['direction']),
                             binding['index'])
 
+    def _powercalc_reverse_order(self):
+        """Only a validated inverse root can select Powercalc's staged order."""
+        if self._powercalc_preparation_snapshot is None:
+            return None
+        from .powercalc_composition import PowercalcComposition
+        baseline, composition = self.preparations.resolve_composition(self.plan.native_inputs)
+        if type(composition) is not PowercalcComposition or baseline != self.baseline:
+            _fail('powercalc_reverse_composition_changed')
+        forward_positions = {i: 'forward' for i in range(len(self.plan.steps))}
+        heads = [head for head, positions in self._setup_positions.items() if positions == forward_positions]
+        if len(heads) != 1:
+            return None
+        key = _event_id(['powercalc_lifecycle_rollback', self.operation_id,
+                         self.plan.fingerprint, heads[0]])
+        row = self.store.read(key)
+        if row is None:
+            return None
+        from .powercalc_lifecycle import validate_reverse_root
+        validate_reverse_root(self, (key, row['digest']))
+        order = tuple(index for kind in ('registry', 'helpers', 'energy', 'yaml')
+                      for index in reversed(range(len(self.plan.steps)))
+                      if self.plan.steps[index].adapter == kind)
+        if (len(order) != len(self.plan.steps) or not order
+                or self.plan.steps[order[-1]].adapter != 'yaml'
+                or sum(step.adapter == 'yaml' for step in self.plan.steps) != 1):
+            _fail('powercalc_reverse_order_invalid')
+        return order
+
     def _phase_state(self, context, completed):
         forward = context.record.direction == 'forward'
+        special = None if forward else self._powercalc_reverse_order()
         for index, phase in enumerate(context.record.phases):
             if index == context.index:
                 expected = None if forward else 'forward'
@@ -711,8 +824,13 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 _fail('phase_receipt_mismatch')
             if forward and phase != ('verified' if index < context.index else 'pending'):
                 _fail('phase_order_mismatch')
-            if not forward and index > context.index and phase not in ('pending', 'undone'):
+            if not forward and special is None and index > context.index and phase not in ('pending', 'undone'):
                 _fail('phase_order_mismatch')
+        if special is not None:
+            at = special.index(context.index)
+            if any(context.record.phases[index] != ('undone' if pos < at else 'verified')
+                   for pos, index in enumerate(special) if index != context.index):
+                _fail('powercalc_reverse_phase_order_mismatch')
 
     def _observe(self, observations, states):
         if (type(observations) is not tuple or len(observations) != 3
@@ -837,7 +955,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                        after: tuple[RegistryRawObservation, ...], *,
                        mutation: NativeRegistryMutation | NativeConfigMutation,
                        audit: NativeRegistryEffectAudit | NativeConfigEffectAudit,
-                       placeholder_stamp=None, escrow_root_reference=None) -> tuple[str, str]:
+                       placeholder_stamp=None, escrow_root_reference=None,
+                       powercalc_source_effect=None, powercalc_group_effect=None) -> tuple[str, str]:
         """Persist receipt only from actual call rows + full independent reads.
 
         No effect is performed here. Caller performs fresh auth/lock checks after
@@ -856,7 +975,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             _fail('intent_binding_mismatch')
         self._observe(before, states)
         change = self._original_change(context.index)
-        config = type(change) is PreparedHelper
+        config = type(change) in (PreparedHelper, PreparedPowercalcGroupMetadata)
         kind = 'config' if config else change.kind
         identity = change.before['identity']['entry_id'] if config else change.identity
         key = 'core.config_entries' if config else 'core.' + change.kind + '_registry'
@@ -888,8 +1007,14 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             validate_config_transition(source, result, change, version=self.version,
                 direction=direction, native_effect_audit=audit, native_mutation=mutation)
         else:
+            from .powercalc_group_own_id import PowercalcGroupOwnID
+            group_effect = (type(powercalc_group_effect) is PowercalcGroupOwnID
+                            and powercalc_group_effect.change == change
+                            and powercalc_group_effect.mutation is mutation
+                            and powercalc_group_effect.stage == 'recorded')
             validate_registry_transition(source, result, change, version=self.version,
-                                         direction=direction, native_effect_audit=audit)
+                                         direction=direction, native_effect_audit=audit,
+                                         powercalc_group_effect=group_effect)
         for document, stamp in ((states[key]['document'], mutation.before_json),
                                 (result_states[key]['document'], mutation.after_json)):
             rows, index = self._row(document, kind, identity)
@@ -903,6 +1028,18 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             from .native_helper_placeholder_receipts import encode_placeholder_subeffect
             payload['own_helper_placeholder'] = encode_placeholder_subeffect(
                 placeholder_stamp, escrow_root_reference)
+        if powercalc_source_effect is not None:
+            from .powercalc_source_transition import PowercalcSourceTransition
+            if type(powercalc_source_effect) is not PowercalcSourceTransition:
+                _fail('powercalc_source_effect_required')
+            payload['powercalc_source_transition'] = list(
+                powercalc_source_effect.claim(self, intent, context, mutation))
+        if powercalc_group_effect is not None:
+            from .powercalc_group_own_id import PowercalcGroupOwnID
+            if type(powercalc_group_effect) is not PowercalcGroupOwnID:
+                _fail('powercalc_group_effect_required')
+            payload['powercalc_group_own_id'] = list(
+                powercalc_group_effect.claim(self, intent, context, mutation))
         payload['source_index'] = self._row(states[key]['document'], kind, identity)[1]
         payload['result_index'] = self._row(result_states[key]['document'], kind, identity)[1]
         if self._summary(self._advance(states, payload, change)) != self._summary(result_states):
@@ -916,7 +1053,19 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         # Preserve the existing validated-prefix cache: each ordinary completion
         # must not replay every prior multi-MiB document solely to update history.
         self._remember((result_states, ref[1], sequence + 1, next_completed, None))
+        if powercalc_source_effect is not None:
+            powercalc_source_effect.completed(ref)
+        if powercalc_group_effect is not None:
+            powercalc_group_effect.completed(ref)
         return ref
+
+    async def begin_powercalc_energy(self, context, observations, energy):
+        from .powercalc_energy_receipts import begin
+        return await begin(self, context, observations, energy)
+
+    async def complete_powercalc_energy(self, intent, context, before, after, witness):
+        from .powercalc_energy_receipts import complete
+        return await complete(self, intent, context, before, after, witness)
 
     async def begin_helper_setup(self, context, observations, *, lifecycle, entry_id):
         from .native_helper_setup_receipts import begin
@@ -935,8 +1084,15 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         return verify_authorization(self, authorization)
 
     def _initial_sources(self):
-        return initial_sources(self.original_receipt,
-                               self.root.get('yaml_original_metadata', {}))
+        sources = initial_sources(self.original_receipt, self.root.get('yaml_original_metadata', {}))
+        if any(step.adapter == 'energy' for step in self.plan.steps):
+            from .powercalc_composition import PowercalcComposition
+            baseline, composition = self.preparations.resolve_composition(self.plan.native_inputs)
+            if (baseline != self.baseline or type(composition) is not PowercalcComposition
+                    or composition.energy_original_physical is None):
+                _fail('powercalc_energy_original_missing')
+            sources['.storage/energy'] = list(composition.energy_original_physical)
+        return sources
 
     def matches_input_state(self, state, *, documents_only=False):
         """Compare all accepted evidence without allocating detached images.
@@ -964,12 +1120,15 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         # Follow the same validated sequence, never dict insertion order.
         rows = sorted((row['payload'] for row in self.store.rows.values()
                        if row['payload'].get('chain') == self.root_id
-                       and row['payload'].get('kind') == 'yaml_receipt'),
+                       and row['payload'].get('kind') in ('yaml_receipt', 'powercalc_energy_receipt')),
                       key=lambda payload: payload['sequence'])
         for payload in rows:
-            sources = fold_yaml_calls(self._original_change(payload['binding']['index']),
-                sources, payload['calls'], payload['binding']['direction'],
-                payload['call_operation_ids'])
+            if payload['kind'] == 'powercalc_energy_receipt':
+                sources['.storage/energy'] = list(payload['energy_after']['physical'])
+            else:
+                sources = fold_yaml_calls(self._original_change(payload['binding']['index']),
+                    sources, payload['calls'], payload['binding']['direction'],
+                    payload['call_operation_ids'])
         for key, value in states.items():
             path = '.storage/' + key
             sources[path][:4] = [value['sha256'], *value['identity']]
@@ -1071,7 +1230,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         self.active = RegistryIntent(ref)
         return self.active
 
-    async def complete_yaml(self, intent, context, before, after, *, calls):
+    async def complete_yaml(self, intent, context, before, after, *, calls, powercalc_setup=None):
         """After independent runtime verification; actual calls alone never prove runtime.
 
         No reload or manager mutation is allowed within this effect. Caller
@@ -1092,6 +1251,13 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                    'calls': canonical(json.loads(_json(list(calls))))[0],
                    'call_operation_ids': operations,
                    'input_result': result, 'result': self._summary(states)}
+        if powercalc_setup is not None:
+            from .powercalc_phase_session import PowercalcPhaseSession
+            if type(powercalc_setup) is not PowercalcPhaseSession:
+                _fail('powercalc_setup_live_phase_required')
+            payload['powercalc_setup'] = list(powercalc_setup.claim_activation(self, intent, context))
+        from .powercalc_setup_receipts import validate_setup_receipt
+        validate_setup_receipt(self, payload, change)
         ref = await self.store.create(self._slot('receipt', context.index,
                                                 context.record.direction), payload)
         self.active = None

@@ -251,6 +251,8 @@ async def ws_prepare(hass, connection, message):
     except Refused as error:
         _log_prepare_failure(error)
         code, text = {
+            'powercalc_public_graph_unsupported':
+                ('unsupported_powercalc_graph', 'This Powercalc graph cannot yet be safely migrated'),
             'template_yaml_server_powercalc_scope_unsupported':
                 ('unsupported_powercalc_scope', 'Powercalc is loaded and its dependencies cannot be verified for this plan'),
             'template_forward_powercalc_scope_unsupported':

@@ -79,6 +79,9 @@ class _Reload:
         self.exact_owner=None
         self.producer_owner=None
         self.clock_owner=None
+        # Empty for the accepted unchanged-reload witness. A typed activation
+        # may bind exact candidate IDs back to their original graph keys.
+        self.activation_aliases={}
 
     def check(self):
         _guard(self.guard)
@@ -272,8 +275,10 @@ class _Reload:
             elif tag.startswith('store_'):
                 relevant=entity is self.previous_store
             else:
-                relevant=(getattr(entity,'entity_id',None) in self.old
-                          and (entity is self.old.get(entity.entity_id)
+                entity_id=getattr(entity,'entity_id',None)
+                original_id=self.activation_aliases.get(entity_id,entity_id)
+                relevant=(original_id in self.old
+                          and (entity is self.old.get(original_id)
                                or getattr(getattr(entity,'registry_entry',None),'platform',None)=='powercalc'))
             if not relevant:
                 return
@@ -326,9 +331,10 @@ class _Reload:
                     if self.producer_owner is not None:
                         self.producer_owner.removed(entity)
             elif tag=='add' and phase=='return':
-                _need(entity is not self.old.get(entity.entity_id)
-                      and entity.entity_id not in self.added,'one_replacement')
-                self.added[entity.entity_id]=entity
+                original_id=self.activation_aliases.get(entity.entity_id,entity.entity_id)
+                _need(entity is not self.old.get(original_id)
+                      and original_id not in self.added,'one_replacement')
+                self.added[original_id]=entity
         except BaseException as error:
             if self.error is None:
                 self.error='native_callback_refused'
@@ -406,16 +412,11 @@ class _Reload:
             raise first
 
 
-async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,original,*,guard,
-                                                  _manage_global_rename=False, _exact_fields=None,
-                                                  _retain_producers=False, _operand_clock=False):
-    """Own ONE real service call under unchanged ORIGINAL. Caller owns admin/IO lease.
-
-    PERFORMS a real vendor reload, which may reset numeric state. This function
-    has no route from YAMLTransaction or WS. A private typed chain policy may
-    transfer only exact live fields; all continuity/readiness flags stay false.
-    Its result records observed lifecycle only, never authorization/readiness.
-    """
+async def _prepare_reload_scope(hass,receipt,evidence,original,*,guard,
+                                _manage_global_rename=False, _exact_fields=None,
+                                _retain_producers=False, _operand_clock=False,
+                                _reverse_admission=None):
+    """Capture the same exact native witness before any lifecycle effect."""
     from homeassistant.const import __version__
     from homeassistant.core import Context, EventBus, HomeAssistant, ServiceCall
     from homeassistant.helpers.entity import Entity
@@ -433,7 +434,30 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
               'typed_exact_fields_requires_global_owner')
     scope=_Reload(hass,receipt,evidence,original,guard)
     scope.vendor=PowercalcVendor(hass,with_profiles=True)
-    bound=await async_bind_powercalc_sources(hass,receipt,evidence,original,guard=guard)
+    scope.reverse_admission = _reverse_admission
+    scope.graph_sources = evidence.powercalc_sources
+    if _reverse_admission is None:
+        async def bind_sources():
+            return await async_bind_powercalc_sources(hass,receipt,evidence,original,guard=guard)
+    else:
+        from .powercalc_reverse_admission import PowercalcReverseAdmission
+        from .native_powercalc_accepted_consumers import async_observe_accepted_powercalc_consumers
+        _need(type(_reverse_admission) is PowercalcReverseAdmission
+              and _reverse_admission.hass is hass and _reverse_admission.receipt is receipt
+              and _reverse_admission.evidence is evidence and _reverse_admission.capture is original
+              and _exact_fields is not None and _exact_fields.chain is _reverse_admission.chain,
+              'reverse_admission_binding_required')
+        _reverse_admission._scope()
+        scope.graph_sources = evidence.powercalc_candidate_sources.sources
+        async def bind_sources():
+            _reverse_admission._scope()
+            result = await async_observe_accepted_powercalc_consumers(
+                hass, _reverse_admission.chain, evidence, original, guard=guard)
+            _reverse_admission._scope()
+            _need(result.source_position == 'proposed' and result.head == _reverse_admission.state.head,
+                  'reverse_accepted_graph_changed')
+            return result
+    bound=await bind_sources()
     _need(all(row.source_verified for row in bound.rows),'complete_bound_graph_required')
     _need(evidence.powercalc_sources.closed_graph_json is not None,'closed_profiles_required')
     scope.entries=tuple(hass.config_entries.async_entries('powercalc'))
@@ -441,8 +465,10 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
     platforms,scope.old=scope.entities()
     _need(set(scope.old)=={row.entity_id for row in bound.rows},'full_reload_graph')
     kinds={row.entity_id:row.relation_kind for row in bound.rows}
-    _need(sum(k=='energy_integral' for k in kinds.values())==3
-          and sum(k=='energy_positive_delta' for k in kinds.values())==1,'profile_energy_slice')
+    _need(sum(k=='energy_positive_delta' for k in kinds.values())==1
+          and (sum(k=='energy_integral' for k in kinds.values()),
+               sum(k=='power_subtract' for k in kinds.values())) in ((2, 0), (3, 1)),
+          'profile_energy_slice')
     grouped=[entity for entity in scope.old.values()
              if type(entity) is scope.vendor.classes['GroupedEnergySensor']]
     _need(len(grouped)==1,'one_previous_state_owner')
@@ -526,7 +552,7 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
     scope.check()
     # The source/instance proof was sampled before executor IO; recheck ORIGINAL
     # again immediately before installing observation and the native effect.
-    second=await async_bind_powercalc_sources(hass,receipt,evidence,original,guard=guard)
+    second=await bind_sources()
     _need(second==bound and not pending(hass),'preflight_changed')
     _need(scope.rename_listeners()[0]==rename_before,'preflight_global_listener_changed')
     if _manage_global_rename:
@@ -538,6 +564,24 @@ async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,origina
         scope.producer_owner.bind_original(second)
     if scope.clock_owner is not None:
         scope.clock_owner.bind_original(second)
+    return scope,bound,platforms,before,rename_before,prove
+
+
+async def async_witness_unchanged_powercalc_reload(hass,receipt,evidence,original,*,guard,
+                                                  _manage_global_rename=False, _exact_fields=None,
+                                                  _retain_producers=False, _operand_clock=False,
+                                _reverse_admission=None):
+    """Own ONE real service call under unchanged ORIGINAL. Caller owns admin/IO lease.
+
+    PERFORMS a real vendor reload, which may reset numeric state. This function
+    has no route from YAMLTransaction or WS. A private typed chain policy may
+    transfer only exact live fields; all continuity/readiness flags stay false.
+    Its result records observed lifecycle only, never authorization/readiness.
+    """
+    from .yaml_validation import _settled_executor
+    scope,bound,platforms,before,rename_before,prove=await _prepare_reload_scope(
+        hass,receipt,evidence,original,guard=guard,_manage_global_rename=_manage_global_rename,
+        _exact_fields=_exact_fields,_retain_producers=_retain_producers,_operand_clock=_operand_clock)
     token=scope.causal.set(scope.marker)
     task=None
     try:

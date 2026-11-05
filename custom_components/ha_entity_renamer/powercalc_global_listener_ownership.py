@@ -122,9 +122,14 @@ class _GlobalRenameOwner:
         # The successful SAME-original binder has already checked every native
         # source row. Freeze only those physical identities, bound to its UUIDs;
         # this is not a replacement discovery/config/runtime baseline.
-        _need(type(bound) is PowercalcSourceBindings
-              and bound.evidence_sha256==scope.evidence.sha256
-              and bound.runtime_sha256==_sha(scope.original.payload_json)
+        from .native_powercalc_accepted_consumers import AcceptedPowercalcConsumers
+        reverse = getattr(scope, 'reverse_admission', None)
+        original_bound = (reverse is None and type(bound) is PowercalcSourceBindings
+                          and bound.runtime_sha256 == _sha(scope.original.payload_json))
+        reverse_bound = (reverse is not None and type(bound) is AcceptedPowercalcConsumers
+                         and bound.original_runtime_sha256 == _sha(scope.original.payload_json)
+                         and bound.source_position == 'proposed' and bound.head == reverse.state.head)
+        _need((original_bound or reverse_bound) and bound.evidence_sha256==scope.evidence.sha256
               and all(row.source_verified for row in bound.rows),'original_bound_sources_required')
         expected={}
         for row in bound.rows:
@@ -172,7 +177,14 @@ class _GlobalRenameOwner:
         _need(registry is self.source_registry
               and self.scope.hass.config_entries is self.source_entry_manager,reason)
         active=self.active_sources()
+        transition=getattr(self.scope,'source_transition',None)
+        if transition is not None:
+            from .powercalc_source_transition import PowercalcSourceTransition
+            _need(type(transition) is PowercalcSourceTransition,'typed_source_transition_required')
         for entity_id,original in self.sources.items():
+            if transition is not None and transition.handles_input(entity_id):
+                transition.check_exact_source(entity_id,original,self)
+                continue
             row=registry.async_get(entity_id)
             entity=active.get(entity_id)
             _need(row is not None and _OriginalPhysicalSource.from_row(row)==original
@@ -194,11 +206,45 @@ class _GlobalRenameOwner:
         unchanged(scope.vendor_refs,scope.vendor_methods,scope.vendor_codes)
         _need(asyncio.get_running_loop() is scope.loop,'loop_changed')
 
-    def metadata_current(self):
+    def metadata_current(self, *, accepted_group=None):
+        expected = dict(self.metadata)
+        if accepted_group is not None:
+            # Only this live YAML owner may use an already-accepted exact
+            # ConfigEntry receipt. A reopened/pending receipt is not a grant.
+            from .powercalc_group_metadata import PreparedPowercalcGroupMetadata, assert_original_group
+            from .powercalc_phase_session import PowercalcPhaseSession
+            from .powercalc_yaml_adapter import _PowercalcYAMLHooks
+            phase = accepted_group
+            _need(type(phase) is PowercalcPhaseSession and phase.scope is self.scope
+                  and phase.phase == 'activated' and type(phase.activation) is dict,
+                  'live_metadata_phase_required')
+            phase.check()
+            lease, chain = phase.lease, phase.lease.chain
+            hooks = phase.policy.activation_hooks
+            _need(type(hooks) is _PowercalcYAMLHooks and hooks.adapter.phase is phase
+                  and hooks is hooks.adapter._active_hooks and hooks.intent is lease.pending
+                  and chain.active is hooks.intent, 'live_metadata_yaml_intent_required')
+            _, head, _, _, pending = chain._reconstruct()
+            positions = chain._setup_positions.get(head)
+            _need(head == lease.state.head and pending == hooks.intent.reference
+                  and type(positions) is dict, 'metadata_accepted_head_required')
+            reverse = phase.lifecycle.direction == 'rollback'
+            indexes = [i for i, step in enumerate(chain.plan.steps) if step.adapter == 'helpers']
+            _need(len(indexes) == 1 and positions.get(indexes[0]) == ('rollback' if reverse else 'forward')
+                  and hooks.context.record.phases[indexes[0]] == ('undone' if reverse else 'verified'),
+                  'metadata_directional_receipt_required')
+            change = chain._original_change(indexes[0])
+            _need(type(change) is PreparedPowercalcGroupMetadata, 'metadata_preparation_required')
+            assert_original_group(chain, change)
+            entry_id = change.before['identity']['entry_id']
+            before, after = (change.after, change.before) if reverse else (change.before, change.after)
+            original = _json([before['data'], before['options'], before['identity']['unique_id']])
+            _need(expected.get(entry_id) == original, 'metadata_original_changed')
+            expected[entry_id] = _json([after['data'], after['options'], after['identity']['unique_id']])
         return all(self.scope.hass.config_entries.async_get_entry(entry.entry_id) is entry
                    and entry.state.value=='loaded'
                    and _json([dict(entry.data),dict(entry.options),entry.unique_id])
-                       ==self.metadata[entry.entry_id] for entry in self.scope.entries)
+                       ==expected[entry.entry_id] for entry in self.scope.entries)
 
     def observe(self,tag,frame,phase,result):
         scope=self.scope
@@ -313,12 +359,13 @@ class _GlobalRenameOwner:
               and actual[-1] is owner,'native_unload_owner_not_attached')
         return owner
 
-    def finish(self,after):
+    def finish(self,after, *, accepted_group=None):
         scope=self.scope
         scope.check()
         self.bindings()
         self.idle()
-        _need(self.metadata_current() and not self.inflight,'final_metadata_or_native_calls')
+        _need(self.metadata_current(accepted_group=accepted_group) and not self.inflight,
+              'final_metadata_or_native_calls')
         self.require_sources_current('final_source_identity_changed')
         _need(self.detached==set(self.pairs) and not set(self.before)&set(after),
               'old_membership_left')

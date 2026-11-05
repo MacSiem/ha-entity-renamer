@@ -16,7 +16,7 @@ import unittest
 import test_powercalc_operand_clock_native as baseline
 from test_powercalc_custom_profile_io import CustomProfileIOProof
 
-_CLOCK_SHA256 = '3549e96a59cfe45b0464ea6555f161213b187f388604a79f2ba272816ec24597'
+_CLOCK_SHA256 = '2163595b24787259116244bffd17e23e74244b448e6058997b6c023fe5372884'
 
 
 def _utc():
@@ -308,6 +308,13 @@ class NativePowercalcActualTimerTests(unittest.IsolatedAsyncioTestCase):
                 continue
             action = getattr(h._args[1], 'target', None)
             self.assertFalse(type(action) is facts.timer_action and action.owner.scope.hass is self.f.hass)
+        from homeassistant.helpers import event as native_event
+        for key in (native_event._TRACK_STATE_CHANGE_DATA, native_event._TRACK_STATE_REPORT_DATA):
+            tracker = self.f.hass.data.get(key)
+            if tracker is not None:
+                self.assertFalse([job for members in tracker.callbacks.values() for job in members
+                    if '_OperandClockOwner._observe_source.<locals>.make_observer' in
+                    getattr(job.target, '__qualname__', '')], 'owned source observer leaked')
 
     async def _drive(self, *, cancel=False):
         self.assertTrue(self.custom_profile_directories)
@@ -589,7 +596,9 @@ class NativePowercalcActualTimerTests(unittest.IsolatedAsyncioTestCase):
                           'the public API-produced numeric State must exist before first BASE')
             reasons = '\n'.join(getattr(caught.exception, '__notes__', ())) + str(caught.exception)
             self.assertTrue('numeric_before_unknown_setup_or_overlap_unsupported' in reasons
-                            or 'numeric_first_setup_unsupported' in reasons,
+                            or 'numeric_first_setup_unsupported' in reasons
+                            or 'numeric_first_source_not_observed' in reasons
+                            or 'source_delivery_without_emission' in reasons,
                             'an unrelated refusal cannot qualify numeric-first handling')
             self._no_owned(facts)
         finally:

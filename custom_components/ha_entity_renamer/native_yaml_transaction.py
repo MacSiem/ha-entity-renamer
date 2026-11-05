@@ -135,6 +135,15 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
     def _hooks(self, change, context, intent, guard):
         return _YAMLHooks(self, change, context, intent, guard)
 
+    def _intent_started(self, intent):
+        pass
+
+    def _receipt_completed(self, reference):
+        pass
+
+    def _completion_extra(self, hooks, context):
+        return {}
+
     def _runtime_check(self, change, position):
         if 'template' in change.receipt.changed_domains:
             return self.observer.runtime_check(position)
@@ -222,7 +231,7 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
         except Exception:
             return Position.UNKNOWN
 
-    async def _effect(self, step, caller_guard, direction):
+    async def _effect(self, step, caller_guard, direction, *, _loop_context=None):
         import threading
         from concurrent.futures import Future
         loop, owner_thread = asyncio.get_running_loop(), threading.get_ident()
@@ -245,7 +254,12 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
                     result.set_exception(error)
                 else:
                     result.set_result(None)
-            loop.call_soon_threadsafe(checked)
+            if _loop_context is None:
+                loop.call_soon_threadsafe(checked)
+            else:
+                # An explicitly owned phase may carry its causal context to
+                # this read-only loop guard. It does not authorize an effect.
+                loop.call_soon_threadsafe(checked, context=_loop_context.copy())
             return result.result()
 
         guard()
@@ -274,6 +288,7 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
                 runtime_check.check()
             # begin_yaml validates native source and entire original-bound graph.
             intent = await self.chain.begin_yaml(context, before, input_state=state)
+            self._intent_started(intent)
             hooks = self._hooks(change, context, intent, guard)
             await hooks.checkpoint()  # begin durable ACK yielded; re-read journal.
             # Fresh authenticated native observation immediately before effects.
@@ -283,7 +298,9 @@ class ReceiptedYAMLTransactionAdapter(YAMLTransactionAdapter):
             await hooks.checkpoint()
             after = await self._read(hooks.state(), guard, hooks.checkpoint)
             await hooks.checkpoint()
-            await self.chain.complete_yaml(intent, context, before, after, calls=hooks.calls)
+            reference = await self.chain.complete_yaml(intent, context, before, after, calls=hooks.calls,
+                                                       **self._completion_extra(hooks, context))
+            self._receipt_completed(reference)
             # If acknowledgement is lost, chain/store poison and no replay. A
             # fresh read-only reopen can later inspect a durable receipt.
             guard()

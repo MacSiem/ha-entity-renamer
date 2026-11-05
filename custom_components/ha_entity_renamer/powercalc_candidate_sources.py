@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .native_input_baseline import _KEYS, _envelope, _receipt_bytes
+from .native_input_baseline import _KEYS, _envelope, _receipt_bytes, _loads
 from .powercalc_source_binding import (
     OriginalPowercalcSources, seal_powercalc_sources, _need, _json, _sha,
 )
@@ -18,6 +18,7 @@ from .powercalc_source_binding import (
 class PlannedPowercalcDocuments:
     """Full three before/proposed bytes supplied before native validation."""
     documents: tuple[tuple[str, bytes, bytes], ...]
+    energy: tuple[bytes, bytes] | None = None
 
     def checked(self, version):
         _need(type(self.documents) is tuple and len(self.documents) == len(_KEYS),
@@ -29,6 +30,16 @@ class PlannedPowercalcDocuments:
         for key, before, after in self.documents:
             _envelope(before, key, version)
             _envelope(after, key, version)
+        if self.energy is not None:
+            _need(type(self.energy) is tuple and len(self.energy) == 2
+                  and all(type(raw) is bytes for raw in self.energy), 'candidate_energy_shape')
+            for raw in self.energy:
+                document = _loads(raw)
+                _need(type(document) is dict and set(document) == {'version', 'minor_version', 'key', 'data'}
+                      and type(document['version']) is int and document['version'] == 1
+                      and type(document['minor_version']) is int and document['minor_version'] == 3
+                      and document['key'] == 'energy' and type(document['data']) is dict,
+                      'candidate_energy_envelope')
         return self
 
 
@@ -43,6 +54,13 @@ def stage_candidate_documents(planned, before_root, proposed_root):
         _need(original.read_bytes() == before and proposed.read_bytes() == before,
               'candidate_original_document_changed')
         proposed.write_bytes(after)
+    if planned.energy is not None:
+        before, after = planned.energy
+        original = Path(before_root) / '.storage/energy'
+        proposed = Path(proposed_root) / '.storage/energy'
+        _need(original.read_bytes() == before and proposed.read_bytes() == before,
+              'candidate_original_energy_changed')
+        proposed.write_bytes(after)
 
 
 @dataclass(frozen=True)
@@ -55,10 +73,12 @@ class CandidatePowercalcSources:
 
     @property
     def sha256(self):
-        return _sha(_json([self.original_receipt_json.decode(),
-            self.original_sources_sha256, self.proposed_files,
-            [(key, _sha(before), _sha(after)) for key, before, after in self.documents.documents],
-            self.sources.sha256]))
+        value = [self.original_receipt_json.decode(), self.original_sources_sha256, self.proposed_files,
+                 [(key, _sha(before), _sha(after)) for key, before, after in self.documents.documents],
+                 self.sources.sha256]
+        if self.documents.energy is not None:
+            value.append([_sha(raw) for raw in self.documents.energy])
+        return _sha(_json(value))
 
     @property
     def migration_ready(self):
@@ -84,9 +104,12 @@ class CandidatePowercalcSources:
         _need(all(physical.get('.storage/' + key) == _sha(before)
                   for key, before, _ in self.documents.documents),
               'candidate_original_full_three_changed')
+        if self.documents.energy is not None:
+            _need(physical.get('.storage/energy') == _sha(self.documents.energy[0]),
+                  'candidate_original_energy_changed')
 
 
-def seal_powercalc_candidate(receipt, plan, original, planned, native, document_hashes):
+def seal_powercalc_candidate(receipt, plan, original, planned, native, document_hashes, energy_hashes=None):
     """Consume private SAME checker output, never parse live candidate sources."""
     _need(type(original) is OriginalPowercalcSources
           and original.closed_graph_json is not None
@@ -95,6 +118,8 @@ def seal_powercalc_candidate(receipt, plan, original, planned, native, document_
     planned.checked(receipt.version)
     expected = [[key, _sha(before), _sha(after)] for key, before, after in planned.documents]
     _need(document_hashes == expected, 'candidate_staged_full_three_changed')
+    if planned.energy is not None:
+        _need(energy_hashes == [_sha(raw) for raw in planned.energy], 'candidate_staged_energy_changed')
     candidate = seal_powercalc_sources(receipt, plan, original.ledger, native)
     import json
     old, new = json.loads(original.closed_graph_json), json.loads(candidate.closed_graph_json)

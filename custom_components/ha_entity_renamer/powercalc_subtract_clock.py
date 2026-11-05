@@ -265,8 +265,19 @@ class _SubtractClockOwner:
             return
         scope, c = self.scope, self.c
         base, excluded, values, dispatch = self.dynamic_graph
+        _need(type(result) is PowercalcActualCalculation, 'subtract_actual_result_required')
         producer = scope.producer_owner.old.get(result.producer.entity_id)
-        _need(type(result) is PowercalcActualCalculation and producer is result.producer
+        dependencies = scope.producer_owner.dependencies[result.producer.entity_id]
+        transition = getattr(scope, 'source_transition', None)
+        mapped_source = False
+        if transition is not None:
+            from .powercalc_source_transition import PowercalcSourceTransition
+            _need(type(transition) is PowercalcSourceTransition, 'typed_source_transition_required')
+            mapped_source = (transition.live and transition.rebound
+                             and result.producer.entity_id in transition.affected
+                             and transition.old in dependencies
+                             and result.input_state.entity_id == transition.new)
+        _need(producer is result.producer
               and result is scope.producer_owner.results[-1]
               and all(result is not previous for previous in self.dynamic_results)
               and result.ownership_phase == 'retained_removed' and result.available
@@ -281,7 +292,7 @@ class _SubtractClockOwner:
               and type(result.native_power) is Decimal and result.native_power.is_finite()
               and result.event.data.get('new_state') is result.input_state
               and scope.hass.states.get(result.input_state.entity_id) is result.input_state
-              and result.input_state.entity_id in scope.producer_owner.dependencies[producer.entity_id]
+              and (result.input_state.entity_id in dependencies or mapped_source)
               and result.resolved_light_state is scope.hass.states.get(producer._source_entity.entity_id)
               and result.old_profile is producer._power_profile
               and result.actual_strategy is producer._strategy_instance,
@@ -290,6 +301,19 @@ class _SubtractClockOwner:
         # actual callback/Task and native normalized result. Every other physical
         # input must remain the last actual State accepted by this component.
         inputs = dict(self.inputs)
+        if mapped_source and transition.new not in inputs:
+            old_events = tuple(transition.remove_raw.values())
+            _need(len(old_events) == 1 and transition.old in inputs
+                  and old_events[0].get('old_state') is inputs[transition.old]
+                  and old_events[0].get('new_state') is None
+                  and scope.hass.states.get(transition.old) is None
+                  and transition.witness.is_owned_rename(result.event)
+                  and result.event.data.get('entity_id') == transition.new
+                  and result.event.data.get('old_state') is None
+                  and result.event.data.get('new_state') is result.input_state,
+                  'subtract_source_rename_delivery_unproven')
+            del inputs[transition.old]
+            inputs[transition.new] = result.input_state
         _need(result.input_state.entity_id in inputs, 'subtract_result_physical_source')
         inputs[result.input_state.entity_id] = result.input_state
         _need(all(scope.hass.states.get(key) is state for key, state in inputs.items())

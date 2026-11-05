@@ -193,6 +193,22 @@ def _native_script_suggested_move(before, after):
             and after.get('suggested_object_id') == after['unique_id'])
 
 
+def _powercalc_group_suggested_move(before, after):
+    """Recognize only a group ID-derived suggested field, never grant authority."""
+    if type(before) is not dict or type(after) is not dict:
+        return False
+    old, new = before.get('entity_id'), after.get('entity_id')
+    if (before.keys() != after.keys() or before.get('platform') != 'powercalc'
+            or after.get('platform') != 'powercalc' or before.get('id') != after.get('id')
+            or type(old) is not str or type(new) is not str or old == new
+            or not old.startswith('sensor.') or not new.startswith('sensor.')
+            or before.get('suggested_object_id') != old.removeprefix('sensor.')
+            or after.get('suggested_object_id') != new.removeprefix('sensor.')):
+        return False
+    return all(_equal(before[key], after[key]) for key in before
+               if key not in ('entity_id', 'suggested_object_id'))
+
+
 def _native_script_unique_move(before, after):
     """Recognize a structural native Script-key move, never authorize one.
 
@@ -227,7 +243,7 @@ def _native_script_unique_move(before, after):
 
 
 def validate_registry_transition(source_raw, result_raw, prepared, *, version,
-                                 direction, native_effect_audit):
+                                 direction, native_effect_audit, powercalc_group_effect=False):
     """Validate exactly one entity/device rename in two full storage envelopes.
 
     Reverse consumes a full proven AFTER image (including its newer audit), not
@@ -263,6 +279,11 @@ def validate_registry_transition(source_raw, result_raw, prepared, *, version,
     script_unique_move = prepared.kind == 'entity' and _native_script_unique_move(before, after)
     allowed = ({'entity_id', 'name', 'unique_id', 'previous_unique_id'} if script_unique_move else
                {'entity_id', 'name'} if prepared.kind == 'entity' else {'name_by_user'})
+    group_suggested_move = (_powercalc_group_suggested_move(before, after)
+                            and powercalc_group_effect is True
+                            and version in ('2026.10.2', '2026.10.4'))
+    if group_suggested_move:
+        allowed.add('suggested_object_id')
     if script_unique_move and _native_script_default_name_move(before, after):
         allowed.add('original_name')
     if script_unique_move and _native_script_suggested_move(before, after):

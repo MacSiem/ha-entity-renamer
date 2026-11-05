@@ -144,9 +144,11 @@ def _assert_mixed_state_scope(receipt, *, allow_dependent_only=False):
                 _sha(value)
 
 
-def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_owner_mode=False):
+def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_owner_mode=False,
+                 powercalc_mode=False):
     """Shared bounded file codec, with explicit disjoint selective gates."""
-    if state_mode and mixed_state_mode or dependent_owner_mode and not mixed_state_mode:
+    if (sum(bool(flag) for flag in (state_mode, mixed_state_mode, powercalc_mode)) > 1
+            or dependent_owner_mode and not mixed_state_mode):
         raise ValueError('ambiguous_prepared_yaml_mode')
     _keys(data, ('receipt', 'files'))
     raw = data['receipt']
@@ -200,10 +202,13 @@ def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_ow
             raise ValueError('invalid_prepared_yaml_proposal')
         proposed.append((_path(row[0]), _sha(row[1])))
     domains = tuple(sequence(raw['changed_domains'], 4))
-    if (not domains or any(type(d) is not str or d not in _SUPPORTED for d in domains)
+    allowed = _SUPPORTED | {'powercalc'} if powercalc_mode else _SUPPORTED
+    unsupported = sequence(raw['unsupported_domains'], 1 if (state_mode or mixed_state_mode or powercalc_mode) else 0)
+    if (not domains or any(type(d) is not str or d not in allowed for d in domains)
             or len(set(domains)) != len(domains)
-            or (sequence(raw['unsupported_domains'], 1) not in ((), [], ('template',), ['template'])
-                if state_mode or mixed_state_mode else sequence(raw['unsupported_domains'], 0))):
+            or (powercalc_mode and (domains != ('powercalc',) or tuple(unsupported) != ('powercalc',)))
+            or ((state_mode or mixed_state_mode) and tuple(unsupported) not in ((), ('template',)))
+            or (not (state_mode or mixed_state_mode or powercalc_mode) and unsupported)):
         raise ValueError('unsupported_prepared_yaml_activation')
     files, total = [], 0
     for row in sequence(data['files'], 512):
@@ -387,9 +392,12 @@ class YAMLTransactionAdapter:
             runtime_version = __version__
         self.runtime_version = runtime_version
 
+    def _accepts_preparation(self, change):
+        return type(change) is PreparedYAML
+
     def _change(self, step):
         change = self.resolver(step.prepared_ref)
-        if type(change) is not PreparedYAML:
+        if not self._accepts_preparation(change):
             raise Refused('yaml_preparation_type')
         change.checked()
         if (change.identity != step.identity or change.before_revision != step.before_revision
@@ -397,7 +405,7 @@ class YAMLTransactionAdapter:
                 or change.receipt.config_root != str(Path(self.hass.config.config_dir).resolve())
                 or change.receipt.version != self.runtime_version):
             raise Refused('yaml_preparation_mismatch')
-        assert_activation_available(self.hass, change.receipt)
+        self._assert_activation_available(change)
         if 'template' in change.receipt.changed_domains:
             from .native_template_yaml import NativeTemplateYAMLRuntimeReadback
             from .mixed_yaml_runtime import MixedTemplateYAMLRuntimeReadback
@@ -405,6 +413,9 @@ class YAMLTransactionAdapter:
                 raise Refused('template_scoped_runtime_observer_required')
             self.observer.assert_change(change)
         return change
+
+    def _assert_activation_available(self, change):
+        assert_activation_available(self.hass, change.receipt)
 
     async def inspect(self, step):
         change = self._change(step)
@@ -489,6 +500,8 @@ class YAMLTransactionAdapter:
         if _trusted_hooks is None:
             await _settled(async_activate_yaml(self.hass, change.receipt, context=self.context, guard=guard))
         else:
+            from .powercalc_yaml_adapter import _PowercalcYAMLHooks
+            owner_bound = type(_trusted_hooks) is _PowercalcYAMLHooks
             async def activate_and_settle():
                 try:
                     await _trusted_hooks.activate()
@@ -497,10 +510,19 @@ class YAMLTransactionAdapter:
                     # OWN started reload descendants inside these editor locks,
                     # including cancellation/error while activate was awaiting.
                     await _trusted_hooks.settle_reload()
-            await _settled(activate_and_settle())
+            if owner_bound:
+                # This typed phase owns ConfigEntry locks on the current task.
+                # Its actual native calls are independently shielded/drained.
+                await activate_and_settle()
+            else:
+                await _settled(activate_and_settle())
         await checkpoint()
-        position = (await _settled(_trusted_hooks.runtime_position()) if _trusted_hooks is not None
-                    else await self.observer.position(change))
+        if _trusted_hooks is None:
+            position = await self.observer.position(change)
+        elif owner_bound:
+            position = await _trusted_hooks.runtime_position()
+        else:
+            position = await _settled(_trusted_hooks.runtime_position())
         runtime_check = (self.observer.runtime_check(position)
                          if 'template' in change.receipt.changed_domains else None)
         await checkpoint()

@@ -86,25 +86,33 @@ class PowercalcProfileEnergyNativeTests(unittest.IsolatedAsyncioTestCase):
             'entity_id': self.gui_source, 'sensor_type': 'virtual_power',
             'manufacturer': 'lifx', 'model': 'LHB30E27UC10P', 'create_energy_sensor': True,
             **({'custom_model_directory': 'powercalc/profiles/lifx/LHB30E27UC10P'} if custom else {})})
-        await add(self.entry)
+        if not getattr(self, 'single_child_group', False):
+            await add(self.entry)
+        else:
+            await hass.async_block_till_done()
         self.static_power = entity(VirtualPowerSensor, 'public-profile-static')
-        self.dynamic_power = entity(VirtualPowerSensor, 'public-profile-dynamic')
         self.static_energy = entity(VirtualEnergySensor, 'public-profile-static_energy')
-        self.dynamic_energy = entity(VirtualEnergySensor, 'public-profile-dynamic_energy')
+        self.dynamic_power = self.dynamic_energy = None
+        if not getattr(self, 'single_child_group', False):
+            self.dynamic_power = entity(VirtualPowerSensor, 'public-profile-dynamic')
+            self.dynamic_energy = entity(VirtualEnergySensor, 'public-profile-dynamic_energy')
         self.group = entry('Public sum', 'public-profile-sum', {
             'sensor_type': 'group', 'group_type': 'custom', 'create_energy_sensor': True,
             'force_calculate_group_energy': False,
-            'group_power_entities': [self.static_power.entity_id, self.dynamic_power.entity_id],
-            'group_energy_entities': [self.static_energy.entity_id, self.dynamic_energy.entity_id]})
+            **getattr(self, 'group_fixture_options', {}),
+            'group_power_entities': [self.static_power.entity_id] + ([] if self.dynamic_power is None else [self.dynamic_power.entity_id]),
+            'group_energy_entities': [self.static_energy.entity_id] + ([] if self.dynamic_energy is None else [self.dynamic_energy.entity_id])})
         await add(self.group)
         self.sum_power = entity(GroupedPowerSensor, 'public-profile-sum')
         self.sum_energy = entity(GroupedEnergySensor, 'public-profile-sum_energy')
-        self.subtract = entry('Public subtract', 'public-profile-subtract', {
-            'sensor_type': 'group', 'group_type': 'subtract', 'create_energy_sensor': True,
-            'entity_id': self.sum_power.entity_id, 'subtract_entities': [self.dynamic_power.entity_id]})
-        await add(self.subtract)
-        self.subtract_power = entity(SubtractGroupSensor, 'public-profile-subtract')
-        self.subtract_energy = entity(VirtualEnergySensor, 'public-profile-subtract_energy')
+        self.subtract = self.subtract_power = self.subtract_energy = None
+        if not getattr(self, 'omit_subtract', False):
+            self.subtract = entry('Public subtract', 'public-profile-subtract', {
+                'sensor_type': 'group', 'group_type': 'subtract', 'create_energy_sensor': True,
+                'entity_id': self.sum_power.entity_id, 'subtract_entities': [self.dynamic_power.entity_id]})
+            await add(self.subtract)
+            self.subtract_power = entity(SubtractGroupSensor, 'public-profile-subtract')
+            self.subtract_energy = entity(VirtualEnergySensor, 'public-profile-subtract_energy')
         # Native Energy settings are configuration input, not energy counter data.
         from homeassistant.components.energy.data import async_get_manager
         manager = await async_get_manager(hass)

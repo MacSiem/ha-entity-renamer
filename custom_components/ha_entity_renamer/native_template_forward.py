@@ -37,7 +37,7 @@ class _UnchangedConsumers:
     """Task-local read comparisons, never an adapter or effect capability."""
 
     @classmethod
-    async def capture(cls, hass, mapping, *, guard):
+    async def capture(cls, hass, mapping, *, guard, _powercalc_energy=None):
         from .native_discovery_consumers import async_observe_discovery_consumers
         from .discovery import _plain
         from .discovery_final_fence import _ConsumerFence
@@ -70,7 +70,17 @@ class _UnchangedConsumers:
                 planner = plan_energy
             for config in configs:
                 plan = planner(_plain(config), mapping)
-                _need(not plan.markers and not plan.changes, name + '_dependency_unsupported')
+                _need(not plan.markers, name + '_dependency_unsupported')
+                if plan.changes and name == 'energy' and _powercalc_energy is not None:
+                    from .energy_native import PreparedEnergy
+                    from .native_registry_receipts import _exact_json_equal, _freeze_json
+                    _need(type(_powercalc_energy) is PreparedEnergy
+                          and _exact_json_equal(_plain(config), _freeze_json(_powercalc_energy.before.value))
+                          and _exact_json_equal(plan.value, _freeze_json(_powercalc_energy.after)),
+                          'energy_preparation_mismatch')
+                    names.remove(name)  # This exact Energy step has its own receipt/physical CAS.
+                else:
+                    _need(not plan.changes, name + '_dependency_unsupported')
         obj.native = _ConsumerFence(hass, observed, _plain, names=tuple(names))
         obj.runtime_sample = obj.runtime_sampler = None
         obj.evidence = obj.observed = None

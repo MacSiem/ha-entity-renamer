@@ -172,6 +172,18 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
     def _native_key(self, change):
         return 'core.' + change.kind + '_registry'
 
+    def _intent_started(self, intent):
+        """Typed session extensions can bind the newly durable intent."""
+
+    def _receipt_completed(self, reference):
+        """Typed session extensions can accept the actual durable receipt."""
+
+    async def _typed_node(self, change, context, intent, observations, guard):
+        return None
+
+    async def _typed_extra(self, node, context, mutation, observations, guard):
+        raise Refused('unrecognized_registry_effect_node')
+
     def _effect_audit(self, change, direction, source_raw, result_raw, mutation):
         # Timestamps belong to the actual synchronous call, never eventual rows.
         return NativeRegistryEffectAudit(change.kind, change.identity,
@@ -198,6 +210,7 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
                 raise Refused('Registry mutation hook repeated')
             before = await self._read(guard)
             intent = await self.chain.begin(context, before)
+            self._intent_started(intent)
             guard()
             await self._durable_context(guard, context)
             # Intent persistence yielded. Reobserve ALL original inputs before
@@ -225,6 +238,17 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
             if binding is not None:
                 node = self._own_node(binding, own, change, context, intent, before, guard)
                 return node
+            node = await self._typed_node(change, context, intent, before, guard)
+            if node is not None:
+                try:
+                    await self._durable_context(guard, context)
+                    before = await self._read(guard)
+                    self.chain.verify_intent_source(intent, context, before)
+                    guard()
+                    return node
+                except BaseException:
+                    node.abort_before_attempt()
+                    raise
 
         method = self.bridge.apply if direction == 'forward' else self.bridge.compensate
         mutation = await method(change, guard, before_mutation=before_mutation)
@@ -252,14 +276,19 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         result_raw = next(item.raw for item in after if item.key == key)
         audit = self._effect_audit(change, direction, source_raw, result_raw, mutation)
         if node is not None and self._template_state_root is None:
-            extra['placeholder_stamp'] = node.finish()
+            from .native_helper_placeholder_effect import OwnHelperPlaceholder
+            if type(node) is OwnHelperPlaceholder:
+                extra['placeholder_stamp'] = node.finish()
+            else:
+                extra.update(await self._typed_extra(node, context, mutation, after, guard))
         if self._template_state_root is not None and change.mapping:
             if node is None:
                 raise Refused('template_state_registry_effect_required')
             await node.verify_effect(mutation, after)
             await self._durable_context(guard, context)
-        await self.chain.complete(intent, context, before, after,
-                                  mutation=mutation, audit=audit, **extra)
+        reference = await self.chain.complete(intent, context, before, after,
+                                              mutation=mutation, audit=audit, **extra)
+        self._receipt_completed(reference)
         guard()
         if self._template_state_root is not None and change.mapping:
             await node.accepted()

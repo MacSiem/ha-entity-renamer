@@ -62,6 +62,22 @@ class NativePowercalcAcceptedCandidateTests(unittest.IsolatedAsyncioTestCase):
                 'Powercalc accepted selector preference')
         else:
             source['entity_id'] = new
+        group_target = getattr(self, 'candidate_group_target', None)
+        if group_target is not None:
+            group_row = next(row for row in entities if row['entity_id'] == self.sum_energy.entity_id)
+            group_row['entity_id'] = group_target
+            if getattr(self, '_ordinary_driver_test', False):
+                # Core's two actual ID updates remove and reinsert each row.
+                # Derive the proposed image from ORIGINAL before validation.
+                self.assertEqual(group_row['suggested_object_id'], self.sum_energy.entity_id.removeprefix('sensor.'))
+                group_row['suggested_object_id'] = group_target.removeprefix('sensor.')
+                entities.append(entities.pop(entities.index(source)))
+                entities.append(entities.pop(entities.index(group_row)))
+                entry_id = self.sum_energy.registry_entry.config_entry_id
+                group_entry = next(row for row in planned['core.config_entries']['data']['entries']
+                                   if row['entry_id'] == entry_id)
+                self.assertEqual(group_entry['data']['_energy_entity'], self.sum_energy.entity_id)
+                group_entry['data']['_energy_entity'] = group_target
         if dynamic:
             target = 'light.public_dynamic_target'
             next(row for row in entities if row['entity_id'] == self.gui_source)['entity_id'] = target
@@ -71,13 +87,28 @@ class NativePowercalcAcceptedCandidateTests(unittest.IsolatedAsyncioTestCase):
             if move_selector:
                 sid = 'select.public_dynamic_target_infrared_brightness'
                 next(row for row in entities if row['entity_id'] == self.selector.entity_id)['entity_id'] = sid
+        candidate_energy = None
+        if group_target is not None:
+            from homeassistant.components.energy.data import async_get_manager
+            manager = await async_get_manager(self.f.hass)
+            native = self.module('energy_native').NativeEnergy(self.f.hass, manager)
+            before_energy, planned_energy = await native.plan({self.sum_energy.entity_id: group_target})
+            self.prepared_energy = native.prepare(before_energy, planned_energy)
+            old_energy = (self.f.root / '.storage/energy').read_bytes()
+            energy_document = json.loads(old_energy)
+            self.assertEqual(energy_document['data'], before_energy.value)
+            energy_document['data'] = self.prepared_energy.after
+            candidate_energy = (old_energy, json.dumps(energy_document, sort_keys=True,
+                                                       separators=(',', ':')).encode())
         # Only immutable ORIGINAL bytes are inputs. Proposed full images are
         # derived before validation/effect, preserving all unrelated fields.
         self.planned = candidates.PlannedPowercalcDocuments(tuple(
             (key, self.original_documents[key],
              json.dumps(planned[key], sort_keys=True, separators=(',', ':')).encode())
-            for key in keys))
+            for key in keys), candidate_energy)
         mapping = ({'sensor.accepted_probe_old': 'sensor.accepted_probe_new'} if metadata else {old: new})
+        if group_target is not None:
+            mapping[self.sum_energy.entity_id] = group_target
         plan = planner.plan_yaml(self.f.root, mapping)
         self.assertTrue(plan.ready, plan.issues)
         self.yaml_plan = await inputs.async_add_powercalc_source_inputs(self.f.hass, plan, guard=self.guard)

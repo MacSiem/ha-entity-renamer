@@ -2,12 +2,13 @@
 
 Actual retained update-return UTC is an operand boundary, never a W State
 emission timestamp. One real native arithmetic engine and an explicitly typed
-external timer per pair. Numeric-first setup/source-ID/group/reverse unsupported.
+external timer per pair. Scope and source authority are checked by the owning phase.
 """
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal
 from functools import partial
@@ -55,6 +56,7 @@ class _Clock:
     action: object = None
     job: object = None
     first_base: bool = False
+    setup_numeric: object = None
     transport: object = None
     transport_before: object = None
     cutting: object = None
@@ -143,10 +145,13 @@ class _OperandClockOwner:
             (self.integration._IntegrationMethod, 'calculate_area_with_one_state')) + tuple(
             (event, name) for name in ('async_call_at', '_run_async_call_action',
                                       '_async_dispatch_entity_id_event')) + (
-            (Entity, 'add_to_platform_finish'),)
+            (Entity, 'add_to_platform_finish'),
+            (event, 'async_track_state_report_event'), (event, '_async_state_filter'))
         self.bound = None
         self.steps, self.timer_proofs = [], []
         self.numeric, self.seen_results, self.kept = {}, set(), {}
+        self.source_observers, self.source_deliveries = {}, {}
+        self._issued_source_observers, self._retired_source_observers = {}, set()
         self.setup_nonnumeric = {}
         self.depth = 0
         self.timer_action_code = _OperandTimerAction.__call__.__code__
@@ -183,8 +188,16 @@ class _OperandClockOwner:
             c.old.platform.config_entry, c.old._sensor_source_id, c.old._source_entity,
             c.old._max_sub_interval, c.old._unit_prefix, c.old._unit_time)
             for name, c in self.states.items()}
-        from .powercalc_subtract_clock import _SubtractClockOwner
-        self.subtract = _SubtractClockOwner(self, bound)
+        subtracts = [row for row in bound.rows if row.relation_kind == 'power_subtract']
+        if subtracts:
+            _need(len(subtracts) == 1 and len(self.scope.exact_owner.old) == 3,
+                  'one_qualified_subtract_required')
+            from .powercalc_subtract_clock import _SubtractClockOwner
+            self.subtract = _SubtractClockOwner(self, bound)
+        else:
+            _need(len(self.scope.exact_owner.old) == len(self.states) == 2
+                  and set(self.scope.exact_owner.old) == set(self.states),
+                  'only_direct_engines_without_subtract')
         self.check()
 
     def check(self):
@@ -196,6 +209,7 @@ class _OperandClockOwner:
         _need(asyncio.get_running_loop() is self.scope.loop, 'same_loop')
         if self.bound is None:
             return
+        self._check_source_observers()
         for name, c in self.states.items():
             row, uid, entry, sid, source, interval, prefix, unit = self.identities[name]
             e = c.engine
@@ -272,10 +286,185 @@ class _OperandClockOwner:
             ("unit_of_measurement", "device_class", "state_class"))
         c.anchor, c.trigger = c.old._last_integration_time, c.old._last_integration_trigger
         c.deadline, c.phase = handle.when(), 'retained'
+        self._observe_source(name)
         self.kept[id(state)] = state
         self.steps.append({'kind': 'capture', 'entity_id': name, 'engine': id(c.engine),
             'full': str(c.engine._state), 'anchor': c.anchor.isoformat(), 'trigger': c.trigger.name,
             'endpoint': c.endpoint.isoformat(), 'power': str(c.value), 'deadline': c.deadline})
+
+    def _observe_source(self, name):
+        """Observe completeness only; a delivery never proves its writer."""
+        from homeassistant.core import callback, Event, HassJob, HassJobType
+        from .powercalc_retained_producer import _Bridge
+        c = self.states[name]
+        for kind, tracker, register in (
+                ('state_changed', self.event._KEYED_TRACK_STATE_CHANGE,
+                 self.event.async_track_state_change_event),
+                ('state_reported', self.event._KEYED_TRACK_STATE_REPORT,
+                 self.event.async_track_state_report_event)):
+            key = (name, kind)
+            _need(key not in self.source_observers, 'one_source_observer')
+            def make_observer(key, kind):
+                @callback
+                def observe(event):
+                    try:
+                        bridge = self.source_observers[key]
+                        if key in self._retired_source_observers or c.phase == 'native':
+                            return
+                        issued = self._issued_source_observers.get(key)
+                        _need(not bridge.removed and type(issued) is tuple and issued[0] is bridge
+                              and issued[2] is bridge.job and issued[3] is bridge.callback,
+                              'source_observer_issuance_changed')
+                        _need(type(event) is Event and event.event_type == kind,
+                              'actual_source_delivery')
+                        frame, keyed, bus, job = sys._getframe(1), False, False, False
+                        try:
+                            codes = self.scope.producer_owner.hc
+                            while frame is not None:
+                                if frame.f_code is codes[10]:
+                                    keyed = (frame.f_locals.get('hass') is self.scope.hass
+                                             and frame.f_locals.get('callbacks') is bridge.callbacks
+                                             and frame.f_locals.get('event') is event
+                                             and frame.f_locals.get('job') is bridge.job)
+                                elif frame.f_code is codes[2]:
+                                    bus = (frame.f_locals.get('self') is self.scope.hass.bus
+                                           and frame.f_locals.get('event') is event
+                                           and frame.f_locals.get('event_data') is event.data)
+                                elif frame.f_code is codes[3] and frame.f_locals.get('hassjob') is bridge.job:
+                                    job = frame.f_locals.get('self') is self.scope.hass
+                                frame = frame.f_back
+                        finally:
+                            del frame
+                        _need(keyed and bus and job, 'source_keyed_bus_dispatch')
+                        data = event.data
+                        _need(type(data) is dict and data.get('entity_id') == c.power.entity_id
+                              and self.kept.get(id(data)) is data, 'source_delivery_without_emission')
+                        _need(id(data) not in self.source_deliveries, 'duplicate_source_delivery')
+                        self.source_deliveries[id(data)] = event
+                    except BaseException as error:
+                        self.poison(error)
+                return observe
+            observe = make_observer(key, kind)
+            deps = frozenset((c.power.entity_id,))
+            remove = register(self.scope.hass, tuple(deps), observe)
+            _need(type(remove) is partial and remove.func is self.event._remove_listener
+                  and not remove.keywords and len(remove.args) == 5
+                  and remove.args[0] is self.scope.hass and remove.args[1] is tracker
+                  and set(remove.args[2]) == set(deps), 'source_observer_remover')
+            job, callbacks = remove.args[3:]
+            bridge = self.source_observers[key] = _Bridge(observe, remove, job, callbacks, deps)
+            data = self.scope.hass.data.get(tracker.key)
+            _need(type(job) is HassJob and job.job_type is HassJobType.Callback and job.target is observe
+                  and type(data) is self.event._KeyedEventData and data.callbacks is callbacks
+                  and sum(item is job for item in callbacks.get(c.power.entity_id, ())) == 1,
+                  'source_observer_membership')
+            # Record the actual issuance before additional proof can fail, so
+            # abort cleanup can always quiesce this exact job.
+            self._issued_source_observers[key] = (bridge, remove, job, observe, callbacks,
+                                                   data, data.listener, tracker, None, None)
+            from .yaml_runtime_observer import _registered_bus_remove
+            (bus_job, event_filter), _ = _registered_bus_remove(self.scope.hass, data.listener, kind)
+            for actual, expected in ((bus_job.target, self.event._async_dispatch_entity_id_event),
+                                     (event_filter, self.event._async_state_filter)):
+                _need(type(actual) is partial and actual.func is expected and not actual.keywords
+                      and actual.args == (self.scope.hass, callbacks), 'source_observer_dispatch_changed')
+            # Independent issuance identity, not mutable bridge or current hass.data.
+            self._issued_source_observers[key] = (bridge, remove, job, observe, callbacks,
+                                                   data, data.listener, tracker, bus_job, event_filter)
+
+    def _check_source_observers(self):
+        from homeassistant.core import HassJob, HassJobType
+        from .yaml_runtime_observer import _registered_bus_remove
+        for (name, kind), bridge in self.source_observers.items():
+            if (name, kind) in self._retired_source_observers:
+                continue
+            _need(not bridge.removed, 'source_observer_issuance_changed')
+            tracker = (self.event._KEYED_TRACK_STATE_CHANGE if kind == 'state_changed'
+                       else self.event._KEYED_TRACK_STATE_REPORT)
+            expected_key = (self.event._TRACK_STATE_CHANGE_DATA if kind == 'state_changed'
+                            else self.event._TRACK_STATE_REPORT_DATA)
+            data = self.scope.hass.data.get(expected_key)
+            issued = self._issued_source_observers.get((name, kind))
+            _need(type(issued) is tuple and len(issued) == 10 and issued[0] is bridge
+                  and issued[1] is bridge.remover and issued[2] is bridge.job
+                  and issued[3] is bridge.callback and issued[4] is bridge.callbacks
+                  and issued[5] is data and issued[6] is data.listener
+                  and issued[7] is tracker, 'source_observer_issuance_changed')
+            _need(type(tracker) is self.event._KeyedEventTracker and tracker.key == expected_key
+                  and tracker.event_type == kind
+                  and tracker.dispatcher_callable is self.event._async_dispatch_entity_id_event
+                  and tracker.filter_callable is self.event._async_state_filter
+                  and type(data) is self.event._KeyedEventData
+                  and data.callbacks is bridge.callbacks
+                  and type(bridge.job) is HassJob and bridge.job.job_type is HassJobType.Callback
+                  and bridge.job.target is bridge.callback
+                  and sum(job is bridge.job for job in data.callbacks.get(self.states[name].power.entity_id, ())) == 1,
+                  'source_observer_tracker_changed')
+            (bus_job, event_filter), _ = _registered_bus_remove(self.scope.hass, data.listener, kind)
+            _need(bus_job is issued[8] and event_filter is issued[9], 'source_observer_bus_changed')
+            for actual, expected in ((bus_job.target, self.event._async_dispatch_entity_id_event),
+                                     (event_filter, self.event._async_state_filter)):
+                _need(type(actual) is partial and actual.func is expected and not actual.keywords
+                      and actual.args == (self.scope.hass, data.callbacks),
+                      'source_observer_dispatch_changed')
+
+    def _close_source_observers(self):
+        from homeassistant.core import HassJob, HassJobType
+        from .yaml_runtime_observer import _registered_bus_remove
+        failure = None
+        for (name, kind), issued in self._issued_source_observers.items():
+            bridge, remove, job, callback, callbacks, original, listener, tracker, bus_job, event_filter = issued
+            if (name, kind) in self._retired_source_observers:
+                continue
+            try:
+                # Quiesce the independently issued job even if hass.data now
+                # points at a foreign tracker. Never invoke the native remover
+                # on a rebound tracker: its last-job branch pops hass.data.
+                _need(type(remove) is partial and remove.func is self.event._remove_listener
+                      and not remove.keywords and len(remove.args) == 5
+                      and remove.args[0] is self.scope.hass and remove.args[1] is tracker
+                      and tuple(remove.args[2]) == (self.states[name].power.entity_id,)
+                      and remove.args[3] is job and remove.args[4] is callbacks
+                      and type(job) is HassJob and job.job_type is HassJobType.Callback
+                      and job.target is callback
+                      and sum(item is job for item in callbacks.get(self.states[name].power.entity_id, ())) == 1,
+                      'source_observer_issuance_unrecoverable')
+                current = self.scope.hass.data.get(tracker.key)
+                intact = (self.source_observers.get((name, kind)) is bridge and not bridge.removed
+                          and bridge.remover is remove and bridge.job is job
+                          and bridge.callback is callback and bridge.callbacks is callbacks
+                          and current is original and original.callbacks is callbacks
+                          and original.listener is listener and bus_job is not None
+                          and event_filter is not None)
+                if intact:
+                    try:
+                        (actual_job, actual_filter), _ = _registered_bus_remove(self.scope.hass, listener, kind)
+                        intact = actual_job is bus_job and actual_filter is event_filter
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        intact = False
+                if intact:
+                    remove()
+                else:
+                    members = callbacks[self.states[name].power.entity_id]
+                    members.remove(job)
+                    if not members:
+                        del callbacks[self.states[name].power.entity_id]
+                    if not callbacks:
+                        _need(bus_job is not None and event_filter is not None,
+                              'source_observer_original_listener_unproven')
+                        (actual_job, actual_filter), _ = _registered_bus_remove(self.scope.hass, listener, kind)
+                        _need(actual_job is bus_job and actual_filter is event_filter,
+                              'source_observer_original_listener_changed')
+                        listener()
+                    failure = failure or ValueError('powercalc_operand_clock_source_observer_tracker_changed')
+                bridge.removed = True
+                self._retired_source_observers.add((name, kind))
+                _need(all(all(item is not job for item in jobs) for jobs in callbacks.values()),
+                      'source_observer_remove_failed')
+            except BaseException as error:
+                failure = failure or error
+        if failure is not None:
+            raise failure
 
     def _typed_timer_proof(self, name):
         from homeassistant.core import HassJob, HassJobType
@@ -449,6 +638,43 @@ class _OperandClockOwner:
     def after_exact_schedule(self, entity):
         if self.subtract is not None:
             self.subtract.after_exact_schedule(entity)
+        c = self.states.get(entity.entity_id)
+        if c is None or c.setup_numeric is None:
+            return
+        self.check()
+        state = c.setup_numeric
+        producer = self.scope.producer_owner.new.get(c.power.entity_id)
+        _need(c.phase == 'retained' and c.engine is entity and entity is not c.old
+              and producer is not None and producer is not c.power
+              and producer.registry_entry is c.power.registry_entry
+              and producer._platform_state.name == 'ADDED'
+              and producer.platform.entities.get(producer.entity_id) is producer
+              and producer._power == _numeric(state) and producer._attr_available is True
+              and state is self.scope.hass.states.get(c.power.entity_id)
+              and tuple(state.attributes.get(k) for k in
+                  ('unit_of_measurement', 'device_class', 'state_class')) == c.source_attributes
+              and c.power.entity_id not in self.scope.producer_owner.active,
+              'numeric_first_actual_producer_changed')
+        native, action, endpoint = self._native_timer(entity)
+        seen = self.numeric.get(entity.entity_id)
+        _need(endpoint is state and c.transport is None and seen is not None and seen[1] is state
+              and c.endpoint == seen[2] == state.last_updated and c.value == _numeric(state),
+              'numeric_first_native_endpoint')
+        # Every observed pre-BASE operand was already integrated on emission.
+        # A real retained timer may subsequently advance the anchor beyond the
+        # source timestamp; re-integrating that older endpoint would be wrong.
+        self._cancel(entity.entity_id)
+        if native.when() != c.deadline:
+            native.cancel()
+            entity._max_sub_interval_exceeded_callback = self.event.async_call_at(
+                self.scope.hass, action, c.deadline)
+            native, _, endpoint = self._native_timer(entity)
+            _need(native.when() == c.deadline and endpoint is state, 'numeric_first_deadline')
+        c.setup_numeric = None
+        c.phase = 'native'
+        self.steps.append({'kind': 'native_setup_handoff', 'entity_id': entity.entity_id,
+                           'native_handle': id(native), 'native_source_state': id(state),
+                           'deadline': native.when(), 'full': str(entity._state)})
 
     def after_exact_transfer(self, entity):
         if self.subtract is not None:
@@ -493,9 +719,31 @@ class _OperandClockOwner:
                 setup = (parent is not None and parent.f_back is not None
                          and parent.f_back.f_code is self.hc[12])
                 if setup:
-                    _need(_numeric(frame.f_locals.get('source_state')) is None,
-                          'numeric_first_setup_unsupported')
+                    source_state = frame.f_locals.get('source_state')
                     c.first_base = True
+                    if _numeric(source_state) is not None:
+                        # BASE receives the actual source pointer captured by
+                        # IntegrationSensor.async_added_to_hass. The handoff
+                        # occurs after the pinned vendor/base calls complete.
+                        seen = self.numeric.get(name)
+                        _need(c.phase == 'retained' and c.engine is obj
+                              and seen is not None and seen[1] is source_state
+                              and (delivered := self.source_deliveries.get(id(seen[0]))) is not None
+                              and delivered.data is seen[0]
+                              and source_state.last_reported == seen[3]
+                              and source_state is self.scope.hass.states.get(c.power.entity_id)
+                              and c.power.entity_id not in self.scope.producer_owner.active,
+                              'numeric_first_source_not_observed')
+                        queue = self.scope.hass.bus._event_queue
+                        _need(type(queue) is deque and all(type(row) is tuple and len(row) == 5
+                              and (row[0] not in ('state_changed', 'state_reported')
+                                   or type(row[1]) is dict) for row in queue),
+                              'numeric_first_event_queue_unverified')
+                        _need(not any(row[0] in ('state_changed', 'state_reported')
+                              and row[1] is not None
+                              and row[1].get('entity_id') == c.power.entity_id for row in queue),
+                              'numeric_first_source_event_pending')
+                        c.setup_numeric = source_state
             if c.phase == 'cutting' and obj is c.engine and phase == 'return':
                 handle, action, state = self._native_timer(obj)
                 _need(state is c.cutting[1], 'native_handoff_endpoint')
@@ -606,12 +854,28 @@ class _OperandClockOwner:
         _need(tuple(state.attributes.get(k) for k in
                     ('unit_of_measurement', 'device_class', 'state_class')) == c.source_attributes,
               'actual_new_W_units_or_metadata_changed')
-        _need(kind == 'state_changed' and c.first_base and c.phase == 'retained',
-              'numeric_before_unknown_setup_or_overlap_unsupported')
+        _need(kind == 'state_changed' and c.phase == 'retained',
+              'numeric_before_setup_or_overlap_unsupported')
         _need(parent.f_locals.get('state') is state and parent.f_locals.get('state_changed_data') is data,
               'actual_new_W_payload')
-        _need(name not in self.numeric, 'one_first_numeric_emission')
-        self.numeric[name] = (data, state, state.last_updated)
+        previous = self.numeric.get(name)
+        if not c.first_base:
+            # Account for each observed native W publication immediately: a
+            # real owned timer may fire before BASE receives its first input.
+            # The exact previous State proves that no numeric sample was
+            # skipped between the predecessor and this emission.
+            old_state = data.get('old_state')
+            _need(c.engine is c.old and c.transport is None
+                  and c.power.entity_id not in self.scope.producer_owner.active
+                  and ((previous is None and _numeric(old_state) is None)
+                       or (previous is not None and old_state is previous[1]
+                           and old_state.last_reported == previous[3])),
+                  'unproven_numeric_first_predecessor')
+            self._area(name, state.last_updated, kind='operand', next_value=_numeric(state))
+            self._arm(name, self.scope.loop.time() + c.engine._max_sub_interval.total_seconds())
+        else:
+            _need(previous is None, 'one_first_numeric_emission')
+        self.numeric[name] = (data, state, state.last_updated, state.last_reported)
         self.kept[id(data)] = data
 
     def _consumers(self, e):
@@ -713,11 +977,12 @@ class _OperandClockOwner:
     def finish(self, current):
         from .powercalc_profile_binding import _energy_listeners
         self.check()
-        _need(self.subtract.pending_native is None and self.subtract.depth == 0
-              and (not self.subtract.dynamic_results or self.subtract.dynamic_source_state is not None)
-              and (self.subtract.phase != 'native' or self.subtract.interval is not None
-                   or self.subtract.dynamic_source_state is not None),
-              'subtract_incomplete_native_handoff')
+        if self.subtract is not None:
+            _need(self.subtract.pending_native is None and self.subtract.depth == 0
+                  and (not self.subtract.dynamic_results or self.subtract.dynamic_source_state is not None)
+                  and (self.subtract.phase != 'native' or self.subtract.interval is not None
+                       or self.subtract.dynamic_source_state is not None),
+                  'subtract_incomplete_native_handoff')
         _need(all(c.phase == 'native' and c.handle is None and c.transport is None
                   and not c.neutralizing and current[name] is c.engine
                   for name, c in self.states.items()), 'incomplete_direct_clock_handoff')
@@ -725,15 +990,15 @@ class _OperandClockOwner:
             _energy_listeners(self.scope.hass, c.engine, c.engine._sensor_source_id, self.scope.vendor)
         policy = self.scope.exact_owner.policy
         return PowercalcOperandClockReceipt(self.scope.evidence.sha256, self.scope.original.structural_token,
-            policy.state.head, policy.source_hashes_json,
+            policy.current_state.head, policy.source_hashes_json,
             _json({'root_id': policy.chain.root_id, 'operation_id': policy.chain.operation_id,
                    'direct_pairs': [[name, c.power.entity_id] for name, c in self.states.items()],
-                   'subtract_quiet_handoff': {'phase': self.subtract.phase,
-                       'steps': self.subtract.steps},
+                   'subtract_quiet_handoff': None if self.subtract is None else {
+                       'phase': self.subtract.phase, 'steps': self.subtract.steps},
                    'time_policy': 'actual_update_return_utc_v1', 'ha_codes': [id(code) for code in self.hc]}),
             _json(self.steps), _json(self.timer_proofs),
-            subtract_interval=self.subtract.interval,
-            subtract_intervals=tuple(self.subtract.dynamic_intervals))
+            subtract_interval=None if self.subtract is None else self.subtract.interval,
+            subtract_intervals=() if self.subtract is None else tuple(self.subtract.dynamic_intervals))
 
     def annotate(self, error):
         if self.subtract is not None:
@@ -744,6 +1009,11 @@ class _OperandClockOwner:
         error.add_note('powercalc_operand_clock_refusal=' + str(self.error) + ';no_numeric_rollback')
 
     def close(self):
+        observer_error = None
+        try:
+            self._close_source_observers()
+        except BaseException as error:
+            observer_error = error
         # _arm records the actual returned TimerHandle, job and action as one
         # fixed issuance tuple, separate from mutable _Clock runtime fields.
         # On abort, first quiesce *that* issued handle, then refuse any drift.
@@ -797,6 +1067,8 @@ class _OperandClockOwner:
             else:
                 foreign = True
         _need(not foreign, 'cleanup_foreign_timer')
+        if observer_error is not None:
+            raise observer_error
 
 
 async def async_reload_with_powercalc_operand_clock(hass, chain, evidence, original, *, guard):

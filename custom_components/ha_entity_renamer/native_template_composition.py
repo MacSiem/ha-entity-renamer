@@ -242,6 +242,10 @@ class MixedTemplateComposition(TemplateComposition):
 
 
 def encode_composition(composition, baseline):
+    if type(composition).__module__ == __package__ + '.powercalc_composition':
+        from .powercalc_composition import PowercalcComposition, encode_powercalc_composition
+        _need(type(composition) is PowercalcComposition)
+        return encode_powercalc_composition(composition, baseline)
     from .native_automation_program_composition import AutomationTemplateStateComposition, encode_automation_state_composition
     if type(composition) is AutomationTemplateStateComposition:
         return encode_automation_state_composition(composition, baseline)
@@ -271,6 +275,9 @@ def encode_composition(composition, baseline):
 
 
 def decode_composition(payload, baseline):
+    if type(payload) is dict and payload.get('profile') == 'powercalc_source_own_binding_v1':
+        from .powercalc_composition import decode_powercalc_composition
+        return decode_powercalc_composition(payload, baseline)
     if type(payload) is dict and payload.get('profile') == 'template_automation_prefix_binding_v1':
         from .native_automation_program_composition import decode_automation_state_composition
         return decode_automation_state_composition(payload, baseline)

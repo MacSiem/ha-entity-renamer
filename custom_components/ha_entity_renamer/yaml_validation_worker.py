@@ -1137,6 +1137,11 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
                     hashlib.sha256((Path(before_root) / '.storage' / key).read_bytes()).hexdigest(),
                     hashlib.sha256((Path(proposed_root) / '.storage' / key).read_bytes()).hexdigest()]
                     for key in keys]
+                old_energy = Path(before_root) / '.storage/energy'
+                new_energy = Path(proposed_root) / '.storage/energy'
+                if old_energy.is_file() and new_energy.is_file():
+                    result['powercalc_candidate_energy'] = [hashlib.sha256(path.read_bytes()).hexdigest()
+                                                            for path in (old_energy, new_energy)]
         result['template_sources'] = template_sources
         result['template_candidate_sources'] = candidate_templates
         result['source_runtime'] = {'version': __version__, 'domains': [

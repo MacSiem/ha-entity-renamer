@@ -196,11 +196,11 @@ class CustomProfileIOProof:
             if not self._io_loader(loader):
                 return
             row = self._io_row(loader)
-            assert asyncio.current_task() is row['task']
-            assert target.func.__func__.__code__ is self.io_codes[1]
-            assert not frame.f_locals['args'] and len(target.args) == 2 and not target.keywords
-            assert type(result) is asyncio.Future and not result.done()
-            assert result.get_loop() is self.hass.loop
+            assert asyncio.current_task() is row['task'], 'executor task identity'
+            assert target.func.__func__.__code__ is self.io_codes[1], 'executor native code'
+            assert not frame.f_locals['args'] and len(target.args) == 2 and not target.keywords, 'executor arguments'
+            assert type(result) is asyncio.Future and not result.done(), 'executor future already complete or wrong type'
+            assert result.get_loop() is self.hass.loop, 'executor future loop'
             row.update(future=result, target=target, executor_return_loop=self.hass.loop.time())
         else:
             if not self._io_loader(loader):

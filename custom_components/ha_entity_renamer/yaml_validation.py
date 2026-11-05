@@ -514,7 +514,7 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                         from .powercalc_candidate_sources import seal_powercalc_candidate
                         candidate = seal_powercalc_candidate(receipt, plan, original,
                             powercalc_candidate_documents, result['powercalc_candidate_sources'],
-                            result['powercalc_candidate_documents'])
+                            result['powercalc_candidate_documents'], result.get('powercalc_candidate_energy'))
                         evidence = replace(evidence, powercalc_candidate_sources=candidate)
                 if template_reference_mapping is not None:
                     from .template_source_evidence import (seal_template_state_sources,

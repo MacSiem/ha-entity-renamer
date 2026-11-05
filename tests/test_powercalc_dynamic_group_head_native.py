@@ -15,7 +15,7 @@ import unittest
 import test_powercalc_group_head_native as group
 import test_powercalc_operand_timer_native as timers
 
-_SUBTRACT_SHA256 = "f14231d960275963bfbb376745562a9308d8e2a330f2b247070d68b5986618d5"
+_SUBTRACT_SHA256 = "13595da305ac043d822fc8a525798d2138bd679ac3ac114deb888091ccf0fe03"
 
 
 class _DynamicIOFacts(timers._CustomTimerFacts):
@@ -39,7 +39,7 @@ The shared fixture and its accepted quiet timer assertions are not modified.
                 assert self.case.stimulus_task.exception() is None
                 scope = self.deadline_wait['scope']
                 outcomes = [r for r in scope.producer_owner.results
-                            if r.producer is self.case.static_power and r.native_value_changed
+                            if r.producer is self.case.affected_power and r.native_value_changed
                             and r.input_state is self.case.stimulus_state]
                 assert len(outcomes) == 1, 'qualification: no actual retained result during pending native IO'
                 row['dynamic_result'] = outcomes[0]
@@ -112,7 +112,7 @@ class _DynamicGroupFacts(group._GroupHeadFacts):
         try:
             if tag in ('dynamic_calculate', 'dynamic_update'):
                 self.unchanged(self.vrefs, self.vm, self.vc)
-                if entity is not self.case.static_power:
+                if entity is not self.case.affected_power:
                     return
                 if tag == 'dynamic_calculate' and phase == 'return':
                     self.calculations.append((frame.f_locals.get('state'), returned))
@@ -159,12 +159,12 @@ class _DynamicGroupFacts(group._GroupHeadFacts):
         case.assertLessEqual(row['stimulus_pending_end_loop'], row['resumes'][0])
         outcome = row['dynamic_result']
         case.assertTrue(any(r is outcome for r in result.retained_producers.calculations))
-        case.assertIs(outcome.producer, case.static_power)
+        case.assertIs(outcome.producer, case.affected_power)
         case.assertIs(outcome.input_state, case.stimulus_state)
         case.assertEqual(outcome.ownership_phase, 'retained_removed')
         case.assertTrue(outcome.available and outcome.native_value_changed and outcome.native_write_suppressed)
         case.assertNotEqual(outcome.previous_native_power, outcome.native_power)
-        case.assertEqual(outcome.previous_native_power, self.initial_children[case.static_power.entity_id])
+        case.assertEqual(outcome.previous_native_power, self.initial_children[case.affected_power.entity_id])
         case.assertTrue(any(state is outcome.input_state and value is outcome.calculated_value
                             for state, value in self.calculations), 'qualification: native calculate_power body missing')
         case.assertTrue(any(argument is outcome.update_argument and previous == outcome.previous_native_power
@@ -174,8 +174,12 @@ class _DynamicGroupFacts(group._GroupHeadFacts):
         case.assertLess(outcome.update_returned_at, self.boundary)
         case.assertLessEqual(case.stimulus_state.last_updated, outcome.update_returned_at)
         self.changes = [(outcome.update_returned_at, outcome.producer.entity_id, outcome.native_power)]
-        case.assertNotEqual(self.signed(self.retired), self.signed(outcome.update_returned_at),
-                            'qualification: changed child did not change signed reload power')
+        if case.affected_dynamic:
+            case.assertEqual(self.signed(self.retired), self.signed(outcome.update_returned_at),
+                             'subtracting the changed child must preserve signed power')
+        else:
+            case.assertNotEqual(self.signed(self.retired), self.signed(outcome.update_returned_at),
+                                'qualification: changed child did not change signed reload power')
         self.typed_interval = result.operand_clock.subtract_interval
         actual_intervals = result.operand_clock.subtract_intervals
         if actual_intervals:
@@ -376,6 +380,10 @@ class NativePowercalcDynamicGroupHeadTests(unittest.IsolatedAsyncioTestCase):
         self.stimulus_task = self.stimulus_state = None
         await group.direct.NativePowercalcOperandClockRedTests.asyncSetUp(self)
 
+    @property
+    def affected_power(self):
+        return self.dynamic_power if getattr(self, 'affected_dynamic', False) else self.static_power
+
     async def change_during_real_io(self, io, row):
         self.assertIs(row.get('yielded'), row.get('future'), 'qualification: no genuine native IO yield')
         self.assertFalse(row['future'].done(), 'qualification: IO completed before public stimulus')
@@ -384,15 +392,26 @@ class NativePowercalcDynamicGroupHeadTests(unittest.IsolatedAsyncioTestCase):
         scope = io.deadline_wait['scope']
         self.assertEqual(scope.started, 1)
         self.assertEqual(scope.returned, 0)
-        self.assertEqual(self.static_power._platform_state.name, 'REMOVED')
-        await self.sources[0].async_turn_on(brightness=1)
-        self.stimulus_state = self.f.hass.states.get(self.yaml_source)
-        self.assertEqual(self.stimulus_state.attributes.get('brightness'), 1)
+        self.assertEqual(self.affected_power._platform_state.name, 'REMOVED')
+        index = 1 if self.affected_dynamic else 0
+        brightness = 255 if self.affected_dynamic else 1
+        await self.sources[index].async_turn_on(brightness=brightness)
+        source = self.gui_source if self.affected_dynamic else self.yaml_source
+        self.stimulus_state = self.f.hass.states.get(source)
+        self.assertEqual(self.stimulus_state.attributes.get('brightness'), brightness)
         self.assertFalse(row['future'].done(), 'qualification: native result did not finish while IO pending')
         row['stimulus_pending_end_loop'] = self.f.hass.loop.time()
         self.assertFalse(io.numeric or io.cutovers)
 
     async def test_dynamic_retained_child_during_real_json_io_preserves_group_and_subtract_heads(self):
+        self.affected_dynamic = False
+        await self._run_dynamic_child()
+
+    async def test_subtracted_dynamic_child_during_real_json_io_preserves_heads(self):
+        self.affected_dynamic = True
+        await self._run_dynamic_child()
+
+    async def _run_dynamic_child(self):
         await self.ready()
         self.original_head = self.chain.reconstruct_inputs().head
         original_receipt = self.chain.baseline.receipt_json
@@ -416,7 +435,7 @@ class NativePowercalcDynamicGroupHeadTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(io.error, 'qualification failure, not product RED: ' + repr(io.error))
             # Public follow-up supplies an actual new source endpoint and later
             # native HEAD. No callbacks, deadlines or source States are invoked.
-            await self.sources[0].async_turn_on(brightness=128)
+            await self.sources[1 if self.affected_dynamic else 0].async_turn_on(brightness=128)
             await self.f.hass.async_block_till_done()
             await asyncio.shield(facts.new_integral)
             facts.qualify(result, io)

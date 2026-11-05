@@ -31,6 +31,9 @@ def _yaml_factory_for_plan(preparations, plan):
         raise Refused('yaml_original_profile_unavailable')
     composition = row['payload'].get('composition')
     profile = composition.get('profile') if type(composition) is dict else None
+    if profile == 'powercalc_source_own_binding_v1':
+        from .powercalc_public_server import PowercalcPublicServer
+        return PowercalcPublicServer
     if profile in ('template_state_binding_v3', 'template_mixed_state_binding_v1', 'template_script_prefix_binding_v1', 'template_automation_prefix_binding_v1'):
         return NativeTemplateStateServer
     if profile == 'template_numeric_entry_reverse_v1' and plan.required_scopes == ('registry', 'helpers'):
@@ -136,7 +139,12 @@ class Runtime:
             await self.preparations.create('review-' + prefix, review_lease(prefix, actor_id))
             current()
             try:
-                if hass.config_entries.async_entries('template'):
+                if 'powercalc' in hass.config.components:
+                    from .powercalc_public_server import PowercalcPublicServer
+                    session = await PowercalcPublicServer.prepare(hass, mapping,
+                        guard=current, refresh=refresh, entity_names=entity_names,
+                        device_names=device_names, review_id=prefix)
+                elif hass.config_entries.async_entries('template'):
                     from .native_template_forward import NativeTemplateForward
                     if entity_names or device_names:
                         raise Refused('template_forward_names_unsupported')
@@ -178,14 +186,16 @@ class Runtime:
                 receipt = baseline.receipt
                 # Aggregate only the admitted planned YAML scope. Paths, YAML,
                 # native keys, receipts and private consumer configuration stay here.
+                from .powercalc_composition import PowercalcComposition
+                powercalc = type(composition) is PowercalcComposition
                 dependencies = {
-                    'domains': ['template'] if is_entry else sorted(domain for domain in receipt.changed_domains
-                                      if domain in ('template', 'automation', 'script')),
+                    'domains': (['powercalc'] + (['energy'] if 'energy' in plan.required_scopes else [])) if powercalc else (['template'] if is_entry else sorted(domain for domain in receipt.changed_domains
+                                      if domain in ('template', 'automation', 'script'))),
                     'yaml_file_count': len(receipt.proposed_files),
-                    'files': [] if is_entry else dependency_files(composition),
-                    'template_consumer_count': 1 if is_entry else sum(
+                    'files': session.dependency_files if powercalc else ([] if is_entry else dependency_files(composition)),
+                    'template_consumer_count': 0 if powercalc else (1 if is_entry else sum(
                         row.domain in ('template.sensor', 'template.binary_sensor')
-                        for row in session.evidence.template_sources.ledger.definitions)}
+                        for row in session.evidence.template_sources.ledger.definitions))}
                 if is_entry:
                     old, new = next(iter(session.mapping.items()))
                     dependencies['config_entries'] = [{'entity_id': session.observer.rows[0]['entity_id'],

@@ -371,6 +371,25 @@ class RecoveryController:
                     await store.initialize()
                     self.check()
                 try:
+                    native = record.plan.native_inputs
+                    stored = (preparations.plans.get(native[0]) if type(native) is tuple and len(native) == 3
+                              and type(native[0]) is str else None)
+                    encoded = stored['payload'].get('composition') if stored is not None else None
+                    is_powercalc = (type(encoded) is dict
+                                    and encoded.get('profile') == 'powercalc_source_own_binding_v1')
+                    if is_powercalc:
+                        from .powercalc_composition import PowercalcComposition
+                        _, candidate = preparations.resolve_composition(native)
+                        is_powercalc = type(candidate) is PowercalcComposition
+                    if (is_powercalc and record.status == 'applied'
+                            and record.direction == 'forward'
+                            and record.phases == ('verified',) * len(record.plan.steps)):
+                        operations.append({'operation_id': record.operation_id,
+                            'fingerprint': record.plan.fingerprint, 'status': record.status,
+                            'direction': record.direction, 'recovery_required': True,
+                            'reason': 'inspection_available', 'eligible': False})
+                        required = True
+                        continue
                     if (record.status == 'applied' and record.direction == 'forward'
                             and _own_registry_plan(preparations, record)):
                         # Snapshot inventory is never full native/source admission.
@@ -448,6 +467,17 @@ class RecoveryController:
                 return _result(operation_id, fingerprint, 'refused', 'operation_mismatch')
             if record.status == 'refused' and record.reason == 'prewrite_refused':
                 return _result(operation_id, fingerprint, 'refused', 'prewrite_refused')
+            native = record.plan.native_inputs
+            stored = (preparations.plans.get(native[0]) if type(native) is tuple and len(native) == 3
+                      and type(native[0]) is str else None)
+            encoded = stored['payload'].get('composition') if stored is not None else None
+            if type(encoded) is dict and encoded.get('profile') == 'powercalc_source_own_binding_v1':
+                from .powercalc_composition import PowercalcComposition
+                _, composition = preparations.resolve_composition(native)
+                if type(composition) is not PowercalcComposition:
+                    raise Refused('unsupported_recovery_plan')
+                from .powercalc_public_recovery import inspect_or_restore
+                return await inspect_or_restore(self, record, restore=restore)
             if record.status == 'rolled_back':
                 if restore:
                     return _result(operation_id, fingerprint, 'refused', 'already_finished')
