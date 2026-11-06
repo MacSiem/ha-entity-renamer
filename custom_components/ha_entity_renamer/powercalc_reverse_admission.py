@@ -134,6 +134,7 @@ class PowercalcReverseAdmission:
                   'forward_restore_lineage_changed')
             expected_old = pss_intent['payload']['source'].get(move.before)
             expected_restore = _canonical(restore_intent['payload']['before'])
+            uuid_mode = obj.receipt.version == '2026.11.0'
             _need(type(expected_old) is dict, 'forward_old_alias_required')
             vendor = PowercalcVendor(hass, with_profiles=True)
             vendor.bindings()
@@ -156,10 +157,17 @@ class PowercalcReverseAdmission:
                   and type(groups[0]._native_value_exact) is Decimal
                   and groups[0]._native_value_exact.is_finite(), 'current_group_identity_changed')
             memory = _snapshot(store)
-            _need(_exact_json_equal(memory.get(move.before), _freeze_json(expected_old)) and move.after in memory
-                  and move.before not in restore.entities and move.before in restore.last_states
-                  and _captured(restore.last_states[move.before]) == expected_restore,
+            _need(_exact_json_equal(memory.get(move.before), _freeze_json(expected_old)) and move.after in memory,
                   'retained_alias_changed')
+            if uuid_mode:
+                from .native_restore_uuid import owned_slot
+                current_restore = owned_slot(restore, move.after, move.before,
+                                             expected_group.registry_id, required=True)
+                current_restore_bytes = _captured(current_restore)
+            else:
+                _need(move.before not in restore.entities and move.before in restore.last_states
+                      and _captured(restore.last_states[move.before]) == expected_restore,
+                      'retained_alias_changed')
             checks = (('powercalc_group', store), ('core.restore_state', restore))
             observations = []
             for key, owner in checks:
@@ -176,8 +184,13 @@ class PowercalcReverseAdmission:
                         _need(_exact_json_equal(_loads(raw)['data'].get(move.before), _freeze_json(expected_old)),
                               'retained_pss_disk_changed')
                     else:
-                        _need(_rows(raw, (move.before,))[move.before] == expected_restore,
-                              'retained_restore_disk_changed')
+                        if uuid_mode:
+                            disk = _rows(raw, (move.before, move.after), owned_uuid=expected_group.registry_id)
+                            _need(disk[move.before] is None and disk[move.after] is not None,
+                                  'foreign_restore_alias')
+                        else:
+                            _need(_rows(raw, (move.before,))[move.before] == expected_restore,
+                                  'retained_restore_disk_changed')
                     await _drained(hass.async_add_executor_job, pinned.verify)
                     obj._scope()
                     _need(_idle(owner), 'retained_alias_writer_changed')
@@ -185,10 +198,15 @@ class PowercalcReverseAdmission:
                 finally:
                     pinned.close()
             _need(_exact_json_equal(_snapshot(store).get(move.before), _freeze_json(expected_old))
-                  and _idle(store) and _idle(restore)
-                  and restore.last_states.get(move.before) is not None
-                  and _captured(restore.last_states[move.before]) == expected_restore,
-                  'retained_alias_changed_during_read')
+                  and _idle(store) and _idle(restore), 'retained_alias_changed_during_read')
+            if uuid_mode:
+                _need(owned_slot(restore, move.after, move.before, expected_group.registry_id, required=True)
+                      is current_restore and _captured(current_restore) == current_restore_bytes,
+                      'retained_uuid_changed_during_read')
+            else:
+                _need(restore.last_states.get(move.before) is not None
+                      and _captured(restore.last_states[move.before]) == expected_restore,
+                      'retained_alias_changed_during_read')
             vendor.bindings()
             return tuple(observations)
 

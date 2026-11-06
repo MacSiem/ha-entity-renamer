@@ -94,9 +94,14 @@ def qualify_population(hass, bound, mapping, previous, *, inverse_aliases=None):
         if target != identity:
             allowed_restore = (inverse_aliases or {}).get('restore_owned', {})
             allowed_pss = (inverse_aliases or {}).get('pss_owned', {})
-            _need((target not in restore.last_states or target in allowed_restore)
-                  and target not in restore.entities,
-                  'restore_target_occupied')
+            from homeassistant.const import __version__
+            if __version__ == '2026.11.0':
+                from .native_restore_uuid import owned_slot
+                owned_slot(restore, identity, target, row.registry_id, required=False)
+                _need(target not in restore.entities, 'restore_target_occupied')
+            else:
+                _need((target not in restore.last_states or target in allowed_restore)
+                      and target not in restore.entities, 'restore_target_occupied')
             if kind == 'group':
                 _need((target not in pss_disk or target in allowed_pss)
                       and (target not in entity._prev_state_store.states or target in allowed_pss),
@@ -161,6 +166,7 @@ def snapshot_removed(hass, population, *, allowed_targets=()):
     _need(type(hass) is HomeAssistant and type(population) is PowercalcPopulation, 'inputs')
     data = hass.data.get(DATA_RESTORE_STATE)
     _need(type(data) is RestoreStateData and data.hass is hass, 'restore_store_unavailable')
+    from homeassistant.const import __version__
     result = []
     for counter in population.counters:
         entity, old, new = counter.entity, counter.entity_id, counter.target_id
@@ -168,9 +174,15 @@ def snapshot_removed(hass, population, *, allowed_targets=()):
               and entity.entity_id == old and entity.registry_entry is not None
               and entity.registry_entry.id == counter.registry_id
               and entity.registry_entry.config_entry_id == counter.entry_id
-              and old not in data.entities and old in data.last_states
-              and (new == old or new not in data.last_states or new in allowed_targets), 'inactive_or_target_changed')
-        stored = data.last_states[old]
+              and old not in data.entities, 'inactive_or_target_changed')
+        if __version__ == '2026.11.0':
+            from .native_restore_uuid import owned_slot
+            stored = owned_slot(data, old, new, counter.registry_id, required=True)
+            _need(stored.state.entity_id == old, 'restore_source_id_changed')
+        else:
+            _need(old in data.last_states and (new == old or new not in data.last_states
+                  or new in allowed_targets), 'inactive_or_target_changed')
+            stored = data.last_states[old]
         if counter.kind == 'integration':
             payload = native_restore_state_payload.prepare_integration_snapshot_payload(stored, new, entity=entity)
         elif counter.kind == 'group':

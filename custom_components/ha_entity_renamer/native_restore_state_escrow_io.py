@@ -60,7 +60,6 @@ class EscrowIO:
         require(self.lease.owns_entry(self.entry), 'entry_outside_owned_scope')
         hass, data, store = self.hass, self.data, self.store
         require(__version__ in codec.PINS, 'ha_version_unsupported')
-        require(__version__ != '2026.11.0', 'core11_restore_escrow_unqualified')
         require(type(data) is RestoreStateData and hass.data.get(DATA_RESTORE_STATE) is data
                 and data.hass is hass and data.store is store and type(store) is Store
                 and store.hass is hass, 'native_data_store_identity')
@@ -96,6 +95,27 @@ class EscrowIO:
                     'helper_platform_active')
 
     def _memory(self, expected):
+        from homeassistant.const import __version__
+        if __version__ == '2026.11.0':
+            from homeassistant.helpers import entity_registry as er
+            from .native_restore_uuid import owned_slot
+            registry = er.async_get(self.hass)
+            registered = [(name, registry.async_get(name)) for name in expected
+                          if registry.async_get(name) is not None]
+            require(len(registered) == 1, 'one_registered_restore_owner_required')
+            source, row = registered[0]
+            require(row.config_entry_id == self.entry.entry_id
+                    and row.unique_id == self.entry.entry_id
+                    and row.platform == self.entry.domain, 'restore_registry_owner_changed')
+            others = [name for name in expected if name != source]
+            require(len(others) <= 1, 'restore_endpoint_count')
+            item = owned_slot(self.data, source, others[0] if others else source, row.id, required=True)
+            actual_id = item.state.entity_id
+            require(actual_id in expected and expected[actual_id] is not ABSENT
+                    and captured(item) == expected[actual_id]
+                    and all(value is ABSENT for key, value in expected.items() if key != actual_id),
+                    'memory_uuid_preimage_changed')
+            return
         for entity_id, raw in expected.items():
             current = self.data.last_states.get(entity_id)
             require((entity_id not in self.data.last_states and raw is ABSENT) or
@@ -109,7 +129,7 @@ class EscrowIO:
         self._memory(expected)
 
     @staticmethod
-    def _read(path, ids):
+    def _read(path, ids, owned_uuid=None):
         # Never Store.async_load: pending _data/preload can conceal disk failure.
         import json
         try:
@@ -126,7 +146,7 @@ class EscrowIO:
                 and doc['key'] == 'core.restore_state' and type(doc['data']) is list,
                 'raw_store_envelope')
         result = {key: ABSENT for key in ids}
-        seen = set()
+        seen, uuids = set(), set()
         for row in doc['data']:
             require(type(row) is dict and type(row.get('state')) is dict
                     and type(row['state'].get('entity_id')) is str, 'raw_row_schema')
@@ -134,18 +154,35 @@ class EscrowIO:
             # Reject every duplicate: load's dict comprehension would conceal it.
             require(key not in seen, 'raw_duplicate_entity_id')
             seen.add(key)
+            uuid = row.get('entity_registry_id')
+            if uuid is not None:
+                require(type(uuid) is str and uuid not in uuids, 'raw_duplicate_uuid')
+                uuids.add(uuid)
+                if owned_uuid is not None and uuid == owned_uuid:
+                    require(key in ids, 'raw_foreign_uuid')
+            if owned_uuid is not None and key in ids and 'entity_registry_id' in row:
+                require(uuid == owned_uuid, 'raw_foreign_entity')
             if key in result:
                 codec._shape(row)
                 result[key] = codec._canonical(row)
         return result
 
     async def _raw(self, memory, disk, *, inactive=True):
+        from homeassistant.const import __version__
+        owned_uuid = None
+        if __version__ == '2026.11.0':
+            from homeassistant.helpers import entity_registry as er
+            registry = er.async_get(self.hass)
+            owners = [registry.async_get(name) for name in memory if registry.async_get(name) is not None]
+            require(len(owners) == 1, 'one_registered_restore_owner_required')
+            owned_uuid = owners[0].id
         self._boundary(memory, inactive=inactive)
         # Await acquiring lock and await executor both get fresh checks.
         async with self.write_lock:
             self._boundary(memory, inactive=inactive)
-            actual = await self.hass.async_add_executor_job(
-                self._read, self.store.path, tuple(memory))
+            args = ((self.store.path, tuple(memory), owned_uuid) if owned_uuid is not None
+                    else (self.store.path, tuple(memory)))
+            actual = await self.hass.async_add_executor_job(self._read, *args)
             self._boundary(memory, inactive=inactive)
             require(actual == disk, 'raw_disk_preimage_or_postimage_mismatch')
             return actual
@@ -173,7 +210,14 @@ class EscrowIO:
                 'explicit_disk_preimage_required')
         require(disk_preimage[target] == expected_target, 'disk_target_preimage_conflict')
         self._boundary(expected, inactive=True)
-        require(self.data.last_states[source] is expected_source, 'source_object_changed')
+        from homeassistant.const import __version__
+        uuid_mode = __version__ == '2026.11.0'
+        def current_source():
+            if uuid_mode:
+                from .native_restore_uuid import owned_slot
+                return owned_slot(self.data, source, target, before['entity_registry_id'], required=True)
+            return self.data.last_states.get(source)
+        require(current_source() is expected_source, 'source_object_changed')
         if integration:
             from .native_integration_unload_audit import NativeIntegrationUnloadWitness
             require(type(witness) is NativeIntegrationUnloadWitness
@@ -183,19 +227,24 @@ class EscrowIO:
         self._boundary(expected, inactive=True)
         if integration:
             witness.check_live(lease=self.lease, data=self.data, stored=expected_source)
-        require(self.data.last_states[source] is expected_source, 'source_object_changed')
+        require(current_source() is expected_source, 'source_object_changed')
         clone = codec.materialize(payload)
-        self.data.last_states[target] = clone  # source deliberately retained
+        if uuid_mode:
+            require(expected_target is ABSENT and before['entity_registry_id'] == after['entity_registry_id']
+                    and clone.entity_registry_id == before['entity_registry_id'], 'restore_uuid_payload')
+            self.data.last_states_by_entity_registry_id[clone.entity_registry_id] = clone
+        else:
+            self.data.last_states[target] = clone  # source deliberately retained
         if integration:
             witness._written(self, clone)
-        post = {source: payload.before_json, target: payload.after_json}
+        post = {source: ABSENT if uuid_mode else payload.before_json, target: payload.after_json}
         self._boundary(post, inactive=True)
         await self.data.async_dump_states()  # NEVER while holding store._write_lock
         self._boundary(post, inactive=True)
         actual = await self._raw(post, post)
         if integration:
             witness.check_live(lease=self.lease, data=self.data)
-        return Readback(actual[source], actual[target])
+        return Readback(payload.before_json if uuid_mode else actual[source], actual[target])
 
     async def cleanup(self, *, source, target, owned_source, expected_target,
                       durable_names_setup_guard):
@@ -205,6 +254,8 @@ class EscrowIO:
         the next ordinary native unload; this narrow version never reasons about
         a concurrently accumulating active target. It never removes target.
         """
+        from homeassistant.const import __version__
+        require(__version__ != '2026.11.0', 'uuid_restore_has_no_alias_cleanup')
         require(callable(durable_names_setup_guard), 'durable_names_setup_guard_required')
         require(source != target and type(owned_source) is bytes
                 and type(expected_target) is bytes, 'cleanup_preimages_required')
@@ -263,7 +314,12 @@ class EscrowIO:
         clone = codec.materialize_integration_payload(payload)
         self._boundary(expected, inactive=True)
         witness.check_live(lease=self.lease, data=self.data)
-        self.data.last_states[entity_id] = clone
+        from homeassistant.const import __version__
+        if __version__ == '2026.11.0':
+            require(clone.entity_registry_id == before['entity_registry_id'], 'restore_uuid_payload')
+            self.data.last_states_by_entity_registry_id[clone.entity_registry_id] = clone
+        else:
+            self.data.last_states[entity_id] = clone
         witness._written(self, clone)
         post = {entity_id: payload.after_json}
         self._boundary(post, inactive=True)

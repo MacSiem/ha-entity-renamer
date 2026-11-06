@@ -293,10 +293,15 @@ class PowercalcPhaseSession:
               and restore_intent['payload'].get('root') == list(self.lifecycle.root_reference),
               'restore_original_intent_required')
         restore_data = self.lease.hass.data.get(DATA_RESTORE_STATE)
+        if chain.original_receipt.version == '2026.11.0':
+            from .native_restore_uuid import owned_slot
+            matches = [group for group in self.lifecycle.groups if group.entity_id == move.before]
+            _need(len(matches) == 1, 'restore_group_identity_required')
+            stored = owned_slot(restore_data, move.after, move.before, matches[0].registry_id, required=True)
+        else:
+            stored = None if restore_data is None else restore_data.last_states.get(move.after)
         _need(restore_data is not None and move.after not in restore_data.entities
-              and move.after in restore_data.last_states
-              and _captured(restore_data.last_states[move.after])
-                  == codec._canonical(restore_intent['payload']['after'])
+              and stored is not None and _captured(stored) == codec._canonical(restore_intent['payload']['after'])
               and _snapshot(self.scope.previous_store).get(move.after)
                   == pss['payload'].get('target', {}).get(move.after),
               'native_group_restore_changed')
@@ -319,7 +324,7 @@ class PowercalcPhaseSession:
               and self.policy.activation_hooks is hooks and hooks.intent is self.lease.pending,
               'typed_live_yaml_activation_required')
         aliases = self.verify_activation_preflight(hooks=hooks)
-        _need(self.lease.receipt.version == '2026.10.4', 'activation_core_unsupported')
+        _need(self.lease.receipt.version in ('2026.10.4', '2026.11.0'), 'activation_core_unsupported')
         native = import_module('custom_components.powercalc')
         vendor_refs = tuple((native, name) for name in ('get_global_configuration',
             '_async_load_yaml_sensor', 'setup_domain_groups', 'create_standby_group'))

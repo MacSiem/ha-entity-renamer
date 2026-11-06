@@ -171,10 +171,14 @@ class PowercalcGroupOwnID:
         _need(_idle(store) and _snapshot(store).get(self.target) == pss['target'][self.target],
               'live_pss_target_changed')
         data = self.hass.data.get(DATA_RESTORE_STATE)
+        if self.chain.original_receipt.version == '2026.11.0':
+            from .native_restore_uuid import owned_slot
+            stored = owned_slot(data, self.source, self.target, self.change.identity, required=True)
+        else:
+            stored = data.last_states.get(self.target) if type(data) is RestoreStateData else None
         _need(type(data) is RestoreStateData and data.hass is self.hass and _idle(data)
               and self.source not in data.entities and self.target not in data.entities
-              and self.target in data.last_states
-              and _captured(data.last_states[self.target]) == _canonical(intent['after']),
+              and stored is not None and _captured(stored) == _canonical(intent['after']),
               'live_restore_target_changed')
 
     def _before(self):

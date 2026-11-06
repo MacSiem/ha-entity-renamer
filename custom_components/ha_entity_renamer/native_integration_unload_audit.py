@@ -30,6 +30,7 @@ _INTEGRATION = {
 _INIT = {
     '2025.6.0': '282ec19412f1dc291e0e2bc983285266cfdc4eb41d416178e1b5c0a4a5262a7b',
     '2026.10.2': 'a1e9e24c684782287053eedea3d48c4852e0b30c7df8dbf56e0a72141a4de24b', '2026.10.4': 'a1e9e24c684782287053eedea3d48c4852e0b30c7df8dbf56e0a72141a4de24b',
+    '2026.11.0': 'e89582b55186d82d7b83dd0b092d93f079804bf56b2cd1bf2b77afa15766bed7',
 }
 
 
@@ -85,14 +86,25 @@ class NativeIntegrationUnloadWitness:
               and (stored is None or stored is audit._stored), 'witness_scope')
         audit._quiescent()
         expected = audit._post if audit._post is not None else audit._stored
-        _need(audit.data.last_states.get(audit.capture.entity_id) is expected,
-              'stored_object_changed')
+        if audit.version == '2026.11.0':
+            from .native_restore_uuid import owned_slot
+            if audit._target is not None:
+                expected = audit._target
+            target = (codec._parse(audit._payload.after_json)['state']['entity_id']
+                      if audit._payload is not None else audit.capture.entity_id)
+            _need(owned_slot(audit.data, audit.capture.entity_id, target,
+                             audit.capture.helper_uuid, required=True) is expected,
+                  'stored_object_changed')
+        else:
+            _need(audit.data.last_states.get(audit.capture.entity_id) is expected,
+                  'stored_object_changed')
         raw = codec._canonical(codec._capture(expected, codec._native()))
-        _need(raw == (audit._payload.after_json if audit._post is not None
+        _need(raw == (audit._payload.after_json if audit._post is not None or
+                      audit.version == '2026.11.0' and audit._target is not None
                      else audit._before), 'stored_payload_changed')
         if audit._target is not None:
             target = codec._parse(audit._payload.after_json)['state']['entity_id']
-            _need(audit.data.last_states.get(target) is audit._target
+            _need((audit.version == '2026.11.0' or audit.data.last_states.get(target) is audit._target)
                   and codec._canonical(codec._capture(audit._target, codec._native()))
                       == audit._payload.after_json, 'target_payload_changed')
         if audit.clock is None:
@@ -140,8 +152,14 @@ class NativeIntegrationUnloadWitness:
     def _written(self, io, clone):
         audit = self._audit
         target = codec._parse(audit._payload.after_json)['state']['entity_id']
+        if audit.version == '2026.11.0':
+            from .native_restore_uuid import owned_slot
+            actual = owned_slot(audit.data, audit.capture.entity_id, target,
+                                audit.capture.helper_uuid, required=True)
+        else:
+            actual = audit.data.last_states.get(target)
         _need(audit._attempted and audit._io is io and audit._post is None
-              and audit._target is None and audit.data.last_states.get(target) is clone,
+              and audit._target is None and actual is clone,
               'actual_transfer_required')
         _need(codec._canonical(codec._capture(clone, codec._native()))
               == audit._payload.after_json, 'transfer_postimage')
@@ -244,6 +262,8 @@ class NativeIntegrationUnloadAudit:
             (type(self.row), 'write_unavailable_state'),
             (type(self.hass.states), 'async_set'),
             (type(self.hass.states), 'async_set_internal'))
+        if self.version == '2026.11.0':
+            self.refs += ((type(self.hass.config_entries), 'async_unload_platforms_or_raise'),)
         self.methods, self.codes = prove_methods(self.root, self.pins, self.refs)
         self.extra_class = IntegrationSensorExtraStoredData
         self.class_refs = tuple((import_module('homeassistant.' + module), name, cls)
@@ -372,7 +392,12 @@ class NativeIntegrationUnloadAudit:
                       and self._extra is not None, 'restore_remove_cause')
                 if event == 'return':
                     self._remove_count += 1
-                    stored = self.data.last_states.get(self.row.entity_id)
+                    if self.version == '2026.11.0':
+                        from .native_restore_uuid import owned_slot
+                        stored = owned_slot(self.data, self.row.entity_id, self.row.entity_id,
+                                            self.row.id, required=True)
+                    else:
+                        stored = self.data.last_states.get(self.row.entity_id)
                     _need(self._remove_count == 1 and stored is not None
                           and stored.extra_data is self._extra, 'native_stored_extra_identity')
                     self._stored = stored

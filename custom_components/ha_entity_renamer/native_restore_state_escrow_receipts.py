@@ -124,10 +124,11 @@ def _parse_root(store, context, root_ref, *, depth=0):
     """Strict offline graph validator; callbacks of readonly lifecycle never run."""
     _need(depth <= 1, 'forward_witness_recursion')
     root = _read(store, root_ref)
+    uuid_mode = context[2].version == '2026.11.0'
     _need(set(root) == {'kind', 'schema', 'binding', 'direction', 'payload',
                        'target_preimage', 'disk_preimage', 'forward_receipt'}
           and root['kind'] == 'restore_state_escrow_root'
-          and type(root['schema']) is int and root['schema'] == 1,
+          and type(root['schema']) is int and root['schema'] == (2 if uuid_mode else 1),
           'root_layout')
     binding = root['binding']
     _need(type(binding) is dict and set(binding) == {'original',
@@ -154,6 +155,10 @@ def _parse_root(store, context, root_ref, *, depth=0):
     _need(codec._parse(payload.before_json)['state']['entity_id'] == source
           and codec._parse(payload.after_json)['state']['entity_id'] == target,
           'payload_endpoints')
+    if uuid_mode:
+        _need(codec._parse(payload.before_json)['entity_registry_id'] == binding['helper_uuid']
+              and codec._parse(payload.after_json)['entity_registry_id'] == binding['helper_uuid'],
+              'payload_uuid_binding')
     if change.before['platform'] == 'integration':
         _need(type(payload) is codec.PreparedIntegrationPayload, 'integration_payload_required')
         from .native_integration_unload_audit import (decode_integration_own_unload,
@@ -167,6 +172,8 @@ def _parse_root(store, context, root_ref, *, depth=0):
     else:
         _need(type(payload) is codec.PreparedPayload, 'utility_payload_required')
     expected_target = _row_bytes(root['target_preimage'], target)
+    if uuid_mode:
+        _need(expected_target is None, 'uuid_target_must_be_absent')
     disk = root['disk_preimage']
     _need(type(disk) is dict and set(disk) == {source, target}, 'disk_preimage_layout')
     _row_bytes(disk[source], source)
@@ -223,6 +230,8 @@ def _status(store, context, root_ref, parsed, *, depth=0):
                      'target': codec._parse(payload.after_json),
                      'source_sha256': payload.before_digest,
                      'target_sha256': payload.after_digest}}
+    if root['schema'] == 2:
+        expected_receipt['readback']['source_retained'] = False
     _need(_read(store, receipt_ref) == expected_receipt, 'receipt_binding')
     return {'status': 'verified', 'pending': None, 'read_only': True,
             'receipt': receipt_ref}
@@ -358,7 +367,13 @@ class NativeRestoreStateEscrow:
             source, target = change.before['entity_id'], change.after['entity_id']
             if direction == 'rollback':
                 source, target = target, source
-            source_object = self.data.last_states.get(source)
+            uuid_mode = self.lifecycle.receipt.version == '2026.11.0'
+            if uuid_mode:
+                from .native_restore_uuid import owned_slot
+                source_object = owned_slot(self.data, source, target, binding['helper_uuid'], required=True)
+                _need(source_object.state.entity_id == source, 'source_uuid_id_changed')
+            else:
+                source_object = self.data.last_states.get(source)
             _need(source_object is not None, 'post_unload_source_required')
             if change.before['platform'] == 'integration':
                 _, witness = self.lifecycle._unload_witnesses[self.entry_id]
@@ -366,12 +381,12 @@ class NativeRestoreStateEscrow:
                 self._integration_witness = witness
             else:
                 payload = codec.prepare_payload(source_object, target)
-            expected_target = (None if target not in self.data.last_states else
+            expected_target = (None if uuid_mode or target not in self.data.last_states else
                                captured(self.data.last_states[target]))
             _need(type(disk_preimage) is dict and set(disk_preimage) == {source, target},
                   'explicit_disk_preimage_required')
             disk = {key: _optional_row(value, key) for key, value in disk_preimage.items()}
-            root = {'kind': 'restore_state_escrow_root', 'schema': 1,
+            root = {'kind': 'restore_state_escrow_root', 'schema': 2 if uuid_mode else 1,
                     'binding': binding, 'direction': direction,
                     'payload': codec._parse(codec.serialize(payload)),
                     'target_preimage': _optional_row(expected_target, target),
@@ -384,7 +399,11 @@ class NativeRestoreStateEscrow:
             self._validate_candidate(root, key)
             await self.io._raw({source: payload.before_json, target: expected_target}, disk_preimage)
             await self._fresh()
-            _need(self.data.last_states[source] is source_object, 'source_capture_identity')
+            if uuid_mode:
+                _need(owned_slot(self.data, source, target, binding['helper_uuid'], required=True)
+                      is source_object, 'source_capture_identity')
+            else:
+                _need(self.data.last_states[source] is source_object, 'source_capture_identity')
             self.root_reference = await self.store.create(key, root)
             self.root = root
             await self._fresh()
@@ -439,7 +458,7 @@ class NativeRestoreStateEscrow:
             # disk immediately before receipt rather than trusting stale Readback.
             before = codec._parse(self._payload.before_json)['state']['entity_id']
             after = codec._parse(self._payload.after_json)['state']['entity_id']
-            post = {before: result.source, after: result.target}
+            post = {before: None if self.root['schema'] == 2 else result.source, after: result.target}
             await self.io._raw(post, post)
             self._guard()
             receipt_payload = {'kind': 'restore_state_escrow_receipt',
@@ -450,6 +469,8 @@ class NativeRestoreStateEscrow:
                     'target': codec._parse(result.target),
                     'source_sha256': self._payload.before_digest,
                     'target_sha256': self._payload.after_digest}}
+            if self.root['schema'] == 2:
+                receipt_payload['readback']['source_retained'] = False
             ref = await self.store.create(_slot(self.root_reference[0], 'receipt'), receipt_payload)
             await self._fresh()
             await self.io._raw(post, post)
@@ -471,4 +492,5 @@ class NativeRestoreStateEscrow:
         _need(self.inspect()['status'] == 'verified', 'durable_receipt_required')
         before = codec._parse(self._payload.before_json)['state']['entity_id']
         after = codec._parse(self._payload.after_json)['state']['entity_id']
-        self.io._boundary({before: self._payload.before_json, after: self._payload.after_json}, inactive=True)
+        self.io._boundary({before: None if self.root['schema'] == 2 else self._payload.before_json,
+                           after: self._payload.after_json}, inactive=True)

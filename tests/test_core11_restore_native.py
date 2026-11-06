@@ -13,6 +13,33 @@ class Core11RestoreNativeTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = fixture.NativeBaselineTests.asyncSetUp
     asyncTearDown = fixture.NativeBaselineTests.asyncTearDown
 
+    async def test_uuid_owner_checks_both_namespaces_without_native_lookup(self):
+        from homeassistant.const import __version__
+        if __version__ != '2026.11.0':
+            self.skipTest('Core 11 RestoreState only')
+        from homeassistant.core import State
+        from homeassistant.helpers.restore_state import DATA_RESTORE_STATE, RestoreStateData, StoredState
+        module = importlib.import_module(fixture.PACKAGE + '.native_restore_uuid')
+        refused = importlib.import_module(fixture.PACKAGE + '.transaction').Refused
+        data = RestoreStateData(self.hass)
+        self.hass.data[DATA_RESTORE_STATE] = data
+        source, target = self.row.entity_id, 'sensor.renamed_owned'
+        stored = StoredState(State(source, '1'), None, datetime.now(timezone.utc), self.row.id)
+        data.last_states_by_entity_registry_id[self.row.id] = stored
+        self.assertIs(module.owned_slot(data, source, target, self.row.id, required=True), stored)
+        self.assertEqual(stored.state.entity_id, source)
+        foreign = StoredState(State(target, '2'), None, datetime.now(timezone.utc), None)
+        data.last_states_by_entity_id[target] = foreign
+        with self.assertRaises(refused):
+            module.owned_slot(data, source, target, self.row.id, required=True)
+        del data.last_states_by_entity_id[target]
+        self.assertIs(data.last_states_by_entity_registry_id[self.row.id], stored)
+        data.last_states_by_entity_registry_id[self.other.id] = StoredState(
+            State(target, '3'), None, datetime.now(timezone.utc), self.other.id)
+        with self.assertRaises(refused):
+            module.owned_slot(data, source, target, self.row.id, required=True)
+        self.assertEqual(stored.state.entity_id, source)
+
     async def test_exact_group_payload_preserves_uuid_and_full_total(self):
         from homeassistant.const import __version__
         if __version__ != '2026.11.0':

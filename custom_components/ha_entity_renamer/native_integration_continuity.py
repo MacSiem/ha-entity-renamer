@@ -75,7 +75,7 @@ class NativeIntegrationContinuity:
         from homeassistant.helpers import entity_platform as ep, entity_registry as er, event
         from homeassistant.helpers.entity import Entity
         version = import_module('homeassistant.const').__version__
-        _need(cls is NativeIntegrationContinuity and version in _INTEGRATION
+        _need(cls is NativeIntegrationContinuity and version in _INTEGRATION and version != '2026.11.0'
               and type(lease) is NativeHelperActivationLease
               and type(store) is RegistryReceiptStore and callable(guard)
               and type(hass) is HomeAssistant and type(hass.states) is StateMachine

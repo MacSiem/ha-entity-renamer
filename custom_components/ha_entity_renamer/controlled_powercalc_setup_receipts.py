@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
-from .native_registry_receipts import _digest, _event_id
+from .native_registry_receipts import _digest, _event_id, _exact_json_equal, _freeze_json
 from .transaction import Refused
 
 
@@ -32,9 +32,11 @@ def validate_handoff(chain, reference, direction):
                     _event_id(['controlled_pc_population', chain.root_id, direction, 'intent']),
                     'controlled_powercalc_population_intent')
     common = (chain.root_id, chain.operation_id, chain.plan.fingerprint, direction)
+    uuid_restore = chain.original_receipt.version == '2026.11.0'
     _need(all((event.get('root'), event.get('operation_id'), event.get('fingerprint'), event.get('direction'))
-              == common and type(event.get('schema')) is int and event['schema'] == 1
+              == common and type(event.get('schema')) is int
               for event in (handoff, unload))
+          and unload['schema'] == 1 and handoff['schema'] == (2 if uuid_restore else 1)
           and handoff.get('source_head') == unload.get('source_head')
           and unload.get('source_head') in chain._setup_positions
           and type(unload.get('phase_index')) is int
@@ -55,7 +57,8 @@ def validate_handoff(chain, reference, direction):
           and all(type(row) is dict and set(row) == {'uuid', 'before_id', 'after_id', 'kind', 'payload'}
                   and type(row['payload']) is dict for row in rows)
           and {(row['uuid'], row['before_id'], row['after_id'], row['kind']) for row in rows} == expected)
-    owned_restore = {name for _, old, new, _ in expected for name in (old, new)}
+    owned_restore = ({new for _, _, new, _ in expected} if uuid_restore else
+                     {name for _, old, new, _ in expected for name in (old, new)})
     owned_pss = {name for _, old, new, kind in expected if kind == 'group' for name in (old, new)}
     _need(type(handoff.get('restore_owned')) is dict and set(handoff['restore_owned']) == owned_restore
           and type(handoff.get('pss_owned')) is dict and set(handoff['pss_owned']) == owned_pss)
@@ -63,6 +66,12 @@ def validate_handoff(chain, reference, direction):
     from .powercalc_group_restore import PowercalcGroupRestorePayload, materialize
     for row in rows:
         value = row['payload']
+        if uuid_restore:
+            _need(type(value.get('before')) is dict and type(value.get('after')) is dict
+                  and value['before'].get('entity_registry_id') == row['uuid']
+                  and value['after'].get('entity_registry_id') == row['uuid']
+                  and _exact_json_equal(handoff['restore_owned'][row['after_id']],
+                                        _freeze_json(value['after'])))
         if row['kind'] == 'integration':
             decoded = deserialize_integration_payload(_canonical(value))
             _need(__import__('json').loads(decoded.capture_json)['helper_uuid'] == row['uuid']
@@ -99,8 +108,10 @@ def validate_controlled_setup(chain, payload, change):
                     'controlled_powercalc_population_intent')
     common = (chain.root_id, chain.operation_id, chain.plan.fingerprint, direction)
     _need(all((event.get('root'), event.get('operation_id'), event.get('fingerprint'), event.get('direction'))
-              == common and type(event.get('schema')) is int and event['schema'] == 1
+              == common and type(event.get('schema')) is int
               for event in (setup, intent, handoff, unload))
+          and all(event['schema'] == 1 for event in (setup, intent, unload))
+          and handoff['schema'] == (2 if chain.original_receipt.version == '2026.11.0' else 1)
           and setup.get('phase_index') == intent.get('phase_index') == index
           and setup.get('yaml_intent') == intent.get('yaml_intent') == payload.get('intent')
           and setup.get('handoff') == intent.get('handoff')

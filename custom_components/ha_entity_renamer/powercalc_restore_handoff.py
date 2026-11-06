@@ -29,7 +29,7 @@ def _need(condition, reason):
         raise PowercalcRestoreHandoffError('powercalc_restore_handoff_' + reason) from None
 
 
-def _rows(raw, ids):
+def _rows(raw, ids, *, owned_uuid=None):
     result = {name: None for name in ids}
     if raw is None:
         return result
@@ -38,13 +38,21 @@ def _rows(raw, ids):
           and type(value['version']) is int and value['version'] == 1
           and type(value['minor_version']) is int and value['minor_version'] == 1
           and value['key'] == 'core.restore_state' and type(value['data']) is list, 'disk_envelope')
-    seen = set()
+    seen, seen_uuids = set(), set()
     for row in value['data']:
         _need(type(row) is dict and type(row.get('state')) is dict
               and type(row['state'].get('entity_id')) is str, 'disk_row')
         name = row['state']['entity_id']
         _need(name not in seen, 'duplicate_disk_entity')
         seen.add(name)
+        uuid = row.get('entity_registry_id')
+        if uuid is not None:
+            _need(type(uuid) is str and uuid not in seen_uuids, 'duplicate_disk_uuid')
+            seen_uuids.add(uuid)
+            if owned_uuid is not None and uuid == owned_uuid:
+                _need(name in ids, 'foreign_disk_uuid')
+        if owned_uuid is not None and name in ids and 'entity_registry_id' in row:
+            _need(uuid == owned_uuid, 'foreign_disk_entity')
         if name in result:
             codec._shape(row)
             result[name] = codec._canonical(row)
@@ -73,6 +81,10 @@ async def async_handoff_group_restore(lifecycle, group_id):
     matches = [move for move in lifecycle.moves if move.before == group_id]
     _need(len(matches) == 1 and matches[0].before != matches[0].after, 'group_rename_required')
     move = matches[0]
+    uuid_mode = chain.original_receipt.version == '2026.11.0'
+    group_rows = [group for group in lifecycle.groups if group.entity_id == group_id]
+    _need(len(group_rows) == 1, 'group_identity_required')
+    group_uuid = group_rows[0].registry_id
     accepted = _unloads(lifecycle)
     terminal = accepted[group_id][2]
     pss_label = 'pss_reverse' if reverse else 'pss_forward'
@@ -109,21 +121,35 @@ async def async_handoff_group_restore(lifecycle, group_id):
               and forward['payload'].get('root') == list(admission.forward.root_reference),
               'forward_restore_alias_required')
         retained_body = codec._canonical(forward['payload']['before'])
-        retained = data.last_states.get(move.after)
+        if not uuid_mode:
+            retained = data.last_states.get(move.after)
     def target_current():
+        if uuid_mode:
+            from .native_restore_uuid import owned_slot
+            item = owned_slot(data, move.before, move.after, group_uuid, required=True)
+            return item.state.entity_id == move.before
         if reverse:
             return (retained is not None and data.last_states.get(move.after) is retained
                     and _captured(retained) == retained_body)
         return move.after not in data.last_states
     # _idle expects a vendor owner with .store, which RestoreStateData supplies.
     _need(_idle(data) and move.before not in data.entities and move.after not in data.entities
-          and move.before in data.last_states and target_current()
+          and (uuid_mode or move.before in data.last_states) and target_current()
           and lease.hass.states.get(move.after) is None, 'inactive_source_and_target_required')
-    source = data.last_states[move.before]
+    if uuid_mode:
+        from .native_restore_uuid import owned_slot
+        source = owned_slot(data, move.before, move.after, group_uuid, required=True)
+    else:
+        source = data.last_states[move.before]
     payload = prepare(source, move.after, full_total=terminal['full_total'],
                       precision=terminal['precision'], unit=terminal['unit'])
     native = codec._native()
     _need(_captured(source) == payload.before_json, 'native_source_changed')
+    def source_current():
+        if uuid_mode:
+            return (owned_slot(data, move.before, move.after, group_uuid, required=True) is source
+                    and _captured(source) == payload.before_json)
+        return data.last_states.get(move.before) is source and _captured(source) == payload.before_json
     refs = ((RestoreStateData, 'async_dump_states'), (RestoreStateData, 'async_get_stored_states'),
             (Store, 'async_save'), (Store, '_async_handle_write_data'), (Store, '_async_write_data'))
     pins = dict(_SOURCES[chain.original_receipt.version])
@@ -132,7 +158,7 @@ async def async_handoff_group_restore(lifecycle, group_id):
     proof = await _drained(lease.hass.async_add_executor_job, prove)
     lifecycle.check()
     _need(_unloads(lifecycle) == accepted and _idle(data)
-          and data.last_states.get(move.before) is source and _captured(source) == payload.before_json
+          and source_current()
           and target_current() and move.after not in data.entities,
           'preflight_changed')
     pinned = _PinnedPSS(chain.original_receipt, key='core.restore_state',
@@ -140,11 +166,11 @@ async def async_handoff_group_restore(lifecycle, group_id):
     try:
         raw, identity = await _drained(lease.hass.async_add_executor_job, pinned.capture)
         lifecycle.check()
-        disk = _rows(raw, (move.before, move.after))
+        disk = _rows(raw, (move.before, move.after), owned_uuid=group_uuid if uuid_mode else None)
         _need(pinned.root_sig[:3] == lifecycle.composition.previous.root_identity
               and pinned.storage_sig[:3] == lifecycle.composition.previous.storage_identity
-              and disk[move.after] == (retained_body if reverse else None) and _idle(data)
-              and data.last_states.get(move.before) is source and _captured(source) == payload.before_json,
+              and disk[move.after] == (retained_body if reverse and not uuid_mode else None) and _idle(data)
+              and source_current(),
               'preimage_changed')
     finally:
         pinned.close()
@@ -152,7 +178,7 @@ async def async_handoff_group_restore(lifecycle, group_id):
     _need(free, 'dump_observer_unavailable')
     label = 'restore_reverse' if reverse else 'restore_forward'
     key = _event_id([lifecycle.root_reference[0], label, group_id, 'intent'])
-    intent = {'kind': 'powercalc_group_restore_reverse_intent' if reverse else 'powercalc_group_restore_intent', 'schema': 1,
+    intent = {'kind': 'powercalc_group_restore_reverse_intent' if reverse else 'powercalc_group_restore_intent', 'schema': 2 if uuid_mode else 1,
               'root': list(lifecycle.root_reference), 'source_chain': lease.state.head,
               'unload': [accepted[group_id][0], accepted[group_id][1]], 'pss': [pss_key, pss['digest']],
               'before': codec._parse(payload.before_json), 'after': codec._parse(payload.after_json),
@@ -162,7 +188,7 @@ async def async_handoff_group_restore(lifecycle, group_id):
     ref = await chain.store.create(key, intent)
     lifecycle.check()
     _need(_unloads(lifecycle) == accepted and _idle(data)
-          and data.last_states.get(move.before) is source and _captured(source) == payload.before_json
+          and source_current()
           and target_current() and move.after not in data.entities,
           'post_intent_memory_changed')
     pinned = _PinnedPSS(chain.original_receipt, key='core.restore_state',
@@ -171,16 +197,26 @@ async def async_handoff_group_restore(lifecycle, group_id):
         reread, observed_identity = await _drained(lease.hass.async_add_executor_job, pinned.capture)
         lifecycle.check()
         _need(reread == raw and observed_identity == identity and _idle(data)
-              and data.last_states.get(move.before) is source and _captured(source) == payload.before_json
+              and source_current()
               and target_current(), 'post_intent_disk_changed')
     finally:
         pinned.close()
     clone = materialize(payload)
     lifecycle.check()
     _need(sys.monitoring.get_tool(free[0]) is None and _idle(data)
-          and data.last_states.get(move.before) is source and target_current(),
+          and source_current() and target_current(),
           'final_preimage_changed')
-    data.last_states[move.after] = clone
+    if uuid_mode:
+        _need(clone.entity_registry_id == group_uuid, 'restore_uuid_payload_changed')
+        data.last_states_by_entity_registry_id[group_uuid] = clone
+    else:
+        data.last_states[move.after] = clone
+    def effect_current():
+        if uuid_mode:
+            return (owned_slot(data, move.before, move.after, group_uuid, required=True) is clone
+                    and _captured(clone) == payload.after_json)
+        return (source_current() and data.last_states.get(move.after) is clone
+                and _captured(clone) == payload.after_json)
     code = RestoreStateData.async_dump_states.__code__
     tool, starts, returns, contamination, task = free[0], [], [], [], None
     sys.monitoring.use_tool_id(tool, 'renamer.powercalc_group_restore')
@@ -214,8 +250,7 @@ async def async_handoff_group_restore(lifecycle, group_id):
         task.result()
         lifecycle.check()
         _need(starts == [task] and returns == [task] and not contamination and _idle(data)
-              and data.last_states.get(move.before) is source and _captured(source) == payload.before_json
-              and data.last_states.get(move.after) is clone and _captured(clone) == payload.after_json,
+              and effect_current(),
               'native_dump_or_memory_unknown')
         readback = _PinnedPSS(chain.original_receipt, key='core.restore_state',
                               input_state=lease.state if reverse else None)
@@ -224,12 +259,12 @@ async def async_handoff_group_restore(lifecycle, group_id):
             lifecycle.check()
             _need(readback.root_sig[:3] == lifecycle.composition.previous.root_identity
                   and readback.storage_sig[:3] == lifecycle.composition.previous.storage_identity
-                  and _rows(actual, (move.before, move.after)) ==
-                      {move.before: payload.before_json, move.after: payload.after_json}
+                  and _rows(actual, (move.before, move.after), owned_uuid=group_uuid if uuid_mode else None) ==
+                      {move.before: None if uuid_mode else payload.before_json, move.after: payload.after_json}
                   and _idle(data) and not contamination, 'native_disk_readback_unknown')
             await _drained(lease.hass.async_add_executor_job, readback.verify)
             lifecycle.check()
-            _need(not contamination and _idle(data) and data.last_states.get(move.after) is clone,
+            _need(not contamination and _idle(data) and effect_current(),
                   'native_disk_changed')
         finally:
             readback.close()
@@ -240,7 +275,7 @@ async def async_handoff_group_restore(lifecycle, group_id):
         sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, None)
         sys.monitoring.free_tool_id(tool)
     key = _event_id([lifecycle.root_reference[0], label, group_id, 'receipt'])
-    receipt = {'kind': 'powercalc_group_restore_reverse_receipt' if reverse else 'powercalc_group_restore_receipt', 'schema': 1,
+    receipt = {'kind': 'powercalc_group_restore_reverse_receipt' if reverse else 'powercalc_group_restore_receipt', 'schema': 2 if uuid_mode else 1,
                'root': list(lifecycle.root_reference), 'intent': list(ref),
                'source_chain': lease.state.head, 'unload': [accepted[group_id][0], accepted[group_id][1]],
                'pss': [pss_key, pss['digest']], 'before_sha256': hashlib.sha256(payload.before_json).hexdigest(),

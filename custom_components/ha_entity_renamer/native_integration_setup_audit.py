@@ -190,10 +190,18 @@ class NativeIntegrationSetupAudit:
             (IntegrationSensor, 'async_get_last_sensor_data'),
             (IntegrationSensor, 'async_added_to_hass'),
             (type(self.hass.config_entries), 'async_setup'))
+        if self.core == '2026.11.0':
+            from homeassistant.helpers.restore_state import RestoreStateData
+            self.refs += ((RestoreStateData, 'async_get_stored_state'),)
         self.methods, self.codes = prove_methods(self.root, self.pins, self.refs)
         self.entity_class, self.extra_class = IntegrationSensor, IntegrationSensorExtraStoredData
         self.restore = self.hass.data[DATA_RESTORE_STATE]
-        self.stored = self.restore.last_states[self.target]
+        if self.core == '2026.11.0':
+            from .native_restore_uuid import owned_slot
+            old = codec._parse(self.payload.before_json)['state']['entity_id']
+            self.stored = owned_slot(self.restore, self.target, old, self.capture['helper_uuid'], required=True)
+        else:
+            self.stored = self.restore.last_states[self.target]
         _need(codec._canonical(codec._capture(self.stored, codec._native())) == self.payload.after_json,
               'actual_escrow_target')
         self._check()
@@ -218,7 +226,9 @@ class NativeIntegrationSetupAudit:
                       and type(entity) is self.entity_class
                       and entity.entity_id == self.target and entity.hass is self.hass
                       and entity.platform.config_entry is self.entry
-                      and self.restore.last_states.get(self.target) is self.stored
+                      and (self.core == '2026.11.0' and
+                           self.restore.last_states_by_entity_registry_id.get(self.capture['helper_uuid']) is self.stored
+                           or self.core != '2026.11.0' and self.restore.last_states.get(self.target) is self.stored)
                       and frame.f_locals['restored'] == self.after['extra_data']
                       and type(arg) is self.extra_class
                       and type(arg.native_value) is str

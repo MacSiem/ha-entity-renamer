@@ -211,7 +211,7 @@ async def _native_store_write(hass, owner, method_name, receipt, input_state, ke
     def prove():
         pins = dict(_SOURCES[receipt.version])
         core = prove_methods(Path(homeassistant.__file__).resolve().parent, pins, core_refs)
-        owner_proof = (prove_methods(vendor.root, _pins(), refs) if vendor is not None
+        owner_proof = (prove_methods(vendor.root, _pins(vendor.vendor_version), refs) if vendor is not None
                        else prove_methods(Path(homeassistant.__file__).resolve().parent, pins, refs))
         return owner_proof, core
     proof = await _drained(hass.async_add_executor_job, prove)
@@ -415,7 +415,7 @@ class ControlledPowercalcHandoff:
                      (Store, '_async_write_data'), (Store, '_write_data'), (Store, '_write_prepared_data'))
         vendor = PowercalcVendor(self.hass, with_profiles=True)
         def prove():
-            return (prove_methods(vendor.root, _pins(), refs),
+            return (prove_methods(vendor.root, _pins(vendor.vendor_version), refs),
                     prove_methods(Path(homeassistant.__file__).resolve().parent,
                                   dict(_SOURCES[self.chain.original_receipt.version]), core_refs))
         proof, core_proof = await _drained(self.hass.async_add_executor_job, prove)
@@ -428,6 +428,7 @@ class ControlledPowercalcHandoff:
             progress.close()
 
     async def _start(self, context, progress):
+        from homeassistant.const import __version__
         from homeassistant.config_entries import ConfigEntryState
         from homeassistant.helpers.entity_platform import async_get_platforms
         from homeassistant.helpers.restore_state import DATA_RESTORE_STATE, RestoreStateData
@@ -603,13 +604,30 @@ class ControlledPowercalcHandoff:
         _need(_pss_foreign_unchanged(prior, pss_after_memory, owned), 'foreign_pss_changed')
         # The payloads were built from actual post-unload native objects.
         owned_restore = set()
+        staged_restore = []
         for uuid, old, new, kind, payload in payloads:
-            _need(old not in data.entities and new not in data.entities
-                  and (new == old or new not in data.last_states
-                       or aliases is not None and new in aliases['restore_owned']), 'restore_target_changed')
+            _need(old not in data.entities and new not in data.entities, 'restore_target_changed')
+            if __version__ == '2026.11.0':
+                from .native_restore_uuid import owned_slot
+                from .native_restore_state_escrow_io import captured
+                source = owned_slot(data, old, new, uuid, required=True)
+                _need(source.state.entity_id == old and captured(source) == payload.before_json,
+                      'restore_uuid_preimage_changed')
+            else:
+                _need(new == old or new not in data.last_states
+                      or aliases is not None and new in aliases['restore_owned'], 'restore_target_changed')
             clone = materialize_integration_payload(payload) if kind == 'integration' else materialize_group(payload)
-            data.last_states[new] = clone
-            owned_restore.update((old, new))
+            if __version__ == '2026.11.0':
+                _need(clone.entity_registry_id == uuid, 'restore_uuid_payload_changed')
+                owned_restore.add(new)
+            else:
+                owned_restore.update((old, new))
+            staged_restore.append((uuid, new, clone))
+        for uuid, new, clone in staged_restore:
+            if __version__ == '2026.11.0':
+                data.last_states_by_entity_registry_id[uuid] = clone
+            else:
+                data.last_states[new] = clone
         expected_restore = _native_restore_rows(data)
         _need(owned_restore <= expected_restore.keys() and _idle(data) and _idle(pss),
               'store_busy_or_owned_restore_expired')
@@ -662,7 +680,8 @@ class ControlledPowercalcHandoff:
                 body = {'before': json.loads(payload.before_json), 'after': json.loads(payload.after_json),
                         'full_total': payload.full_total, 'precision': payload.precision, 'unit': payload.unit}
             encoded.append({'uuid': uuid, 'before_id': old, 'after_id': new, 'kind': kind, 'payload': body})
-        receipt = {'kind': 'controlled_powercalc_population_receipt', 'schema': 1,
+        receipt = {'kind': 'controlled_powercalc_population_receipt',
+                   'schema': 2 if __version__ == '2026.11.0' else 1,
                    'root': self.chain.root_id, 'operation_id': self.chain.operation_id,
                    'fingerprint': self.chain.plan.fingerprint, 'direction': direction,
                    'intent': list(self.intent), 'source_head': intent['source_head'],

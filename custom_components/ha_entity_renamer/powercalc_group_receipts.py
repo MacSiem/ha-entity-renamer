@@ -52,8 +52,11 @@ def group_lineage(chain, composition, change, source_head, refs):
                      'powercalc_group_restore_receipt')
     ri = _event(chain, restore['intent'], _event_id([root_id, 'restore_forward', group.entity_id, 'intent']),
                 'powercalc_group_restore_intent')
-    _need(all(row.get('root') == root_ref and row.get('schema') == 1
-              for row in (unload, ui, pss, pi, restore, ri)), 'root_or_schema_changed')
+    restore_schema = 2 if chain.original_receipt.version == '2026.11.0' else 1
+    _need(all(row.get('root') == root_ref for row in (unload, ui, pss, pi, restore, ri))
+          and all(row.get('schema') == 1 for row in (unload, ui, pss, pi))
+          and restore.get('schema') == ri.get('schema') == restore_schema,
+          'root_or_schema_changed')
     _need(unload['source_chain'] == ui['source_chain'] and unload['before'] == ui['before']
           and unload['native_state'] == 'not_loaded' and unload['entry_id'] == ui['before']['entry_id']
           and unload['after']['group_uuid'] == group.registry_id
@@ -64,6 +67,8 @@ def group_lineage(chain, composition, change, source_head, refs):
           and pss['group_totals'].get(group.entity_id) == unload['after']['full_total'], 'pss_binding')
     from .native_restore_state_payload import _canonical, _shape
     _shape(ri['before']); _shape(ri['after'])
+    _need(restore_schema == 1 or (ri['before'].get('entity_registry_id') == group.registry_id
+          and ri['after'].get('entity_registry_id') == group.registry_id), 'restore_uuid_changed')
     _need(hashlib.sha256(_canonical(ri['before'])).hexdigest() == restore['before_sha256']
           and hashlib.sha256(_canonical(ri['after'])).hexdigest() == restore['after_sha256']
           and ri['before']['state']['entity_id'] == group.entity_id
@@ -108,8 +113,10 @@ def reverse_group_lineage(chain, change, source_head, refs, root_reference):
                      'powercalc_group_restore_reverse_receipt')
     ri = _event(chain, restore['intent'], _event_id([root_id, 'restore_reverse', group.entity_id, 'intent']),
                 'powercalc_group_restore_reverse_intent')
-    _need(all(row.get('root') == list(root_reference) and row.get('schema') == 1
-              for row in (unload, ui, pss, pi, restore, ri)), 'reverse_root_changed')
+    restore_schema = 2 if chain.original_receipt.version == '2026.11.0' else 1
+    _need(all(row.get('root') == list(root_reference) for row in (unload, ui, pss, pi, restore, ri))
+          and all(row.get('schema') == 1 for row in (unload, ui, pss, pi))
+          and restore.get('schema') == ri.get('schema') == restore_schema, 'reverse_root_changed')
     _need(unload['source_chain'] == ui['source_chain'] and unload['before'] == ui['before']
           and unload['native_state'] == 'not_loaded' and unload['entry_id'] == ui['before']['entry_id']
           and unload['after']['group_uuid'] == group.registry_id
@@ -120,6 +127,8 @@ def reverse_group_lineage(chain, change, source_head, refs, root_reference):
           and pss['group_totals'].get(group.entity_id) == unload['after']['full_total'],
           'reverse_pss_changed')
     _shape(ri['before']); _shape(ri['after'])
+    _need(restore_schema == 1 or (ri['before'].get('entity_registry_id') == group.registry_id
+          and ri['after'].get('entity_registry_id') == group.registry_id), 'restore_uuid_changed')
     _need(hashlib.sha256(_canonical(ri['before'])).hexdigest() == restore['before_sha256']
           and hashlib.sha256(_canonical(ri['after'])).hexdigest() == restore['after_sha256']
           and ri['before']['state']['entity_id'] == group.entity_id
