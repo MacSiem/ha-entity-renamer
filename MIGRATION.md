@@ -1,14 +1,14 @@
 # Entity Renamer 5.0.0 — migration draft / szkic migracji
 
-**Unreleased candidate; final HACS installation and migration are pending R11.B qualification.** Do not treat these steps as a published release or a claim of automatic HACS recategorization. Public 4.6.1 is a Dashboard plugin; 4.6.2 is a separately prepared transition plugin, not a prerequisite. The candidate is one Integration package containing the full card and backend. The root compatibility JavaScript keeps the 4.6.1 workflow and does not provide the backend or full candidate card.
+**Unreleased candidate; these instructions describe the prepared 5.0.0 version.** Do not treat these steps as a published release or a claim of automatic HACS recategorization. Public 4.6.1 is a Dashboard plugin; 4.6.2 is a separately prepared transition plugin, not a prerequisite. The candidate is one Integration package containing the full card and backend. The root compatibility JavaScript keeps the 4.6.1 workflow and does not provide the backend or full candidate card.
 
 ## Before any change
 
-Make and verify a full Home Assistant backup, including dashboards, configuration and `.storage`, and know how to restore it. Note the current card configuration and resources. Review version and family restrictions in [README](README.md). The candidate has been tested on selected versions and data, not every configuration. A reload can interrupt running automations and scripts. Avoid a migration while an operation is running or its result is unknown; never replay UNKNOWN. Use journal inspection and a newly admitted, separately confirmed restore where available.
+Make and verify a full Home Assistant backup, including dashboards, configuration and `.storage`, and know how to restore it. Account-scoped card history is kept in the browser, outside the Home Assistant backup; export it before moving to a different browser or clearing its data if you need a separate copy. Note the current card configuration and resources. Review version and family restrictions in [README](README.md). The candidate has been tested on selected versions and data, not every configuration. A reload can interrupt running automations and scripts. Avoid a migration while an operation is running or its result is unknown; never replay UNKNOWN. Use journal inspection and a newly admitted, separately confirmed restore where available.
 
 ## Fresh installation (draft for the future release)
 
-1. In HACS, add `https://github.com/MacSiem/ha-entity-renamer` as a custom repository in **Integration**, select the released 5.0.0 package when available and download it. Do not select the Dashboard compatibility file as the integration.
+1. In HACS, search for **Entity Renamer** in **Integration**. If it is not listed, add `https://github.com/MacSiem/ha-entity-renamer` as a custom repository in **Integration**. When 5.0.0 is released, select and download it. The Dashboard compatibility file alone does not install the integration.
 2. Restart Home Assistant. In **Settings → Devices & services → Add integration**, choose **Entity Renamer** and complete the config flow once. Refresh the browser. Add the `custom:ha-entity-renamer` card using the dashboard card picker, or use that type in YAML.
 3. Check that the integration is loaded, the full card opens and only the intended card resource is present. If it does not, stop and inspect HA logs and resources before trying changes.
 
@@ -24,19 +24,19 @@ Make and verify a full Home Assistant backup, including dashboards, configuratio
 
 Stop on error or UNKNOWN; inspect the journal and affected registries before deciding what happened. Never repeat an uncertain write or apply an inverse without fresh admission. The local transaction backups are not a full HA backup. If rollback of the installation is necessary, use your verified HA backup and restore plan, including the prior plugin/resource and dashboard configuration; inspect the state first and avoid overwriting changes made since the backup. Do not delete journal, preparations or receipts as a shortcut. A native restore may be unavailable for an uncertain scope.
 
-**Evidence boundary:** synthetic native Core tests established fresh integration setup, single runtime/resource, preservation and recognized storage takeover; they also established that an old YAML resource causes safe setup retry. The final published HACS fresh/upgrade/skip-bridge path, pending-update UI, rollback and public propagation remain R11.B work. No release is available yet from this branch.
+The 5.0.0 package is not published from this branch. Public availability and HACS catalogue propagation must be checked at release.
 
 # Polski
 
-**Niewydany kandydat 5.0.0; końcowy przebieg instalacji i migracji HACS czeka na kwalifikację R11.B.** Publiczne 4.6.1 jest pluginem Dashboard. Przygotowany osobno bridge 4.6.2 nie jest wymagany. Kandydat jest jednym pakietem Integration z pełną kartą i backendem; główny plik JS repozytorium jest kartą zgodności z działaniem 4.6.1, nie instaluje backendu.
+**Niewydany kandydat 5.0.0; instrukcja opisuje przygotowywaną wersję.** Publiczne 4.6.1 jest pluginem Dashboard. Przygotowany osobno bridge 4.6.2 nie jest wymagany. Kandydat jest jednym pakietem Integration z pełną kartą i backendem; główny plik JS repozytorium jest kartą zgodności z działaniem 4.6.1, nie instaluje backendu.
 
 ## Przygotowanie
 
-Wykonaj i sprawdź pełną kopię Home Assistant, także dashboardów, konfiguracji i `.storage`, oraz przygotuj sposób jej przywrócenia. Zapisz dotychczasową konfigurację karty i zasobów. Sprawdź ograniczenia wersji i rodzin w [README](README.md). Testy obejmują wybrane wersje i dane, nie każdą konfigurację. Reload może przerwać działające automatyzacje i skrypty. Nie migruj podczas operacji ani przy nieznanym wyniku; UNKNOWN nie ponawiaj. Sprawdź dziennik; przywracanie wymaga nowej kwalifikacji i osobnego potwierdzenia.
+Wykonaj i sprawdź pełną kopię Home Assistant, także dashboardów, konfiguracji i `.storage`, oraz przygotuj sposób jej przywrócenia. Historia karty przypisana do konta jest przechowywana w przeglądarce i nie należy do kopii Home Assistant; jeśli potrzebujesz osobnej kopii, wyeksportuj ją przed zmianą przeglądarki lub usunięciem jej danych. Zapisz dotychczasową konfigurację karty i zasobów. Sprawdź ograniczenia wersji i rodzin w [README](README.md). Testy obejmują wybrane wersje i dane, nie każdą konfigurację. Reload może przerwać działające automatyzacje i skrypty. Nie migruj podczas operacji ani przy nieznanym wyniku; UNKNOWN nie ponawiaj. Sprawdź dziennik; przywracanie wymaga nowej kwalifikacji i osobnego potwierdzenia.
 
 ## Nowa instalacja — szkic na przyszłe wydanie
 
-1. W HACS dodaj `https://github.com/MacSiem/ha-entity-renamer` jako repozytorium własne kategorii **Integration**, wybierz opublikowany pakiet 5.0.0, gdy będzie dostępny, i pobierz go. Plik zgodności Dashboard nie instaluje integracji.
+1. W HACS wyszukaj **Entity Renamer** w kategorii **Integration**. Jeśli nie ma go w katalogu, dodaj `https://github.com/MacSiem/ha-entity-renamer` jako repozytorium własne kategorii **Integration**. Po wydaniu 5.0.0 wybierz i pobierz tę wersję. Sam plik zgodności Dashboard nie instaluje integracji.
 2. Uruchom ponownie Home Assistant. W **Ustawienia → Urządzenia i usługi → Dodaj integrację** wybierz **Entity Renamer** i jednokrotnie przejdź konfigurację. Odśwież przeglądarkę i dodaj kartę przez edytor albo typ `custom:ha-entity-renamer` w YAML.
 3. Sprawdź załadowanie integracji, pełną kartę i pojedynczy właściwy zasób. Przy błędzie zatrzymaj się i sprawdź logi oraz zasoby.
 
@@ -52,4 +52,4 @@ Wykonaj i sprawdź pełną kopię Home Assistant, także dashboardów, konfigura
 
 Przy błędzie lub UNKNOWN zatrzymaj się; sprawdź dziennik i odpowiednie rejestry. Nie ponawiaj niepewnego zapisu ani nie wykonuj odwrotnej operacji bez nowej kwalifikacji. Lokalne backupy transakcji nie zastępują pełnej kopii HA. W razie potrzeby przywróć instalację według zweryfikowanej kopii i planu, uwzględniając stary plugin, zasób oraz konfigurację dashboardu; najpierw sprawdź stan i nie nadpisuj zmian nowszych niż kopia. Nie usuwaj dziennika ani danych przygotowania jako obejścia. Przywracanie niepewnego zakresu może być niedostępne.
 
-**Granica dowodu:** syntetyczne testy natywnego Core potwierdziły nową konfigurację integracji, pojedynczy runtime/zasób, zachowanie danych i przejęcie rozpoznanego zasobu storage; stary zasób YAML bezpiecznie wstrzymuje konfigurację. Końcowa ścieżka HACS nowa/aktualizacja/pominięcie bridge, przycisk oczekującej aktualizacji, rollback i publiczna propagacja pozostają R11.B. Ta gałąź nie jest wydaniem.
+Pakiet 5.0.0 nie został opublikowany z tej gałęzi. Przy wydaniu trzeba sprawdzić jego publiczną dostępność i propagację katalogu HACS.
