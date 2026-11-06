@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased candidate
+
+- Prepare an administrator-reviewed, server-owned plan for recognized registry
+  and dependency changes. The candidate companion is not part of the public
+  4.6.1 frontend release; its distribution and installation remain unqualified.
+- Recommend a full Home Assistant backup before applying, disclose the limits
+  of testing and the possibility that a required reload interrupts running
+  automations or scripts, and retain Cancel/Escape without a write.
+- Show observed journal steps and independent inspection. An uncertain outcome
+  is not retried; a restore requires fresh admission and separate confirmation.
+- Improve readable status, keyboard focus, long identifiers, editor theme and
+  waiting guidance. Apply and inspection may take several minutes; no timing
+  or coverage of every configuration is guaranteed.
+- Retain the native precision and version limits documented in the README.
+
+
 ## 4.6.1 (2026-10-29)
 
 - Remove change-plan import and its registry-preview panel. Keep the existing device/entity browsing, editable names/IDs, queue, impact review, confirmation and history workflows.

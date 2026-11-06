@@ -6,9 +6,24 @@ Bulk-rename Home Assistant devices and entities — `entity_id`, friendly names,
 or a whole device's entities at once by prefix — with an impact preview for
 references visible through Home Assistant's APIs.
 
+> **Unreleased candidate:** This branch describes development after public
+> 4.6.1. Its dependency migration and recovery use a companion backend that
+> is not included in the published 4.6.1 frontend release. Distribution and
+> installation of the candidate companion are still being prepared; this branch
+> is not an installation or release announcement.
+
 [![Version](https://img.shields.io/github/v/release/MacSiem/ha-entity-renamer)](https://github.com/MacSiem/ha-entity-renamer/releases) [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-## How it works
+## Public release 4.6.1
+
+The published 4.6.1 dashboard plugin browses the registries, queues entity and
+device renames and writes confirmed changes through Home Assistant's registry
+APIs. Its dependency options are disabled and marked **Coming soon**; it does
+not automatically rewrite YAML or dashboard references and does not include a
+companion integration. Review and update affected references separately.
+The installation steps below are for this public release.
+
+## How the unreleased candidate works
 
 1. **Devices and entities from the registries.** On load, the card fetches
    every device (`config/device_registry/list`) and entity
@@ -34,43 +49,56 @@ references visible through Home Assistant's APIs.
    Lovelace dashboard (`lovelace/dashboards/list` + `lovelace/config`) for raw
    references where those resources are readable. You may still need to check
    YAML, templates and other references manually.
-4. **Apply with confirmation.** **Apply Changes** shows a confirmation
-   dialog, then writes the changes via `config/entity_registry/update`
-   (entity_id and/or name) and `config/device_registry/update` (device
-   display name), and logs every attempt — success or failure — to the Log
-   tab. ID and friendly name are sent in one update per entity. Successful
-   items leave the queue; failed items remain available for review and retry.
-   The confirmed queue is frozen while it runs. A change of account, role or
-   connection or browser availability cancels any remaining writes and requires
-   a fresh confirmation. A sent request with no verified readback remains unknown
-   in its originating administrator’s local history. Reconnecting does not restore
-   an earlier confirmation. Permitted registry browsing reloads for the newly
-   recognized account or role after any old operation has finished.
-   Automatic proposals are checked against the current registry and
-   regenerated IDs again immediately before applying. Stale proposals fail
-   without a registry write and remain in the queue for review.
+4. **Review the server plan.** In this candidate, **Apply Changes** opens a
+   confirmation from which **Prepare review** creates a server-owned review of
+   the selected registry changes and recognized dependencies. Review every listed change, coverage limitation
+   and conflict. Preparing and previewing do not apply the plan.
+5. **Decide before writing.** Before applying, the card recommends a full
+   Home Assistant backup and warns that a required reload may interrupt running
+   automations and scripts. Cancel or Escape keeps the queue and sends no apply.
+   Continue submits the reviewed operation once. A changed account, role,
+   connection or expired review requires a new review; an old confirmation is
+   not reused. Do not assume a change of authority can interrupt a native effect
+   already in progress: check the outcome rather than repeating it.
+6. **Wait and check the outcome.** Apply, inspection and restore can take
+   several minutes depending on the instance and data; no duration is
+   guaranteed. The journal reports observed steps, not a percentage or proof
+   of completion. Check the separate inspection and registry results. If an
+   outcome is unknown, do not repeat the write. Use **Find previous operations**
+   and **Check status and inspect**; restore is offered only after a fresh
+   inspection admits the exact scope and you separately review and confirm it.
+   An unsupported or uncertain state may remain unavailable for restore.
 
-Before confirming a rename, review the queued entity IDs, friendly names and
-device names. For larger queues, expand **Review remaining changes** to inspect
-every entity and device before applying. The confirmation also shows **Templates, Powercalc, Automations,
-Scripts and Integrations** as disabled, unchecked **Coming soon** options.
-Dependency updates are not available; review affected references separately.
-There is no change-plan file import or companion integration.
+## Scope and limitations of the candidate
 
-## What is automatic vs. manual
+The reviewed flow covers selected entity/device registry changes and recognized
+references, including qualified Template, Automation, Script, dashboard,
+helper, integration and Powercalc/Energy cases. Coverage is determined for the
+particular plan, not for an entire integration family. Unsupported or dynamic
+cases that cannot be safely admitted are refused; the review also identifies
+scan limitations. Custom or external consumers may not be discoverable, so
+check them separately. Tests cover multiple Home Assistant versions and
+instances with different data; they cannot guarantee every configuration.
 
-| Automatic | Manual (optional) |
+The candidate protects the observed history, statistics, identity and numeric
+values during admitted changes and verifies the affected scope. This is not a
+claim that every possible setup or interrupted operation can be restored.
+For Powercalc 1.26.1, Home Assistant 2025.6 is unsupported; Powercalc itself
+requires 2026.4 or newer. Other candidate components have their own supported
+version checks. With native precision 2, ordinary Powercalc reload may round
+its displayed/restored value; do not assume lossless precision beyond native
+behavior. Keep the full backup and verify the actual result.
+
+| Automatic | Your review |
 |---|---|
-| Loading every device and entity from the registries | Choosing which entities/devices to queue |
-| Impact scan across automations, scripts, scenes, dashboards | Editing the automations/scripts/dashboards a rename affects — the card does not rewrite YAML or Lovelace config for you |
-| Rename confirmation dialog before any registry write | Bulk prefix rename — you choose the old/new prefix per device |
-| Rename history log kept in your browser | Checking integrations and references after an `entity_id` change |
-| Read-only automatic ID preview | Choosing which proposed changes to queue and confirming writes |
+| Load registries and prepare proposals | Choose changes and inspect the plan and coverage limits |
+| Check recognized dependencies and validate the reviewed operation | Check undiscovered external or custom references |
+| Show observed progress and independent inspection | Decide whether an admitted restore should be performed |
 
 ## Screenshots
 
-These images show the unchanged queue workflow from 4.5.0. The rename
-confirmation now also shows unavailable dependency options as Coming soon.
+These historical images show the queue workflow from 4.5.0. They do not
+show the unreleased candidate's server review or recovery screens.
 
 | Light | Dark |
 |---|---|
@@ -80,7 +108,9 @@ confirmation now also shows unavailable dependency options as Coming soon.
 or any registry write. Use Analyze Impact to review readable references.
 Dark mode follows your Home Assistant theme.*
 
-## Installation
+## Installation of public 4.6.1
+
+The following instructions describe the released frontend, not this branch's unreleased companion-backed candidate. Candidate distribution and migration's exact steps will be documented after its installation path is qualified.
 
 Requires **Home Assistant 2025.6 or newer** for the automatic ID preview.
 
@@ -149,24 +179,27 @@ Selecting **Queue area prefixes** in a device's details adds proposals such as `
 ## FAQ
 
 **Does this rename entities immediately when I add them to the queue?**
-No. Adding an entity or device to the queue only stages the change — nothing
-is written to Home Assistant until you click **Apply Changes** and confirm.
+No. Adding an entity or device to the queue only stages a proposal in the card.
+Preparing a review can store preparation data on Home Assistant; it does not
+apply the selected rename.
 
 **Will this update my automations and dashboards automatically?**
-No. The card shows you which automations, scripts, scenes, and dashboards
-reference a renamed entity so you know what to fix, but it does not rewrite
-that YAML or Lovelace config for you.
+The unreleased candidate can update admitted references in the reviewed plan.
+It does not claim to discover or update every external or custom reference.
+The public 4.6.1 release does not automatically migrate dependencies.
 
 **Do I need to restart Home Assistant after a rename?**
-A successful registry update takes effect without a routine Core restart.
-Review the affected references and check the integration after an ID change;
-follow that integration's instructions if it needs a reload.
+A plan may require an integration reload. A reload can interrupt running
+automations or scripts; inspect the plan and check the affected behavior afterward.
+A routine Core restart is not implied by every rename.
 
 **Does this send data anywhere?**
-No. Everything runs locally in your browser against your Home Assistant
-instance — no telemetry, no analytics, no CDN-hosted assets. The only
-external link in the card is the optional Buy Me a Coffee support link,
-which only loads anything if you click it.
+The card communicates with your Home Assistant instance, and the candidate
+backend reads and writes local Home Assistant data as described below. The
+card does not automatically submit an issue report; the GitHub issue and
+optional support links open external sites only when selected. Review exports
+before sharing them, and never include private configuration or credentials
+in a public issue.
 
 ## Changelog
 
@@ -185,27 +218,35 @@ MIT, see [LICENSE](LICENSE).
 
 ## Privacy and data
 
-The card reads entity/device registries and configuration references to preview changes to entity IDs. Applying a confirmed queue changes Home Assistant registry IDs; related configuration references need separate review. Keep impact reports and rollback mappings private. Rename history and dismissed
-intro/support preferences use browser local storage for this Home Assistant
-origin. New rename history persists across reloads in a separate namespace for
-its administrator account and origin. Changing account or authority clears the
-previous account’s private results, drafts and history from the card. Resolved
-household users retain registry browsing allowed by Home Assistant; applying
-changes and reviewing/exporting private history require an administrator.
+The card reads entity and device registries and available references. The
+candidate backend also reads relevant local configuration, registry, dependency,
+state and history data to prepare and verify a plan; an admitted operation can
+write affected registries and configuration. It keeps server-side preparations,
+operation journals and receipts in Home Assistant storage for verification and
+recovery. Those records and normal Home Assistant logs can contain identifiers,
+paths or other sensitive information: protect your backups, logs and HA storage.
+The backend can also keep local YAML before-images under
+`.storage/ha_entity_renamer_backups` for its transaction, which are not a full
+Home Assistant backup. It also stages file changes under
+`.storage/ha_entity_renamer_pending`. Validation stages copies outside the HA configuration
+directory in a private temporary directory; these copies can contain secrets.
+Normal cleanup removes the temporary directory, but an interruption or crash
+may leave it behind. Protect and check the host's temporary storage as well.
+The server review is time-limited; an uncertain outcome must not be retried.
 
-Older unscoped history remains untouched. An administrator can explicitly choose
-**Review legacy history from this browser**. Its account origin remains unknown,
-and reviewing/exporting it does not assign it to the current account or overwrite
-the original storage. This choice clears when authority changes. Help closure is scoped to the current HA account; support dismissal
-remains shared by cards on this origin. Signing out of Home Assistant clears this
-origin’s browser storage, including locally kept Renamer history and legacy entries.
-Export a copy before signing out. History is not synchronized to other devices;
-use separate browser profiles on a shared computer. Queued proposals stay in memory
-and are lost on a page reload. Where the browser supports Save As, choose a location
-and keep the reviewed filename. Saved appears only after closing the file and
-reading back identical bytes. Cancelling or changing that filename leaves the
-outcome unconfirmed. Other browsers use the existing download, whose initiation
-does not confirm a disk write; check the downloaded file before trying again.
+Rename history and help/support preferences are stored in this browser for the
+Home Assistant origin. New history is scoped to the administrator account;
+changing authority removes the prior account's results from the current card,
+but does not imply that all stored data has been deleted. Older unscoped history
+can be reviewed explicitly, with its account origin unknown. History is not
+synchronized between browser profiles. Queued proposals are held in memory.
+
+Completed history can be exported as JSON, CSV or TXT. The default uses paired
+pseudonyms; an explicit option includes old/new entity IDs. Preview the file and
+keep exports private. Where supported, Save As is confirmed only after a
+readback of identical bytes; a browser download initiation alone does not prove
+that a file was saved. The warning dialog does not create or verify a full
+Home Assistant backup or submit an issue report.
 
 See [SECURITY.md](SECURITY.md) for safe vulnerability reporting and [NOTICE](NOTICE) for licensing notices.
 
