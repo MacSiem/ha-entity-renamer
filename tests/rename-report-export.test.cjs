@@ -9,7 +9,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 function fixture(t, language = 'en') {
   const dom = new JSDOM('', { runScripts: 'dangerously', pretendToBeVisual: true, url: 'http://localhost/' });
   t.after(() => dom.window.close());
-  dom.window.eval(fs.readFileSync(path.join(root, 'ha-entity-renamer.js'), 'utf8'));
+  dom.window.eval(fs.readFileSync(path.join(root, 'custom_components/ha_entity_renamer/www/ha-entity-renamer.js'), 'utf8'));
   const card = dom.window.document.createElement('ha-entity-renamer');
   dom.window.document.body.append(card);
   const connection = new dom.window.EventTarget(); connection.connected = true;
@@ -124,7 +124,7 @@ test('disconnected event blocks refreshing even before HA mutates connected=true
 test('reviewed vendors have exact source hashes, one local factory and no globals',()=>{
  const crypto=require('node:crypto'),hash=s=>crypto.createHash('sha256').update(s).digest('hex');const p=JSON.parse(fs.readFileSync(path.join(root,'shared/renamer-report-provenance.json')));
  assert.equal(hash(fs.readFileSync(path.join(root,'shared/ha-tools-export.js'))),'1f9e9c5444ec3b6de44eec136f14ae9e7d89dae1002650b33f746ab9633982f1');assert.equal(hash(fs.readFileSync(path.join(root,'shared/ha-tools-ui.js'))),'54ed3b533163c3b9b704f107fa1697f95476d35ab55ba99265718aea85ec9674');
- const source=fs.readFileSync(path.join(root,'ha-entity-renamer.js'),'utf8');assert.equal((source.match(/function createExportDialog\(/g)||[]).length,1);assert.equal((source.match(/function createUiV3\(/g)||[]).length,1);assert.ok(!source.includes('window.createExportDialog'));assert.equal(p.baseHead,'41cb4b56ef428fde08d9a854252e9a702c55894b');
+ const source=fs.readFileSync(path.join(root,'custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8');assert.equal((source.match(/function createExportDialog\(/g)||[]).length,1);assert.equal((source.match(/function createUiV3\(/g)||[]).length,1);assert.ok(!source.includes('window.createExportDialog'));assert.equal(p.baseHead,'41cb4b56ef428fde08d9a854252e9a702c55894b');
 });
 
 for(const mode of ['applied','unchanged','identity_mismatch','name_mismatch','read_failed'])test(`server result requires fresh exact identity and fields (${mode})`,async t=>{

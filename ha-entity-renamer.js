@@ -1414,9 +1414,9 @@ class HAEntityRenamer extends HTMLElement {
     const pl = this._lang === 'pl';
     if (state.dismissed) return `<button type="button" class="btn btn-outline bridge-reopen" id="bridgeNoticeOpen">${pl ? 'Informacja o migracji' : 'Migration information'}</button>`;
     return `<section class="bridge-notice" role="region" aria-labelledby="bridgeNoticeTitle">
-      <h2 id="bridgeNoticeTitle">${pl ? 'Informacja o przyszłej migracji' : 'Information about a future migration'}</h2>
+      <h2 id="bridgeNoticeTitle">${pl ? 'Informacja o migracji' : 'Migration information'}</h2>
       <p>${pl ? 'Entity Renamer jest dostępny jako jeden pakiet Integration (karta i backend). Ta starsza karta nadal działa; aby korzystać z nowych funkcji, zainstaluj i skonfiguruj integrację według przewodnika migracji.' : 'Entity Renamer is available as one Integration package (card and backend). This legacy card continues to work; install and configure the integration using the migration guide to use the new features.'}</p>
-      <p>${pl ? 'Przed przyszłą migracją wykonaj pełną kopię zapasową Home Assistant i przeczytaj przewodnik. Nowa aktualizacja w HACS może wymagać jednorazowej migracji.' : 'Before the future migration, make a full Home Assistant backup and read the guide. A new HACS update may require a one-time migration.'}</p>
+      <p>${pl ? 'Przed migracją wykonaj pełną kopię zapasową Home Assistant i przeczytaj przewodnik. Przejście do integracji może wymagać jednorazowej migracji.' : 'Before migrating, make a full Home Assistant backup and read the guide. Switching to the integration may require a one-time migration.'}</p>
       <a href="https://github.com/MacSiem/ha-entity-renamer/blob/main/MIGRATION.md" target="_blank" rel="noopener noreferrer">${pl ? 'Przewodnik migracji' : 'Migration guide'}</a>
       <button type="button" class="btn btn-outline" id="bridgeNoticeDismiss">${pl ? 'Zamknij informację' : 'Dismiss information'}</button>
     </section>`;

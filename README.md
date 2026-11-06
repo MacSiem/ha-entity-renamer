@@ -7,10 +7,10 @@ or a whole device's entities at once by prefix — with an impact preview for
 references visible through Home Assistant's APIs.
 
 > **Unreleased candidate:** This branch describes development after public
-> 4.6.1. Its dependency migration and recovery use a companion backend that
-> is not included in the published 4.6.1 frontend release. Distribution and
-> installation of the candidate companion are still being prepared; this branch
-> is not an installation or release announcement.
+> 4.6.1. The candidate packages its backend and full card as one integration.
+> The root JavaScript remains a compatibility card for existing Dashboard
+> installations; it does not install or activate the integration. Installation
+> and migration instructions are still being qualified and are not a release announcement.
 
 [![Version](https://img.shields.io/github/v/release/MacSiem/ha-entity-renamer)](https://github.com/MacSiem/ha-entity-renamer/releases) [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 

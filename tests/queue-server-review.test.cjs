@@ -9,7 +9,7 @@ function gate() { let resolve, reject; const promise = new Promise((a,b) => {res
 async function fixture(t, language='en', connected=true) {
   const dom = new JSDOM('', {runScripts:'dangerously', pretendToBeVisual:true, url:'http://localhost/'});
   t.after(() => dom.window.close());
-  dom.window.eval(readFileSync(join(__dirname,'../ha-entity-renamer.js'),'utf8'));
+  dom.window.eval(readFileSync(join(__dirname,'../custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8'));
   const card=dom.window.document.createElement('ha-entity-renamer');
   card.setConfig({show_support:false}); dom.window.document.body.append(card);
   const requests=[], entries=[{id:'entry-a',entity_id:'sensor.a',device_id:'dev',unique_id:'a',platform:'mqtt',name:null}];

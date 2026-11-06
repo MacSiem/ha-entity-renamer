@@ -4,7 +4,7 @@ const {readFileSync}=require('node:fs');
 const {JSDOM}=require('jsdom');
 function fixture(t,scenario){
  const dom=new JSDOM('',{runScripts:'dangerously',url:'http://localhost/'});t.after(()=>dom.window.close());
- dom.window.eval(readFileSync(require('node:path').join(__dirname,'../ha-entity-renamer.js'),'utf8'));
+ dom.window.eval(readFileSync(require('node:path').join(__dirname,'../custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8'));
  const card=dom.window.document.createElement('ha-entity-renamer');dom.window.document.body.append(card);
  const connection=new dom.window.EventTarget();connection.connected=true;
  const entry={id:'coverage-fixture-entry',entity_id:'sensor.coverage_old',device_id:'coverage-device',unique_id:'coverage-unique',platform:'fixture',name:null};

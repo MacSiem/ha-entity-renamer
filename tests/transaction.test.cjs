@@ -6,7 +6,7 @@ const { JSDOM } = require('jsdom');
 function fixture(t) {
   const dom = new JSDOM('', { runScripts: 'dangerously', url: 'http://localhost/' });
   t.after(() => dom.window.close());
-  dom.window.eval(readFileSync(require('node:path').join(__dirname, '../ha-entity-renamer.js'), 'utf8'));
+  dom.window.eval(readFileSync(require('node:path').join(__dirname, '../custom_components/ha_entity_renamer/www/ha-entity-renamer.js'), 'utf8'));
   const card = dom.window.document.createElement('ha-entity-renamer');
   dom.window.document.body.append(card);
   const entries = ['a', 'b'].map(id => ({ id: 'entry-' + id, entity_id: 'sensor.' + id, device_id: 'dev', unique_id: id, platform: 'mqtt' }));

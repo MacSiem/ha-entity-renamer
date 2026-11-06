@@ -4,7 +4,7 @@ const { readFileSync } = require('node:fs');
 const { JSDOM } = require('jsdom');
 async function fixture(language = 'en', admin = true) {
  const dom = new JSDOM('', { runScripts: 'dangerously', pretendToBeVisual: true, url: 'http://localhost/' });
- dom.window.eval(readFileSync('ha-entity-renamer.js', 'utf8'));
+ dom.window.eval(readFileSync('custom_components/ha_entity_renamer/www/ha-entity-renamer.js', 'utf8'));
  const card = dom.window.document.createElement('ha-entity-renamer'); card.setConfig({ show_support: false }); dom.window.document.body.append(card);
  const requests = [], devices = [{ id: 'qa-device', name: 'QA device' }], entities = [{ entity_id: 'sensor.qa_old', device_id: 'qa-device', unique_id: 'qa' }];
  const connection = new dom.window.EventTarget(); connection.connected = true;

@@ -7,7 +7,7 @@ const { JSDOM } = require('jsdom');
 // Catch registry-order rendering, surprise navigation and stale queue affordances.
 function automaticView() {
   const dom = new JSDOM('', { runScripts: 'dangerously', url: 'http://localhost/' });
-  dom.window.eval(readFileSync(join(__dirname, '..', 'ha-entity-renamer.js'), 'utf8'));
+  dom.window.eval(readFileSync(join(__dirname, '..', 'custom_components/ha_entity_renamer/www/ha-entity-renamer.js'), 'utf8'));
   const card = dom.window.document.createElement('ha-entity-renamer');
   dom.window.document.body.append(card);
   card._hass = { language: 'en', user: { id: 'admin', is_admin: true }, states: {} };
@@ -88,7 +88,7 @@ test('queued automatic status follows Polish labels and never enables conflicts'
 test('automatic ID preview separates null and collision, queues safe rows, rejects stale apply', async () => {
   const dom = new JSDOM('', { runScripts: 'dangerously', url: 'http://localhost/' });
   try {
-    dom.window.eval(readFileSync(join(__dirname, '..', 'ha-entity-renamer.js'), 'utf8'));
+    dom.window.eval(readFileSync(join(__dirname, '..', 'custom_components/ha_entity_renamer/www/ha-entity-renamer.js'), 'utf8'));
     const card = dom.window.document.createElement('ha-entity-renamer');
     dom.window.document.body.append(card);
     const connection = new dom.window.EventTarget(); connection.connected = true;
@@ -136,7 +136,7 @@ test('automatic ID preview separates null and collision, queues safe rows, rejec
 test('large automatic preview batches HA requests and queues one device', async () => {
   const dom = new JSDOM('', { runScripts: 'dangerously', url: 'http://localhost/' });
   try {
-    dom.window.eval(readFileSync(join(__dirname, '..', 'ha-entity-renamer.js'), 'utf8'));
+    dom.window.eval(readFileSync(join(__dirname, '..', 'custom_components/ha_entity_renamer/www/ha-entity-renamer.js'), 'utf8'));
     const card = dom.window.document.createElement('ha-entity-renamer');
     dom.window.document.body.append(card);
     const connection = new dom.window.EventTarget(); connection.connected = true;
@@ -163,7 +163,7 @@ test('large automatic preview batches HA requests and queues one device', async 
 test('large queue can be abandoned before keyboard traversal of hundreds of per-entity actions', () => {
   const dom = new JSDOM('', { runScripts: 'dangerously', url: 'http://localhost/' });
   try {
-    dom.window.eval(readFileSync(join(__dirname, '..', 'ha-entity-renamer.js'), 'utf8'));
+    dom.window.eval(readFileSync(join(__dirname, '..', 'custom_components/ha_entity_renamer/www/ha-entity-renamer.js'), 'utf8'));
     const card = dom.window.document.createElement('ha-entity-renamer');
     dom.window.document.body.append(card);
     const connection = new dom.window.EventTarget(); connection.connected = true;
