@@ -18,6 +18,47 @@ class NativeRegistryScopedSettleTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = fixture.NativeHelperQuiescenceTests.asyncSetUp
     _before_start = fixture.NativeHelperQuiescenceTests._before_start
 
+    async def test_core11_native_in_place_entity_id_change_is_observed_and_flushed(self):
+        from homeassistant.const import __version__
+        if __version__ != '2026.11.0':
+            self.skipTest('Core 11 in-place rename boundary')
+        from homeassistant.components.sensor import SensorEntity
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        from homeassistant.setup import async_setup_component
+        hass = self.f.hass
+        native = self.modules['native_registry']
+        self.assertTrue(await async_setup_component(hass, 'sensor', {'sensor': []}))
+
+        class Source(SensorEntity):
+            _attr_should_poll = False
+            _attr_native_value = 7
+            _attr_unique_id = 'scoped-in-place'
+            _attr_name = 'Scoped in place'
+            def __init__(self):
+                self.moves = []
+            def async_entity_id_changed(self, old_entity_id):
+                self.moves.append((old_entity_id, self.entity_id))
+
+        source = Source()
+        await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([source])
+        io = native.NativeRegistryIO(hass)
+        old = source.entity_id
+        before = next(row for row in io.document('entity')['entities'] if row['entity_id'] == old)
+        after = dict(before, entity_id='sensor.scoped_in_place_target')
+        change = native.PreparedRegistryChange('entity', before['id'],
+                                                json.dumps(before), json.dumps(after))
+        io.mutate(change, after)
+        await io.settle(change)
+        self.assertEqual(source.moves, [(old, after['entity_id'])])
+        self.assertIs(source.platform.entities.get(after['entity_id']), source)
+        self.assertEqual(source.registry_entry.id, before['id'])
+        self.assertIsNone(hass.states.get(old))
+        self.assertEqual(hass.states.get(after['entity_id']).state, '7')
+        self.assertTrue(io.runtime(change, after))
+        await io.flush('entity')
+        row = next(row for row in (await io.disk('entity'))['entities'] if row['id'] == before['id'])
+        self.assertEqual(row['entity_id'], after['entity_id'])
+
     async def test_waits_for_source_remove_and_readd_without_waiting_for_other_source(self):
         from homeassistant.components.sensor import SensorEntity
         from homeassistant.helpers.entity_component import DATA_INSTANCES
