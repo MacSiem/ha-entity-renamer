@@ -1422,6 +1422,15 @@ class HAEntityRenamer extends HTMLElement {
     };
     return texts[key] || '';
   }
+  async _hacsSwitchCall(hass, request) {
+    let timer;
+    try {
+      return await Promise.race([
+        hass.callWS(request),
+        new Promise((_, reject) => { timer = window.setTimeout(() => reject(new Error('HACS response timeout')), 15000); })
+      ]);
+    } finally { window.clearTimeout(timer); }
+  }
   async _switchHacsRepository() {
     if (this._hacsSwitchBusy || this._hass?.user?.is_admin !== true || this._hass?.connection?.connected !== true || !this.isConnected) return;
     const {hass, current} = this._captureRead();
@@ -1436,13 +1445,13 @@ class HAEntityRenamer extends HTMLElement {
     this._hacsSwitchBusy = true; this._hacsSwitchStatus = 'busy'; this.render();
     let mutationStarted = false;
     const readRepo = async () => {
-      try { return await hass.callWS({type:'hacs/repository/info', repository_id:id}); }
+      try { return await this._hacsSwitchCall(hass, {type:'hacs/repository/info', repository_id:id}); }
       catch (e) { if (e?.code === 'repository_not_found') return null; throw e; }
     };
     try {
       const previous = localStorage.getItem(key);
       if (previous === 'inflight') { this._hacsSwitchStatus = 'stopped'; return; }
-      const info = await hass.callWS({type:'hacs/info'});
+      const info = await this._hacsSwitchCall(hass, {type:'hacs/info'});
       if (!connected() || info?.version !== '2.0.5' || info?.disabled_reason || info?.startup || info?.has_pending_tasks) throw new Error('HACS unavailable or busy');
       const before = await readRepo();
       if (!connected()) throw new Error('session changed');
@@ -1456,10 +1465,10 @@ class HAEntityRenamer extends HTMLElement {
       localStorage.setItem(key, 'inflight');
       mutationStarted = true;
       if (localStorage.getItem(key) !== 'inflight' || !connected()) throw new Error('attempt marker or session unavailable');
-      await hass.callWS({type:'hacs/repositories/remove', repository:id});
+      await this._hacsSwitchCall(hass, {type:'hacs/repositories/remove', repository:id});
       if (!connected() || await readRepo() !== null) throw new Error('unregister not confirmed');
       if (!connected()) throw new Error('session changed');
-      await hass.callWS({type:'hacs/repositories/add', repository:full, category:'integration'});
+      await this._hacsSwitchCall(hass, {type:'hacs/repositories/add', repository:full, category:'integration'});
       if (!connected()) throw new Error('session changed');
       const after = await readRepo();
       if (!connected() || after?.id !== id || after?.full_name !== full || after?.category !== 'integration' || after?.installed !== false) throw new Error('integration registration not confirmed');

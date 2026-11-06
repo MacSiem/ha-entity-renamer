@@ -14,7 +14,7 @@ function fixture(options={}) {
   async callWS(msg){calls.push(msg.type);
    if(msg.type==='hacs/info')return {version:options.version||'2.0.5',startup:false,has_pending_tasks:!!options.pending,disabled_reason:null};
    if(msg.type==='hacs/repository/info'){if(!repo){const e=new Error('not found');e.code='repository_not_found';throw e;}const result={...repo};if(options.onRepoRead)await options.onRepoRead(result);return result;}
-   if(msg.type==='hacs/repositories/remove'){if(options.removeFailure)throw Error('uncertain');repo=null;return {};}
+   if(msg.type==='hacs/repositories/remove'){if(options.removeFailure)throw Error('uncertain');if(options.hangRemove)await options.hangRemove;repo=null;return {};}
    if(msg.type==='hacs/repositories/add'){if(options.addFailure)throw Error('uncertain');repo={id,full_name:full,category:'integration',installed:false};return {};}
    return [];
   }};
@@ -42,4 +42,8 @@ test('a second card with delayed stale read cannot remove the newly registered i
   const first=f.card._switchHacsRepository(), second=other._switchHacsRepository();await ready;await first;assert.equal(f.repo.category,'integration');release();await second;
   assert.equal(f.calls.filter(x=>x==='hacs/repositories/remove').length,1);assert.equal(f.calls.filter(x=>x==='hacs/repositories/add').length,1);assert.equal(f.repo.category,'integration');
  }finally{release();f.close()}
+});
+
+test('timed-out remove remains uncertain and a late response never starts registration',async()=>{
+ let release;const pending=new Promise(resolve=>{release=resolve});const f=fixture({hangRemove:pending});try{const original=f.w.setTimeout.bind(f.w);f.w.setTimeout=(fn,ms)=>original(fn,ms===15000?0:ms);await f.card._switchHacsRepository();assert.equal(f.card._hacsSwitchStatus,'stopped');assert.equal(f.w.localStorage.getItem(f.card._hacsMigrationKey()),'inflight');release();await new Promise(resolve=>setTimeout(resolve,10));assert.equal(f.calls.filter(x=>x==='hacs/repositories/add').length,0);await f.card._switchHacsRepository();assert.equal(f.calls.filter(x=>x==='hacs/repositories/remove').length,1);}finally{release();f.close()}
 });
