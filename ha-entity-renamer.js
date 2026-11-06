@@ -1408,6 +1408,67 @@ class HAEntityRenamer extends HTMLElement {
     }
     return this._bridgeNotice;
   }
+  _hacsMigrationKey() {
+    const id = this._hass?.user?.id;
+    return typeof id === 'string' && id.trim() ? 'ha-entity-renamer-hacs-switch-v1:' + encodeURIComponent(JSON.stringify([location.origin, id])) : null;
+  }
+  _hacsMigrationText(key) {
+    const pl = this._lang === 'pl';
+    const texts = {
+      busy: pl ? 'Sprawdzanie i przełączanie wpisu HACS…' : 'Checking and switching the HACS entry…',
+      done: pl ? 'Wpis Integration jest gotowy. Otwórz HACS, pobierz Entity Renamer i postępuj według przewodnika.' : 'The Integration entry is ready. Open HACS, download Entity Renamer, and follow the guide.',
+      stopped: pl ? 'Nie udało się potwierdzić stanu. Nie ponawiaj przełączenia w ciemno; sprawdź HACS i przewodnik migracji.' : 'The result could not be confirmed. Do not repeat the switch blindly; check HACS and the migration guide.',
+      blocked: pl ? 'Przełączenie niedostępne: sprawdź uprawnienia administratora, połączenie, HACS 2.0.5 i stan repozytorium.' : 'Switch unavailable: check administrator access, connection, HACS 2.0.5, and repository state.'
+    };
+    return texts[key] || '';
+  }
+  async _switchHacsRepository() {
+    if (this._hacsSwitchBusy || this._hass?.user?.is_admin !== true || this._hass?.connection?.connected !== true || !this.isConnected) return;
+    const {hass, current} = this._captureRead();
+    const key = this._hacsMigrationKey();
+    const connected = () => current() && this.isConnected && this._hass?.user?.is_admin === true && this._hass?.connection?.connected === true;
+    const id = '1234394331', full = 'MacSiem/ha-entity-renamer';
+    const pl = this._lang === 'pl';
+    const prompt = pl
+      ? 'Wykonaj i sprawdź kopię Home Assistant. Poczekaj na zakończenie pobierania i aktualizacji w HACS; nie uruchamiaj innych w trakcie. Przełączyć wyłącznie wpis HACS Entity Renamer z Dashboard na Integration? Nie usuwa to plików, zasobów, historii ani danych HA i nie zmienia nazw. Potem samodzielnie pobierzesz integrację w HACS.'
+      : 'Make and verify a Home Assistant backup. Wait for HACS downloads and updates to finish; do not start others during this step. Switch only the Entity Renamer HACS entry from Dashboard to Integration? This does not delete files, resources, history or HA data and does not rename anything. You will download the integration in HACS yourself afterwards.';
+    if (!key || !window.confirm(prompt)) return;
+    this._hacsSwitchBusy = true; this._hacsSwitchStatus = 'busy'; this.render();
+    let mutationStarted = false;
+    const readRepo = async () => {
+      try { return await hass.callWS({type:'hacs/repository/info', repository_id:id}); }
+      catch (e) { if (e?.code === 'repository_not_found') return null; throw e; }
+    };
+    try {
+      const previous = localStorage.getItem(key);
+      if (previous === 'inflight') { this._hacsSwitchStatus = 'stopped'; return; }
+      const info = await hass.callWS({type:'hacs/info'});
+      if (!connected() || info?.version !== '2.0.5' || info?.disabled_reason || info?.startup || info?.has_pending_tasks) throw new Error('HACS unavailable or busy');
+      const before = await readRepo();
+      if (!connected()) throw new Error('session changed');
+      if (before?.id === id && before?.full_name === full && before?.category === 'integration') {
+        this._hacsSwitchStatus = 'done'; return;
+      }
+      if (previous || before?.id !== id || before?.full_name !== full || before?.category !== 'plugin' || before?.installed !== true) throw new Error('unexpected repository state');
+      // Persist before the first effect. An interrupted or uncertain attempt is never replayed automatically.
+      localStorage.setItem(key, 'inflight');
+      mutationStarted = true;
+      if (localStorage.getItem(key) !== 'inflight' || !connected()) throw new Error('attempt marker or session unavailable');
+      await hass.callWS({type:'hacs/repositories/remove', repository:id});
+      if (!connected() || await readRepo() !== null) throw new Error('unregister not confirmed');
+      if (!connected()) throw new Error('session changed');
+      await hass.callWS({type:'hacs/repositories/add', repository:full, category:'integration'});
+      if (!connected()) throw new Error('session changed');
+      const after = await readRepo();
+      if (!connected() || after?.id !== id || after?.full_name !== full || after?.category !== 'integration' || after?.installed !== false) throw new Error('integration registration not confirmed');
+      localStorage.setItem(key, 'done'); this._hacsSwitchStatus = 'done';
+    } catch (_) {
+      this._hacsSwitchStatus = mutationStarted ? 'stopped' : 'blocked';
+    } finally {
+      this._hacsSwitchBusy = false; this.render();
+      this.shadowRoot.getElementById('hacsSwitch')?.focus({preventScroll:true});
+    }
+  }
   _renderBridgeNotice() {
     const state = this._bridgeNoticePreference();
     if (!state) return '';
@@ -1418,6 +1479,7 @@ class HAEntityRenamer extends HTMLElement {
       <p>${pl ? 'Entity Renamer jest dostępny jako jeden pakiet Integration (karta i backend). Ta starsza karta nadal działa; aby korzystać z nowych funkcji, zainstaluj i skonfiguruj integrację według przewodnika migracji.' : 'Entity Renamer is available as one Integration package (card and backend). This legacy card continues to work; install and configure the integration using the migration guide to use the new features.'}</p>
       <p>${pl ? 'Przed migracją wykonaj pełną kopię zapasową Home Assistant i przeczytaj przewodnik. Przejście do integracji może wymagać jednorazowej migracji.' : 'Before migrating, make a full Home Assistant backup and read the guide. Switching to the integration may require a one-time migration.'}</p>
       <a href="https://github.com/MacSiem/ha-entity-renamer/blob/main/MIGRATION.md" target="_blank" rel="noopener noreferrer">${pl ? 'Przewodnik migracji' : 'Migration guide'}</a>
+      ${this._hass?.user?.is_admin === true ? `<p>${pl ? 'Przed przełączeniem zakończ wszystkie pobierania i aktualizacje w HACS.' : 'Finish all HACS downloads and updates before switching.'}</p><button type="button" class="btn btn-outline" id="hacsSwitch" ${this._hacsSwitchBusy ? 'disabled' : ''}>${pl ? 'Przygotuj migrację w HACS' : 'Prepare migration in HACS'}</button><p role="status" aria-live="polite">${_esc(this._hacsMigrationText(this._hacsSwitchStatus))}</p>` : ''}
       <button type="button" class="btn btn-outline" id="bridgeNoticeDismiss">${pl ? 'Zamknij informację' : 'Dismiss information'}</button>
     </section>`;
   }
@@ -3483,6 +3545,7 @@ class HAEntityRenamer extends HTMLElement {
     const t = this._t;
     root.getElementById('bridgeNoticeDismiss')?.addEventListener('click', () => this._setBridgeNoticeDismissed(true));
     root.getElementById('bridgeNoticeOpen')?.addEventListener('click', () => this._setBridgeNoticeDismissed(false));
+    root.getElementById('hacsSwitch')?.addEventListener('click', () => this._switchHacsRepository());
     root.getElementById('exportRenameLog')?.addEventListener('click', e => this._openRenameExport(e.currentTarget));
     root.getElementById('reviewLegacyHistory')?.addEventListener('click', () => this._reviewLegacyHistory());
 
