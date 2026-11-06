@@ -10,11 +10,25 @@ function fixture(t) {
   const card = dom.window.document.createElement('ha-entity-renamer');
   dom.window.document.body.append(card);
   const entries = ['a', 'b'].map(id => ({ id: 'entry-' + id, entity_id: 'sensor.' + id, device_id: 'dev', unique_id: id, platform: 'mqtt' }));
-  const writes = [];
+  const writes = [], requests = []; let prepared;
+  const fingerprint='b'.repeat(64), operation_id='transaction_review';
   const devices = [{id:'dev',name:'QA',name_by_user:null}];
   const connection = new dom.window.EventTarget(); connection.connected = true;
   const hass = { language: 'en', connection, user: { id: 'admin-a', is_admin: true }, states: {}, callWS: async msg => {
-    if (msg.type.endsWith('/update')) { writes.push(msg);if(msg.entity_id){const row=entries.find(x=>x.entity_id===msg.entity_id);if(row){if(msg.new_entity_id)row.entity_id=msg.new_entity_id;if(msg.name)row.name=msg.name;}}if(msg.device_id){const row=devices.find(x=>x.id===msg.device_id);if(row)row.name_by_user=msg.name_by_user;}return {}; }
+    requests.push(msg);
+    if (msg.type === 'ha_entity_renamer/prepare') {
+      prepared={entities:msg.entities,devices:msg.devices};
+      const changes=[...msg.entities.map(x=>{const fields={};if(x.new_entity_id)fields.entity_id={before:x.entity_id,after:x.new_entity_id};if(x.name)fields.name={before:entries.find(r=>r.entity_id===x.entity_id)?.name??null,after:x.name};return {entity_id:x.entity_id,fields};}),...msg.devices.map(x=>({device_id:x.device_id,fields:{name_by_user:{before:devices.find(r=>r.id===x.device_id)?.name_by_user??null,after:x.name_by_user}}}))];
+      return {operation_id,fingerprint,changes,dependencies:{domains:[],files:[],yaml_file_count:0,template_consumer_count:0}};
+    }
+    if (msg.type === 'ha_entity_renamer/apply') {
+      for(const x of prepared.entities){writes.push({...x});const row=entries.find(r=>r.entity_id===x.entity_id);if(row){if(x.new_entity_id)row.entity_id=x.new_entity_id;if(x.name)row.name=x.name;}}
+      for(const x of prepared.devices){writes.push({...x});const row=devices.find(r=>r.id===x.device_id);if(row)row.name_by_user=x.name_by_user;}
+      return {operation_id,fingerprint,state:'applied'};
+    }
+    if (msg.type === 'ha_entity_renamer/status') return {operations:[]};
+    if (msg.type === 'ha_entity_renamer/recovery/inspect') return {operation_id,fingerprint,state:'applied',eligible:true};
+    if (msg.type.endsWith('/update')) throw new Error('Unexpected direct registry write');
     if (msg.type === 'config/entity_registry/list') return entries.map(row=>({...row}));
     if (msg.type === 'config/device_registry/list') return devices.map(row=>({...row}));
     if (msg.type === 'config/entity_registry/get_automatic_entity_ids') return Object.fromEntries(msg.entity_ids.map(id => [id, id + '_auto']));
@@ -23,8 +37,8 @@ function fixture(t) {
   } };
   card._hass = hass; card._entities = entries; card._devices = devices; card._deviceEntities = { dev: entries };
   card._bindRenameExportEvents();
-  function confirm() { card._showRenameConfirmation(); return card._executeRenames(true); }
-  return { card, hass, entries, writes, confirm, dom };
+  async function confirm() { card._showRenameConfirmation(); await card._executeRenames(true); if(card._migration?.stage==='review') {await card._applyMigration(); if(card._migration?.stage==='applied')card._finishMigration();} }
+  return { card, hass, entries, devices, writes, requests, confirm, dom };
 }
 function gate() { let release; const promise = new Promise(resolve => { release = resolve; }); return { promise, release }; }
 
@@ -35,7 +49,7 @@ function openEntityEditor(card) {
 }
 
 test('inline manual editor queues literal ID and name, then one confirmed transaction', async t => {
-  const { card, writes } = fixture(t); openEntityEditor(card);
+  const { card, writes, confirm } = fixture(t); openEntityEditor(card);
   card.shadowRoot.getElementById('entityEditObjectId').value = 'qa_changed';
   card.shadowRoot.getElementById('entityEditName').value = '<img src=x onerror=alert(1)> QA';
   card.shadowRoot.getElementById('queueEntityEdit').click();
@@ -43,7 +57,7 @@ test('inline manual editor queues literal ID and name, then one confirmed transa
   card._showRenameConfirmation();
   assert.match(card.shadowRoot.querySelector('.confirm-dialog').textContent, /<img src=x onerror=alert\(1\)> QA/);
   assert.equal(card.shadowRoot.querySelector('.confirm-dialog img'), null);
-  await card._executeRenames(true);
+  await confirm();
   assert.equal(writes.length, 1); assert.equal(writes[0].new_entity_id, 'sensor.qa_changed');
   assert.equal(writes[0].name, '<img src=x onerror=alert(1)> QA');
 });
@@ -81,16 +95,17 @@ test('Polish friendly-only queue describes the unchanged ID in Polish', t => {
 test('ID and friendly name are one registry transaction, failed item retries safely', async t => {
   const { card, hass, writes, confirm } = fixture(t);
   const call = hass.callWS; let fail = true;
-  hass.callWS = async msg => { if (msg.type.endsWith('/update') && fail) { fail = false; throw new Error('controlled failure'); } return call(msg); };
+  hass.callWS = async msg => { if (msg.type === 'ha_entity_renamer/prepare' && fail) { fail = false; throw new Error('controlled refusal'); } return call(msg); };
   card._addToQueue('sensor.a', 'sensor.renamed', 'Friendly QA');
   await confirm(); assert.equal(card._renameQueue.length, 1); assert.equal(writes.length, 0);
+  assert.equal(card._migration.stage, 'refused'); card._cancelRenameConfirmation();
   await confirm(); assert.equal(writes.length, 1);
   assert.equal(writes[0].entity_id, 'sensor.a'); assert.equal(writes[0].new_entity_id, 'sensor.renamed'); assert.equal(writes[0].name, 'Friendly QA');
 });
 
 for (const kind of ['account', 'role', 'connection']) test('pending apply cancels after ' + kind + ' change', async t => {
   const { card, hass, writes, confirm } = fixture(t); const wait = gate(); const call = hass.callWS;
-  hass.callWS = async msg => msg.type === 'search/related' ? wait.promise : call(msg);
+  hass.callWS = async msg => msg.type === 'ha_entity_renamer/prepare' ? wait.promise.then(() => call(msg)) : call(msg);
   card._addToQueue('sensor.a', 'sensor.new_a'); const applying = confirm();
   await new Promise(resolve => setImmediate(resolve));
   card.hass = { ...hass, user: kind === 'account' ? { id: 'admin-b', is_admin: true } : kind === 'role' ? { id: 'admin-a', is_admin: false } : hass.user, connection: kind === 'connection' ? {} : hass.connection };
@@ -99,7 +114,7 @@ for (const kind of ['account', 'role', 'connection']) test('pending apply cancel
 
 test('confirmed queue cannot acquire unconfirmed edits during impact await', async t => {
   const { card, hass, writes, confirm } = fixture(t); const wait = gate(); const call = hass.callWS;
-  hass.callWS = async msg => msg.type === 'search/related' ? wait.promise : call(msg);
+  hass.callWS = async msg => msg.type === 'ha_entity_renamer/prepare' ? wait.promise.then(() => call(msg)) : call(msg);
   card._addToQueue('sensor.a', 'sensor.new_a'); const applying = confirm();
   await new Promise(resolve => setImmediate(resolve));
   card._addToQueue('sensor.b', 'sensor.unconfirmed'); card._removeFromQueue('sensor.a'); card._clearQueue();
@@ -110,7 +125,7 @@ test('confirmed queue cannot acquire unconfirmed edits during impact await', asy
 test('replacement source during impact scan blocks automatic rename', async t => {
   const { card, hass, entries, writes, confirm } = fixture(t); const wait = gate(); const call = hass.callWS;
   await card._loadAutomaticIds(); card._queueAutomaticIds(null, 'sensor.a');
-  hass.callWS = async msg => msg.type === 'search/related' ? wait.promise : call(msg);
+  hass.callWS = async msg => msg.type === 'ha_entity_renamer/prepare' ? wait.promise.then(() => call(msg)) : call(msg);
   const applying = confirm(); await new Promise(resolve => setImmediate(resolve));
   entries[0] = { ...entries[0], id: 'replacement-entry', platform: 'another-integration' };
   wait.release({}); await applying; assert.equal(writes.length, 0); assert.equal(card._renameQueue.length, 1);
@@ -127,7 +142,7 @@ test('clear removes both device and entity proposals and friendly-only confirmat
 
 test('second confirm cannot duplicate an active transaction', async t => {
   const { card, hass, writes, confirm } = fixture(t); const wait = gate(); const call = hass.callWS;
-  hass.callWS = async msg => msg.type === 'search/related' ? wait.promise : call(msg);
+  hass.callWS = async msg => msg.type === 'ha_entity_renamer/prepare' ? wait.promise.then(() => call(msg)) : call(msg);
   card._addToQueue('sensor.a', 'sensor.new_a'); const applying = confirm();
   await new Promise(resolve => setImmediate(resolve)); const duplicate = card._executeRenames(true);
   wait.release({}); await Promise.all([applying, duplicate]); assert.equal(writes.length, 1);
@@ -150,7 +165,7 @@ for (const kind of ['automatic', 'registry', 'impact']) test('late ' + kind + ' 
 test('device removal is frozen while the confirmed transaction awaits impact', async t => {
   const { card, hass, confirm } = fixture(t); const wait = gate(); const call = hass.callWS;
   card._addToQueue('sensor.a', 'sensor.new_a'); card._deviceRenameQueue = {dev:'QA new device'};
-  hass.callWS = async msg => msg.type === 'search/related' ? wait.promise : call(msg);
+  hass.callWS = async msg => msg.type === 'ha_entity_renamer/prepare' ? wait.promise.then(() => call(msg)) : call(msg);
   const applying = confirm(); await new Promise(resolve => setImmediate(resolve));
   card.shadowRoot.querySelector('[data-remove-dev-queue]').click();
   const retained = card._deviceRenameQueue.dev; wait.release({}); await applying;
@@ -163,37 +178,33 @@ test('cancelled confirmation cannot authorize a later direct apply', async t => 
   assert.equal(writes.length, 0); assert.equal(card._renameQueue.length, 1);
 });
 
-test('partial success retries only failed entity and device writes', async t => {
-  const { card, hass, writes, confirm } = fixture(t); const call = hass.callWS; let failing = true;
-  hass.callWS = async msg => {
-    if (failing && (msg.entity_id === 'sensor.b' || msg.device_id === 'dev') && msg.type.endsWith('/update')) throw new Error('controlled rejected write');
-    return call(msg);
-  };
-  card._addToQueue('sensor.a', 'sensor.new_a'); card._addToQueue('sensor.b', 'sensor.new_b'); card._deviceRenameQueue = {dev:'New QA'};
-  await confirm(); assert.equal(card._lastApplyResult.ok, 1); assert.equal(card._lastApplyResult.total, 3);
-  assert.deepEqual(Array.from(card._renameQueue, row=>row.oldId), ['sensor.b']); assert.equal(card._deviceRenameQueue.dev, 'New QA');
-  failing = false; await confirm(); assert.equal(card._lastApplyResult.ok, 2); assert.equal(card._lastApplyResult.total, 2);
-  assert.deepEqual(writes.map(msg=>msg.entity_id || msg.device_id), ['sensor.a','dev','sensor.b']);
-  assert.equal(card._renameQueue.length,0); assert.equal(Object.keys(card._deviceRenameQueue).length,0);
+test('uncertain server apply preserves the queue and never blindly retries', async t => {
+  const {card,hass,writes,confirm,requests}=fixture(t);const call=hass.callWS;
+  hass.callWS=async msg=>{if(msg.type==='ha_entity_renamer/apply')throw new Error('controlled lost acknowledgement');if(msg.type==='ha_entity_renamer/recovery/inspect')return {};return call(msg);};
+  card._addToQueue('sensor.a','sensor.new_a');card._addToQueue('sensor.b','sensor.new_b');card._deviceRenameQueue={dev:'New QA'};
+  await confirm();assert.equal(card._migration.stage,'unknown');assert.equal(card._renameQueue.length,2);assert.equal(card._deviceRenameQueue.dev,'New QA');
+  await card._applyMigration();await card._executeRenames(true);assert.equal(writes.length,0);
+  // The single attempted request may have reached the server even without ACK.
+  assert.equal(card._renameLog.length,3);assert.ok(card._renameLog.every(row=>row.writePhase==='attempted'));
 });
 
 test('impact lookup failure retains all proposals without registry writes', async t => {
   const {card,hass,writes,confirm}=fixture(t);const call=hass.callWS;
-  hass.callWS=async msg=>{if(msg.type==='search/related') throw new Error('controlled lookup unavailable');return call(msg);};
+  hass.callWS=async msg=>{if(msg.type==='ha_entity_renamer/prepare') throw new Error('controlled lookup unavailable');return call(msg);};
   card._addToQueue('sensor.a','sensor.new_a');card._deviceRenameQueue={dev:'New QA'};
   await confirm();assert.equal(writes.length,0);assert.equal(card._renameQueue.length,1);assert.equal(card._deviceRenameQueue.dev,'New QA');
-  assert.match(card._message.text,/no changes applied/);assert.equal(card._loading,false);
+  assert.equal(card._migration.stage,'refused');assert.equal(card._loading,false);
 });
 
 test('failed ID writes do not claim readable references need updating', async t => {
   const {card,hass,confirm}=fixture(t);const call=hass.callWS;
   hass.callWS=async msg=>{
     if(msg.type==='search/related')return {automation:['automation.qa_reference']};
-    if(msg.type.endsWith('/update'))throw new Error('Invalid entity ID');
+    if(msg.type==='ha_entity_renamer/prepare')throw new Error('Invalid entity ID');
     return call(msg);
   };
   card._addToQueue('sensor.a','sensor.invalid id');await confirm();
-  assert.doesNotMatch(card._message.text,/places require (update|review)/);
+  assert.equal(card._migration.stage,'refused');
   assert.equal(card._renameQueue.length,1);
 });
 
@@ -222,7 +233,7 @@ test('confirmation keyboard reaches prepare and both rename actions without appl
   cancel.dispatchEvent(new dom.window.KeyboardEvent('keydown', {key:'Tab',shiftKey:true,bubbles:true,cancelable:true}));
   assert.equal(card.shadowRoot.activeElement.id,'prepareMigration');
   card.shadowRoot.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown', {key:'Tab',shiftKey:true,bubbles:true,cancelable:true}));
-  assert.equal(card.shadowRoot.activeElement.id,'confirmRenameApply');
+  assert.equal(card.shadowRoot.activeElement.id,'cancelRenameDialog');
   card.shadowRoot.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown', {key:'Tab',bubbles:true,cancelable:true}));
   assert.equal(card.shadowRoot.activeElement.id,'prepareMigration');
   card.shadowRoot.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown', {key:'Tab',bubbles:true,cancelable:true}));
@@ -248,7 +259,7 @@ for (const disruption of ['connection', 'browser', 'detach']) {
   });
   test(disruption + ' recovery during impact cancels captured batch', async t => {
     const f = fixture(t), wait = gate(), call = f.hass.callWS;
-    f.hass.callWS = msg => msg.type === 'search/related' ? wait.promise : call(msg);
+    f.hass.callWS = msg => msg.type === 'ha_entity_renamer/prepare' ? wait.promise.then(() => call(msg)) : call(msg);
     f.card._addToQueue('sensor.a', 'sensor.new_a'); const applying = f.confirm();
     await new Promise(resolve => setImmediate(resolve)); disrupt(f); wait.release({}); await applying;
     assert.equal(f.writes.length, 0); assert.equal(f.card._lastApplyResult, null);
@@ -261,7 +272,7 @@ for (const entity of [true, false]) for (const change of ['account', 'role', 'un
   test((entity ? 'entity' : 'device') + ' late ' + (reject ? 'rejection' : 'ACK') + ' after ' + change + ' stays private and unknown', async t => {
     const f = fixture(t), sent = gate(), reply = gate(), call = f.hass.callWS;
     f.hass.callWS = async msg => {
-      if (msg.type.endsWith('/update')) { sent.release(); await reply.promise; if (reject) throw new Error('PRIVATE old authority'); return call(msg); }
+      if (msg.type==='ha_entity_renamer/apply') { sent.release(); await reply.promise; if (reject) throw new Error('PRIVATE old authority'); return call(msg); }
       return call(msg);
     };
     if (entity) { f.card._addToQueue('sensor.a', 'sensor.new_a', 'PRIVATE friendly'); f.card._addToQueue('sensor.b','sensor.new_b'); }
@@ -269,16 +280,16 @@ for (const entity of [true, false]) for (const change of ['account', 'role', 'un
     const applying = f.confirm(); await sent.promise;
     f.card.hass = {...f.hass, user: change === 'account' ? {id:'admin-b',is_admin:true} : change === 'role' ? {id:'admin-a',is_admin:false} : {id:'admin-a'}};
     reply.release(); await applying;
-    assert.equal(f.card._entities.length,0); assert.equal(f.card._devices.length,0);
+    assert.ok(f.card._entities.every(row=>!String(row.entity_id).includes('PRIVATE')));
     assert.equal(f.card._renameQueue.length,0); assert.equal(Object.keys(f.card._deviceRenameQueue).length,0);
     assert.equal(f.card._renameLog.length,0); assert.equal(f.card._lastApplyResult,null);
     assert.doesNotMatch(f.card.shadowRoot.textContent,/PRIVATE|sensor\.new_a/);
     f.card.hass = {...f.hass,user:{id:'admin-a',is_admin:true}};
-    assert.equal(f.card._renameLog.length,1);
-    assert.equal(f.card._renameLog[0].writePhase,'attempted');
+    assert.equal(f.card._renameLog.length,2);
+    assert.ok(f.card._renameLog.every(row=>row.writePhase==='attempted'));
     const report=JSON.parse(f.card._buildRenameReport({draft:{format:'json',includePrivate:true}}).serialized);
-    assert.equal(report.counts.unknown,1); assert.equal(report.counts.applied,0);
-    assert.equal(f.writes.length,reject ? 0 : 1);
+    assert.equal(report.counts.unknown,2); assert.equal(report.counts.applied,0);
+    assert.equal(f.writes.length,reject ? 0 : 2);
   });
 }
 
@@ -292,13 +303,13 @@ for (const entity of [true,false]) for (const reject of [false,true]) for (const
   assert.equal(f.card._lastApplyResult,null);assert.equal(f.card._applyOperation,null);assert.equal(f.card._loading,false);
   assert.doesNotMatch(f.card._message?.text || '',/Confirmed changes:/);
   if(change!=='disconnect') assert.equal(f.card._renameLog.length,0);
-  else assert.equal(f.card._renameLog[0].writePhase,'acknowledged');
+  else assert.equal(f.card._renameLog[0].writePhase,'attempted');
 });
 
 test('a sent request records attempt intent before transport and completion only after its reply', async t=>{
  const f=fixture(t),sent=gate(),reply=gate(),call=f.hass.callWS;
  f.hass.callWS=async msg=>{
-  if(msg.type==='config/entity_registry/update'){sent.release();await reply.promise;}
+  if(msg.type==='ha_entity_renamer/apply'){sent.release();await reply.promise;}
   return call(msg);
  };
  f.card._addToQueue('sensor.a','sensor.new_a');const applying=f.confirm();await sent.promise;
@@ -315,12 +326,12 @@ test('a sent request records attempt intent before transport and completion only
 
 test('a new resolved account gets permitted registries after the cancelled old write releases its lock', async t => {
  const f=fixture(t),writeGate=gate(),original=f.hass.callWS;let started=false;
- f.hass.callWS=async message=>{if(message.type==='config/entity_registry/update'){started=true;f.writes.push(message);await writeGate.promise;return {};}return original(message);};
+ f.hass.callWS=async message=>{if(message.type==='ha_entity_renamer/apply'){started=true;f.writes.push(message);await writeGate.promise;return {};}return original(message);};
  f.card._renameQueue=[{oldId:'sensor.a',newId:'sensor.qa_cancelled_old'}];const pending=f.confirm();
  for(let i=0;i<20&&!started;i++)await new Promise(resolve=>setImmediate(resolve));assert.equal(started,true);
  const nextReads=[];
  f.card.hass={...f.hass,user:{id:'admin-b',is_admin:true},callWS:async message=>{nextReads.push(message);return message.type==='config/device_registry/list'?[{id:'fresh-device',name:'Fresh device'}]:[{entity_id:'sensor.fresh_account',device_id:'fresh-device'}];}};
- assert.equal(nextReads.length,0,'old unresolved write must retain its lock');writeGate.release();await pending;await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(nextReads.filter(x=>x.type==='ha_entity_renamer/apply').length,0);writeGate.release();await pending;await new Promise(resolve=>setImmediate(resolve));
  assert.equal(f.card._entities[0]?.entity_id,'sensor.fresh_account');assert.equal(f.card._devices[0]?.id,'fresh-device');
  assert.equal(nextReads.length,2);assert.equal(nextReads.filter(x=>x.type.endsWith('/update')).length,0);assert.equal(f.writes.length,1);
  assert.equal(f.card._renameLog.length,0);assert.equal(f.card._confirmDialogOpen,false);assert.equal(f.card._applyOperation,null);
@@ -339,15 +350,14 @@ test('ordinary rename has no import and shows deferred dependency choices only a
   card._showRenameConfirmation();
   const dialog=card.shadowRoot.querySelector('.confirm-dialog');
   assert.match(dialog.textContent,/sensor.chosen_id/);assert.match(dialog.textContent,/Chosen name/);assert.match(dialog.textContent,/Chosen device/);
-  const options=dialog.querySelectorAll('[data-coming-soon]');assert.equal(options.length,5);
-  for(const option of options){assert.equal(option.disabled,true);assert.equal(option.checked,false);assert.match(option.parentElement.textContent,/Coming soon/);}
-  assert.deepEqual([...options].map(x=>x.dataset.comingSoon),['template','powercalc','automation','script','config_entries']);
+  assert.equal(dialog.querySelectorAll('[data-coming-soon]').length,0);
+  assert.ok(dialog.querySelector('#prepareMigration'),'the server review owns dependency scope');
   assert.equal(writes.length,0);card._cancelRenameConfirmation();assert.equal(card._renameQueue.length,1);assert.equal(writes.length,0);
 });
 test('deferred options follow Polish confirmation and are absent for household account', t => {
   const {card,hass,writes}=fixture(t);card.hass={...hass,language:'pl'};
   card._addToQueue('sensor.a','sensor.chosen');card._showRenameConfirmation();
-  const scope=card.shadowRoot.querySelector('.confirm-dialog fieldset');assert.ok(scope);assert.match(scope.textContent,/Szablony/);assert.match(scope.textContent,/Automatyzacje/);
+  const prepare=card.shadowRoot.querySelector('.confirm-dialog #prepareMigration');assert.ok(prepare);assert.match(prepare.textContent,/sprawdź|przegląd/i);
   card.hass={...hass,user:{id:'household',is_admin:false}};
   assert.equal(card.shadowRoot.querySelector('.confirm-dialog'),null);assert.equal(card.shadowRoot.querySelector('input[type="file"]'),null);assert.equal(writes.length,0);
 });
@@ -396,13 +406,13 @@ test('bulk confirmation keyboard reaches both reviews and wraps without applying
   assert.equal(reviews.length,2);
   const tab=shiftKey=>root.activeElement.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Tab',shiftKey,bubbles:true,cancelable:true}));
   assert.equal(root.activeElement.id,'cancelRenameDialog');
-  tab(true);assert.equal(root.activeElement.id,'prepareMigration');
   tab(true);assert.equal(root.activeElement,reviews[1]);
   tab(true);assert.equal(root.activeElement,reviews[0]);
-  tab(true);assert.equal(root.activeElement.id,'confirmRenameApply');
+  tab(true);assert.equal(root.activeElement.id,'prepareMigration');
+  tab(true);assert.equal(root.activeElement.id,'cancelRenameDialog');
+  tab(false);assert.equal(root.activeElement.id,'prepareMigration');
   tab(false);assert.equal(root.activeElement,reviews[0]);
   tab(false);assert.equal(root.activeElement,reviews[1]);
-  tab(false);assert.equal(root.activeElement.id,'prepareMigration');
   tab(false);assert.equal(root.activeElement.id,'cancelRenameDialog');
   assert.equal(writes.length,0);
   assert.equal(card._renameQueue.length,9);

@@ -44,9 +44,9 @@ test('ordinary locale preserves unqueued device and prefix drafts, focus and bac
 test('ordinary role loss closes confirmation and disables registry apply without executing it', async () => {
  const f = await fixture();
  try {
-  f.card._renameQueue = [{ oldId: 'sensor.qa_old', newId: 'sensor.qa_new' }]; f.card._showRenameConfirmation(); assert.ok(f.card.shadowRoot.getElementById('confirmRenameApply'));
+  f.card._renameQueue = [{ oldId: 'sensor.qa_old', newId: 'sensor.qa_new' }]; f.card._showRenameConfirmation(); assert.ok(f.card.shadowRoot.getElementById('prepareMigration'));
   f.card.hass = { ...f.hass, language: 'pl', user: { is_admin: false } };
-  assert.equal(f.card.shadowRoot.getElementById('confirmRenameApply'), null);
+  assert.equal(f.card.shadowRoot.getElementById('prepareMigration'), null);
   assert.equal(f.card.shadowRoot.getElementById('executeRenames'), null); assert.match(f.card._renderLogTab(), /administratora/);
   assert.equal(f.card._confirmDialogOpen, false); assert.equal(f.card._renameQueue.length, 0); assert.equal(f.requests.length, 4);
   assert.equal(f.requests.filter(message => message.type.endsWith('/update')).length, 0);

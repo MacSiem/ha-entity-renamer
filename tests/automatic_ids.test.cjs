@@ -128,7 +128,8 @@ test('automatic ID preview separates null and collision, queues safe rows, rejec
     card._showRenameConfirmation();
     await card._executeRenames(true);
     assert.equal(card._renameQueue.length, 1);
-    assert.equal(card._renameLog[0].status, 'error');
+    assert.equal(card._migration.stage, 'refused');
+    assert.equal(card._renameLog.length, 0, 'preflight refusal does not invent an attempted write');
   } finally { dom.window.close(); }
 });
 

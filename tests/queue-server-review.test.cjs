@@ -1013,3 +1013,76 @@ test('unsupported Template dependency explains the specific refusal without offe
     assert.equal(f.card.shadowRoot.getElementById('applyMigration'),null);
   }
 });
+
+test('forward inspection rejects a foreign UUID even when target fields match',async t=>{
+ const f=await fixture(t);await f.card._prepareMigration();
+ f.handlers['ha_entity_renamer/apply']=()=>{f.entries[0]={...f.entries[0],id:'foreign-uuid',entity_id:'sensor.b'};return {operation_id:'review_qa',fingerprint,state:'applied'};};
+ await f.card._applyMigration();assert.equal(f.card._migration.registryMatches,false);assert.equal(f.card._migration.stage,'unknown');
+ assert.equal(f.card._renameLog.length,1);assert.equal(f.card._renameLog[0].writePhase,'attempted');
+});
+
+test('forward inspection rejects duplicate target rows',async t=>{
+ const f=await fixture(t);await f.card._prepareMigration();
+ f.handlers['ha_entity_renamer/apply']=()=>{f.entries[0].entity_id='sensor.b';f.entries.push({...f.entries[0],id:'foreign'});return {operation_id:'review_qa',fingerprint,state:'applied'};};
+ await f.card._applyMigration();assert.equal(f.card._migration.registryMatches,false);assert.equal(f.card._migration.stage,'unknown');
+});
+
+test('forward inspection rejects a duplicated UUID on a different entity ID',async t=>{
+ const f=await fixture(t);await f.card._prepareMigration();
+ f.handlers['ha_entity_renamer/apply']=()=>{f.entries[0].entity_id='sensor.b';f.entries.push({...f.entries[0],entity_id:'sensor.other'});return {operation_id:'review_qa',fingerprint,state:'applied'};};
+ await f.card._applyMigration();assert.equal(f.card._migration.registryMatches,false);assert.equal(f.card._migration.stage,'unknown');
+});
+
+test('typed script identity accepts only the native matching service-key change',async t=>{
+ const f=await fixture(t),c=f.card;
+ const old=JSON.stringify(['uuid','script','old_key',null]);const change={fields:{entity_id:{before:'script.old_key',after:'script.new_key'}}};
+ const row={id:'uuid',platform:'script',unique_id:'new_key',device_id:null};
+ assert.equal(c._migrationEntityIdentityMatches(row,old,change,'after'),true);
+ assert.equal(c._migrationEntityIdentityMatches({...row,id:'foreign'},old,change,'after'),false);
+ assert.equal(c._migrationEntityIdentityMatches({...row,unique_id:'other'},old,change,'after'),false);
+ assert.equal(c._migrationEntityIdentityMatches({...row,unique_id:'old_key'},old,change,'after'),false);
+ assert.equal(c._migrationEntityIdentityMatches({...row,unique_id:'custom-key'},
+   JSON.stringify(['uuid','script','custom-key',null]),change,'after'),true);
+ assert.equal(c._migrationEntityIdentityMatches(row,old,change,'before'),false);
+});
+
+test('server-owned history records one attempt and updates only after verified inspection',async t=>{
+ const f=await fixture(t);await f.card._prepareMigration();const pending=gate();
+ f.handlers['ha_entity_renamer/apply']=()=>{f.entries[0].entity_id='sensor.b';return pending.promise;};
+ const operation=f.card._applyMigration();assert.equal(f.card._renameLog.length,1);
+ assert.equal(f.card._renameLog[0].writePhase,'attempted');
+ pending.resolve({operation_id:'review_qa',fingerprint,state:'applied'});await operation;
+ assert.equal(f.card._renameLog.length,1);assert.equal(f.card._renameLog[0].writePhase,'readback_confirmed');
+ await f.card._inspectMigration();assert.equal(f.card._renameLog.length,1);
+ assert.equal(JSON.parse(f.card._buildRenameReport({draft:{format:'json',includePrivate:false}}).serialized).counts.applied,1);
+});
+
+test('late apply reply cannot add or confirm history in another account',async t=>{
+ const f=await fixture(t);await f.card._prepareMigration();const pending=gate();
+ f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
+ const operation=f.card._applyMigration();assert.equal(f.card._renameLog[0].writePhase,'attempted');
+ f.card.hass={...f.hass,user:{id:'admin-b',is_admin:true}};
+ pending.resolve({operation_id:'review_qa',fingerprint,state:'applied'});await operation;
+ assert.equal(f.card._renameLog.length,0);assert.doesNotMatch(f.card.shadowRoot.textContent,/sensor\.b/);
+ f.card.hass={...f.hass,user:{id:'admin-a',is_admin:true}};
+ assert.equal(f.card._renameLog.length,1);assert.equal(f.card._renameLog[0].writePhase,'attempted');
+});
+
+test('history does not merge a reused operation ID with a different fingerprint',async t=>{
+ const f=await fixture(t);await f.card._prepareMigration();const m=f.card._migration;
+ f.card._recordMigrationHistory(m,'attempted');const first=f.card._renameLog[0];
+ m.fingerprint='c'.repeat(64);f.card._recordMigrationHistory(m,'attempted');
+ assert.equal(f.card._renameLog.length,2);assert.notEqual(f.card._renameLog[0],first);
+ assert.equal(first.operationFingerprint,fingerprint);assert.equal(f.card._renameLog[0].operationFingerprint,'c'.repeat(64));
+});
+
+test('script own-ID forward cannot verify the old unique key after a rename',async t=>{
+ const f=await fixture(t);
+ f.entries[0]={id:'script-uuid',entity_id:'script.old_key',device_id:null,unique_id:'old_key',platform:'script',name:null};
+ f.card._entities=f.entries.map(row=>({...row}));f.card._renameQueue=[{oldId:'script.old_key',newId:'script.new_key'}];
+ f.review.changes=[{entity_id:'script.old_key',fields:{entity_id:{before:'script.old_key',after:'script.new_key'}}}];
+ f.card._cancelRenameConfirmation();f.card._showRenameConfirmation();await f.card._prepareMigration();
+ f.handlers['ha_entity_renamer/apply']=()=>{f.entries[0].entity_id='script.new_key';return {operation_id:'review_qa',fingerprint,state:'applied'};};
+ await f.card._applyMigration();assert.equal(f.card._migration.registryMatches,false);assert.equal(f.card._migration.stage,'unknown');
+ assert.equal(f.card._renameLog[0].writePhase,'attempted');
+});

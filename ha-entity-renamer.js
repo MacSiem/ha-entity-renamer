@@ -1924,6 +1924,23 @@ class HAEntityRenamer extends HTMLElement {
     return entry && JSON.stringify([entry.id, entry.platform, entry.unique_id, entry.device_id]);
   }
 
+  _migrationEntityIdentityMatches(row, identity, change, side) {
+    let expected;
+    try { expected = JSON.parse(identity); } catch (_) { return false; }
+    if (!Array.isArray(expected) || expected.length !== 4 || !expected[0]
+        || row.id !== expected[0] || row.platform !== expected[1]
+        || (row.device_id ?? null) !== (expected[3] ?? null)) return false;
+    // YAML Script own-ID changes its native unique_id with the service key.
+    const ids = change.fields?.entity_id;
+    if (side === 'after' && expected[1] === 'script'
+        && typeof ids?.before === 'string' && typeof ids?.after === 'string'
+        && ids.before.startsWith('script.') && ids.after.startsWith('script.')
+        && expected[2] === ids.before.slice('script.'.length)) {
+      return row.unique_id === ids.after.slice('script.'.length);
+    }
+    return row.unique_id === expected[2];
+  }
+
   set hass(hass) {
     const previousFormatKey = this._displayFormatKey || this._formatUi.key;
     const previousLanguage = this._lang;
@@ -2577,6 +2594,48 @@ class HAEntityRenamer extends HTMLElement {
       confirmed++;
     }
     return confirmed;
+  }
+
+  _recordMigrationHistory(m, outcome) {
+    // Only the currently authenticated owner may create or revise their log.
+    // The operation ID and reviewed row position make repeated inspection idempotent.
+    if (!this._migrationCurrent(m) || !m.review || !this._historyKey()) return;
+    const entries = m.review.changes;
+    const now = new Date().toISOString();
+    entries.forEach((change, index) => {
+      let entry = this._renameLog.find(row => row?.operationId === m.operation_id
+        && row?.operationFingerprint === m.fingerprint && row?.operationIndex === index);
+      if (!entry && outcome !== 'attempted') return;
+      if (!entry) {
+        const device = typeof change.device_id === 'string';
+        const oldId = device ? '📱 ' + change.device_id.substring(0, 8) + '...'
+          : change.fields.entity_id?.before || change.entity_id;
+        const newId = device ? '📱 ' + (change.fields.name_by_user?.after || '')
+          : change.fields.entity_id?.after || change.entity_id;
+        const dashboardSource = m.review.dependencies.coverage?.find(row => row.source === 'dashboard');
+        const dashboardRows = Array.isArray(m.review.dependencies.dashboards)
+          ? m.review.dependencies.dashboards.filter(row => row.references?.some(ref => ref.before === oldId))
+          : [];
+        const dashboardCoverage = dashboardSource?.status === 'COMPLETE' && !dashboardSource.blockers?.length
+          ? 'complete' : dashboardRows.length ? 'partial' : 'unavailable';
+        const impact = {dashboardCoverage};
+        if (dashboardRows.length || dashboardCoverage === 'complete') {
+          impact.dashboards = dashboardRows.map(row => row.route
+            || this._migrationText('Default dashboard', 'Domyślny pulpit'));
+        }
+        entry = {operationId: m.operation_id, operationFingerprint: m.fingerprint, operationIndex: index, oldId, newId,
+          operationKind: device ? 'device' : 'entity', status: 'error',
+          writePhase: 'attempted', attemptedAt: now, impact};
+        this._renameLog.unshift(entry);
+      }
+      if (outcome === 'applied' && entry.writePhase !== 'readback_confirmed') {
+        entry.status = 'ok'; entry.writePhase = 'readback_confirmed';
+        entry.verification = 'independent_registry_list_exact_fields'; entry.completedAt = now;
+      } else if (outcome === 'refused' && entry.writePhase !== 'readback_confirmed') {
+        entry.status = 'error'; entry.writePhase = 'not_started'; entry.completedAt = now;
+      }
+    });
+    this._saveHistoryToStorage();
   }
 
   async _applyEntityRename(rename, hass = this._hass) {
@@ -3396,6 +3455,16 @@ class HAEntityRenamer extends HTMLElement {
       });
       if (!this._migrationCurrent(m)) return;
       if (!this._validMigrationReview(result)) throw new Error('invalid_review');
+      // A source may be replaced while server prepare is pending. Bind the
+      // reviewed operation to the selection the user actually confirmed.
+      if (c.entities.some(row => row.sourceIdentity)) {
+        const rows = await hass.callWS({type: 'config/entity_registry/list'});
+        if (!current()) return;
+        if (!Array.isArray(rows) || c.entities.some(row => row.sourceIdentity
+          && this._sourceIdentity(rows.find(entry => entry.entity_id === row.oldId)) !== row.sourceIdentity)) {
+          throw new Error('stale_source_identity');
+        }
+      }
       // Full detached public projection; never construct or send a client Plan.
       m.review = JSON.parse(JSON.stringify({changes: result.changes, dependencies: result.dependencies}));
       m.identities = m.review.changes.map(change => change.device_id ? change.device_id
@@ -3435,6 +3504,7 @@ class HAEntityRenamer extends HTMLElement {
     if (!m || m.stage !== 'review' || m.busy || m.attempted || !this._migrationCurrent(m)) return;
     // Consume locally before the first await, including transport failures.
     m.attempted = true; m.stage = 'applying'; m.busy = true; m.applying = true;
+    this._recordMigrationHistory(m, 'attempted');
     const lifecycleRead = this._startRecoveryRead(m, 'apply');
     this._confirmation = null; this._confirmDialogOpen = false;
     const hass = this._hass;
@@ -3577,10 +3647,12 @@ class HAEntityRenamer extends HTMLElement {
       }
       m.registryMatches = !!m.review && m.review.changes.every((change, index) => {
         const side = m.restoreAttempted ? 'before' : 'after';
-        const row = change.device_id ? devices.find(r => r.id === change.device_id)
-          : entities.find(r => r.entity_id === (change.fields.entity_id?.[side] || change.entity_id));
-        return row && ((!m.restoreAttempted && !m.recoveredIdentity) || (change.device_id ? row.id === m.identities?.[index]
-          : !!m.identities?.[index] && this._sourceIdentity(row) === m.identities[index]))
+        const rows = change.device_id ? devices.filter(r => r.id === change.device_id)
+          : entities.filter(r => r.entity_id === (change.fields.entity_id?.[side] || change.entity_id));
+        const row = rows.length === 1 ? rows[0] : null;
+        return row && (change.device_id ? row.id === m.identities?.[index]
+          : entities.filter(item => item.id === row.id).length === 1
+            && !!m.identities?.[index] && this._migrationEntityIdentityMatches(row, m.identities[index], change, side))
           && Object.entries(change.fields).every(([key, field]) => (row[key] ?? null) === field[side]);
       });
     }
@@ -3588,6 +3660,8 @@ class HAEntityRenamer extends HTMLElement {
       : m.restoreAttempted ? ((m.restoreAcknowledged || (m.inspection?.state === 'rolled_back'
         && m.inspection?.reason === 'restored_verified')) && m.registryMatches ? 'restored' : 'unknown')
       : m.inspection?.state === 'applied' && m.registryMatches ? 'applied' : 'unknown';
+    if (!m.restoreAttempted && m.stage === 'applied') this._recordMigrationHistory(m, 'applied');
+    else if (!m.restoreAttempted && m.stage === 'refused') this._recordMigrationHistory(m, 'refused');
     m.inspecting = false; clearTimeout(m.pollTimer); m.pollTimer = null;
     m.busy = false; this.render();
   }
