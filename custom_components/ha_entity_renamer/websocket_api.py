@@ -1,0 +1,384 @@
+"""Admin-only discovery and narrowly qualified server-owned recovery commands."""
+from contextlib import asynccontextmanager
+import logging
+
+import voluptuous as vol
+from homeassistant.components import websocket_api
+from homeassistant.core import callback
+from .const import DATA_RUNTIME, DOMAIN, VERSION
+
+
+_LOGGER = logging.getLogger(__name__)
+
+def _log_prepare_failure(error):
+    # Reuse the checked metadata-only diagnostic: no exception text, locals,
+    # source lines, absolute paths, configuration or credentials.
+    from .yaml_validation_worker import _checker_diagnostic
+    _LOGGER.warning("Migration review could not be prepared: %s", _checker_diagnostic(error))
+
+
+@callback
+def async_register(hass):
+    websocket_api.async_register_command(hass, ws_status)
+    websocket_api.async_register_command(hass, ws_discover)
+    websocket_api.async_register_command(hass, ws_preview)
+    websocket_api.async_register_command(hass, ws_prepare)
+    websocket_api.async_register_command(hass, ws_apply)
+    websocket_api.async_register_command(hass, ws_recovery_inspect)
+    websocket_api.async_register_command(hass, ws_recovery_restore)
+
+
+class _DiscoveryUnauthorized(PermissionError):
+    pass
+
+
+def _send_discovery_error(connection,message,error):
+    if isinstance(error,_DiscoveryUnauthorized):
+        code,detail = 'unauthorized','Administrator permissions are required'
+    else:
+        reason = error.args[0] if type(error) is ValueError and error.args else ''
+        if reason == 'discovery_invalid_proposal':
+            code,detail = 'invalid_proposal','The rename proposal is invalid'
+        elif reason == 'discovery_runtime_unavailable':
+            code,detail = 'unavailable','Entity Renamer backend was unloaded'
+        else:
+            code,detail = 'discovery_unavailable','Dependency discovery could not be verified'
+    connection.send_error(message['id'],code,detail)
+
+
+@asynccontextmanager
+async def _discovery_output_lease(runtime):
+    from . import Runtime
+    if type(runtime) is Runtime:
+        async with runtime.operation_lock:
+            yield
+    else:
+        yield
+
+
+async def _read_discovery(hass, connection, message, *, preview, imported=False):
+    runtime = hass.data.get(DATA_RUNTIME)
+    user_id = connection.user.id
+    current_user = connection.user
+    native_user_source = None
+    if runtime is None or not runtime.loaded or runtime.unloading:
+        connection.send_error(message['id'], 'unavailable', 'Entity Renamer backend is not loaded')
+        return
+
+    def guard():
+        if native_user_source is not None:
+            manager,store = native_user_source
+            # Real AuthStore is the backing source read by async_get_user.
+            # Detect removal/replacement during the final SQL/files await too.
+            if (hass.auth is not manager or manager._store is not store
+                    or type(store._users) is not dict
+                    or store._users.get(user_id) is not current_user):
+                raise _DiscoveryUnauthorized()
+        if (current_user is None or not current_user.is_active or not current_user.is_admin
+                or connection.user.id != user_id or not connection.user.is_admin
+                or not connection.user.is_active):
+            raise _DiscoveryUnauthorized()
+        if (hass.data.get(DATA_RUNTIME) is not runtime or not runtime.loaded or runtime.unloading):
+            raise ValueError('discovery_runtime_unavailable')
+
+    async def refresh():
+        nonlocal current_user,native_user_source
+        guard()
+        current_user = await hass.auth.async_get_user(user_id)
+        from homeassistant.auth import AuthManager
+        if type(hass.auth) is AuthManager:
+            native_user_source = (hass.auth,hass.auth._store)
+        guard()
+
+    try:
+        await refresh()
+        if preview:
+            result = await runtime.preview(hass, message['proposal'], guard=guard, refresh=refresh)
+        else:
+            capture = await runtime.discover(hass, message['proposal'], guard=guard, refresh=refresh)
+            result = capture.summary()
+    except Exception as error:
+        _send_discovery_error(connection,message,error)
+        return
+    # Only the native Runtime's real operation lock is our read lease.
+    # Explicit trusted alternate backends retain their handler-owned auth.
+    async with _discovery_output_lease(runtime):
+        try:
+            guard()  # Identity/liveness may have changed while awaiting acquire.
+            # The handler owns its final output decision even when backend IO is
+            # supplied by another trusted consumer. Re-read role after that await.
+            await refresh()
+            guard()
+            from .discovery_final_fence import _Preview, async_finalize_discovery
+            if preview:
+                if type(result) is _Preview:
+                    from .discovery import compose_preview, compose_import_preview
+                    capture = await async_finalize_discovery(hass,result.capture,guard)
+                    result = (compose_import_preview(capture) if imported else compose_preview(capture))
+            else:
+                capture = await async_finalize_discovery(hass,capture,guard)
+                result = capture.summary()
+            guard()
+        except Exception as error:
+            _send_discovery_error(connection,message,error)
+        else:
+            connection.send_result(message['id'], result)
+
+
+@websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/discover',
+                                  vol.Required('proposal'): dict})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_discover(hass, connection, message):
+    await _read_discovery(hass, connection, message, preview=False)
+
+
+@websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/preview',
+                                  vol.Required('proposal'): dict})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_preview(hass, connection, message):
+    await _read_discovery(hass, connection, message, preview=True)
+
+
+def _recovery_authority(hass, connection, runtime):
+    """Synchronous AuthStore identity/role checks across every native await.
+
+    AuthManager.async_get_user is normal IO, never awaited through AuthStore.
+    The store reference is used only for the final synchronous continuation.
+    """
+    user_id = connection.user.id
+    current_user = connection.user
+    native_source = None
+    def guard():
+        if native_source is not None:
+            manager, store = native_source
+            if (hass.auth is not manager or manager._store is not store
+                    or type(store._users) is not dict
+                    or store._users.get(user_id) is not current_user):
+                raise _DiscoveryUnauthorized()
+        if (current_user is None or not current_user.is_active or not current_user.is_admin
+                or connection.user is not current_user or connection.user.id != user_id):
+            raise _DiscoveryUnauthorized()
+        if hass.data.get(DATA_RUNTIME) is not runtime or not runtime.loaded or runtime.unloading:
+            raise ValueError('recovery_runtime_unavailable')
+    async def refresh():
+        nonlocal current_user, native_source
+        guard()
+        from homeassistant.auth import AuthManager
+        if type(hass.auth) is not AuthManager:
+            raise _DiscoveryUnauthorized()
+        current_user = await hass.auth.async_get_user(user_id)
+        native_source = (hass.auth, hass.auth._store)
+        guard()
+    return guard, refresh
+
+
+class _InvalidSelection(ValueError):
+    pass
+
+
+def _ordinary_selection(message):
+    """Copy only ordinary requested fields; clients never supply a Plan/root."""
+    mapping, names, devices, seen = {}, {}, {}, set()
+    if not (message['entities'] or message.get('devices')) or len(message['entities']) + len(message.get('devices', ())) > 10000:
+        raise _InvalidSelection()
+    for row in message['entities']:
+        old = row['entity_id']
+        new = row.get('new_entity_id', old)
+        if old in seen or (new == old and 'name' not in row):
+            raise _InvalidSelection()
+        seen.add(old)
+        if new != old:
+            mapping[old] = new
+        if 'name' in row:
+            names[old] = row['name']
+    for row in message.get('devices', ()):
+        identity = row['device_id']
+        if identity in devices:
+            raise _InvalidSelection()
+        devices[identity] = row['name_by_user']
+    # Reuse the existing product validators for IDs, domains, collisions and
+    # names. This is an internal schema conversion, never a file/import API.
+    from .manifest import parse_manifest
+    try:
+        parse_manifest({'entities': [
+            {'entity_id': old, 'proposed_entity_id': mapping.get(old, old),
+             'proposed_name': names.get(old)} for old in sorted(seen)],
+            'devices': [{'device_id': key, 'proposed_name': value}
+                        for key, value in devices.items()]})
+    except ValueError:
+        raise _InvalidSelection() from None
+    return mapping, names, devices
+
+
+_SELECTION_TEXT = vol.All(str, vol.Length(min=1, max=255))
+_ENTITY_SELECTION = vol.Schema({
+    vol.Required('entity_id'): _SELECTION_TEXT,
+    vol.Optional('new_entity_id'): _SELECTION_TEXT,
+    vol.Optional('name'): _SELECTION_TEXT}, extra=vol.PREVENT_EXTRA)
+_DEVICE_SELECTION = vol.Schema({
+    vol.Required('device_id'): _SELECTION_TEXT,
+    vol.Required('name_by_user'): _SELECTION_TEXT}, extra=vol.PREVENT_EXTRA)
+
+
+@websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/prepare',
+    vol.Required('entities'): vol.All([_ENTITY_SELECTION], vol.Length(max=10000)),
+    vol.Optional('devices'): vol.All([_DEVICE_SELECTION], vol.Length(max=10000))})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_prepare(hass, connection, message):
+    """Read-only server review of an ordinary selection, with readiness false."""
+    from . import Runtime
+    from .transaction import Refused
+    runtime = hass.data.get(DATA_RUNTIME)
+    if type(runtime) is not Runtime or not runtime.loaded or runtime.unloading:
+        connection.send_error(message['id'], 'unavailable', 'Entity Renamer backend is not loaded')
+        return
+    guard, refresh = _recovery_authority(hass, connection, runtime)
+    try:
+        await refresh()
+        mapping, names, devices = _ordinary_selection(message)
+        result = await runtime.native_yaml_prepare(hass, mapping, entity_names=names,
+            device_names=devices, actor_id=connection.user.id, guard=guard, refresh=refresh)
+        # No additional await after the native source/history fence. This checks
+        # the actual backing AuthStore user and Runtime synchronously.
+        guard()
+    except PermissionError:
+        connection.send_error(message['id'], 'unauthorized', 'Administrator permissions are required')
+    except _InvalidSelection:
+        connection.send_error(message['id'], 'invalid_selection', 'The rename selection is invalid')
+    except Refused as error:
+        from .helper_native import UnsupportedEntryReferences
+        if type(error) is UnsupportedEntryReferences:
+            import json
+            # Admin-only, metadata and selected entity IDs only; never entry data/options.
+            connection.send_error(message['id'], 'unsupported_config_entry',
+                json.dumps({'sources': error.sources}, ensure_ascii=True, separators=(',', ':')))
+            return
+        # This narrow prewrite refusal identifies a recognized dependency.
+        # Only validated entity IDs are projected to the administrator.
+        import re
+        match = re.fullmatch(r'own_id_script_state_trigger_unqualified:(automation\.[a-z0-9_]+):(script\.[a-z0-9_]+)', str(error))
+        if match:
+            import json
+            connection.send_error(message['id'], 'unsupported_script_state_trigger',
+                json.dumps({'automation': match.group(1), 'script': match.group(2)}, separators=(',', ':')))
+            return
+        _log_prepare_failure(error)
+        code, text = {
+            'powercalc_public_graph_unsupported':
+                ('unsupported_powercalc_graph', 'This Powercalc graph cannot yet be safely migrated'),
+            'template_yaml_server_powercalc_scope_unsupported':
+                ('unsupported_powercalc_scope', 'Powercalc is loaded and its dependencies cannot be verified for this plan'),
+            'template_forward_powercalc_scope_unsupported':
+                ('unsupported_powercalc_scope', 'Powercalc is loaded and its dependencies cannot be verified for this plan'),
+            'template_state_server_template_requires_reference_parser':
+                ('unsupported_template_reference', 'A Template reference could not be safely interpreted'),
+            'template_state_server_affected_unsupported_family':
+                ('unsupported_template_family', 'An affected Template form is not supported'),
+            'controlled_automation_scope_unsupported':
+                ('unsupported_automation_scope', 'Automation state or configuration could not be safely verified'),
+        }.get(str(error), ('unsupported_selection', 'This selection cannot be verified for migration'))
+        connection.send_error(message['id'], code, text)
+    except Exception as error:
+        _log_prepare_failure(error)
+        unavailable = type(error) is ValueError and error.args == ('recovery_runtime_unavailable',)
+        connection.send_error(message['id'], 'unavailable' if unavailable else 'prepare_unavailable',
+                              'The rename review could not be verified')
+    else:
+        connection.send_result(message['id'], result)
+
+
+@websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/apply',
+    vol.Required('operation_id'): vol.All(str, vol.Match(r'[A-Za-z0-9_-]{1,80}\Z')),
+    vol.Required('fingerprint'): vol.All(str, vol.Match(r'[0-9a-f]{64}\Z'))})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_apply(hass, connection, message):
+    """Consume only this connection actor's retained review, never a client Plan."""
+    from . import Runtime
+    from .transaction import Refused
+    runtime = hass.data.get(DATA_RUNTIME)
+    if type(runtime) is not Runtime or not runtime.loaded or runtime.unloading:
+        connection.send_error(message['id'], 'unavailable', 'Entity Renamer backend is not loaded')
+        return
+    guard, refresh = _recovery_authority(hass, connection, runtime)
+    actor_id = connection.user.id
+    try:
+        await refresh()
+        result = await runtime.native_yaml_apply(hass, message['operation_id'],
+            message['fingerprint'], actor_id=actor_id, guard=guard, refresh=refresh)
+        guard()  # No new IO after the native final source/history/auth fence.
+    except PermissionError:
+        connection.send_error(message['id'], 'unauthorized', 'Administrator permissions are required')
+    except Refused:
+        connection.send_error(message['id'], 'apply_refused',
+                              'The retained rename review could not be applied; check status')
+    except Exception:
+        # The review may already be consumed. Never retry an uncertain write or
+        # expose source paths, exception strings, native payloads or tokens.
+        connection.send_error(message['id'], 'apply_unavailable',
+                              'The rename outcome could not be verified; check status')
+    else:
+        connection.send_result(message['id'], {key: result[key] for key in (
+            'operation_id', 'fingerprint', 'state', 'migration_ready', 'family_complete')})
+
+
+async def _read_recovery(hass, connection, message, *, action):
+    from . import Runtime
+    runtime = hass.data.get(DATA_RUNTIME)
+    if type(runtime) is not Runtime or not runtime.loaded or runtime.unloading:
+        connection.send_error(message['id'], 'unavailable', 'Entity Renamer backend is not loaded')
+        return
+    guard, refresh = _recovery_authority(hass, connection, runtime)
+    try:
+        await refresh()
+        if action == 'status':
+            result = await runtime.recovery_status(hass, guard=guard, refresh=refresh)
+        elif action == 'inspect':
+            result = await runtime.recovery_inspect(hass, message['operation_id'], message['fingerprint'],
+                                                    guard=guard, refresh=refresh)
+        else:
+            result = await runtime.recovery_restore(hass, message['operation_id'], message['fingerprint'],
+                                                    guard=guard, refresh=refresh)
+        # Native controller owns its final source/history admission; no extra
+        # auth await can reopen that gap. The actual backing user is checked now.
+        guard()
+    except PermissionError:
+        connection.send_error(message['id'], 'unauthorized', 'Administrator permissions are required')
+    except Exception as error:
+        unavailable = type(error) is ValueError and error.args == ('recovery_runtime_unavailable',)
+        connection.send_error(message['id'], 'unavailable' if unavailable else 'recovery_unavailable',
+                              'Migration recovery could not be verified')
+    else:
+        connection.send_result(message['id'], result)
+
+
+@websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/status'})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_status(hass, connection, message):
+    await _read_recovery(hass, connection, message, action='status')
+
+
+@websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/recovery/inspect',
+    vol.Required('operation_id'): vol.All(str, vol.Match(r'[A-Za-z0-9_-]{1,80}\Z')),
+    vol.Required('fingerprint'): vol.All(str, vol.Match(r'[0-9a-f]{64}\Z'))})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_recovery_inspect(hass, connection, message):
+    await _read_recovery(hass, connection, message, action='inspect')
+
+
+@websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/recovery/restore',
+    vol.Required('operation_id'): vol.All(str, vol.Match(r'[A-Za-z0-9_-]{1,80}\Z')),
+    vol.Required('fingerprint'): vol.All(str, vol.Match(r'[0-9a-f]{64}\Z'))})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_recovery_restore(hass, connection, message):
+    # Fresh native admission and current AuthStore authority are repeated for
+    # this explicit operation; inspection never serves as write permission.
+    await _read_recovery(hass, connection, message, action='restore')
+
+

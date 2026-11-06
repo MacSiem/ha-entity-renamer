@@ -58,5 +58,60 @@
         "height": 1200
       }
     }
-  ]
+  ],
+  "candidate_5_0_0": {
+    "captured_at": "2026-11-06",
+    "runtime_source_head": "a2d396a832e0983f20ff0004bae4ae434e413427",
+    "runtime_sha256": "f8af128aa3bd4db5b5880a86ea9826fd9a092a9ac9e3f4d2f1471b3742c2f07e",
+    "home_assistant": "2026.10.4",
+    "environment": "Owned synthetic native HA; exact packaged runtime, synthetic entities, no private data.",
+    "processing": "Rectangular pixel crop only; no generated or substituted UI.",
+    "screenshots": [
+      {
+        "file": "docs/screenshots/candidate-card-light.png",
+        "sha256": "10f3130755473665b84fe82322edb6f3a6cf94dd9e67a4528954b71381ec5ad9",
+        "source": "installed-initial.png",
+        "crop_xyxy": [
+          510,
+          55,
+          1025,
+          655
+        ],
+        "size": [
+          515,
+          600
+        ]
+      },
+      {
+        "file": "docs/screenshots/candidate-backup-en.png",
+        "sha256": "daca1ba6297bde37ed38eb244716a9c39830ec3fbe9a11d8be8d18dffc729b49",
+        "source": "modal-en.png",
+        "crop_xyxy": [
+          365,
+          178,
+          915,
+          545
+        ],
+        "size": [
+          550,
+          367
+        ]
+      },
+      {
+        "file": "docs/screenshots/candidate-backup-pl.png",
+        "sha256": "ad7637f50c4977d931e1c9a95b991d3c773f136a1fd71e9e7a601c3224ca233b",
+        "source": "modal-pl.png",
+        "crop_xyxy": [
+          365,
+          170,
+          915,
+          550
+        ],
+        "size": [
+          550,
+          380
+        ]
+      }
+    ]
+  }
 }

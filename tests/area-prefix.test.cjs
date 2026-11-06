@@ -3,7 +3,7 @@ const assert=require('node:assert/strict');
 const {JSDOM,VirtualConsole}=require('jsdom');
 function fixture() {
  const dom=new JSDOM('',{runScripts:'dangerously',url:'http://qa.invalid/',virtualConsole:new VirtualConsole()});
- dom.window.eval(require('node:fs').readFileSync(require('node:path').join(__dirname,'../ha-entity-renamer.js'),'utf8'));
+ dom.window.eval(require('node:fs').readFileSync(require('node:path').join(__dirname,'../custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8'));
  const card=dom.window.document.createElement('ha-entity-renamer');dom.window.document.body.append(card);
  const calls=[];
  card._hass={user:{id:'qa',is_admin:true},language:'en',states:{},callWS:async msg=>{

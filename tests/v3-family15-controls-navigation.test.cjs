@@ -1,4 +1,4 @@
-const SOURCE="ha-entity-renamer.js";
+const SOURCE="custom_components/ha_entity_renamer/www/ha-entity-renamer.js";
 const TAG="ha-entity-renamer";
 const NAV=".tabs";
 const ATTR="data-tab";

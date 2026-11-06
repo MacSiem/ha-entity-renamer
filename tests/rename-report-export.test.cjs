@@ -9,7 +9,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 function fixture(t, language = 'en') {
   const dom = new JSDOM('', { runScripts: 'dangerously', pretendToBeVisual: true, url: 'http://localhost/' });
   t.after(() => dom.window.close());
-  dom.window.eval(fs.readFileSync(path.join(root, 'ha-entity-renamer.js'), 'utf8'));
+  dom.window.eval(fs.readFileSync(path.join(root, 'custom_components/ha_entity_renamer/www/ha-entity-renamer.js'), 'utf8'));
   const card = dom.window.document.createElement('ha-entity-renamer');
   dom.window.document.body.append(card);
   const connection = new dom.window.EventTarget(); connection.connected = true;
@@ -87,16 +87,36 @@ for(const language of ['pl','en']) test(language+' dialog traps focus, Escape ca
  assert.match(f.node(d,'save').textContent,language==='pl'?/Zapisz/:/Save/);f.node(d,'filename').dispatchEvent(new f.dom.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true,composed:true,cancelable:true}));assert.equal(f.card.shadowRoot.activeElement,opener);assert.equal(f.downloads.length,0);
 });
 test('disconnect aborts preview and removes browser and connection listeners',async t=>{const f=fixture(t);const d=await f.open();f.card.remove();assert.equal(d.host.isConnected,false);f.connection.dispatchEvent(new f.dom.window.Event('disconnected'));assert.equal(f.downloads.length,0);});
-test('actual native completion records phase without adding registry readback or rewriting references',async t=>{
- const f=fixture(t);f.card._renameLog=[];f.card._renameQueue=[{oldId:'sensor.a',newId:'sensor.b'}];f.card._showRenameConfirmation();await f.card._executeRenames(true);
- assert.equal(f.card._renameLog[0].writePhase,'acknowledged');assert.equal(JSON.parse(payload(f.card).serialized).counts.applied,0);
- assert.equal(f.requests.filter(msg=>msg.type.endsWith('/update')).length,1);assert.equal(f.requests.filter(msg=>msg.type==='config/entity_registry/list').length,1);
+async function runServerHistory(f, mode='applied') {
+ const source={id:'stable-registry',entity_id:'sensor.old',platform:'fixture',unique_id:'fixture-unique',device_id:'fixture-device',name:null};
+ let registry=[{...source}], sent=false;const fingerprint='e'.repeat(64), operation_id='history_review';
+ const review={operation_id,fingerprint,changes:[{entity_id:source.entity_id,fields:{entity_id:{before:source.entity_id,after:'sensor.new'},name:{before:null,after:'Reviewed private name'}}}],dependencies:{domains:[],files:[],yaml_file_count:0,template_consumer_count:0}};
+ f.card._entities=registry;f.card._renameLog=[];f.card._renameQueue=[{oldId:source.entity_id,newId:'sensor.new',newName:'Reviewed private name',sourceIdentity:f.card._sourceIdentity(source)}];
+ f.hass.callWS=async msg=>{
+  f.requests.push(msg);
+  if(msg.type==='config/entity_registry/list'){if(mode==='read_failed'&&sent)throw Error('Synthetic readonly failure');return registry.map(x=>({...x}));}
+  if(msg.type==='config/device_registry/list')return [];
+  if(msg.type==='ha_entity_renamer/prepare')return review;
+  if(msg.type==='ha_entity_renamer/apply') {sent=true;if(mode==='lost')throw Error('private uncertain timeout');if(mode!=='unchanged')registry=[{...source,id:mode==='identity_mismatch'?'foreign-registry':source.id,entity_id:'sensor.new',name:mode==='name_mismatch'?'Unchanged private name':'Reviewed private name'}];return {operation_id,fingerprint,state:'applied'};}
+  if(msg.type==='ha_entity_renamer/status')return {operations:[]};
+  if(msg.type==='ha_entity_renamer/recovery/inspect')return {operation_id,fingerprint,state:mode==='lost'?'unknown':'applied',eligible:mode!=='lost'};
+  throw Error('Unexpected '+msg.type);
+ };
+ f.card._showRenameConfirmation();await f.card._executeRenames(true);
+ if(f.card._migration?.stage==='review')await f.card._applyMigration();
+ return f.card._migration;
+}
+test('server completion records one phase after independent exact registry readback',async t=>{
+ const f=fixture(t),m=await runServerHistory(f);assert.equal(m.stage,'applied');
+ assert.equal(f.card._renameLog.length,1);assert.equal(f.card._renameLog[0].writePhase,'readback_confirmed');
+ assert.equal(JSON.parse(payload(f.card).serialized).counts.applied,1);
+ assert.equal(f.requests.filter(msg=>msg.type==='ha_entity_renamer/apply').length,1);assert.equal(f.requests.filter(msg=>msg.type.endsWith('/update')).length,0);
 });
-test('uncertain attempted write is unknown',async t=>{
- const f=fixture(t);f.card._renameLog=[];f.card._renameQueue=[{oldId:'sensor.a',newId:'sensor.b'}];f.hass.callWS=async msg=>{if(msg.type.endsWith('/update'))throw new Error('private uncertain timeout');return msg.type.endsWith('/list')?[]:{};};f.card._showRenameConfirmation();await f.card._executeRenames(true);assert.equal(f.card._renameLog[0].writePhase,'attempted');assert.equal(JSON.parse(payload(f.card).serialized).counts.unknown,1);
+test('uncertain attempted server write is unknown',async t=>{
+ const f=fixture(t),m=await runServerHistory(f,'lost');assert.equal(m.stage,'unknown');assert.equal(f.card._renameLog[0].writePhase,'attempted');assert.equal(JSON.parse(payload(f.card).serialized).counts.unknown,1);
 });
-test('native automatic preflight rejection is failed and records no registry update',async t=>{
- const f=fixture(t);f.card._renameLog=[];f.card._renameQueue=[{oldId:'sensor.a',newId:'sensor.b',automatic:true}];f.card._revalidateAutomaticQueue=async()=>new Map([['sensor.a','Controlled preflight rejection']]);f.card._showRenameConfirmation();await f.card._executeRenames(true);assert.equal(f.card._renameLog[0].writePhase,'not_started');assert.equal(JSON.parse(payload(f.card).serialized).counts.failed,1);assert.equal(f.requests.filter(msg=>msg.type.endsWith('/update')).length,0);
+test('automatic preflight rejection records no server write or false history',async t=>{
+ const f=fixture(t);f.card._renameLog=[];f.card._renameQueue=[{oldId:'sensor.a',newId:'sensor.b',automatic:true}];f.card._revalidateAutomaticQueue=async()=>new Map([['sensor.a','Controlled preflight rejection']]);f.card._showRenameConfirmation();await f.card._executeRenames(true);assert.equal(f.card._migration.stage,'refused');assert.equal(f.card._renameLog.length,0);assert.equal(f.requests.filter(msg=>msg.type==='ha_entity_renamer/apply'||msg.type.endsWith('/update')).length,0);
 });
 test('disconnected event blocks refreshing even before HA mutates connected=true',async t=>{
  const f=fixture(t);const d=await f.open();f.connection.dispatchEvent(new f.dom.window.Event('disconnected'));f.node(d,'refresh').click();await tick();assert.equal(f.node(d,'save').disabled,true);assert.equal(f.downloads.length,0);f.connection.dispatchEvent(new f.dom.window.Event('ready'));assert.equal(f.node(d,'save').disabled,true);
@@ -104,13 +124,14 @@ test('disconnected event blocks refreshing even before HA mutates connected=true
 test('reviewed vendors have exact source hashes, one local factory and no globals',()=>{
  const crypto=require('node:crypto'),hash=s=>crypto.createHash('sha256').update(s).digest('hex');const p=JSON.parse(fs.readFileSync(path.join(root,'shared/renamer-report-provenance.json')));
  assert.equal(hash(fs.readFileSync(path.join(root,'shared/ha-tools-export.js'))),'1f9e9c5444ec3b6de44eec136f14ae9e7d89dae1002650b33f746ab9633982f1');assert.equal(hash(fs.readFileSync(path.join(root,'shared/ha-tools-ui.js'))),'54ed3b533163c3b9b704f107fa1697f95476d35ab55ba99265718aea85ec9674');
- const source=fs.readFileSync(path.join(root,'ha-entity-renamer.js'),'utf8');assert.equal((source.match(/function createExportDialog\(/g)||[]).length,1);assert.equal((source.match(/function createUiV3\(/g)||[]).length,1);assert.ok(!source.includes('window.createExportDialog'));assert.equal(p.baseHead,'41cb4b56ef428fde08d9a854252e9a702c55894b');
+ const source=fs.readFileSync(path.join(root,'custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8');assert.equal((source.match(/function createExportDialog\(/g)||[]).length,1);assert.equal((source.match(/function createUiV3\(/g)||[]).length,1);assert.ok(!source.includes('window.createExportDialog'));assert.equal(p.baseHead,'41cb4b56ef428fde08d9a854252e9a702c55894b');
 });
 
-for(const persisted of [true,false,'identity_mismatch','name_mismatch','read_failed'])test(`existing independent registry refresh confirms applied only when stable identity and all requested fields match (${persisted})`,async t=>{
- const f=fixture(t),source={id:'stable-registry',entity_id:'sensor.old',platform:'fixture',unique_id:'fixture-unique',device_id:'fixture-device',name:null};let registry=[{...source}];f.card._entities=registry;f.card.hass={...f.hass};f.card._renameLog=[];f.card._renameQueue=[{oldId:'sensor.old',newId:'sensor.new',newName:'Reviewed private name',entity:source,sourceIdentity:f.card._sourceIdentity(source)}];
- f.hass.callWS=async msg=>{f.requests.push(msg);if(msg.type==='config/entity_registry/list'){if(persisted==='read_failed'&&f.requests.filter(x=>x.type===msg.type).length===2)throw Error('Synthetic readonly failure');return registry.map(x=>({...x}));}if(msg.type==='config/device_registry/list')return [];if(msg.type==='config/entity_registry/update'){if(persisted)registry=[{...source,id:persisted==='identity_mismatch'?'foreign-registry':source.id,entity_id:msg.new_entity_id,name:persisted==='name_mismatch'?'Unchanged private name':msg.name}];return {...source,entity_id:msg.new_entity_id,name:msg.name};}return {};};f.card._hass=f.hass;
- f.card._showRenameConfirmation();await f.card._executeRenames(true);const r=JSON.parse(payload(f.card).serialized);assert.equal(r.counts.applied,persisted===true?1:0);assert.equal(f.card._lastApplyResult.ok,persisted===true?1:0);assert.notEqual(f.card._message.type,persisted===true?'warning':'success');assert.ok(f.card.shadowRoot.querySelector('[data-result-state="'+(persisted===true?'success':'unconfirmed')+'"]'));assert.equal(r.counts.unknown,persisted===true?0:1);assert.equal(f.requests.filter(x=>x.type==='config/entity_registry/update').length,1);assert.equal(f.requests.filter(x=>x.type==='config/entity_registry/list').length,2);assert.ok(!r.rows[0].old.includes('sensor.'));assert.ok(!JSON.stringify(r).includes('Reviewed private name'));
+for(const mode of ['applied','unchanged','identity_mismatch','name_mismatch','read_failed'])test(`server result requires fresh exact identity and fields (${mode})`,async t=>{
+ const f=fixture(t),m=await runServerHistory(f,mode),r=JSON.parse(payload(f.card).serialized),success=mode==='applied';
+ assert.equal(m.stage,success?'applied':'unknown');assert.equal(r.counts.applied,success?1:0);assert.equal(r.counts.unknown,success?0:1);
+ assert.equal(f.requests.filter(x=>x.type==='ha_entity_renamer/apply').length,1);assert.equal(f.requests.filter(x=>x.type.endsWith('/update')).length,0);
+ assert.ok(!r.rows[0].old.includes('sensor.'));assert.ok(!JSON.stringify(r).includes('Reviewed private name'));
 });
 
 test('offline event remains authoritative after replacing a connection with a cached true flag',async t=>{

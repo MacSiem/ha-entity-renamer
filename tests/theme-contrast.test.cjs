@@ -14,7 +14,7 @@ test('primary foreground remains readable for HA theme colors and both fallback 
 test('ordinary HA theme update applies the same readable primary colors to the connected card',()=>{
   const dom=new JSDOM('',{runScripts:'dangerously',url:'http://localhost/'});
   try{
-    dom.window.eval(readFileSync(join(__dirname,'../ha-entity-renamer.js'),'utf8'));
+    dom.window.eval(readFileSync(join(__dirname,'../custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8'));
     const card=dom.window.document.createElement('ha-entity-renamer');dom.window.document.body.append(card);
     card.style.setProperty('--primary-color','#818cf8');
     card.hass={language:'en',themes:{darkMode:true},states:{}};
