@@ -5,7 +5,7 @@
 - Prepare an administrator-reviewed, server-owned plan for recognized registry
   and dependency changes. The full card and backend are packaged as one integration; the public
   4.6.1 Dashboard plugin remains the released baseline. The final HACS migration
-  and installed user path remain pending qualification.
+  and installed user path remain pending qualification. The compatibility card offers an administrator-confirmed HACS entry switch before installation, without uninstalling the existing card.
 - Recommend a full Home Assistant backup before applying, disclose the limits
   of testing and the possibility that a required reload interrupts running
   automations or scripts, and retain Cancel/Escape without a write.

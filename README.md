@@ -10,7 +10,7 @@ references visible through Home Assistant's APIs.
 > 4.6.1. The candidate packages its backend and full card as one integration.
 > The root JavaScript remains a compatibility card for existing Dashboard
 > installations; it does not install or activate the integration. Installation
-> and migration instructions are a draft pending final HACS qualification, not a release announcement.
+> and migration instructions are a draft pending final HACS qualification, not a release announcement. Existing users will use a confirmed HACS entry switch before installing the integration; no automatic uninstall is performed.
 
 [![Version](https://img.shields.io/github/v/release/MacSiem/ha-entity-renamer)](https://github.com/MacSiem/ha-entity-renamer/releases) [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
