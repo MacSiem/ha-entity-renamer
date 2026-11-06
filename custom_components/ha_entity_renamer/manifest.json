@@ -2,8 +2,13 @@
   "domain": "ha_entity_renamer",
   "name": "Entity Renamer",
   "after_dependencies": [
+    "config",
     "energy",
-    "recorder"
+    "integration",
+    "recorder",
+    "template",
+    "trace",
+    "utility_meter"
   ],
   "codeowners": [
     "@MacSiem"
