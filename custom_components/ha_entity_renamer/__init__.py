@@ -551,6 +551,14 @@ async def async_setup(hass, config):
 
 
 async def async_setup_entry(hass, entry):
+    # Config flow normally prevents duplicate entries, but setup can overlap
+    # during reload/retry; serialize admission before initializing stores.
+    lock = hass.data.setdefault(DOMAIN + '.setup_lock', asyncio.Lock())
+    async with lock:
+        return await _async_setup_entry_locked(hass, entry)
+
+
+async def _async_setup_entry_locked(hass, entry):
     from homeassistant.exceptions import ConfigEntryNotReady
     from .journal import native_journal
     from .prepared import native_prepared_store
