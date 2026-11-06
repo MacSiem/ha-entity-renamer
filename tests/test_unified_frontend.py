@@ -61,3 +61,34 @@ class FrontendTests(unittest.IsolatedAsyncioTestCase):
     async def test_yaml_fresh_registers_and_unload_removes_one_extra(self):
         h=FakeHass(storage=False);await async_register_frontend(h);await async_register_frontend(h)
         self.assertEqual(self.extra,[CARD_PATH+'?v=5.0.0.dev0']);await async_unregister_frontend(h);self.assertEqual(self.extra,[])
+
+class RuntimeAdmissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_overlapping_setup_allows_only_one_runtime(self):
+        from custom_components.ha_entity_renamer import async_setup_entry
+        from custom_components.ha_entity_renamer.const import DATA_RUNTIME, DATA_WEBSOCKETS
+        class NotReady(Exception): pass
+        errors=types.ModuleType('homeassistant.exceptions');errors.ConfigEntryNotReady=NotReady
+        journal=types.ModuleType('custom_components.ha_entity_renamer.journal')
+        prepared=types.ModuleType('custom_components.ha_entity_renamer.prepared')
+        retention=types.ModuleType('custom_components.ha_entity_renamer.review_retention')
+        ws=types.ModuleType('custom_components.ha_entity_renamer.websocket_api')
+        frontend=types.ModuleType('custom_components.ha_entity_renamer.frontend')
+        started=asyncio.Event();release=asyncio.Event();calls=[]
+        class Store:
+            async def initialize(self):
+                calls.append('initialize')
+                if len(calls)==1:started.set();await release.wait()
+        j=Store();p=Store()
+        journal.native_journal=lambda h:j;prepared.native_prepared_store=lambda h:p
+        async def reclaim(h,guard):return p,j
+        async def register_frontend(h):calls.append('frontend')
+        retention.async_reclaim_reviews=reclaim;frontend.async_register_frontend=register_frontend
+        ws.async_register=lambda h:calls.append('websocket')
+        modules={errors.__name__:errors,journal.__name__:journal,prepared.__name__:prepared,retention.__name__:retention,ws.__name__:ws,frontend.__name__:frontend}
+        h=types.SimpleNamespace(data={});one=types.SimpleNamespace(entry_id='one');two=types.SimpleNamespace(entry_id='two')
+        with patch.dict(sys.modules,modules):
+            a=asyncio.create_task(async_setup_entry(h,one));await started.wait()
+            b=asyncio.create_task(async_setup_entry(h,two));await asyncio.sleep(0);release.set()
+            self.assertTrue(await a)
+            with self.assertRaises(NotReady):await b
+        self.assertEqual(h.data[DATA_RUNTIME].entry_id,'one');self.assertTrue(h.data[DATA_WEBSOCKETS]);self.assertEqual(calls.count('websocket'),1);self.assertEqual(calls.count('frontend'),1)
