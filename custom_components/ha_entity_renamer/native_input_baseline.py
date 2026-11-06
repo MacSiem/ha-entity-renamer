@@ -490,6 +490,9 @@ class _Managers:
                     or store._load_future is not None):
                 _fail('native_input_native_write_pending')
             if self.version in ('2026.10.2', '2026.10.4', '2026.11.0'):
+                if (key == _KEYS[0] and self.version == '2026.11.0'
+                        and not manager._loaded_event.is_set()):
+                    _fail('native_input_manager_not_loaded')
                 if key == _KEYS[1] and not manager._loaded_event.is_set():
                     _fail('native_input_manager_not_loaded')
                 if key == _KEYS[2] and not manager._initialized.is_set():

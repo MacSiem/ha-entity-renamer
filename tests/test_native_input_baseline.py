@@ -389,6 +389,28 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(entry['subentries'])
         self.assertEqual(baseline.decode_baseline(baseline.encode_baseline(captured)), captured)
 
+    async def test_core11_store_io_identity_and_settings_are_fenced(self):
+        if self.version != '2026.11.0':
+            self.skipTest('Core 11 Store IO boundary only')
+        from homeassistant.helpers.storage import _FileStoreIO
+        witness = baseline._Managers(self.hass, self.receipt)
+        witness.sample()
+        store = self.entity._store
+        original = store._io
+        try:
+            store._io = _FileStoreIO(self.hass, store.key, store.path, False, True)
+            with self.assertRaises(baseline.NativeInputBaselineError):
+                witness.sample()
+            store._io = original
+            original._private = True
+            with self.assertRaises(baseline.NativeInputBaselineError):
+                witness.sample()
+            original._private = False
+            witness.sample()
+        finally:
+            store._io = original
+            original._private = False
+
     async def test_native_manager_samples_validate_each_decoded_tree_once(self):
         expected = tuple(baseline._json(baseline._loads(
             __import__('homeassistant.helpers.json', fromlist=['_orjson_bytes_default_encoder'])
