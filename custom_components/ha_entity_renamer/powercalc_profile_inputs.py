@@ -356,6 +356,14 @@ async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
          and pc.get('energy_integration_method', 'left') == 'left'
          and pc.get('energy_sensor_unit_prefix') == 'k', 'offline_energy_globals_required')
     bundle = read_bundle(root)
+    # Core 11's entity registry derives disabled_by from real config entries.
+    # This runs only in the isolated staged checker, never in the live runtime.
+    from homeassistant.const import __version__
+    if __version__ == '2026.11.0':
+        from homeassistant.config_entries import ConfigEntries
+        need(hass.config_entries is None, 'checker_config_entries_already_initialized')
+        hass.config_entries = ConfigEntries(hass, {})
+        await hass.config_entries.async_initialize()
     # Real native registries load the staged ORIGINAL. No fake SourceEntity/cache.
     dr.async_setup(hass)
     await dr.async_load(hass)
