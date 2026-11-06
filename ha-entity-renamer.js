@@ -1400,7 +1400,7 @@ class HAEntityRenamer extends HTMLElement {
   _bridgeNoticePreference() {
     const id = this._hass?.user?.id;
     if (typeof id !== 'string' || !id.trim()) return null;
-    const key = 'ha-entity-renamer-migration-notice-v1:' + encodeURIComponent(JSON.stringify([location.origin, id]));
+    const key = 'ha-entity-renamer-migration-notice-v2:' + encodeURIComponent(JSON.stringify([location.origin, id]));
     if (!this._bridgeNotice || this._bridgeNotice.key !== key) {
       let dismissed = false;
       try { dismissed = localStorage.getItem(key) === '1'; } catch (_) {}
