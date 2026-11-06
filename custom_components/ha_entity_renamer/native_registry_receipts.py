@@ -368,6 +368,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         self.writable = False
         self.active = None
         self._cache = None  # Derived only from acknowledged immutable durable refs.
+        self._cold_projection = None  # Read-only qualified metadata until inverse admission.
+        self._effective_cold = None
         self._setup_history = []
         self._setup_positions = {}
         self._powercalc_preparation_snapshot = None
@@ -714,6 +716,14 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         self._cache = (self._cache_key(), result)
         return result
 
+    def install_cold_projection(self, projection):
+        """Bind one already qualified native observation to this chain instance."""
+        if self._cold_projection is not None or type(projection) is not dict:
+            _fail('cold_projection_binding')
+        self._cold_projection = deepcopy(projection)
+        self._cache = None
+        self._reconstruct()
+
     @trace_call("reconstruct")
     def _reconstruct(self):
         if self.store.read(self.root_id) != {'digest': self.root_digest, 'payload': self.root}:
@@ -728,6 +738,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         if self._cache is not None and self._cache[0] == token:
             return self._cache[1]
         states, completed = self._initial(), {}
+        self._effective_cold = None
         yaml_sources = self._initial_sources() if (self.yaml_index is not None
                         or any(step.adapter == 'dashboard' for step in self.plan.steps)) else None
         head, sequence, pending = self.root_digest, 0, None
@@ -847,6 +858,34 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             head, sequence = rrow['digest'], sequence + 1
             self._setup_history.append((head, receipt))
             self._setup_positions[head] = dict(completed)
+            if completed == {i: 'forward' for i in range(len(self.plan.steps))}:
+                key = _event_id(['controlled_pc_inverse', self.root_id, head])
+                admission = self.store.read(key)
+                persisted = None
+                if admission is not None and 'cold_registry' in admission['payload']:
+                    payload = admission['payload']
+                    from .powercalc_source_receipts import _composition
+                    from .controlled_powercalc_composition import ControlledPowercalcComposition
+                    composition = _composition(self)
+                    expected = {'kind': 'controlled_powercalc_inverse_admission', 'schema': 1,
+                        'root': self.root_id, 'operation_id': self.operation_id,
+                        'fingerprint': self.plan.fingerprint, 'forward_head': head,
+                        'population': [list(item) for item in composition.population],
+                        'cold_registry': payload['cold_registry']}
+                    if (type(composition) is not ControlledPowercalcComposition
+                            or admission != {'digest': _digest(expected), 'payload': expected}):
+                        _fail('cold_admission_binding')
+                    persisted = payload['cold_registry']
+                if persisted is not None and self._cold_projection is not None and persisted != self._cold_projection:
+                    _fail('cold_projection_changed')
+                projection = persisted if persisted is not None else self._cold_projection
+                if projection is not None:
+                    from .controlled_powercalc_cold_registry import apply_projection
+                    states = apply_projection(states, head, self._setup_history, projection)
+                    self._effective_cold = deepcopy(projection)
+                    if yaml_sources is not None:
+                        native = states['core.entity_registry']
+                        yaml_sources['.storage/core.entity_registry'][:4] = [native['sha256'], *native['identity']]
         return self._remember((states, head, sequence, completed, pending))
 
     def _historical_context(self, binding):
@@ -905,6 +944,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                         'root': self.root_id, 'operation_id': self.operation_id,
                         'fingerprint': self.plan.fingerprint, 'forward_head': heads[0],
                         'population': [list(item) for item in composition.population]}
+            if self._effective_cold is not None:
+                expected['cold_registry'] = self._effective_cold
             if row != {'digest': _digest(expected), 'payload': expected}:
                 _fail('controlled_powercalc_inverse_admission_changed')
             order = tuple(index for kind in ('registry', 'helpers', 'energy', 'dashboard', 'yaml')
@@ -1190,9 +1231,9 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             powercalc_group_effect.completed(ref)
         return ref
 
-    async def begin_powercalc_energy(self, context, observations, energy):
+    async def begin_powercalc_energy(self, context, observations, energy, cost_before=None):
         from .powercalc_energy_receipts import begin
-        return await begin(self, context, observations, energy)
+        return await begin(self, context, observations, energy, cost_before)
 
     async def complete_powercalc_energy(self, intent, context, before, after, witness):
         from .powercalc_energy_receipts import complete

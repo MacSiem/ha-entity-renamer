@@ -130,6 +130,33 @@ def _literal_documents(planned, accepted, original, chain, *, replay_owned_regis
                     and 'modified_at' in actual[uid]
                     and row['modified_at'] == before[uid]['modified_at']):
                 row['modified_at'] = actual[uid]['modified_at']
+    # Energy can recreate its generated cost entity after the source rename.
+    # Apply only the already reconstructed, typed same-chain cost receipts;
+    # no value is taken from the current registry as an authority.
+    from .native_registry_receipts import _exact_json_equal, _freeze_json
+    rows = expected['core.entity_registry']['data']['entities']
+    for _, receipt in chain._setup_history:
+        if receipt.get('kind') != 'powercalc_energy_receipt':
+            continue
+        effect = receipt.get('cost_registry_after')
+        for change in (() if effect is None else effect['changes']):
+            matches = [row for row in rows if row.get('id') == change['id']]
+            _need(len(matches) == 1, 'accepted_cost_registry_identity_changed')
+            row = matches[0]
+            before, after = change['before'], change['after']
+            expected_before = deepcopy(before)
+            expected_before['modified_at'] = row.get('modified_at')
+            _need(_exact_json_equal(row, _freeze_json(expected_before)),
+                  'accepted_cost_registry_preimage_changed')
+            row['suggested_object_id'] = after['suggested_object_id']
+            row['modified_at'] = after['modified_at']
+        projection = getattr(chain, '_effective_cold', None)
+        if projection is not None and receipt.get('binding', {}).get('direction') == 'forward':
+            for update in projection['updates']:
+                matches = [row for row in rows if row.get('id') == update['registry_id']]
+                _need(len(matches) == 1 and matches[0].get('modified_at') == update['before'],
+                      'accepted_cold_registry_preimage_changed')
+                matches[0]['modified_at'] = update['after']
     return expected == accepted
 
 

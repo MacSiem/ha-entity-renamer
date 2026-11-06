@@ -182,6 +182,12 @@ class PowercalcColdPhase(backend_fixture.NativeBackendLifecycleTests):
         self.assertEqual(len(rows), 1)
         return rows[0]
 
+    async def _pulse_light(self, brightness):
+        await self.sources[0].async_turn_on(brightness=brightness)
+        await asyncio.sleep(1.2)
+        await self.sources[0].async_turn_off()
+        await self.f.hass.async_block_till_done()
+
     def _verify_cold_sum(self, group):
         """Independent delta sum from persisted native PSS and real State events."""
         expected = Decimal(self.meta['stored_total'])
@@ -299,10 +305,7 @@ class PowercalcColdPhase(backend_fixture.NativeBackendLifecycleTests):
                 self.assertEqual(response['result']['state'], 'applied', response)
                 self.assertEqual(self.f.entity.async_get(new_source).id, source_uuid)
                 self.assertEqual(self.f.entity.async_get(new_group).id, group_uuid)
-            await self.sources[0].async_turn_on(brightness=64)
-            await asyncio.sleep(1.2)
-            await self.sources[0].async_turn_off()
-            await hass.async_block_till_done()
+            await self._pulse_light(64)
             active_group = new_group if self.mode == 'migration' else old_group
             group = self._find_group(active_group)
             precision = group._rounding_digits
@@ -388,10 +391,7 @@ class PowercalcColdPhase(backend_fixture.NativeBackendLifecycleTests):
         response = await request(3, 'recovery/inspect', operation_id=meta['operation'], fingerprint=meta['fingerprint'])
         self.assertTrue(response.get('success'), response)
         self.assertEqual(response['result']['state'], 'rolled_back', response)
-        await self.sources[0].async_turn_on(brightness=128)
-        await asyncio.sleep(1.2)
-        await self.sources[0].async_turn_off()
-        await hass.async_block_till_done()
+        await self._pulse_light(128)
         self._verify_cold_sum(self._find_group(meta['old_group']))
         print('COLD_PUBLIC_FRESH_INVERSE', meta['pid'], os.getpid(), flush=True)
 

@@ -78,6 +78,12 @@ class _InverseOwner:
                  'root': self.chain.root_id, 'operation_id': self.chain.operation_id,
                  'fingerprint': self.plan.fingerprint, 'forward_head': state.head,
                  'population': [list(item) for item in self.root.composition.population]}
+        if self.chain._effective_cold is not None:
+            from .native_input_baseline import _drained
+            await _drained(self.handoff.hass.async_add_executor_job,
+                           lambda: state.assert_current(self.chain.original_receipt))
+            self._scope()
+            value['cold_registry'] = self.chain._effective_cold
         if self.chain.store.read(key) is not None:
             raise Refused('controlled_powercalc_reverse_no_replay')
         await self.chain.store.create(key, value)

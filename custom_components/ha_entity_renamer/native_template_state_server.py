@@ -141,7 +141,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             from .powercalc_runtime_observer import capture_powercalc_runtime
             from .powercalc_public_server import _read_original
             from .powercalc_public_candidate import build_candidate
-            native_energy = NativeEnergy(self.hass, await async_get_manager(self.hass))
+            native_energy = NativeEnergy(self.hass, await async_get_manager(self.hass),
+                                         allow_generated_costs=True)
             before_energy, proposed_energy = await native_energy.plan(self.mapping)
             self._scope()
             _need(proposed_energy is None or not proposed_energy.markers, 'powercalc_energy_coverage_unverified')

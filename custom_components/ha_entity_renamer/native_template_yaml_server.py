@@ -795,6 +795,27 @@ class NativeTemplateYAMLServer:
             _need(not readonly.writable and readonly.active is None, 'readonly_required')
             obj.chain = readonly
             if is_powercalc:
+                if not restored:
+                    from .controlled_powercalc_cold_registry import qualify_projection, _costs
+                    from .native_discovery_inputs import async_observe_discovery_inputs, assert_discovery_managers_current
+                    from .native_input_baseline import _drained
+                    observed = await async_observe_discovery_inputs(hass, guard=obj._scope)
+                    states, head, _, completed, pending = readonly._reconstruct()
+                    projection = qualify_projection(readonly, states, head, completed, pending, observed)
+                    if projection is not None:
+                        from homeassistant.components.energy.data import async_get_manager
+                        from .energy_native import NativeEnergy
+                        native = NativeEnergy(hass, await async_get_manager(hass), allow_generated_costs=True)
+                        for cost in _costs(readonly._setup_history):
+                            actual = native._generated_cost(cost['after_source'], cost['after_source'])
+                            _need(actual[1:] == (cost['registry_id'], cost['unique_id'], cost['entity_id'],
+                                                   cost['source_registry_id']), 'cold_cost_identity_changed')
+                        assert_discovery_managers_current(hass, observed, guard=obj._scope)
+                        readonly.install_cold_projection(projection)
+                        projected = readonly.reconstruct_inputs()
+                        await _drained(hass.async_add_executor_job,
+                                       lambda: projected.assert_current(readonly.original_receipt))
+                        obj._scope()
                 from .native_powercalc_accepted_consumers import async_observe_accepted_powercalc_consumers
                 from .powercalc_runtime_observer import capture_powercalc_runtime
                 from .powercalc_source_binding import PowercalcSourceBindings
@@ -822,7 +843,8 @@ class NativeTemplateYAMLServer:
                 if energy:
                     from homeassistant.components.energy.data import async_get_manager
                     from .energy_native import NativeEnergy
-                    obj.native_energy = NativeEnergy(hass, await async_get_manager(hass))
+                    obj.native_energy = NativeEnergy(hass, await async_get_manager(hass),
+                                                     allow_generated_costs=True)
                     obj._scope()
             if dashboard_plan:
                 await obj._install_dashboard_fence()
@@ -851,6 +873,8 @@ class NativeTemplateYAMLServer:
             # Same separated admission pattern as NativeTemplateReverse: the
             # reopened reader remains readonly. Never set readonly.writable.
             writer = RegistryReceiptChain(obj.receipt_store, operation_id, obj.plan, obj.receipt, obj.digests)
+            if readonly._cold_projection is not None:
+                writer.install_cold_projection(readonly._cold_projection)
             _need(writer.root == readonly.root and writer.root_digest == readonly.root_digest
                   and writer.reconstruct_inputs().same_evidence(state), 'head_changed')
             writer.writable = True
@@ -944,7 +968,8 @@ class NativeTemplateYAMLServer:
                 if energy:
                     from homeassistant.components.energy.data import async_get_manager
                     from .energy_native import NativeEnergy
-                    obj.native_energy = NativeEnergy(hass, await async_get_manager(hass))
+                    obj.native_energy = NativeEnergy(hass, await async_get_manager(hass),
+                                                     allow_generated_costs=True)
                     obj._scope()
             if dashboard_plan:
                 await obj._install_dashboard_fence()
