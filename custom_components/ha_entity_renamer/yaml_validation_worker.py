@@ -763,7 +763,7 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
     result = {}
     try:
         from homeassistant.const import __version__
-        if __version__ in ('2026.10.2', '2026.10.4'):
+        if __version__ in ('2026.10.2', '2026.10.4', '2026.11.0'):
             # Current native trigger validation requires its own platform
             # registry initialized even when no automation is activated.
             from homeassistant.helpers import trigger
@@ -1056,7 +1056,7 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
                 stable_script_services=(), owned_script_services=(), mixed_powercalc=False):
     from homeassistant.const import __version__
     from homeassistant.scripts.check_config import async_check_config
-    if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4'):
+    if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0'):
         return {'status': 'unsupported_runtime'}
     if template_source_profile is not None and (
             template_source_profile != TEMPLATE_STATE_SOURCE_PROFILE or not with_sources
