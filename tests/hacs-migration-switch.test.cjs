@@ -13,7 +13,7 @@ function fixture(options={}) {
  const hass={user:{id:'synthetic',is_admin:options.admin!==false},connection,language:'en',themes:{},states:{},
   async callWS(msg){calls.push(msg.type);
    if(msg.type==='hacs/info')return {version:options.version||'2.0.5',startup:false,has_pending_tasks:!!options.pending,disabled_reason:null};
-   if(msg.type==='hacs/repository/info'){if(!repo){const e=new Error('not found');e.code='repository_not_found';throw e;}return {...repo};}
+   if(msg.type==='hacs/repository/info'){if(!repo){const e=new Error('not found');e.code='repository_not_found';throw e;}const result={...repo};if(options.onRepoRead)await options.onRepoRead(result);return result;}
    if(msg.type==='hacs/repositories/remove'){if(options.removeFailure)throw Error('uncertain');repo=null;return {};}
    if(msg.type==='hacs/repositories/add'){if(options.addFailure)throw Error('uncertain');repo={id,full_name:full,category:'integration',installed:false};return {};}
    return [];
@@ -33,4 +33,13 @@ test('uncertain effect persists and is never blindly retried after rerender or r
 
 test('switch button and warning are present for administrators in English and Polish',()=>{
  const f=fixture();try{f.card.render();assert.ok(f.card.shadowRoot.querySelector('#hacsSwitch'));assert.match(f.card.shadowRoot.textContent,/Finish all HACS downloads/);f.card._lang='pl';f.card.render();assert.match(f.card.shadowRoot.textContent,/Przygotuj migrację w HACS/);assert.match(f.card.shadowRoot.textContent,/zakończ wszystkie pobierania/);}finally{f.close()}
+});
+
+test('a second card with delayed stale read cannot remove the newly registered integration',async()=>{
+ let release;const delayed=new Promise(resolve=>{release=resolve});let reads=0, captured;const ready=new Promise(resolve=>{captured=resolve});
+ const f=fixture({onRepoRead:async result=>{if(result.category==='plugin' && ++reads===2){captured();await delayed;}}});
+ try{const other=f.w.document.createElement('ha-entity-renamer');other._hass=f.card._hass;other.setConfig({show_help:false});f.w.document.body.append(other);
+  const first=f.card._switchHacsRepository(), second=other._switchHacsRepository();await ready;await first;assert.equal(f.repo.category,'integration');release();await second;
+  assert.equal(f.calls.filter(x=>x==='hacs/repositories/remove').length,1);assert.equal(f.calls.filter(x=>x==='hacs/repositories/add').length,1);assert.equal(f.repo.category,'integration');
+ }finally{release();f.close()}
 });

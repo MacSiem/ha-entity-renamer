@@ -1450,6 +1450,8 @@ class HAEntityRenamer extends HTMLElement {
         this._hacsSwitchStatus = 'done'; return;
       }
       if (previous || before?.id !== id || before?.full_name !== full || before?.category !== 'plugin' || before?.installed !== true) throw new Error('unexpected repository state');
+      // Recheck synchronously: another card may have started while the reads were pending.
+      if (localStorage.getItem(key)) throw new Error('another attempt already started');
       // Persist before the first effect. An interrupted or uncertain attempt is never replayed automatically.
       localStorage.setItem(key, 'inflight');
       mutationStarted = true;
