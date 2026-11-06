@@ -2800,7 +2800,7 @@ class HAEntityRenamer extends HTMLElement {
 :host(.bento-dark) .intro-banner .intro-dismiss:hover { background: #27272f; color: #fafaf9; }
 
 
-      
+
 /* ===== BENTO DESIGN SYSTEM (local fallback) ===== */
 
 :host {
@@ -2925,7 +2925,7 @@ class HAEntityRenamer extends HTMLElement {
       }
       .apply-result-error { color: #FCA5A5; overflow-wrap: anywhere; }
 
-      
+
 
       .search-bar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
       .search-bar input {
@@ -3019,7 +3019,7 @@ class HAEntityRenamer extends HTMLElement {
       .empty-state .icon { font-size: 40px; margin-bottom: 8px; }
       .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.2); border-top-color: var(--bento-primary, #3B82F6); border-radius: 50%; animation: spin 0.8s linear infinite; }
       @keyframes spin { to { transform: rotate(360deg); } }
-    
+
         :host(.bento-dark) {
             --bento-bg: var(--primary-background-color, #1a1a2e);
             --bento-card: var(--card-background-color, #16213e);
@@ -3030,7 +3030,7 @@ class HAEntityRenamer extends HTMLElement {
             --bento-shadow-md: 0 4px 12px rgba(0,0,0,0.4);
           }
 
-        
+
         .tabs, .tab-bar { scrollbar-width: thin; scrollbar-color: var(--bento-border, #E2E8F0) transparent; }
         .tabs::-webkit-scrollbar, .tab-bar::-webkit-scrollbar { height: 4px; }
         .tabs::-webkit-scrollbar-track, .tab-bar::-webkit-scrollbar-track { background: transparent; }
