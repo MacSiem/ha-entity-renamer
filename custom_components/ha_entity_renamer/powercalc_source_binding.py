@@ -147,6 +147,10 @@ class PowercalcVendor:
         self.ha_pins = {
             'helpers/event.py': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
             'core.py': '1fe2fcfb91fbb6edfb4450dad3ae5ebc4e325664770fedbd607d103d91ce4f19'}
+        if __version__ == '2026.11.0':
+            self.ha_pins = {
+                'helpers/event.py': '35a453cdc015a58ce9e49f2dec4da042babd261930a758eac97a7c2138ba0960',
+                'core.py': '5671149ec3405c4ec81eed05f58e3c392dafe0af141ec6ac7ea1a2b4b658d038'}
         self.ha_refs = tuple((event, name) for name in (
             '_remove_listener', '_async_dispatch_entity_id_event', '_async_state_filter',
             '_async_track_event', '_async_track_state_change_event',

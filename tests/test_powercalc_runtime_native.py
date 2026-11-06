@@ -53,14 +53,16 @@ class PowercalcRuntimeNativeTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         from homeassistant.const import __version__
-        if __version__ not in ('2026.10.2', '2026.10.4'):
-            self.skipTest('v1.26.1 native fixture targets verified exact Core 2026.10.2 or 2026.10.4')
+        if __version__ not in ('2026.10.2', '2026.10.4', '2026.11.0'):
+            self.skipTest('requires an exact Core/vendor fixture pair')
         supplied = os.environ.get('POWERCALC_COMPONENT_DIR')
         if not supplied:
             self.skipTest('requires full public v1.26.1 POWERCALC_COMPONENT_DIR; not a PASS')
         vendor = Path(supplied).resolve()
         # Pin public executable source; never read a private migration manifest.
-        expected_tree = '6f21338bcb02d2b488f8b1e9851b4d20300a888d7a493fdb753f78603f27c91c'
+        expected_tree = ('0fb642a97d3179d56ef73dcdb22e7d5025ed549507b6148b194e2cf626adc72b'
+                         if __version__ == '2026.11.0' else
+                         '6f21338bcb02d2b488f8b1e9851b4d20300a888d7a493fdb753f78603f27c91c')
         files = {}
         for file in vendor.rglob('*'):
             if '__pycache__' in file.parts or file.suffix == '.pyc':
@@ -109,6 +111,26 @@ class PowercalcRuntimeNativeTests(unittest.IsolatedAsyncioTestCase):
         await hass.async_start()
         await hass.async_block_till_done()
         await self._flush_documents(initialize=True)
+
+    async def test_core11_official_vendor_pair_and_source_witness(self):
+        from homeassistant.const import __version__
+        if __version__ != '2026.11.0':
+            self.skipTest('Core 11 / Powercalc 1.27 pair only')
+        binding = importlib.import_module(fixtures.PACKAGE + '.powercalc_source_binding')
+        vendor = binding.PowercalcVendor(self.f.hass)
+        self.assertEqual(vendor.vendor_version, 'v1.27.0')
+        sources = await self.f.hass.async_add_executor_job(vendor.sources)
+        self.assertEqual(set(sources), set(binding._pins('v1.27.0')))
+        vendor.bindings()
+        loaded = vendor.loaded
+        original = loaded.manifest['version']
+        try:
+            loaded.manifest['version'] = 'v1.26.1'
+            with self.assertRaises(ValueError):
+                vendor.bindings()
+        finally:
+            loaded.manifest['version'] = original
+        vendor.bindings()
 
     async def _setup_real_vendor(self):
         from datetime import timedelta
