@@ -8,7 +8,7 @@ function fixture(options={}) {
  const dom=new JSDOM('',{runScripts:'dangerously',url:'http://qa.invalid/',pretendToBeVisual:true,virtualConsole:new VirtualConsole()});
  const {window:w}=dom; w.confirm=()=>options.confirm!==false;
  w.eval(readFileSync(join(__dirname,'../ha-entity-renamer.js'),'utf8'));
- const calls=[];let repo={id,full_name:full,category:'plugin',installed:true};
+ const calls=[];let repo={id,full_name:full,category:'plugin',installed:true,...options.repo};
  const connection={connected:true};
  const hass={user:{id:'synthetic',is_admin:options.admin!==false},connection,language:'en',themes:{},states:{},
   async callWS(msg){calls.push(msg.type);
@@ -25,8 +25,12 @@ test('explicit switch checks HACS, unregisters then registers exact integration 
  const f=fixture();try{await f.card._switchHacsRepository();assert.deepEqual(f.calls.filter(x=>x.startsWith('hacs/')),['hacs/info','hacs/repository/info','hacs/repositories/remove','hacs/repository/info','hacs/repositories/add','hacs/repository/info']);assert.equal(f.repo.category,'integration');assert.equal(f.card._hacsSwitchStatus,'done');assert.equal(f.w.localStorage.getItem(f.card._hacsMigrationKey()),'done');await f.card._switchHacsRepository();assert.equal(f.calls.filter(x=>x==='hacs/repositories/remove').length,1);}finally{f.close()}
 });
 test('no change without consent, admin, supported HACS and idle metadata queue',async()=>{
- for(const options of [{confirm:false},{admin:false},{version:'2.0.4'},{pending:true}]) {const f=fixture(options);try{await f.card._switchHacsRepository();assert.ok(!f.calls.includes('hacs/repositories/remove'));assert.ok(!f.calls.includes('hacs/repositories/add'));}finally{f.close()}}
+ for(const options of [{confirm:false},{admin:false},{version:'2.0.4'},{pending:true},{repo:{id:'foreign'}},{repo:{full_name:'Other/repo'}},{repo:{category:'theme'}},{repo:{installed:false}}]) {const f=fixture(options);try{await f.card._switchHacsRepository();assert.ok(!f.calls.includes('hacs/repositories/remove'));assert.ok(!f.calls.includes('hacs/repositories/add'));}finally{f.close()}}
 });
 test('uncertain effect persists and is never blindly retried after rerender or reload',async()=>{
  for(const options of [{removeFailure:true},{addFailure:true}]) {const f=fixture(options);try{await f.card._switchHacsRepository();assert.equal(f.card._hacsSwitchStatus,'stopped');assert.equal(f.w.localStorage.getItem(f.card._hacsMigrationKey()),'inflight');const before=f.calls.length;await f.card._switchHacsRepository();assert.equal(f.calls.length,before);assert.equal(f.card._hacsSwitchStatus,'stopped');}finally{f.close()}}
+});
+
+test('switch button and warning are present for administrators in English and Polish',()=>{
+ const f=fixture();try{f.card.render();assert.ok(f.card.shadowRoot.querySelector('#hacsSwitch'));assert.match(f.card.shadowRoot.textContent,/Finish all HACS downloads/);f.card._lang='pl';f.card.render();assert.match(f.card.shadowRoot.textContent,/Przygotuj migrację w HACS/);assert.match(f.card.shadowRoot.textContent,/zakończ wszystkie pobierania/);}finally{f.close()}
 });
