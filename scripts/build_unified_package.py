@@ -9,7 +9,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PREFIX = 'custom_components/ha_entity_renamer/'
-ROOT_FILES = {'hacs.json', 'ha-entity-renamer.js', 'LICENSE', 'NOTICE', 'README.md', 'MIGRATION.md', 'CHANGELOG.md', 'SECURITY.md', 'banner.png', 'docs/screenshots/card-queue-light.jpg', 'docs/screenshots/card-queue-dark.jpg', '.github/workflows/hacs.yml', '.github/workflows/hassfest.yml'}
+ROOT_FILES = {'hacs.json', 'ha-entity-renamer.js', 'LICENSE', 'NOTICE', 'README.md', 'MIGRATION.md', 'CHANGELOG.md', 'SECURITY.md', 'banner.png', 'docs/screenshots/card-queue-light.jpg', 'docs/screenshots/card-queue-dark.jpg', 'docs/screenshots/card-automatic-light.jpg', 'docs/screenshots/card-automatic-dark.jpg', 'docs/screenshots/provenance.json', 'docs/screenshots/candidate-card-light.png', 'docs/screenshots/candidate-backup-en.png', 'docs/screenshots/candidate-backup-pl.png', '.github/workflows/hacs.yml', '.github/workflows/hassfest.yml'}
 
 def git(*args): return subprocess.check_output(['git', '-C', str(ROOT), *args])
 

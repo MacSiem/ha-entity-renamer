@@ -109,16 +109,24 @@ behavior. Keep the full backup and verify the actual result.
 
 ## Screenshots
 
-These historical images show the queue workflow from 4.5.0. They do not
-show the unreleased candidate's server review or recovery screens.
+The following images show the **unreleased 5.0.0 candidate** running in a
+synthetic Home Assistant instance. The backup warning appears after a server
+review and before an admitted write; the test instance contains only synthetic
+data. These images are not from the public 4.6.1 plugin.
+
+| Installed card | Backup warning — English | Backup warning — Polish |
+|---|---|---|
+| ![Candidate Entity Renamer card in a synthetic Home Assistant instance](docs/screenshots/candidate-card-light.png) | ![Candidate backup and reload warning in English](docs/screenshots/candidate-backup-en.png) | ![Candidate backup and reload warning in Polish](docs/screenshots/candidate-backup-pl.png) |
+
+The historical 4.5.0 queue images below show the earlier public frontend; they
+do not show the candidate's server review or recovery screens.
 
 | Light | Dark |
 |---|---|
-| ![Rename queue, light theme](docs/screenshots/card-queue-light.jpg) | ![Rename queue, dark theme](docs/screenshots/card-queue-dark.jpg) |
+| ![Historical rename queue, light theme](docs/screenshots/card-queue-light.jpg) | ![Historical rename queue, dark theme](docs/screenshots/card-queue-dark.jpg) |
 
-*Three synthetic area-prefix proposals in the queue, before confirmation
-or any registry write. Use Analyze Impact to review readable references.
-Dark mode follows your Home Assistant theme.*
+*Three synthetic area-prefix proposals in the queue before confirmation or any
+registry write. Dark mode follows your Home Assistant theme.*
 
 ## Installation of public 4.6.1
 
