@@ -307,7 +307,7 @@ async def async_capture_powercalc_numeric_reload(hass, chain, evidence, original
         (EventBus, 'async_fire_internal'),)
     def proof():
         vendor.sources()
-        vm, vc = prove_methods(vendor.root, _pins(), vrefs)
+        vm, vc = prove_methods(vendor.root, _pins(vendor.vendor_version), vrefs)
         pins = dict(_SOURCES[receipt.version])
         pins.update(vendor.ha_pins)
         hm, hc = prove_methods(vendor.ha_root, pins, hrefs)

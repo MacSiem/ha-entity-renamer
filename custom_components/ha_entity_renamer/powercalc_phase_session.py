@@ -328,7 +328,7 @@ class PowercalcPhaseSession:
         pins['helpers/reload.py'] = '398babe3ee681c7211ea819279c5921a0b3bbb6a1e89e07d4534a2fce2a2ef34'
         def prove():
             self.scope.vendor.sources()
-            return (prove_methods(self.scope.vendor.root, _pins(), vendor_refs),
+            return (prove_methods(self.scope.vendor.root, _pins(self.scope.vendor.vendor_version), vendor_refs),
                     prove_methods(self.scope.vendor.ha_root, pins, ha_refs))
         proofs = await _settled_executor(self.lease.hass, prove)
         await hooks.checkpoint()

@@ -53,7 +53,7 @@ class PowercalcPeriodicLease:
         def prove():
             vendor.sources()
             return (prove_methods(vendor.ha_root, vendor.ha_pins, refs),
-                    prove_methods(vendor.root, _pins(), vrefs))
+                    prove_methods(vendor.root, _pins(vendor.vendor_version), vrefs))
         proof = await _settled_executor(hass, prove)
         _guard(guard)
         lease._task_check()

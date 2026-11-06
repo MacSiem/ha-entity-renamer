@@ -512,7 +512,7 @@ async def _prepare_reload_scope(hass,receipt,evidence,original,*,guard,
         scope.vendor.sources()
         if scope.exact_owner is not None:
             scope.exact_owner.policy.prove(scope.vendor)
-        vm,vc=prove_methods(scope.vendor.root,_pins(),scope.vendor_refs)
+        vm,vc=prove_methods(scope.vendor.root,_pins(scope.vendor.vendor_version),scope.vendor_refs)
         pins=dict(_SOURCES[scope.receipt.version])
         pins.update(scope.vendor.ha_pins)
         hm,hc=prove_methods(scope.vendor.ha_root,pins,scope.ha_refs)

@@ -21,6 +21,9 @@ from .yaml_source_ledger import SourceLedger, source_graph_digest
 from .yaml_validation_worker import _fingerprint, powercalc_fixed_semantics
 
 _TREE = '6f21338bcb02d2b488f8b1e9851b4d20300a888d7a493fdb753f78603f27c91c'
+_TREE_127 = '0fb642a97d3179d56ef73dcdb22e7d5025ed549507b6148b194e2cf626adc72b'
+_PAIRS = {'2026.10.2': ('v1.26.1', _TREE), '2026.10.4': ('v1.26.1', _TREE),
+          '2026.11.0': ('v1.27.0', _TREE_127)}
 _PREFIX = 'custom_components.powercalc'
 
 
@@ -37,9 +40,14 @@ def _sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def _pins():
-    data = json.loads(Path(__file__).with_name('powercalc_v1261_sources.json').read_bytes())
-    _need(_sha(_json(data['files'])) == _TREE, 'official_pin_catalog_changed')
+def _pins(version='v1.26.1'):
+    catalogs = {'v1.26.1': ('powercalc_v1261_sources.json', _TREE),
+                'v1.27.0': ('powercalc_v1270_sources.json', _TREE_127)}
+    _need(version in catalogs, 'official_version_unverified')
+    name, tree = catalogs[version]
+    data = json.loads(Path(__file__).with_name(name).read_bytes())
+    _need(data['manifest'].get('version') == version and _sha(_json(data['files'])) == tree,
+          'official_pin_catalog_changed')
     return data['files']
 
 
@@ -50,7 +58,10 @@ def stage_powercalc_bundle(bundle, before, after):
     """
     from .yaml_plan import _Reader, Limits
     import os
-    pins = _pins()
+    from homeassistant.const import __version__
+    _need(__version__ in _PAIRS, 'vendor_core_pair_unverified')
+    version, _ = _PAIRS[__version__]
+    pins = _pins(version)
     _need(set(bundle) == set(pins) and all(_sha(bundle[p]) == pins[p] for p in pins),
           'official_bundle_changed')
     for root in (before, after):
@@ -78,9 +89,10 @@ class PowercalcVendor:
     def __init__(self, hass, *, with_profiles=False):
         from homeassistant.const import __version__
         from homeassistant import loader
-        _need(__version__ in ('2026.10.2', '2026.10.4'), 'vendor_core_pair_unverified')
+        _need(__version__ in _PAIRS, 'vendor_core_pair_unverified')
+        self.vendor_version, self.vendor_tree = _PAIRS[__version__]
         loaded = hass.data.get(loader.DATA_INTEGRATIONS, {}).get('powercalc')
-        _need(type(loaded) is loader.Integration and loaded.manifest.get('version') == 'v1.26.1',
+        _need(type(loaded) is loader.Integration and loaded.manifest.get('version') == self.vendor_version,
               'loaded_vendor_unverified')
         self.hass, self.loaded, self.core_version = hass, loaded, __version__
         module = sys.modules.get(_PREFIX)
@@ -152,7 +164,7 @@ class PowercalcVendor:
     def bindings(self):
         from homeassistant import loader
         _need(self.hass.data.get(loader.DATA_INTEGRATIONS, {}).get('powercalc') is self.loaded
-              and self.loaded.manifest.get('version') == 'v1.26.1', 'loaded_vendor_changed')
+              and self.loaded.manifest.get('version') == self.vendor_version, 'loaded_vendor_changed')
         unchanged(self.refs, self.methods, self.codes)
         unchanged(self.ha_refs, self.ha_methods, self.ha_codes)
         for name, cls in self.classes.items():
@@ -160,7 +172,7 @@ class PowercalcVendor:
 
     def sources(self):
         """Executor-only disk proof; returned actual bytes are staging input."""
-        pins, result = _pins(), {}
+        pins, result = _pins(self.vendor_version), {}
         found = set()
         for path in self.root.rglob('*'):
             _need(not path.is_symlink(), 'vendor_symlink')
@@ -198,7 +210,9 @@ class OriginalPowercalcSources:
 
     @property
     def sha256(self):
-        value = [_TREE, self.ledger.sha256, self.receipt_json.decode(), self.native_json.decode()]
+        core = json.loads(self.native_json)['version']
+        tree = _TREE_127 if core == '2026.11.0' else _TREE
+        value = [tree, self.ledger.sha256, self.receipt_json.decode(), self.native_json.decode()]
         if self.closed_graph_json is not None:
             value.append(self.closed_graph_json.decode())
         return _sha(_json(value))
@@ -567,5 +581,6 @@ async def async_bind_powercalc_sources(hass, receipt, evidence, captured, *, gua
     settings = (json.loads(evidence.powercalc_sources.closed_graph_json)['energy_settings_sha256']
                 if closed else None)
     return PowercalcSourceBindings(evidence.sha256, _sha(captured.payload_json), second,
+                                   vendor_tree_sha256=vendor.vendor_tree, vendor_version=vendor.vendor_version,
                                    core_version=captured.version,
                                    relationships=relationships, energy_settings_sha256=settings)

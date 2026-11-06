@@ -191,7 +191,7 @@ async def async_handoff_previous_states(lifecycle):
     pins = dict(_SOURCES[chain.original_receipt.version]); pins.update(vendor.ha_pins)
     def prove():
         vendor.sources()
-        return (prove_methods(vendor.root, _pins(), refs),
+        return (prove_methods(vendor.root, _pins(vendor.vendor_version), refs),
                 prove_methods(Path(homeassistant.__file__).resolve().parent, pins, core_refs))
     proof = await _drained(lease.hass.async_add_executor_job, prove)
     lifecycle.check()

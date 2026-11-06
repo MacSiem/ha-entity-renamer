@@ -272,7 +272,7 @@ class PowercalcLifecycle:
         def prove():
             vendor.sources()
             return (prove_methods(Path(homeassistant.__file__).resolve().parent, pins, ha_refs),
-                    prove_methods(vendor.root, _pins(), vendor_refs))
+                    prove_methods(vendor.root, _pins(vendor.vendor_version), vendor_refs))
         proofs = await _drained(hass.async_add_executor_job, prove)
         self.check()
         _need(entry.state is ConfigEntryState.LOADED and group._prev_state_store is store,

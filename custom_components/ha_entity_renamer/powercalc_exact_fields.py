@@ -141,7 +141,7 @@ class _ExactFieldsPolicy:
         _accepted_sources(self.chain, self.current_state, self.receipt)
         pins = dict(_SOURCES[self.receipt.version])
         pins.update(vendor.ha_pins)
-        self.source_hashes_json = _json({'vendor': _pins(), 'ha': pins})
+        self.source_hashes_json = _json({'vendor': _pins(vendor.vendor_version), 'ha': pins})
 
 
 class _ExactFieldsOwner:

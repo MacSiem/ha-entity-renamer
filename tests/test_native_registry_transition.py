@@ -51,11 +51,12 @@ def fixture(kind='entity', version='2026.10.2', audit=True):
     plural = 'entities' if kind == 'entity' else 'devices'
     data = {plural: [row, other, third], 'deleted_' + plural: [{'id': 'deleted', 'unknown': [False]}, {'id': 'deleted-two'}],
             'opaque_top': {'flag': True}}
-    if version == '2026.10.2':
+    if version in ('2026.10.2', '2026.11.0'):
         data.update({'settings': {'entity_id_parts': ['name']}} if kind == 'entity'
                     else {'child_devices': [{'id': 'child', 'opaque': [1]}]})
     schemas = {'2025.6.0': {'entity': (1, 17), 'device': (1, 9)},
-               '2026.10.2': {'entity': (1, 23), 'device': (3, 4)}}
+               '2026.10.2': {'entity': (1, 23), 'device': (3, 4)},
+               '2026.11.0': {'entity': (1, 24), 'device': (3, 4)}}
     major, minor = schemas[version][kind]
     before = {'version': major, 'minor_version': minor, 'key': 'core.' + kind + '_registry',
               'data': data, 'opaque_envelope': {'counter': 1}}
@@ -91,6 +92,21 @@ def validate(before, after, prepared, version='2026.10.2', direction='forward', 
 
 
 class RegistryTransitionTests(unittest.TestCase):
+    def test_core11_compat_name_is_preserved_not_authorized_as_side_effect(self):
+        before, after, prepared = fixture(version='2026.11.0')
+        before_row = target(before)
+        after_row = target(after)
+        before_row['compat_name'] = after_row['compat_name'] = 'Existing friendly name'
+        prepared_before = json.loads(prepared.before_json)
+        prepared_after = json.loads(prepared.after_json)
+        prepared_before['compat_name'] = prepared_after['compat_name'] = 'Existing friendly name'
+        prepared = replace(prepared, before_json=json.dumps(prepared_before),
+                           after_json=json.dumps(prepared_after))
+        validate(before, after, prepared, '2026.11.0')
+        target(after)['compat_name'] = 'foreign name'
+        with self.assertRaises(transition.RegistryTransitionError):
+            validate(before, after, prepared, '2026.11.0')
+
     def test_only_deterministic_native_id_relocation_preserves_other_order(self):
         before, after, prepared = fixture()
         self.assertEqual([r['id'] for r in after['data']['entities']],
