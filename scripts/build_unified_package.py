@@ -9,7 +9,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PREFIX = 'custom_components/ha_entity_renamer/'
-ROOT_FILES = {'hacs.json', 'ha-entity-renamer.js', 'LICENSE', 'NOTICE', 'README.md', 'CHANGELOG.md', 'SECURITY.md', 'banner.png', 'docs/screenshots/card-queue-light.jpg', 'docs/screenshots/card-queue-dark.jpg', '.github/workflows/hacs.yml', '.github/workflows/hassfest.yml'}
+ROOT_FILES = {'hacs.json', 'ha-entity-renamer.js', 'LICENSE', 'NOTICE', 'README.md', 'MIGRATION.md', 'CHANGELOG.md', 'SECURITY.md', 'banner.png', 'docs/screenshots/card-queue-light.jpg', 'docs/screenshots/card-queue-dark.jpg', '.github/workflows/hacs.yml', '.github/workflows/hassfest.yml'}
 
 def git(*args): return subprocess.check_output(['git', '-C', str(ROOT), *args])
 
@@ -19,7 +19,8 @@ def main():
     if commit!=a.commit or git('rev-parse','HEAD').decode().strip()!=commit or git('status','--porcelain'):
         p.error('requires exact clean HEAD commit')
     output=a.output.expanduser().absolute()
-    if output.exists() or output.is_symlink() or not output.parent.is_dir() or ROOT in output.parents:
+    if (output.exists() or any(x.is_symlink() for x in (output, *output.parents))
+            or not output.parent.is_dir() or ROOT in output.parents):
         p.error('output must be a new file outside source repo')
     entries=git('ls-tree','-rz','--full-tree',commit,'--',PREFIX,*sorted(ROOT_FILES)).split(b'\0');files={}
     for entry in filter(None,entries):

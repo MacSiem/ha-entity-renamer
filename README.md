@@ -23,6 +23,18 @@ not automatically rewrite YAML or dashboard references and does not include a
 companion integration. Review and update affected references separately.
 The installation steps below are for this public release.
 
+## Candidate version boundaries
+
+The HACS minimum of 2025.6.0 is a coarse installation filter, not a claim
+that all later Home Assistant versions support the migration backend. Native
+write paths use exact checks for 2025.6.0, 2026.10.2 and 2026.10.4, with
+additional family-specific restrictions; Powercalc 1.26.1 is unsupported on
+2025.6 and its qualified paths require the specified 2026.10 versions. Core
+2026.4, intermediate versions and betas are not qualified for these paths.
+Some read-only functions may remain available; unverified paths refuse or
+report incomplete data rather than granting migration authority. See the
+[candidate migration guide](MIGRATION.md); its HACS steps are not yet qualified.
+
 ## How the unreleased candidate works
 
 1. **Devices and entities from the registries.** On load, the card fetches
