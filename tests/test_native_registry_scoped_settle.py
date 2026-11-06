@@ -55,6 +55,14 @@ class NativeRegistryScopedSettleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(hass.states.get(old))
         self.assertEqual(hass.states.get(after['entity_id']).state, '7')
         self.assertTrue(io.runtime(change, after))
+        from homeassistant.helpers import entity as entity_module
+        original_policy = entity_module._ADD_REMOVE_METHODS
+        try:
+            entity_module._ADD_REMOVE_METHODS = ('foreign_hook',)
+            with self.assertRaises(native.RegistryConflict):
+                await io.settle(change)
+        finally:
+            entity_module._ADD_REMOVE_METHODS = original_policy
         await io.flush('entity')
         row = next(row for row in (await io.disk('entity'))['entities'] if row['id'] == before['id'])
         self.assertEqual(row['entity_id'], after['entity_id'])

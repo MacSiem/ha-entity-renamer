@@ -168,6 +168,11 @@ class NativeRegistryIO:
                          (Entity, 'async_internal_entity_id_changed')))
         methods, codes = prove_methods(Path(homeassistant.__file__).resolve().parent,
                                        _SOURCES[__version__], refs)
+        readd_methods = ('async_prepare_to_add_to_hass', 'async_added_to_hass',
+                         'async_will_remove_from_hass')
+        if (__version__ == '2026.11.0'
+                and entity_module._ADD_REMOVE_METHODS != readd_methods):
+            raise RegistryConflict('native_registry_readd_policy_changed')
         identities = None
         if prepared is not None:
             identities = ({prepared.identity} if prepared.kind == 'entity' else
@@ -177,6 +182,9 @@ class NativeRegistryIO:
         observed = set()
         while True:
             unchanged(refs, methods, codes)
+            if (__version__ == '2026.11.0'
+                    and entity_module._ADD_REMOVE_METHODS != readd_methods):
+                raise RegistryConflict('native_registry_readd_policy_changed')
             pending = set()
             for task in asyncio.all_tasks(self.hass.loop):
                 if task is current or task.done():

@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 import hashlib
+import functools
 import inspect
 from pathlib import Path
 import sys
 
 from .native_code_cache import compiled_code_objects
+
+
+def _method(descriptor, name):
+    if name == '_entity_class_requires_readd':
+        if type(descriptor) is not functools._lru_cache_wrapper:
+            raise ValueError('native_unload_cache_wrapper_required')
+        return descriptor.__wrapped__
+    return descriptor.fget if type(descriptor) is property else descriptor
 
 
 def prove_methods(root, pins, refs):
@@ -19,7 +28,7 @@ def prove_methods(root, pins, refs):
     methods, codes, compiled = [], [], {}
     for owner, name in refs:
         descriptor = getattr(owner, name)
-        method = descriptor.fget if type(descriptor) is property else descriptor
+        method = _method(descriptor, name)
         code = getattr(method, '__code__', None)
         if code is None:
             raise ValueError('native_unload_code_required')
@@ -46,6 +55,6 @@ def unchanged(refs, methods, codes):
     """Recheck bindings and code identity without invoking descriptors."""
     for (owner, name), saved, code in zip(refs, methods, codes, strict=True):
         current = getattr(owner, name)
-        method = current.fget if type(current) is property else current
+        method = _method(current, name)
         if current != saved or getattr(method, '__code__', None) is not code:
             raise ValueError('native_unload_binding_changed')
