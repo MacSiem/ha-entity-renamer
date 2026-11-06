@@ -26,5 +26,5 @@
   "issue_tracker": "https://github.com/MacSiem/ha-entity-renamer/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "5.0.0.dev0"
+  "version": "5.0.0"
 }

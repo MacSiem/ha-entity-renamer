@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v5.0.0.dev0 (candidate) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v5.0.0 (candidate) — single-tool standalone repo */
 (function() {
 'use strict';
 

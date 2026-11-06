@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v5.0.0.dev0 legacy compatibility (unreleased bridge) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v5.0.0 legacy compatibility card (4.6.1 workflow; not the integration) — single-tool standalone repo */
 (function() {
 'use strict';
 

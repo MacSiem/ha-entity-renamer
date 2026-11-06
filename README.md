@@ -6,11 +6,11 @@ Bulk-rename Home Assistant devices and entities — `entity_id`, friendly names,
 or a whole device's entities at once by prefix — with an impact preview for
 references visible through Home Assistant's APIs.
 
-> **Unreleased candidate:** This branch describes development after public
+> **Unreleased 5.0.0 candidate:** This branch describes development after public
 > 4.6.1. The candidate packages its backend and full card as one integration.
 > The root JavaScript remains a compatibility card for existing Dashboard
 > installations; it does not install or activate the integration. Installation
-> and migration instructions are still being qualified and are not a release announcement.
+> and migration instructions are a draft pending final HACS qualification, not a release announcement.
 
 [![Version](https://img.shields.io/github/v/release/MacSiem/ha-entity-renamer)](https://github.com/MacSiem/ha-entity-renamer/releases) [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -33,7 +33,7 @@ additional family-specific restrictions; Powercalc 1.26.1 is unsupported on
 2026.4, intermediate versions and betas are not qualified for these paths.
 Some read-only functions may remain available; unverified paths refuse or
 report incomplete data rather than granting migration authority. See the
-[candidate migration guide](MIGRATION.md); its HACS steps are not yet qualified.
+[candidate migration guide](MIGRATION.md); its final HACS user path is not yet qualified.
 
 ## How the unreleased candidate works
 
@@ -122,7 +122,7 @@ Dark mode follows your Home Assistant theme.*
 
 ## Installation of public 4.6.1
 
-The following instructions describe the released frontend, not this branch's unreleased companion-backed candidate. Candidate distribution and migration's exact steps will be documented after its installation path is qualified.
+The following instructions describe the released frontend. For the unreleased one-package 5.0.0 candidate, including fresh installation and migration from 4.6.1 or the planned 4.6.2 bridge, see the [draft migration guide](MIGRATION.md). The final HACS user path remains pending qualification.
 
 Requires **Home Assistant 2025.6 or newer** for the automatic ID preview.
 

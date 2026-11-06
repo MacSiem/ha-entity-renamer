@@ -48,7 +48,7 @@ class SessionStatusTests(unittest.IsolatedAsyncioTestCase):
         self.session = self.persisted = self.user
         self.assertIs(await hass.auth.async_get_user(self.user.id), self.session)
         self.projection = {
-            'version': '5.0.0.dev0', 'migration_ready': False, 'family_complete': False,
+            'version': '5.0.0', 'migration_ready': False, 'family_complete': False,
             'reason': 'dependency_coverage_incomplete', 'recovery_required': True,
             'operations': [{'operation_id': 'private-opaque-operation',
                 'fingerprint': 'a' * 64, 'status': 'applied', 'direction': 'forward',

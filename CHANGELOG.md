@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased candidate
+## 5.0.0 — unreleased candidate
 
 - Prepare an administrator-reviewed, server-owned plan for recognized registry
-  and dependency changes. The candidate companion is not part of the public
-  4.6.1 frontend release; its distribution and installation remain unqualified.
+  and dependency changes. The full card and backend are packaged as one integration; the public
+  4.6.1 Dashboard plugin remains the released baseline. The final HACS migration
+  and installed user path remain pending qualification.
 - Recommend a full Home Assistant backup before applying, disclose the limits
   of testing and the possibility that a required reload interrupts running
   automations or scripts, and retain Cancel/Escape without a write.

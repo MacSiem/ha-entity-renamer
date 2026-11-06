@@ -42,12 +42,12 @@ class FrontendTests(unittest.IsolatedAsyncioTestCase):
     async def test_fresh_and_repeat_keep_one_resource_and_static_route(self):
         h=FakeHass();await async_register_frontend(h);await async_register_frontend(h)
         self.assertEqual(len(h.resources.rows),1);self.assertEqual(len(h.static),1)
-        self.assertEqual(h.resources.rows[0]['url'],CARD_PATH+'?v=5.0.0.dev0')
+        self.assertEqual(h.resources.rows[0]['url'],CARD_PATH+'?v=5.0.0')
         await async_unregister_frontend(h);self.assertEqual(len(h.resources.rows),1)
     async def test_legacy_is_replaced_in_place_and_foreign_untouched(self):
         rows=[{'id':'old','type':'module','url':'/hacsfiles/ha-entity-renamer/ha-entity-renamer.js?hacstag=123'}, {'id':'foreign','type':'module','url':'/local/other.js'}]
         h=FakeHass(rows);await async_register_frontend(h)
-        self.assertEqual(h.resources.rows[0],{'id':'old','type':'module','url':CARD_PATH+'?v=5.0.0.dev0'})
+        self.assertEqual(h.resources.rows[0],{'id':'old','type':'module','url':CARD_PATH+'?v=5.0.0'})
         self.assertEqual(h.resources.rows[1],rows[1])
     async def test_ambiguous_and_unrecognized_copy_refuse_without_edits(self):
         for rows in ([{'id':'a','url':CARD_PATH},{'id':'b','url':'/hacsfiles/ha-entity-renamer/ha-entity-renamer.js'}], [{'id':'f','url':'/local/elsewhere/ha-entity-renamer.js'}], [{'id':'remote','url':'https://example.invalid/ha-entity-renamer.js'}]):
@@ -60,7 +60,7 @@ class FrontendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(h.resources.rows,rows);self.assertEqual(self.extra,[])
     async def test_yaml_fresh_registers_and_unload_removes_one_extra(self):
         h=FakeHass(storage=False);await async_register_frontend(h);await async_register_frontend(h)
-        self.assertEqual(self.extra,[CARD_PATH+'?v=5.0.0.dev0']);await async_unregister_frontend(h);self.assertEqual(self.extra,[])
+        self.assertEqual(self.extra,[CARD_PATH+'?v=5.0.0']);await async_unregister_frontend(h);self.assertEqual(self.extra,[])
 
 class RuntimeAdmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_overlapping_setup_allows_only_one_runtime(self):
