@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.6.2 (unreleased)
+
+- Add a dismissible, reopenable migration notice and guide for the planned
+  move to one Integration package. The existing card and registry workflow
+  continue unchanged; no migration action is required now.
+- Recommend a full Home Assistant backup before the future migration. The
+  verified migration steps will be published before the integration release.
+
+
 ## 4.6.1 (2026-10-29)
 
 - Remove change-plan import and its registry-preview panel. Keep the existing device/entity browsing, editable names/IDs, queue, impact review, confirmation and history workflows.

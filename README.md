@@ -8,6 +8,14 @@ references visible through Home Assistant's APIs.
 
 [![Version](https://img.shields.io/github/v/release/MacSiem/ha-entity-renamer)](https://github.com/MacSiem/ha-entity-renamer/releases) [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+## Migration information
+
+Version 4.6.2 is a transition update: the 4.6.1 card workflow remains available
+and no migration action is required now. Entity Renamer is planned to move to
+one Integration package. Before the future migration, make a full Home Assistant
+backup. See [MIGRATION.md](MIGRATION.md); verified migration steps will be added
+before the integration release. Do not remove the current installation now.
+
 ## How it works
 
 1. **Devices and entities from the registries.** On load, the card fetches

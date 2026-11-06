@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v4.6.1 (2026-10-29) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v4.6.2 (unreleased bridge) — single-tool standalone repo */
 (function() {
 'use strict';
 
@@ -1397,6 +1397,38 @@ class HAEntityRenamer extends HTMLElement {
     // Internal transaction flows may need Queue or Log even on a restricted card.
     return _RENAMER_TABS.filter(tab => configured.includes(tab) || tab === this._activeTab);
   }
+  _bridgeNoticePreference() {
+    const id = this._hass?.user?.id;
+    if (typeof id !== 'string' || !id.trim()) return null;
+    const key = 'ha-entity-renamer-migration-notice-v1:' + encodeURIComponent(JSON.stringify([location.origin, id]));
+    if (!this._bridgeNotice || this._bridgeNotice.key !== key) {
+      let dismissed = false;
+      try { dismissed = localStorage.getItem(key) === '1'; } catch (_) {}
+      this._bridgeNotice = {key, dismissed};
+    }
+    return this._bridgeNotice;
+  }
+  _renderBridgeNotice() {
+    const state = this._bridgeNoticePreference();
+    if (!state) return '';
+    const pl = this._lang === 'pl';
+    if (state.dismissed) return `<button type="button" class="btn btn-outline bridge-reopen" id="bridgeNoticeOpen">${pl ? 'Informacja o migracji' : 'Migration information'}</button>`;
+    return `<section class="bridge-notice" role="region" aria-labelledby="bridgeNoticeTitle">
+      <h2 id="bridgeNoticeTitle">${pl ? 'Informacja o przyszłej migracji' : 'Information about a future migration'}</h2>
+      <p>${pl ? 'Entity Renamer przechodzi na jeden pakiet Integration (karta i backend). Ta aktualizacja przejściowa działa jak dotąd; nie usuwaj teraz obecnej instalacji.' : 'Entity Renamer is moving to one Integration package (card and backend). This transition update continues to work as before; do not remove your current installation now.'}</p>
+      <p>${pl ? 'Przed przyszłą migracją wykonaj pełną kopię zapasową Home Assistant i przeczytaj przewodnik. Nowa aktualizacja w HACS może wymagać jednorazowej migracji.' : 'Before the future migration, make a full Home Assistant backup and read the guide. A new HACS update may require a one-time migration.'}</p>
+      <a href="https://github.com/MacSiem/ha-entity-renamer/blob/main/MIGRATION.md" target="_blank" rel="noopener noreferrer">${pl ? 'Przewodnik migracji' : 'Migration guide'}</a>
+      <button type="button" class="btn btn-outline" id="bridgeNoticeDismiss">${pl ? 'Zamknij informację' : 'Dismiss information'}</button>
+    </section>`;
+  }
+  _setBridgeNoticeDismissed(dismissed) {
+    const state = this._bridgeNoticePreference();
+    if (!state) return;
+    state.dismissed = dismissed;
+    try { localStorage.setItem(state.key, dismissed ? '1' : '0'); } catch (_) {}
+    this.render();
+    this.shadowRoot.getElementById(dismissed ? 'bridgeNoticeOpen' : 'bridgeNoticeDismiss')?.focus({preventScroll:true});
+  }
   _helpPreference() {
     const account = this._hass?.user?.id || null;
     if (!this._helpState || this._helpState.account !== account) {
@@ -2745,6 +2777,7 @@ class HAEntityRenamer extends HTMLElement {
 
   render() {
     if (!this._hass) return;
+    const bridgeFocus = this.shadowRoot.activeElement?.id;
     createUiV3({language:this._lang}).applyTheme(this);
     const listViewport = _rememberListViewport(this);
     const openAutomaticDevices = new Set(Array.from(this.shadowRoot.querySelectorAll('[data-auto-group][open]'), group => group.dataset.autoGroup));
@@ -3124,6 +3157,12 @@ class HAEntityRenamer extends HTMLElement {
         :host input[type=checkbox] { accent-color:var(--_hat-primary-fill); }
         :host .btn-primary:disabled { opacity:1;background:var(--_hat-chip);color:var(--_hat-text-2);box-shadow:none; }
 
+        .bridge-notice { margin:8px 0 12px;padding:12px;border:1px solid var(--bento-border,var(--divider-color));border-radius:8px;background:var(--bento-bg,var(--primary-background-color));color:var(--bento-text,var(--primary-text-color));font-size:14px; }
+        .bridge-notice h2 { margin:0 0 8px;font-size:14px; }
+        .bridge-notice p { margin:8px 0; }
+        .bridge-notice a { color:inherit;text-decoration:underline; }
+        .bridge-notice .btn { margin-inline-start:8px; }
+        .bridge-reopen { margin:4px 0 8px; }
         .renamer-help { margin:8px 0 12px;font-size:14px; }
         .renamer-help summary { cursor:pointer;min-height:44px;align-content:center; }
         .renamer-help summary:focus-visible { outline:3px solid var(--primary-color);outline-offset:2px; }
@@ -3139,6 +3178,7 @@ class HAEntityRenamer extends HTMLElement {
       <div class="subtitle">${this._registryCount(this._devices.length,'device')} • ${this._registryCount(this._entities.length,'entity')}
         </div>
 
+      ${this._renderBridgeNotice()}
       ${this._renderHelp()}
       ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${this._message.outcome ? createUiV3({language:this._lang}).statusHtml(this._message.outcome) : ''} ${_esc(this._message.text || '')}</div>` : ''}
       ${this._renderApplyResult()}
@@ -3168,6 +3208,7 @@ class HAEntityRenamer extends HTMLElement {
     if (this._familyNavWidth > 0) this._syncHelpWidth(this._familyNavWidth);
     _restoreFamilyRowFocus(this,familyRowFocus);
     _restoreListViewport(this,listViewport);
+    if (bridgeFocus === 'bridgeNoticeOpen' || bridgeFocus === 'bridgeNoticeDismiss') this.shadowRoot.getElementById(bridgeFocus)?.focus({preventScroll:true});
   }
 
 
@@ -3440,6 +3481,8 @@ class HAEntityRenamer extends HTMLElement {
   _attachEvents() {
     const root = this.shadowRoot;
     const t = this._t;
+    root.getElementById('bridgeNoticeDismiss')?.addEventListener('click', () => this._setBridgeNoticeDismissed(true));
+    root.getElementById('bridgeNoticeOpen')?.addEventListener('click', () => this._setBridgeNoticeDismissed(false));
     root.getElementById('exportRenameLog')?.addEventListener('click', e => this._openRenameExport(e.currentTarget));
     root.getElementById('reviewLegacyHistory')?.addEventListener('click', () => this._reviewLegacyHistory());
 
