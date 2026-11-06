@@ -37,6 +37,7 @@ class NativeOwnIDRegistryReadback(NativeTemplateStateYAMLRuntimeReadback):
         self.composition, self.hass, self.chain, self.guard = composition, hass, chain, guard
         self.program, self.receipt = composition.state_config_program, chain.original_receipt
         self._last_runtime = None
+        self.entry_witness = None  # Registry-only path has no controlled entry witness.
         self.runtime_original = False
         self.native = _StateRuntime(hass)
         _need(self.native.native.version == self.receipt.version, 'own_registry_core_changed')

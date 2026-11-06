@@ -108,6 +108,20 @@ class NativeOwnIDRootTests(unittest.IsolatedAsyncioTestCase):
     async def test_template_own_only_without_yaml_references(self):
         await self._case('template', False, observer=False)
 
+    async def test_template_registry_only_observer_inherited_readback(self):
+        from unittest.mock import patch
+        observer = self.module('native_own_id_registry_readback').NativeOwnIDRegistryReadback
+        original = observer.position_at_inputs
+        positions = []
+        async def observed(instance, change, state, **live):
+            result = await original(instance, change, state, **live)
+            positions.append(result)
+            return result
+        with patch.object(observer, 'position_at_inputs', observed):
+            await self._case('template', False, observer=False)
+        self.assertIn(self.module('transaction').Position.BEFORE, positions)
+        self.assertIn(self.module('transaction').Position.AFTER, positions)
+
     async def test_automation_own_only_without_yaml_references(self):
         await self._case('automation', False, observer=False)
 

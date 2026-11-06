@@ -2939,7 +2939,7 @@ class HAEntityRenamer extends HTMLElement {
 
       .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: 12px; margin-bottom: 20px; }
       .stat-card .num { font-size: 26px; font-weight: 700; }
-      .stat-card .label { font-size: 12px; text-transform: uppercase; color: var(--bento-text-secondary, #94A3B8); margin-top: 4px; }
+      .stat-card .label { font-size: 12px; text-transform: uppercase; color: var(--bento-text-secondary, #94A3B8); margin-top: 4px; overflow-wrap: anywhere; }
 
       .device-list { max-height: 60vh; overflow-y: auto; }
       .device-item {
