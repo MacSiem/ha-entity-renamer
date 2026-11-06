@@ -366,6 +366,54 @@ class NativeBindingLifecycleTests(unittest.IsolatedAsyncioTestCase):
     _flush_documents = server.NativeTemplateYAMLServerTests._flush_documents
     prepare = server.NativeTemplateYAMLServerTests.prepare
 
+    async def test_core11_cleanup_transport_and_native_unload(self):
+        from homeassistant.const import __version__
+        if __version__ != '2026.11.0':
+            self.skipTest('Core 11 cleanup lifecycle')
+        await self.pair()
+        entity, hass = self.consumer, self.f.hass
+        old = entity._template_result_info
+        callbacks = tuple(entity._on_remove)
+        transport = self.capture()
+        await self.apply(transport)
+        new = entity._template_result_info
+        self.assertIsNot(new, old)
+        self.assertTrue(all(a is b for a, b in zip(entity._on_remove, callbacks)))
+        await self.emit(self.producer, 5)
+        self.assertEqual(hass.states.get(entity.entity_id).state, '10')
+        await entity.async_remove()
+        self.assertFalse(new._track_state_changes._listeners)
+
+    async def test_core11_cleanup_foreign_and_rollback(self):
+        from homeassistant.const import __version__
+        if __version__ != '2026.11.0':
+            self.skipTest('Core 11 cleanup lifecycle')
+        await self.pair()
+        entity = self.consumer
+        old = entity._template_result_info
+        callbacks = tuple(entity._on_remove)
+        index = next(i for i, cb in enumerate(callbacks)
+            if getattr(cb, '__self__', None) is entity
+            and getattr(cb, '__name__', '') == '_async_remove_template_result_info')
+        entity._on_remove[index] = self.control._async_remove_template_result_info
+        try:
+            with self.assertRaises(ValueError):
+                self.capture()
+        finally:
+            entity._on_remove[index] = callbacks[index]
+        self.assertIs(entity._template_result_info, old)
+        transport = self.capture()
+        self.path.write_bytes(self.desired)
+        transport.install_before_registry(self.context)
+        new = entity._template_result_info
+        transport.rollback_before_registry(self.context)
+        self.path.write_bytes(self.original)
+        self.assertIs(entity._template_result_info, old)
+        self.assertTrue(all(a is b for a, b in zip(entity._on_remove, callbacks)))
+        self.assertFalse(new._track_state_changes._listeners)
+        await self.emit(self.producer, 5)
+        self.assertEqual(self.f.hass.states.get(entity.entity_id).state, '10')
+
     async def pair(self, *, variant='sensor', unavailable=False, time=False, broad=False,
                    equal_attributes=False, broad_membership=False, domain=False):
         from homeassistant.core import Context

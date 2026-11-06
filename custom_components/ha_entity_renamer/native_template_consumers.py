@@ -74,6 +74,10 @@ _BINARY_PINS = {
 }
 
 
+# Exact source manifests for Core 11; native code and object proofs remain mandatory.
+_PINS['2026.11.0'] = {'components/template/__init__.py': '7825d7ed9cac2cc68b841e2f92b2ffdc7fbcf4a920ceaa24c3ed8728b9e132d4', 'components/template/config.py': 'a9b48704ea285990bc0b64c7aa6068b01132f689afcd376292df266df95cf6f0', 'components/template/const.py': 'd4e9815e9b289b3145191c05fa9fce3eccb02b5d8e3bd588e9c5666b05650deb', 'components/template/coordinator.py': '891ea9e02465a391ec9a6a54052a6cb058d27fa5eb3a6ac3daced6b279a40eb4', 'components/template/entity.py': 'b03431e40c9b46995dda5f28e6a78b6f7bf2cd8810887a0a6dd772f7d8048013', 'components/template/helpers.py': '1da6e0b6eb88e8f9ac6f37975aa93345a6429ccba3ae4976014b7e5b6ec011fc', 'components/template/sensor.py': '1ac9fc43f239ea509d349df35bf909abeeaaae4cd8c2fa398cb5701919eb5959', 'components/template/template_entity.py': '112057244c66f84b864c83349786d3ef2c3d5ff073a6985f640948db8489f5fe', 'components/template/trigger_entity.py': 'c8859d37c2401554b4caefab33affad54e8ebff979d990b4540577d2c340f0e4', 'helpers/entity_platform.py': '18014aa32bd7b1f0a80044166d9a88d7250a96120d9a62116de6f13a318121c8', 'helpers/event.py': '35a453cdc015a58ce9e49f2dec4da042babd261930a758eac97a7c2138ba0960', 'helpers/trigger_template_entity.py': '1f9029b673fb03839194a88277a40fd744385a89547825d818de6b0e39771e08'}
+_BINARY_PINS['2026.11.0'] = {'components/template/binary_sensor.py': 'd999778cef40daf158661c2a9c88dae37dff8aacd1af40f2fdac8d013e59f7b8', 'helpers/template/helpers.py': '2f4796b9d35516ab9c39498365d4fcf843ebd3334ac9c1b07000d7811d706c67', 'helpers/config_validation.py': 'ab472221aaac1bb03652ec48f47591580f8f14d0bd0f1e4bc9926bc39b6a6f08'}
+
 class TemplateConsumerError(ValueError):
     pass
 
@@ -108,6 +112,21 @@ class TemplateConsumerRow:
     semantic_sha256: str | None = None
     dependencies: tuple[str, ...] = ()
     reason: str = 'runtime_variant_unverified'
+
+
+def _cleanup_index(native, entity, tracker):
+    """Bind the one actual native tracker cleanup without calling it."""
+    from homeassistant.components.template.template_entity import TemplateEntity
+    from homeassistant.helpers.event import TrackTemplateResultInfo
+    _need(entity._template_result_info is tracker and type(entity._on_remove) is list,
+          'native_cleanup_owner_changed')
+    owner, method = ((entity, TemplateEntity._async_remove_template_result_info)
+                     if native.version == '2026.11.0' else
+                     (tracker, TrackTemplateResultInfo.async_remove))
+    matches = [(i, callback) for i, callback in enumerate(entity._on_remove)
+               if _bound(callback, owner, method)]
+    _need(len(matches) == 1, 'native_cleanup_owner_changed')
+    return matches[0]
 
 
 @dataclass(frozen=True)
@@ -177,6 +196,9 @@ class _Native:
             (event, '_async_track_state_change_event'),
             (event, '_async_track_event'), (event, '_remove_listener'),
             (event, '_async_dispatch_entity_id_event'), (ep, 'async_get_platforms')]
+        if __version__ == '2026.11.0':
+            self.refs += [(te.TemplateEntity, '_async_remove_template_result_info'),
+                          (te.TemplateEntity, 'async_entity_id_changed')]
         if __version__ == '2025.6.0':
             self.refs += [(self.sensor, '_async_setup_templates'),
                           (self.sensor, '_update_state')]
@@ -364,7 +386,7 @@ def _live_binary(native, entity):
           and boolean.forgiving_boolean.__globals__ is vars(boolean)
           and native.cv.boolean.__globals__ is vars(native.cv),
           'native_binary_boolean_binding_changed')
-    if native.version in ('2026.10.2', '2026.10.4'):
+    if native.version in ('2026.10.2', '2026.10.4', '2026.11.0'):
         _need(vars(boolean).get('cv') is native.cv,
               'native_binary_boolean_binding_changed')
     else:
@@ -455,8 +477,7 @@ def _registration(native, entity, template):
             if _bound(member.target, info, event.TrackTemplateResultInfo._refresh):
                 _need(key in dependencies and member is job, 'native_registration_extra')
     # Native cleanup remains owned by this entity as well as present on the bus.
-    _need(sum(_bound(callback, info, event.TrackTemplateResultInfo.async_remove)
-              for callback in entity._on_remove) == 1, 'native_cleanup_owner_changed')
+    _cleanup_index(native, entity, info)
     token = (id(entity), id(template), id(info), id(info._job), id(tracks[0]),
              id(variables), id(info._info), id(render), id(render.filter),
              id(render.filter_lifecycle), id(filtered), id(states),
@@ -487,7 +508,7 @@ def _source_semantics(native, entity, registry_row, semantic, evidence, document
               and entity.unique_id == entry_id, 'entry_source_identity_unverified')
         options = dict(source['options'])
         options.pop('template_type')
-        if native.version in ('2026.10.2', '2026.10.4'):
+        if native.version in ('2026.10.2', '2026.10.4', '2026.11.0'):
             additional = options.pop('additional_options', None)
             if additional:
                 options.update(additional)

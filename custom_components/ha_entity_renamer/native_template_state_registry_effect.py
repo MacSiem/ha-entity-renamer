@@ -350,7 +350,7 @@ class NativeTemplateStateRegistryEffect:
             return
         for row in transfer.rows:
             _need(row['entity']._template_result_info is row['new']
-                  and row['entity']._on_remove[row['index']] == row['new'].async_remove,
+                  and row['entity']._on_remove[row['index']] is row['installed_cleanup'][row['index']],
                   'cleanup_owned_binding_changed')
         transfer._restore_before_effect()
         transfer.phase = 'rolled_back'

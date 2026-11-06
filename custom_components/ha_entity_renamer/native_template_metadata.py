@@ -250,8 +250,8 @@ def registration(native, entity, state_template):
         for member in members:
             if _bound(member.target, info, event.TrackTemplateResultInfo._refresh):
                 _need(key in dependencies and member is job, 'native_registration_extra')
-    _need(sum(_bound(callback, info, event.TrackTemplateResultInfo.async_remove)
-              for callback in entity._on_remove) == 1, 'native_cleanup_owner_changed')
+    from .native_template_consumers import _cleanup_index
+    _cleanup_index(native, entity, info)
     return tuple(sorted(declared)), (id(entity), id(info), id(info._job), id(info._info),
         id(entity._template_attrs), id(filtered), id(states), id(filtered._action_as_hassjob),
         tuple(tokens), bus_token)
@@ -305,7 +305,7 @@ class IconValidatorProof:
         import sys
         from .native_template_consumers import _need, _codes
         version = self.native.version
-        _need(version in ('2025.6.0', '2026.10.2', '2026.10.4'), 'native_icon_version_unverified')
+        _need(version in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0'), 'native_icon_version_unverified')
         pins = ({
             'voluptuous.validators': 'c29ddf98aafe282eec6b0f1a7945b0d422cea31c2b723f188ad79724df5e5084',
             'voluptuous.schema_builder': '403b79a3566d2dda93b4e779215cca7333413dfb4b28693bec2cf85052540f48',

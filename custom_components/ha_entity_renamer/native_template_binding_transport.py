@@ -45,6 +45,7 @@ _EXTRA_PINS = {
 # Installed staging readback is byte-identical to these audited bodies.
 # _Runtime still hashes/compiles the actual files for each native admission.
 _EXTRA_PINS['2026.10.2'] = dict(_EXTRA_PINS['2026.10.4'])
+_EXTRA_PINS['2026.11.0'] = {'helpers/ratelimit.py': '9a1a1dbbc416b0b2156e1dc021e205f0e8f3bfcb46e87e33d4543fb4ccf3a005', 'helpers/script_variables.py': 'c70c73cdd5979f05fd16997762c4cddb9a0dd1bfb4b7f23d7a11c4ec325bf9ea', 'helpers/template/states.py': '482640b98dc1aa8b168e2bd5d3bd5adf7e1c151c3511d1fe6022258c28205803', 'helpers/template/__init__.py': '238f0e44b95515cff7aed9402c3d9c14b4dabe743c991331be7f4d79408c62f1'}
 
 # Binding-bearing fields only. Consumer outputs, state, delay owner/token and
 # self-reference limiter are deliberately not replaced or restored.
@@ -366,8 +367,8 @@ class _Runtime:
               and {id(t.template) for t in tracker._track_templates} == {id(t) for t in attrs}
               and tracker._has_super_template is (entity._availability_template is not None),
               'template_binding_incomplete_native_group')
-        _need(sum(cb == tracker.async_remove for cb in entity._on_remove) == 1,
-              'template_binding_cleanup_owner_changed')
+        from .native_template_consumers import _cleanup_index
+        _cleanup_index(native, entity, tracker)
         declarations = getattr(entity, '_templates', {})
         _need(type(declarations) is dict, 'template_binding_declarations_changed')
         if declarations:
@@ -533,11 +534,13 @@ class NativeTemplateBindingTransport:
                 body = next(iter(desired), key.template)
                 for template in members:
                     replacements[id(template)] = Template(body, hass)
+            from .native_template_consumers import _cleanup_index
+            cleanup_index, cleanup_callback = _cleanup_index(obj.runtime.native, entity, tracker)
             obj.rows.append(dict(entity=entity, tracker=tracker, bindings=bindings,
                 attrs=entity._template_attrs, slots=slots, declarations=declarations,
                 replacements=replacements, originals=originals, containers=containers,
                 bodies={key: value.template for key, value in originals.items()}, memo={},
-                cleanup=tuple(entity._on_remove), index=entity._on_remove.index(tracker.async_remove),
+                cleanup=tuple(entity._on_remove), index=cleanup_index, cleanup_callback=cleanup_callback,
                 new=None, detached=False, time_moves=[], rate_moves=[]))
         _need(set(by_id) <= {key for row in obj.rows for key in row['originals']},
               'template_binding_source_not_in_group')
@@ -778,7 +781,8 @@ class NativeTemplateBindingTransport:
                     slot.template = row['replacements'][id(template)]
                 entity._template_attrs = {row['replacements'][id(t)]: slots for t, slots in row['attrs'].items()}
                 entity._template_result_info = row['new']
-                entity._on_remove[row['index']] = row['new'].async_remove
+                if self.runtime.native.version != '2026.11.0':
+                    entity._on_remove[row['index']] = row['new'].async_remove
                 # Retain the exact installed graph for the final pre-API fence
                 # and for a checked pre-attempt undo. Strong references prevent
                 # a replaced child from being confused with an id-reused value.
