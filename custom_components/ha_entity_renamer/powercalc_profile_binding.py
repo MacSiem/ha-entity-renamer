@@ -78,7 +78,10 @@ def extend_vendor(vendor):
     from .native_integration_unload_audit import _INTEGRATION
     vendor.integration = integration
     vendor.ha_pins['components/integration/sensor.py'] = _INTEGRATION[vendor.core_version]
-    vendor.ha_pins['util/color.py'] = '20bf486782dfac8cb1607beddc26188fb82610bb5fabf42a6046b4e6b4ac4bb2'
+    vendor.ha_pins['util/color.py'] = (
+        'd88de5d2232455cc1e6085c796c6865049b9aaa731ffcfa533304b0c8998546a'
+        if vendor.core_version == '2026.11.0' else
+        '20bf486782dfac8cb1607beddc26188fb82610bb5fabf42a6046b4e6b4ac4bb2')
     vendor.ha_refs += tuple((owner, name) for owner in (color, lut) for name in
         ('color_temperature_kelvin_to_mired', 'color_temperature_to_hs'))
     vendor.ha_refs += tuple((integration.IntegrationSensor, name) for name in (
