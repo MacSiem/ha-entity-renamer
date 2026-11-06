@@ -291,7 +291,7 @@ def _dispatch_token(entity, expected_class, names):
     return tuple(token)
 
 
-def _sample(hass, vendor, evidence, observed, captured, prepared=None):
+def _sample(hass, vendor, evidence, observed, captured, prepared=None, *, removed_group_ids=frozenset()):
     from homeassistant.helpers import entity_platform as ep, entity_registry as er
     from homeassistant.helpers.entity import Entity
     original = evidence.powercalc_sources
@@ -304,7 +304,10 @@ def _sample(hass, vendor, evidence, observed, captured, prepared=None):
     active = {eid: entity for platforms in hass.data[ep.DATA_ENTITY_PLATFORM].values()
               for platform in platforms for eid, entity in platform.entities.items()}
     source = json.loads(original.native_json)
+    _need(type(removed_group_ids) is frozenset and all(type(key) is str for key in removed_group_ids),
+          'removed_group_ids_invalid')
     runtime = json.loads(captured.payload_json)
+    runtime['objects'] = [row for row in runtime['objects'] if row['object_id'] not in removed_group_ids]
     yaml_rows = {row[0]: row for row in source['rows']}
     vendor_config = hass.data['powercalc']['config']
     global_ok = (not original.ledger.findings

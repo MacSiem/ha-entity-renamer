@@ -39,12 +39,53 @@ async function fixture(t, language='en', connected=true) {
 }
 const writes = f => f.requests.filter(m=>m.type==='ha_entity_renamer/apply'||m.type.endsWith('/update'));
 
-test('ordinary confirmation keeps registry-only and explicit server prepare as separate actions',async t=>{
-  const f=await fixture(t);assert.ok(f.card.shadowRoot.getElementById('confirmRenameApply'));assert.ok(f.card.shadowRoot.getElementById('prepareMigration'));
-  f.card.shadowRoot.getElementById('prepareMigration').click();await tick();
+for (const language of ['en','pl']) test(`write warning ${language}: cancel and escape preserve queue, continue applies once`,async t=>{
+  const f=await fixture(t,language);await f.card._prepareMigration();
+  f.card.shadowRoot.getElementById('applyMigration').click();
+  let modal=f.card.shadowRoot.querySelector('.write-warning-backdrop [role="dialog"]');
+  assert.equal(modal.getAttribute('aria-modal'),'true');
+  assert.ok(f.card.shadowRoot.querySelector('.card').hasAttribute('inert'));
+  assert.match(modal.textContent,language==='pl' ? /pełnej kopii zapasowej/ : /full Home Assistant backup/);
+  assert.match(modal.textContent,language==='pl' ? /przerwać trwające automatyzacje i skrypty/ : /interrupt running automations and scripts/);
+  assert.equal(modal.querySelector('a').href,'https://github.com/MacSiem/ha-entity-renamer/issues/new');
+  assert.equal(f.card.shadowRoot.activeElement.id,'cancelWriteWarning');
+  modal.dispatchEvent(new f.dom.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+  assert.equal(writes(f).length,0);assert.equal(f.card._renameQueue.length,1);
+  assert.equal(f.card.shadowRoot.activeElement.id,'applyMigration');
+  f.card.shadowRoot.getElementById('applyMigration').click();
+  f.card.shadowRoot.getElementById('cancelWriteWarning').click();
+  assert.equal(writes(f).length,0);assert.equal(f.card._renameQueue.length,1);
+  f.card.shadowRoot.getElementById('applyMigration').click();
+  f.card.shadowRoot.getElementById('continueWriteWarning').click();await tick();await tick();
+  assert.equal(writes(f).length,1);assert.equal(f.card._migration.stage,'applied');
+});
+
+test('warning continue cannot revive consent after authority changes',async t=>{
+  const f=await fixture(t);await f.card._prepareMigration();
+  f.card.shadowRoot.getElementById('applyMigration').click();
+  f.card.hass={...f.hass,user:{id:'different',is_admin:true}};
+  f.card.shadowRoot.getElementById('continueWriteWarning').click();await tick();
+  assert.equal(writes(f).length,0);assert.equal(f.card._migration,null);
+});
+
+test('restore warning cancels without issuing an inverse',async t=>{
+  const f=await fixture(t);await f.card._prepareMigration();await f.card._applyMigration();
+  f.card.shadowRoot.getElementById('reviewMigrationRestore').click();
+  f.card.shadowRoot.getElementById('restoreMigration').click();
+  assert.ok(f.card.shadowRoot.querySelector('.write-warning-backdrop'));
+  f.card.shadowRoot.getElementById('cancelWriteWarning').click();
+  assert.equal(f.requests.some(m=>m.type==='ha_entity_renamer/recovery/restore'),false);
+  assert.equal(f.card.shadowRoot.activeElement.id,'restoreMigration');
+});
+
+test('ordinary confirmation offers only server review and cancel writes nothing',async t=>{
+  const f=await fixture(t);assert.equal(f.card.shadowRoot.getElementById('confirmRenameApply'),null);
+  f.card.shadowRoot.getElementById('cancelRenameDialog').click();
+  assert.equal(writes(f).length,0);assert.equal(f.card._renameQueue.length,1);
+  f.card._showRenameConfirmation();f.card.shadowRoot.getElementById('prepareMigration').click();await tick();
+  assert.equal(f.card._migration.stage,'review');assert.equal(writes(f).length,0);
   const request=f.requests.find(m=>m.type==='ha_entity_renamer/prepare');
   assert.deepEqual(JSON.parse(JSON.stringify(request)),{type:'ha_entity_renamer/prepare',entities:[{entity_id:'sensor.a',new_entity_id:'sensor.b'}],devices:[]});
-  assert.equal(f.card.shadowRoot.getElementById('confirmRenameApply'),null);assert.equal(writes(f).length,0);
 });
 
 test('review displays every server change and all dependency aggregates with PL/EN escaping',async t=>{
@@ -70,6 +111,47 @@ test('review names admitted dashboard changes in both languages before apply',as
   f.card.hass={...f.hass,language:'en'};
   assert.match(f.card.shadowRoot.querySelector('[role="dialog"]').textContent,/Dashboards/);
   assert.equal(writes(f).length,0);
+});
+
+test('server review displays specific scan limitations without presenting them as dependencies',async t=>{
+  const f=await fixture(t,'pl');
+  f.review.dependencies.coverage=[{source:'custom:example',status:'UNKNOWN',reason:'integration_code_not_enumerated',blockers:[]},
+    {source:'external',status:'UNKNOWN',reason:'external_consumers_not_enumerated',blockers:[]}];
+  await f.card._prepareMigration();
+  let dialog=f.card.shadowRoot.querySelector('[role="dialog"]');
+  assert.match(dialog.textContent,/Ograniczenia skanowania/);assert.match(dialog.textContent,/custom:example/);
+  assert.match(dialog.textContent,/Sama ich obecność nie dowodzi zależności/);
+  assert.ok(f.card.shadowRoot.getElementById('applyMigration'));assert.equal(writes(f).length,0);
+  f.card.hass={...f.hass,language:'en'};dialog=f.card.shadowRoot.querySelector('[role="dialog"]');
+  assert.match(dialog.textContent,/Scan limitations/);assert.match(dialog.textContent,/does not by itself prove a dependency/);
+});
+
+test('unsupported entry shows source and selected reference without a write',async t=>{
+  const f=await fixture(t,'pl');
+  f.handlers['ha_entity_renamer/prepare']=()=>Promise.reject({code:'unsupported_config_entry',
+    message:JSON.stringify({sources:[{domain:'custom_example',entry_id:'entry-1',references:['sensor.a'],reasons:['unsupported_helper_reference']}]})});
+  await f.card._prepareMigration();const dialog=f.card.shadowRoot.querySelector('[role="dialog"]');
+  assert.match(dialog.textContent,/Wpis konfiguracji/);assert.match(dialog.textContent,/custom_example/);
+  assert.match(dialog.textContent,/entry-1/);assert.match(dialog.textContent,/sensor.a/);
+  assert.equal(f.card.shadowRoot.getElementById('applyMigration'),null);assert.equal(writes(f).length,0);
+});
+
+for (const language of ['en','pl']) test(`state trigger refusal names the affected automation and script ${language}`,async t=>{
+  const f=await fixture(t,language);
+  f.handlers['ha_entity_renamer/prepare']=()=>Promise.reject({code:'unsupported_script_state_trigger',
+    message:JSON.stringify({automation:'automation.watcher',script:'script.selected'})});
+  await f.card._prepareMigration();const dialog=f.card.shadowRoot.querySelector('[role="dialog"]');
+  assert.match(dialog.textContent,language==='pl' ? /obserwuje stan tego skryptu/ : /monitors this script’s state/);
+  assert.match(dialog.textContent,/automation\.watcher/);assert.match(dialog.textContent,/script\.selected/);
+  assert.equal(f.card.shadowRoot.getElementById('applyMigration'),null);assert.equal(writes(f).length,0);
+});
+
+test('state trigger refusal does not render unvalidated server text',async t=>{
+  const f=await fixture(t);f.handlers['ha_entity_renamer/prepare']=()=>Promise.reject({code:'unsupported_script_state_trigger',
+    message:JSON.stringify({automation:'<img src=x>',script:'script.selected'})});
+  await f.card._prepareMigration();const dialog=f.card.shadowRoot.querySelector('[role="dialog"]');
+  assert.equal(dialog.querySelector('img'),null);assert.ok(!dialog.textContent.includes('<img'));
+  assert.equal(f.card.shadowRoot.getElementById('applyMigration'),null);assert.equal(writes(f).length,0);
 });
 
 test('unsupported prepare refuses honestly and cannot silently use registry-only',async t=>{
@@ -168,12 +250,20 @@ test('pending apply reads journal progress without timing out or repeating the w
   assert.equal(f.card._migration.applying,false);assert.equal(writes(f).length,1);
 });
 
-test('a detached registry-only button cannot dismiss a prepared migration or write',async t=>{
-  const f=await fixture(t);const oldButton=f.card.shadowRoot.getElementById('confirmRenameApply');
-  await f.card._prepareMigration();oldButton.click();f.card.render();
-  assert.ok(f.card.shadowRoot.getElementById('applyMigration'));assert.equal(writes(f).length,0);
+for (const kind of ['name', 'device']) test(`ordinary ${kind}-only queue uses the server review`,async t=>{
+  const f=await fixture(t);
+  f.card._renameQueue=kind==='name' ? [{oldId:'sensor.a',newName:'Reviewed name'}] : [];
+  f.card._deviceRenameQueue=kind==='device' ? {dev:'Reviewed device'} : {};
+  f.review.changes=kind==='name' ? [{entity_id:'sensor.a',fields:{name:{before:null,after:'Reviewed name'}}}]
+    : [{device_id:'dev',fields:{name_by_user:{before:null,after:'Reviewed device'}}}];
+  f.review.dependencies={domains:[],yaml_file_count:0,template_consumer_count:0,files:[]};
+  f.card._showRenameConfirmation();f.card.shadowRoot.getElementById('prepareMigration').click();await tick();
+  const sent=f.requests.find(m=>m.type==='ha_entity_renamer/prepare');
+  assert.deepEqual(JSON.parse(JSON.stringify(sent.entities)),kind==='name' ? [{entity_id:'sensor.a',name:'Reviewed name'}] : []);
+  assert.deepEqual(JSON.parse(JSON.stringify(sent.devices)),kind==='device' ? [{device_id:'dev',name_by_user:'Reviewed device'}] : []);
+  assert.equal(f.card._migration.stage,'review');assert.equal(writes(f).length,0);
+  assert.equal(f.card.shadowRoot.getElementById('confirmRenameApply'),null);
 });
-
 
 test('mixed queue sends only ordinary name fields and review includes server device changes',async t=>{
   const f=await fixture(t);f.card._renameQueue[0].newName='Literal <name>';f.card._deviceRenameQueue={dev:'Literal <device>'};f.card._showRenameConfirmation();
@@ -895,10 +985,26 @@ test('numeric Template entry dependency is explicit in forward and inverse revie
   assert.match(text,/sensor.consumer/); assert.match(text,/sensor.b\s*→\s*sensor.a/);
 });
 
+test('Powercalc group reference is visible in forward and inverse review', async t => {
+  const f=await fixture(t,'en');
+  f.review.dependencies={domains:['powercalc'],yaml_file_count:0,template_consumer_count:0,files:[],
+    config_entries:[{kind:'powercalc',entity_id:'sensor.old_group',before:'sensor.old_group',after:'sensor.new_group'}]};
+  await f.card._prepareMigration();
+  assert.equal(f.card._migration.stage,'review');
+  let text=f.card.shadowRoot.querySelector('[role="dialog"]').textContent;
+  assert.match(text,/Powercalc group/); assert.match(text,/sensor.old_group\s*→\s*sensor.new_group/);
+  f.handlers['ha_entity_renamer/recovery/inspect']=()=>({operation_id:'review_qa',fingerprint,state:'applied',eligible:true,restore_attempt_available:true});
+  await f.card._applyMigration();
+  f.card._reviewMigrationRestore();
+  text=f.card.shadowRoot.querySelector('[role="dialog"]').textContent;
+  assert.match(text,/Powercalc group/); assert.match(text,/sensor.new_group\s*→\s*sensor.old_group/);
+});
+
 test('unsupported Template dependency explains the specific refusal without offering apply', async t => {
   for (const [code, expected] of [['unsupported_template_reference', /Template reference could not be safely interpreted/i],
                                   ['unsupported_template_family', /Template form is not supported/i],
-                                  ['unsupported_powercalc_scope', /Powercalc is loaded/i]]) {
+                                  ['unsupported_powercalc_scope', /Powercalc is loaded/i],
+                                  ['unsupported_automation_scope', /Automation state or configuration could not be safely verified/i]]) {
     const f=await fixture(t);
     f.handlers['ha_entity_renamer/prepare']=()=>Promise.reject({code});
     await f.card._prepareMigration();

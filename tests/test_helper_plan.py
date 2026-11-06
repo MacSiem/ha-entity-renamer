@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import unittest
 
 from custom_components.ha_entity_renamer.helper_plan import plan_helper, rebase_after_listeners
-from custom_components.ha_entity_renamer.helper_native import apply_entry, read_entry
+from custom_components.ha_entity_renamer.helper_native import apply_entry, read_entry, UnsupportedEntryReferences, partition_entry_coverage
 
 MAP = {'sensor.before': 'sensor.after'}
 
@@ -18,6 +18,25 @@ def snapshot(domain, data=None, options=None):
 
 
 class PlannerTests(unittest.TestCase):
+    def test_blocked_entry_review_contains_source_and_reference_not_private_value(self):
+        plan = plan_helper(snapshot('custom_example', {'expression': 'secret states("sensor.before")'}), MAP)
+        self.assertTrue(plan.blocked)
+        error = UnsupportedEntryReferences((plan,), MAP)
+        self.assertEqual(error.sources[0]['domain'], 'custom_example')
+        self.assertEqual(error.sources[0]['entry_id'], 'synthetic')
+        self.assertEqual(error.sources[0]['references'], ['sensor.before'])
+        self.assertNotIn('secret', repr(error.sources))
+
+    def test_unrelated_dynamic_entry_is_reported_without_claiming_affected_reference(self):
+        affected = plan_helper(snapshot('custom_example', {'source': 'sensor.before'}), MAP)
+        uncertain = plan_helper(snapshot('other_custom', {'expression': '{{ states(variable) }}'}), MAP)
+        clean = plan_helper(snapshot('unrelated', {'name': 'a normal value'}), MAP)
+        blocked, limitations = partition_entry_coverage((affected, uncertain, clean), MAP)
+        self.assertEqual([row['domain'] for row in blocked], ['custom_example'])
+        self.assertEqual(blocked[0]['references'], ['sensor.before'])
+        self.assertEqual([row['domain'] for row in limitations], ['other_custom'])
+        self.assertEqual(limitations[0]['references'], [])
+
     def test_native_schemas_and_identity(self):
         for domain, field, value in [('group', 'entities', ['sensor.before']),
             ('min_max', 'entity_ids', ['sensor.before']), ('integration', 'source', 'sensor.before'),

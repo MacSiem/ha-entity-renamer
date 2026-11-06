@@ -23,11 +23,13 @@ def _composition(chain):
         return None
     row = chain.preparations.plans.get(reference[0])
     payload = None if row is None else row['payload'].get('composition')
-    if not (type(payload) is dict and payload.get('profile') == 'powercalc_source_own_binding_v1'):
+    if not (type(payload) is dict and payload.get('profile') in
+            ('powercalc_source_own_binding_v1', 'template_controlled_powercalc_v1')):
         return None
     from .powercalc_composition import PowercalcComposition
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
     baseline, composition = chain.preparations.resolve_composition(reference)
-    _need(baseline == chain.baseline and type(composition) is PowercalcComposition,
+    _need(baseline == chain.baseline and type(composition) in (PowercalcComposition, ControlledPowercalcComposition),
           'same_original_required')
     return composition
 
@@ -56,6 +58,12 @@ def validate_source_receipt(chain, payload, change):
     """Reject missing/foreign source evidence during completion and reopen."""
     composition = _composition(chain)
     reference = payload.get('powercalc_source_transition')
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    if type(composition) is ControlledPowercalcComposition:
+        _need(reference is None, 'foreign_live_source_subeffect')
+        from .controlled_powercalc_setup_receipts import validate_handoff
+        validate_handoff(chain, payload.get('controlled_powercalc_handoff'), payload['binding']['direction'])
+        return
     if composition is None:
         _need(reference is None, 'foreign_subeffect')
         return

@@ -22,22 +22,26 @@ class NativeOwnIDRegistryReadback(NativeTemplateStateYAMLRuntimeReadback):
         from .native_registry_receipts import RegistryReceiptChain
         from .native_template_state_binding import _StateRuntime
         from .native_template_state_composition import TemplateStateComposition, retain_state_composition
+        from .native_template_yaml_server import _dashboard_plan
         _need(type(chain) is RegistryReceiptChain and chain.yaml_index is None
               and type(composition) is TemplateStateComposition
               and not chain.original_receipt.proposed_files
               and not chain.original_receipt.changed_domains
-              and chain.plan.required_scopes == chain.plan.covered_scopes
-                  == chain.plan.verification_adapters == ('registry',)
-              and bool(chain.plan.steps)
-              and all(step.adapter == 'registry' for step in chain.plan.steps),
+              and ((chain.plan.required_scopes == chain.plan.covered_scopes
+                    == chain.plan.verification_adapters == ('registry',)
+                    and all(step.adapter == 'registry' for step in chain.plan.steps))
+                   or _dashboard_plan(chain.plan))
+              and bool(chain.plan.steps),
               'own_registry_readback_scope_unqualified')
         composition.assert_baseline(chain.baseline)
         self.composition, self.hass, self.chain, self.guard = composition, hass, chain, guard
         self.program, self.receipt = composition.state_config_program, chain.original_receipt
         self._last_runtime = None
+        self.runtime_original = False
         self.native = _StateRuntime(hass)
         _need(self.native.native.version == self.receipt.version, 'own_registry_core_changed')
-        self.change = chain._original_change(len(chain.plan.steps) - 1)
+        self.registry_index = max(i for i, step in enumerate(chain.plan.steps) if step.adapter == 'registry')
+        self.change = chain._original_change(self.registry_index)
         self.wire, self.composition_check = retain_state_composition(composition, chain.baseline)
         documents = {row.key: json.loads(row.raw) for row in chain.baseline.files}
         rows = [row for row in documents['core.entity_registry']['data']['entities']
@@ -52,7 +56,7 @@ class NativeOwnIDRegistryReadback(NativeTemplateStateYAMLRuntimeReadback):
 
     def assert_change(self, change):
         _need(change == self.change and self.chain.yaml_index is None
-              and self.chain._original_change(len(self.chain.plan.steps) - 1) == self.change,
+              and self.chain._original_change(self.registry_index) == self.change,
               'own_registry_preparation_changed')
         self.composition_check()
         _need(self.chain.original_receipt == self.receipt
@@ -80,6 +84,20 @@ class NativeOwnIDRegistryReadback(NativeTemplateStateYAMLRuntimeReadback):
         _need(current == original, 'own_registry_yaml_graph_changed')
         snapshot = sample_state_bindings(runtime, self.program, prefix, 'original',
                                          self.chain.accepted_documents())
-        expected = frozenset(dict(self.composition.mapping))
-        position = Position.AFTER if prefix.active == expected else Position.BEFORE
+        # Empty ID mappings still have a real before/after for selected names.
+        # Use the accepted registry image of the last prepared change, bound to
+        # its UUID; every selected row is independently checked by the bridge.
+        change = self.change
+        key = 'core.entity_registry' if change.kind == 'entity' else 'core.device_registry'
+        family = 'entities' if change.kind == 'entity' else 'devices'
+        rows = [row for row in self.chain.accepted_documents()[key]['data'][family]
+                if row.get('id') == change.identity]
+        _need(len(rows) == 1, 'own_registry_identity_changed')
+        fields = {key for key in set(change.before) | set(change.after)
+                  if key != 'modified_at' and change.before.get(key) != change.after.get(key)}
+        _need(bool(fields), 'own_registry_change_missing')
+        before = all(rows[0].get(key) == change.before.get(key) for key in fields)
+        after = all(rows[0].get(key) == change.after.get(key) for key in fields)
+        _need(before != after, 'own_registry_position_ambiguous')
+        position = Position.BEFORE if before else Position.AFTER
         return position, snapshot

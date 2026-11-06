@@ -33,10 +33,19 @@ def _need(value, reason):
 
 
 def _mixed_composition(value):
-    from .native_template_state_composition import MixedTemplateStateComposition
+    from .native_template_state_composition import MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition
     from .native_script_program_composition import ScriptTemplateStateComposition
     from .native_automation_program_composition import AutomationTemplateStateComposition
-    return type(value) in (MixedTemplateComposition, MixedTemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)
+    from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    return type(value) in (MixedTemplateComposition, MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ControlledPowercalcComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)
+
+
+def _controlled_reload(value):
+    from .native_template_state_composition import ControlledReloadComposition, ControlledReloadEntryComposition
+    from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    return type(value) in (ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ControlledPowercalcComposition)
 
 
 def _script_prefix_composition(value):
@@ -50,7 +59,7 @@ def _registry_only_state_plan(plan, composition, receipt):
     return (type(composition) is TemplateStateComposition and not receipt.proposed_files
             and not receipt.changed_domains and not receipt.unsupported_domains
             and plan.required_scopes == plan.covered_scopes == plan.verification_adapters == ('registry',)
-            and len(plan.steps) in (1, 2)
+            and bool(plan.steps)
             and all(step.adapter == 'registry' and not step.caused_by for step in plan.steps))
 
 
@@ -58,13 +67,51 @@ def _dashboard_plan(plan):
     adapters = tuple(step.adapter for step in plan.steps)
     if (plan.required_scopes != plan.covered_scopes or
             plan.required_scopes != plan.verification_adapters or
-            plan.required_scopes != ('registry', 'dashboard', 'yaml') or
-            len(adapters) < 3 or adapters[-1] != 'yaml' or any(step.caused_by for step in plan.steps)):
+            any(step.caused_by for step in plan.steps)):
         return False
     registry = adapters.count('registry')
     dashboards = adapters.count('dashboard')
-    return registry > 0 and dashboards > 0 and adapters == (
-        ('registry',) * registry + ('dashboard',) * dashboards + ('yaml',))
+    if not registry:
+        return False
+    if plan.required_scopes == ('registry', 'dashboard', 'yaml'):
+        return adapters == (('registry',) * registry + ('dashboard',) * dashboards + ('yaml',))
+    if plan.required_scopes == ('registry', 'dashboard'):
+        return adapters == (('registry',) * registry + ('dashboard',) * dashboards)
+    return False
+
+
+def _entry_reload_plan(plan, composition):
+    from .native_template_state_composition import ControlledReloadEntryComposition
+    from .controlled_script_composition import ControlledScriptComposition
+    if (type(composition) not in (ControlledReloadEntryComposition, ControlledScriptComposition)
+            or plan.required_scopes != plan.covered_scopes or plan.required_scopes != plan.verification_adapters
+            or any(step.caused_by for step in plan.steps)):
+        return False
+    adapters = tuple(step.adapter for step in plan.steps)
+    registries, dashboards = adapters.count('registry'), adapters.count('dashboard')
+    scopes = ('registry', 'helpers', 'dashboard', 'yaml') if dashboards else ('registry', 'helpers', 'yaml')
+    return bool(registries and plan.required_scopes == scopes and adapters ==
+                ('registry',) * registries + ('helpers',) + ('dashboard',) * dashboards + ('yaml',))
+
+
+def _controlled_powercalc_plan(plan, composition):
+    """Recognize one bounded queue without granting mutation authority."""
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    if (type(composition) is not ControlledPowercalcComposition
+            or plan.required_scopes != plan.covered_scopes
+            or plan.required_scopes != plan.verification_adapters
+            or any(step.caused_by for step in plan.steps)):
+        return False
+    adapters = tuple(step.adapter for step in plan.steps)
+    registry, helpers = adapters.count('registry'), adapters.count('helpers')
+    energy, dashboards = adapters.count('energy'), adapters.count('dashboard')
+    scopes = ('registry', 'helpers') + (('energy',) if energy else ()) + (
+        ('dashboard',) if 'dashboard' in plan.required_scopes else ()) + ('yaml',)
+    return (registry > 0 and helpers in (1, 2) and energy in (0, 1)
+            and plan.required_scopes == scopes
+            and adapters == ('registry',) * registry + ('helpers',) * helpers
+                + ('energy',) * energy + ('dashboard',) * dashboards + ('yaml',)
+            and ('dashboard' in scopes or not dashboards))
 
 
 def _registry_mapping(changes, composition, *, dashboard_plan=False):
@@ -72,16 +119,22 @@ def _registry_mapping(changes, composition, *, dashboard_plan=False):
     from .native_template_state_composition import TemplateStateComposition
     from .native_script_program_composition import ScriptTemplateStateComposition
     from .native_automation_program_composition import AutomationTemplateStateComposition
+    from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    powercalc = type(composition) is ControlledPowercalcComposition
     mixed_names = dashboard_plan and type(composition) in (ScriptTemplateStateComposition, AutomationTemplateStateComposition)
-    names = type(composition) is TemplateStateComposition or mixed_names
+    names = type(composition) is TemplateStateComposition or mixed_names or _controlled_reload(composition)
     own_template_profile = type(composition) in (TemplateStateComposition, ScriptTemplateStateComposition,
-                                                  AutomationTemplateStateComposition)
+                                                  AutomationTemplateStateComposition, ControlledScriptComposition, ControlledPowercalcComposition)
     from .native_registry_transition import (_native_script_default_name_move,
         _native_script_suggested_move, _native_script_unique_move)
     own_entity = [change for change in changes
                   if change.before.get('platform') in ('template', 'automation', 'script') and change.mapping]
+    direct_automation = (_controlled_reload(composition) and len(own_entity) == 1
+                         and own_entity[0].before.get('platform') == 'automation')
     if own_entity:
-        _need(own_template_profile and len(own_entity) == 1 and len(changes) in (1, 2),
+        _need((own_template_profile or direct_automation)
+              and len(own_entity) == 1 and (powercalc or len(changes) in (1, 2)),
               'own_template_mapping_required')
     mapping = {}
     for change in changes:
@@ -94,6 +147,10 @@ def _registry_mapping(changes, composition, *, dashboard_plan=False):
         default_name_move = script_move and _native_script_default_name_move(before, after)
         if change.kind == 'entity':
             allowed = {'entity_id', 'modified_at'} | ({'name'} if names else set())
+            if powercalc and before.get('platform') == 'powercalc' and change.mapping:
+                from .native_registry_transition import _powercalc_group_suggested_move
+                _need(_powercalc_group_suggested_move(before, after), 'powercalc_group_scope_required')
+                allowed.add('suggested_object_id')
             if script_move:
                 allowed |= {'unique_id', 'previous_unique_id'}
                 if default_name_move:
@@ -105,7 +162,8 @@ def _registry_mapping(changes, composition, *, dashboard_plan=False):
             _need(delta <= allowed, 'source_mapping_required')
             if change.mapping:
                 _need(len(change.mapping) == 1
-                      and (before['platform'] not in ('template', 'automation', 'script') or own_template_profile)
+                      and (before['platform'] not in ('template', 'automation', 'script') or own_template_profile
+                           or direct_automation and change is own_entity[0])
                       and not set(mapping) & set(change.mapping), 'source_mapping_required')
                 mapping.update(change.mapping)
             else:
@@ -121,15 +179,19 @@ def _registry_mapping(changes, composition, *, dashboard_plan=False):
             _need(names and not mixed_names and change.kind == 'device' and 'name_by_user' in delta
                   and delta <= {'name_by_user', 'modified_at'} and bool(change.runtime_before_json),
                   'selected_device_name_scope_required')
-    if own_entity:
+    if own_entity and not powercalc:
         _need(all(change.kind == 'entity' and change.mapping
                   and ((change is own_entity[0] and _native_script_unique_move(change.before, change.after))
                        or {key: value for key, value in change.before.items()
-                           if key not in ('entity_id', 'modified_at')}
+                           if key not in (('entity_id', 'modified_at', 'name')
+                                          if direct_automation and change.runtime_before_json
+                                          else ('entity_id', 'modified_at'))}
                           == {key: value for key, value in change.after.items()
-                              if key not in ('entity_id', 'modified_at')}) for change in changes),
+                              if key not in (('entity_id', 'modified_at', 'name')
+                                             if direct_automation and change.runtime_before_json
+                                             else ('entity_id', 'modified_at'))}) for change in changes),
               'own_template_mapping_required')
-    _need(bool(mapping) and len(set(mapping.values())) == len(mapping)
+    _need(bool(changes) and len(set(mapping.values())) == len(mapping)
           and not set(mapping) & set(mapping.values()), 'independent_mapping_required')
     return mapping
 
@@ -178,18 +240,20 @@ class NativeTemplateYAMLServer:
         _need(False, 'installed_factory_required')
 
     @classmethod
-    async def _open(cls, hass, *, guard, refresh, recovering_operation=None):
+    async def _open(cls, hass, *, guard, refresh, recovering_operation=None, powercalc_scope=False):
         from . import Runtime
         from homeassistant.core import HomeAssistant
         from .native_template_state_server import NativeTemplateStateServer
         _need(cls in (NativeTemplateYAMLServer, NativeTemplateStateServer) and type(hass) is HomeAssistant
-              and callable(guard) and callable(refresh), 'installed_scope_required')
+              and callable(guard) and callable(refresh) and type(powercalc_scope) is bool
+              and (not powercalc_scope or cls is NativeTemplateStateServer), 'installed_scope_required')
         runtime = hass.data.get(DATA_RUNTIME)
         _need(type(runtime) is Runtime, 'runtime_required')
         obj = object.__new__(cls)
         obj.hass, obj.runtime, obj.guard, obj.refresh = hass, runtime, guard, refresh
         obj.task, obj.lock = asyncio.current_task(), runtime.operation_lock
         obj.bound = obj.used = obj.closed = False
+        powercalc_present = 'powercalc' in hass.config.components
 
         def scope():
             _authorize(guard)
@@ -197,13 +261,16 @@ class NativeTemplateYAMLServer:
                   and runtime.loaded and not runtime.unloading
                   and runtime.operation_lock is obj.lock and obj.lock.locked(), 'runtime_scope_lost')
             obj.scene_fence.check()
-            _need('powercalc' not in hass.config.components, 'powercalc_scope_unsupported')
+            _need(('powercalc' in hass.config.components) is powercalc_present
+                  and (not powercalc_scope or powercalc_present), 'powercalc_scope_unsupported')
             _need(not ({'mqtt', 'rest', 'command_line'}
                        & set(hass.config.components)), 'other_consumer_scope_unsupported')
             if hasattr(obj, 'consumers'):
                 obj.consumers.check()
             if hasattr(obj, 'automation_lifecycle'):
                 obj.automation_lifecycle.check_live()
+            if hasattr(obj, 'controlled_automation'):
+                obj.controlled_automation.check_preserving_enabled()
             if obj.bound:
                 _need(runtime.journal is obj.journal and runtime.preparations is obj.preparations,
                       'runtime_cache_replaced')
@@ -241,9 +308,9 @@ class NativeTemplateYAMLServer:
 
     @classmethod
     async def prepare(cls, hass, mapping, *, guard, refresh, entity_names=None, device_names=None,
-                      review_id=None):
+                      review_id=None, _mixed_powercalc=False):
         from .manifest import parse_manifest
-        _need(type(mapping) is dict and bool(mapping)
+        _need(type(_mixed_powercalc) is bool and type(mapping) is dict and (bool(mapping) or not _mixed_powercalc)
               and all(type(k) is str and type(v) is str for k, v in mapping.items()), 'mapping_required')
         from .native_template_state_server import NativeTemplateStateServer
         if review_id is not None:
@@ -256,6 +323,7 @@ class NativeTemplateYAMLServer:
         _need(type(names) is dict and type(devices) is dict
               and all(type(key) is str and type(value) is str for key, value in names.items())
               and all(type(key) is str and type(value) is str for key, value in devices.items())
+              and bool(mapping or names or devices)
               and (not (names or devices) or cls is NativeTemplateStateServer),
               'selected_registry_names_required')
         names, devices = dict(names), dict(devices)
@@ -268,7 +336,8 @@ class NativeTemplateYAMLServer:
         _need(len(parsed.entities) == len(selected) and len(parsed.devices) == len(devices)
               and len(set(mapping.values())) == len(mapping)
               and not set(mapping) & set(mapping.values()), 'independent_mapping_required')
-        obj = await cls._open(hass, guard=guard, refresh=refresh)
+        obj = await cls._open(hass, guard=guard, refresh=refresh, powercalc_scope=_mixed_powercalc)
+        obj.mixed_powercalc = _mixed_powercalc
         obj.mapping, obj.entity_names, obj.device_names = dict(mapping), names, devices
         obj.review_id = review_id
         try:
@@ -410,9 +479,12 @@ class NativeTemplateYAMLServer:
     async def _install_dashboard_fence(self):
         from .dashboard_phase import DashboardPhase, DashboardConsumerFence
         observed = self.consumers.dashboard_observed
-        _need(_dashboard_plan(self.plan) and observed is not None, 'dashboard_evidence_required')
+        _need((_dashboard_plan(self.plan) or _controlled_powercalc_plan(self.plan, self.composition))
+              and observed is not None, 'dashboard_evidence_required')
         phase = await DashboardPhase.capture(self.hass, observed, self.chain, guard=self._scope)
         self._scope()
+        _need(bool(phase.yaml_routes) or any(step.adapter == 'dashboard' for step in self.plan.steps),
+              'dashboard_effect_or_route_required')
         self.dashboard_phase = phase
         self.consumers.native = DashboardConsumerFence(self.hass, observed, phase)
         self._scope()
@@ -591,7 +663,19 @@ class NativeTemplateYAMLServer:
         self._scope()
         await self._fresh_stores(None)
         await self._common(False, initial=True)
-        if _mixed_composition(self.composition) and not _script_prefix_composition(self.composition):
+        from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+        if (_controlled_reload(self.composition) and ('automation' in self.receipt.changed_domains
+                or (is_controlled_script(self.composition) and self.hass.data.get('automation') is not None)
+                or any(change.mapping and change.before.get('platform') == 'automation'
+                       for change in self.registry_changes))):
+            from .native_automation_transition import NativeAutomationTransition
+            transition = NativeAutomationTransition(self.hass, allow_running=True)
+            await transition.prepare_preserving_enabled()
+            self.controlled_automation = transition
+            self.observer.controlled_automation = transition
+            self._scope()
+        if (_mixed_composition(self.composition) and not _script_prefix_composition(self.composition)
+                and not _controlled_reload(self.composition)):
             from .journal import Record
             from .native_automation_lifecycle import NativeAutomationLifecycle
             # Persist the ordinary operation BEFORE any native detach, as in
@@ -624,7 +708,10 @@ class NativeTemplateYAMLServer:
     @classmethod
     async def bind_reverse(cls, hass, operation_id, fingerprint, *, guard, refresh, restored=False):
         """Fresh read-only reopen, actual admission, then a DIFFERENT live chain."""
-        obj = await cls._open(hass, guard=guard, refresh=refresh, recovering_operation=operation_id)
+        from .native_template_state_server import NativeTemplateStateServer
+        powercalc_scope = cls is NativeTemplateStateServer and 'powercalc' in hass.config.components
+        obj = await cls._open(hass, guard=guard, refresh=refresh, recovering_operation=operation_id,
+                              powercalc_scope=powercalc_scope)
         try:
             record = await obj.journal.load(operation_id)
             obj._scope()
@@ -661,28 +748,40 @@ class NativeTemplateYAMLServer:
                       'prefix_profile_unsupported')
             obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
             obj.digests = dict(obj.composition.prepared_digests)
+            from .controlled_powercalc_composition import ControlledPowercalcComposition
+            is_powercalc = type(obj.composition) is ControlledPowercalcComposition
+            _need(not is_powercalc or powercalc_scope, 'powercalc_runtime_required')
             registry_only = _registry_only_state_plan(obj.plan, obj.composition, obj.receipt)
-            dashboard_plan = _dashboard_plan(obj.plan)
+            entry_plan = _entry_reload_plan(obj.plan, obj.composition)
+            powercalc_plan = _controlled_powercalc_plan(obj.plan, obj.composition)
+            dashboard_plan = _dashboard_plan(obj.plan) or ((entry_plan or powercalc_plan) and 'dashboard' in obj.plan.required_scopes)
             standard = (obj.plan.required_scopes == obj.plan.covered_scopes == obj.plan.verification_adapters == ('registry', 'yaml')
                   and tuple(s.adapter for s in obj.plan.steps) == ('registry',) * (len(obj.plan.steps) - 1) + ('yaml',)
                   and len(obj.plan.steps) >= 2 and not any(s.caused_by for s in obj.plan.steps))
             _need(obj.plan.coverage_evidence == obj.composition.coverage_sha256
-                  and (registry_only or standard or dashboard_plan), 'qualified_plan_required')
+                  and (registry_only or standard or dashboard_plan or entry_plan or powercalc_plan), 'qualified_plan_required')
             changes = [decode_change(obj.preparations.resolve(s.prepared_ref, obj.digests[s.prepared_ref]))
                        for s in obj.plan.steps]
             obj.registry_changes = tuple(change for step, change in zip(obj.plan.steps, changes, strict=True)
                                          if step.adapter == 'registry')
             obj.dashboard_changes = tuple(change for step, change in zip(obj.plan.steps, changes, strict=True)
                                           if step.adapter == 'dashboard')
-            obj.change = changes[-1]
+            obj.change = changes[-1] if obj.receipt.proposed_files else obj.registry_changes[-1]
             _need(set(obj.digests) == {s.prepared_ref for s in obj.plan.steps}, 'preparation_scope')
             obj.mapping = _registry_mapping(obj.registry_changes, obj.composition, dashboard_plan=dashboard_plan)
+            from .energy_native import PreparedEnergy
+            energy = [change for step, change in zip(obj.plan.steps, changes, strict=True)
+                      if step.adapter == 'energy']
+            _need(len(energy) <= 1 and all(type(change) is PreparedEnergy for change in energy),
+                  'powercalc_energy_preparation_required')
             consumer_type = _UnchangedConsumers
             if _mixed_composition(obj.composition):
                 from .mixed_yaml_runtime import MixedYAMLConsumers
                 consumer_type = MixedYAMLConsumers
             obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope,
-                                                        _dashboard_effects=dashboard_plan)
+                _powercalc_energy=energy[0] if energy else None, _dashboard_effects=dashboard_plan,
+                _powercalc_reverse=is_powercalc and not restored)
+            obj.consumers.allow_controlled_reload = _controlled_reload(obj.composition)
             from .native_automation_program_composition import AutomationTemplateStateComposition
             if type(obj.composition) is AutomationTemplateStateComposition:
                 from .native_automation_owned_graph import OwnedAutomationGraph
@@ -695,6 +794,36 @@ class NativeTemplateYAMLServer:
                                                    obj.receipt, obj.digests)
             _need(not readonly.writable and readonly.active is None, 'readonly_required')
             obj.chain = readonly
+            if is_powercalc:
+                from .native_powercalc_accepted_consumers import async_observe_accepted_powercalc_consumers
+                from .powercalc_runtime_observer import capture_powercalc_runtime
+                from .powercalc_source_binding import PowercalcSourceBindings
+                from .controlled_powercalc_population import qualify_population
+                from .native_registry_receipts import _event_id
+                capture = capture_powercalc_runtime(hass, guard=obj._scope)
+                accepted = await async_observe_accepted_powercalc_consumers(
+                    hass, readonly, obj.evidence, capture, guard=obj._scope)
+                bound = PowercalcSourceBindings(accepted.evidence_sha256, accepted.original_runtime_sha256,
+                    accepted.rows, core_version=accepted.version, relationships=accepted.relationships,
+                    energy_settings_sha256=accepted.energy_settings_sha256)
+                aliases = None
+                if not restored:
+                    alias_key = _event_id(['controlled_pc_population', readonly.root_id, 'forward', 'receipt'])
+                    saved = readonly.store.read(alias_key)
+                    from .controlled_powercalc_setup_receipts import validate_handoff
+                    _need(saved is not None, 'powercalc_forward_handoff_missing')
+                    aliases = validate_handoff(readonly, [alias_key, saved['digest']], 'forward')
+                reverse_mapping = {} if restored else {new: old for old, new in obj.mapping.items()}
+                obj.powercalc_population = qualify_population(hass, bound, reverse_mapping,
+                    obj.composition.previous, inverse_aliases=aliases)
+                expected = (obj.composition.population if restored else tuple(sorted(
+                    (obj.mapping.get(name, name), uid, kind) for name, uid, kind in obj.composition.population)))
+                _need(obj.powercalc_population.descriptors == expected, 'powercalc_population_changed')
+                if energy:
+                    from homeassistant.components.energy.data import async_get_manager
+                    from .energy_native import NativeEnergy
+                    obj.native_energy = NativeEnergy(hass, await async_get_manager(hass))
+                    obj._scope()
             if dashboard_plan:
                 await obj._install_dashboard_fence()
             if restored_partial:
@@ -742,21 +871,28 @@ class NativeTemplateYAMLServer:
         This is an internal capability boundary. Websocket input never contains
         a Plan, receipt, preparations, root or callback.
         """
-        obj = await cls._open(hass, guard=guard, refresh=refresh)
+        from .native_template_state_server import NativeTemplateStateServer
+        powercalc_scope = cls is NativeTemplateStateServer and 'powercalc' in hass.config.components
+        obj = await cls._open(hass, guard=guard, refresh=refresh, powercalc_scope=powercalc_scope)
         try:
             obj.operation_id, obj.plan = operation_id, plan
             plan.validate()
             baseline, obj.composition = obj.preparations.resolve_composition(plan.native_inputs)
+            from .controlled_powercalc_composition import ControlledPowercalcComposition
+            _need(type(obj.composition) is not ControlledPowercalcComposition or powercalc_scope,
+                  'powercalc_composition_required')
             obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
             obj.digests = dict(obj.composition.prepared_digests)
             registry_only = _registry_only_state_plan(plan, obj.composition, obj.receipt)
-            dashboard_plan = _dashboard_plan(plan)
+            entry_plan = _entry_reload_plan(plan, obj.composition)
+            powercalc_plan = _controlled_powercalc_plan(plan, obj.composition)
+            dashboard_plan = _dashboard_plan(plan) or ((entry_plan or powercalc_plan) and 'dashboard' in plan.required_scopes)
             standard = (plan.required_scopes == plan.covered_scopes == plan.verification_adapters == ('registry', 'yaml')
                   and len(plan.steps) >= 2
                   and tuple(s.adapter for s in plan.steps) == ('registry',) * (len(plan.steps) - 1) + ('yaml',)
                   and not any(s.caused_by for s in plan.steps))
             _need(plan.coverage_evidence == obj.composition.coverage_sha256
-                  and (registry_only or standard or dashboard_plan)
+                  and (registry_only or standard or dashboard_plan or entry_plan or powercalc_plan)
                   and set(obj.digests) == {s.prepared_ref for s in plan.steps}, 'qualified_plan_required')
             changes = [decode_change(obj.preparations.resolve(s.prepared_ref, obj.digests[s.prepared_ref]))
                        for s in plan.steps]
@@ -764,14 +900,20 @@ class NativeTemplateYAMLServer:
                                          if step.adapter == 'registry')
             obj.dashboard_changes = tuple(change for step, change in zip(plan.steps, changes, strict=True)
                                           if step.adapter == 'dashboard')
-            obj.change = changes[-1]
+            obj.change = changes[-1] if obj.receipt.proposed_files else obj.registry_changes[-1]
             obj.mapping = _registry_mapping(obj.registry_changes, obj.composition, dashboard_plan=dashboard_plan)
+            from .energy_native import PreparedEnergy
+            energy = [change for step, change in zip(plan.steps, changes, strict=True)
+                      if step.adapter == 'energy']
+            _need(len(energy) <= 1 and all(type(change) is PreparedEnergy for change in energy),
+                  'powercalc_energy_preparation_required')
             consumer_type = _UnchangedConsumers
             if _mixed_composition(obj.composition):
                 from .mixed_yaml_runtime import MixedYAMLConsumers
                 consumer_type = MixedYAMLConsumers
             obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope,
-                                                        _dashboard_effects=dashboard_plan)
+                _powercalc_energy=energy[0] if energy else None, _dashboard_effects=dashboard_plan)
+            obj.consumers.allow_controlled_reload = _controlled_reload(obj.composition)
             obj._scope()
             bind_sources = (obj.consumers.bind_prefix_sources if _script_prefix_composition(obj.composition)
                             else obj.consumers.bind_sources)
@@ -786,6 +928,24 @@ class NativeTemplateYAMLServer:
             _need(not readonly.writable and readonly.active is None
                   and state.head == readonly.root_digest, 'pristine_review_required')
             obj.chain = readonly
+            if powercalc_plan:
+                from .powercalc_runtime_observer import capture_powercalc_runtime
+                from .powercalc_source_binding import async_bind_powercalc_sources
+                from .powercalc_previous_state_original import async_capture_powercalc_previous_original
+                from .controlled_powercalc_population import qualify_population
+                obj.powercalc_capture = capture_powercalc_runtime(hass, guard=obj._scope)
+                bound = await async_bind_powercalc_sources(hass, obj.receipt, obj.evidence,
+                    obj.powercalc_capture, guard=obj._scope)
+                previous = await async_capture_powercalc_previous_original(hass, obj.receipt, obj.evidence,
+                    obj.powercalc_capture, guard=obj._scope, allow_live_progress=True)
+                obj.powercalc_population = qualify_population(hass, bound, obj.mapping, previous)
+                _need(obj.powercalc_population.descriptors == obj.composition.population,
+                      'powercalc_population_changed')
+                if energy:
+                    from homeassistant.components.energy.data import async_get_manager
+                    from .energy_native import NativeEnergy
+                    obj.native_energy = NativeEnergy(hass, await async_get_manager(hass))
+                    obj._scope()
             if dashboard_plan:
                 await obj._install_dashboard_fence()
             obj._install()
@@ -819,12 +979,24 @@ class NativeTemplateYAMLServer:
         observed = await async_observe_discovery_inputs(self.hass, guard=self._scope)
         self._scope()
         sampler = _RuntimeSourceSampler.bind(self.evidence, observed)
+        from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+        if is_controlled_script(self.composition):
+            from .controlled_script_phases import ControlledScriptPhases
+            self.consumers.evidence, self.consumers.observed = self.evidence, observed
+            self.consumers.runtime_sample = None
+            self.consumers.phases = ControlledScriptPhases(self, observed,
+                position=Position.BEFORE if rollback else Position.AFTER)
+            self._scope()
+            return
         if _script_prefix_composition(self.composition):
             self.consumers.bind_prefix_phases(self)
             self._scope()
             return
         if _mixed_composition(self.composition):
             self.consumers.bind_phases(self.receipt, self.evidence, observed, Position.BEFORE if rollback else Position.AFTER)
+            fence = getattr(self, 'own_dependent_fence', None)
+            if fence is not None and fence.native_readd:
+                self.consumers.phases.own_fence = fence
             self._scope()
             return
         sample = sampler.sample(self.hass, self.evidence, observed)
@@ -862,7 +1034,19 @@ class NativeTemplateYAMLServer:
             await self._prefix_current(self.record)
         else:
             await self._terminal(self.record, rollback=False)
-        if _mixed_composition(self.composition) and not _script_prefix_composition(self.composition):
+        from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+        if (_controlled_reload(self.composition) and ('automation' in self.receipt.changed_domains
+                or (is_controlled_script(self.composition) and self.hass.data.get('automation') is not None)
+                or any(change.mapping and change.before.get('platform') == 'automation'
+                       for change in self.registry_changes))):
+            from .native_automation_transition import NativeAutomationTransition
+            transition = NativeAutomationTransition(self.hass, allow_running=True)
+            await transition.prepare_preserving_enabled()
+            self.controlled_automation = transition
+            self.observer.controlled_automation = transition
+            self._scope()
+        if (_mixed_composition(self.composition) and not _script_prefix_composition(self.composition)
+                and not _controlled_reload(self.composition)):
             from .native_automation_lifecycle import NativeAutomationLifecycle
             self.automation_lifecycle = NativeAutomationLifecycle(self, 'rollback')
             self.observer.automation_lifecycle = self.automation_lifecycle
@@ -880,6 +1064,8 @@ class NativeTemplateYAMLServer:
     def close(self):
         _need(asyncio.current_task() is self.task, 'owner_task_required')
         try:
+            if hasattr(self, 'controlled_automation'):
+                self.controlled_automation.close_preserving_enabled()
             if hasattr(self, 'automation_lifecycle'):
                 self.automation_lifecycle.close()
             consumers = getattr(self, 'consumers', None)

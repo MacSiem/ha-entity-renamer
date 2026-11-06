@@ -17,7 +17,7 @@ from .energy_native import EnergySnapshot, PreparedEnergy
 from .energy_plan import plan_energy
 from .native_input_baseline import _envelope, _loads, _open_absolute_directory, _signature
 from .native_registry import PreparedRegistryChange
-from .native_registry_receipts import RegistryIntent, _digest
+from .native_registry_receipts import RegistryIntent, _digest, _exact_json_equal, _freeze_json
 from .transaction import Refused
 from .yaml_plan import _Reader, Limits
 
@@ -30,17 +30,19 @@ def _need(value, reason):
 def validate_prepared_energy(chain, change):
     """Prove ORIGINAL and candidate Energy bytes are exactly the queued plan."""
     from .powercalc_composition import PowercalcComposition
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
     from .powercalc_profile_inputs import digest
     from .prepared import decode_change
     _need(type(change) is PreparedEnergy and change.before.value is not None
           and change.before.file_identity is not None, 'prepared_required')
     baseline, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
-    _need(baseline == chain.baseline and type(composition) is PowercalcComposition
+    _need(baseline == chain.baseline and type(composition) in (PowercalcComposition, ControlledPowercalcComposition)
           and composition.evidence.powercalc_candidate_sources.documents.energy is not None,
           'same_original_required')
     before_raw, after_raw = composition.evidence.powercalc_candidate_sources.documents.energy
     before, after = _loads(before_raw), _loads(after_raw)
-    _need(before['data'] == change.before.value and after['data'] == change.after
+    _need(_exact_json_equal(before['data'], _freeze_json(change.before.value))
+          and _exact_json_equal(after['data'], _freeze_json(change.after))
           and hashlib.sha256(before_raw).hexdigest() == change.before.file_identity[2],
           'candidate_energy_bytes_changed')
     source = next((row for row in chain.original_receipt.source_files if row[0] == '.storage/energy'), None)
@@ -58,7 +60,8 @@ def validate_prepared_energy(chain, change):
                 _need(old not in mapping and new not in mapping.values(), 'registry_mapping_ambiguous')
                 mapping[old] = new
     planned = plan_energy(change.before.value, mapping)
-    _need(not planned.markers and planned.value == change.after, 'energy_mapping_not_exact')
+    _need(not planned.markers and _exact_json_equal(planned.value, _freeze_json(change.after)),
+          'energy_mapping_not_exact')
     old_graph = _loads(composition.evidence.powercalc_sources.closed_graph_json)
     new_graph = _loads(composition.evidence.powercalc_candidate_sources.sources.closed_graph_json)
     _need(old_graph['energy_settings_sha256'] == digest(change.before.value)
@@ -83,6 +86,13 @@ def fold_energy_receipt(chain, states, sources, intent, receipt):
     """Reconstruct one acknowledged native Energy delta in chain sequence."""
     _need(type(sources) is dict and '.storage/energy' in sources, 'source_file_required')
     binding = intent['binding']
+    from .powercalc_source_receipts import _composition
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    if type(_composition(chain)) is ControlledPowercalcComposition:
+        from .controlled_powercalc_setup_receipts import validate_handoff
+        validate_handoff(chain, intent.get('controlled_powercalc_handoff'), binding['direction'])
+    else:
+        _need(intent.get('controlled_powercalc_handoff') is None, 'foreign_handoff')
     change = chain._original_change(binding['index'])
     old_value, old_rev, new_value, new_rev = _expected(change, binding['direction'])
     prior, after = intent.get('energy_before'), receipt.get('energy_after')
@@ -142,16 +152,20 @@ def _read_physical(root, expected_identity, root_identity, storage_identity):
 async def observe_energy(native, lifecycle):
     """Actual native cache/disk read plus symlink-safe physical identity."""
     from .native_input_baseline import _drained
-    lifecycle.check()
+    from .controlled_powercalc_handoff import ControlledPowercalcHandoff
+    controlled = type(lifecycle) is ControlledPowercalcHandoff
+    check = lifecycle.require_inactive if controlled else lifecycle.check
+    composition = lifecycle.root.composition if controlled else lifecycle.composition
+    check()
     before = await native.read()
-    lifecycle.check()
+    check()
     _need(before.file_identity is not None, 'energy_file_required')
     physical = await _drained(native.hass.async_add_executor_job, lambda: _read_physical(
         lifecycle.chain.original_receipt.config_root, before.file_identity,
-        lifecycle.composition.previous.root_identity, lifecycle.composition.previous.storage_identity))
-    lifecycle.check()
+        composition.previous.root_identity, composition.previous.storage_identity))
+    check()
     after = await native.read()
-    lifecycle.check()
+    check()
     _need(after == before, 'energy_changed_during_read')
     return EnergyObservation(before, physical)
 
@@ -174,6 +188,17 @@ async def begin(chain, context, observations, energy):
     payload = {'kind': 'powercalc_energy_intent', 'chain': chain.root_id, 'binding': binding,
                'source_chain': head, 'sequence': sequence, 'source': chain._summary(states),
                'energy_before': {'revision': old_rev, 'physical': list(energy.physical)}}
+    from .powercalc_source_receipts import _composition
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    if type(_composition(chain)) is ControlledPowercalcComposition:
+        from .native_registry_receipts import _event_id
+        from .controlled_powercalc_setup_receipts import validate_handoff
+        key = _event_id(['controlled_pc_population', chain.root_id, binding['direction'], 'receipt'])
+        row = chain.store.read(key)
+        _need(row is not None, 'controlled_handoff_required')
+        reference = [key, row['digest']]
+        validate_handoff(chain, reference, binding['direction'])
+        payload['controlled_powercalc_handoff'] = reference
     ref = await chain.store.create(chain._slot('intent', context.index, binding['direction']), payload)
     chain.active = RegistryIntent(ref)
     chain._remember((states, head, sequence, completed, ref))

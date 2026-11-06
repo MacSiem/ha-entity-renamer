@@ -31,6 +31,23 @@ class PowercalcGroupRestorePayload:
 
 
 def prepare(stored, target, *, full_total, precision, unit):
+    return _prepare(stored, target, full_total=full_total, precision=precision, unit=unit,
+                    same_id=False)
+
+
+def prepare_same_id(stored, *, full_total, precision, unit):
+    """Prepare exact restore data for an unchanged group in a global reload.
+
+    This is detached data only; an inactive owner and CAS on the actual
+    directional preimage are required before applying it.
+    """
+    api = native._native()
+    source = native._capture(stored, api)['state']['entity_id']
+    return _prepare(stored, source, full_total=full_total, precision=precision, unit=unit,
+                    same_id=True)
+
+
+def _prepare(stored, target, *, full_total, precision, unit, same_id):
     from homeassistant.components.sensor import SensorExtraStoredData
     _need(type(target) is str and target.startswith('sensor.')
           and type(full_total) is str and type(precision) is int and type(unit) is str and unit,
@@ -43,7 +60,7 @@ def prepare(stored, target, *, full_total, precision, unit):
     api = native._native()
     before = native._capture(stored, api)
     source = before['state']['entity_id']
-    _need(source != target and source.split('.', 1)[0] == target.split('.', 1)[0]
+    _need((source == target) is same_id and source.split('.', 1)[0] == target.split('.', 1)[0]
           and type(before['extra_data']) is dict, 'native_source_or_target')
     prior = SensorExtraStoredData.from_dict(before['extra_data'])
     _need(type(prior) is SensorExtraStoredData and prior.native_unit_of_measurement == unit

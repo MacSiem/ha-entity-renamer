@@ -104,7 +104,9 @@ def _yaml_summary(session):
     consumers = [(row.domain.removeprefix('template.'), row.native_key)
                  for row in definitions
                  if row.domain in ('template.sensor', 'template.binary_sensor')]
-    if (not 1 <= len(sources) <= 10000 or not 1 <= len(consumers) <= 10000
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    controlled_powercalc = type(session.composition) is ControlledPowercalcComposition
+    if (not registry or len(sources) > 10000 or not (0 if controlled_powercalc else 1) <= len(consumers) <= 10000
             or len(set(consumers)) != len(consumers)):
         raise Refused('unsupported_recovery_plan')
     result = {'sources': sources,
@@ -114,13 +116,17 @@ def _yaml_summary(session):
         result['registry_changes'] = registry
     from .native_script_program_composition import ScriptTemplateStateComposition
     from .native_automation_program_composition import AutomationTemplateStateComposition
-    if type(session.composition) in (ScriptTemplateStateComposition, AutomationTemplateStateComposition):
+    from .controlled_script_composition import is_controlled_script
+    controlled_script = is_controlled_script(session.composition)
+    if (type(session.composition) in (ScriptTemplateStateComposition, AutomationTemplateStateComposition)
+            or controlled_script):
         phases = session.consumers.phases
         phases.check()
         program = session.composition.dependent_config_program
         # Actual current prefix, not every proposed/future change. The existing
         # Template consumer field keeps its established meaning for old clients.
-        domains = (('automation', 'script') if type(session.composition) is AutomationTemplateStateComposition
+        domains = (('automation', 'script') if (type(session.composition) is AutomationTemplateStateComposition
+                                                 or controlled_script)
                    else ('script',))
         result['dependent_changes'] = {}
         original, active = dict(program.rows(frozenset())), dict(program.rows(phases.mask))
@@ -160,9 +166,29 @@ def _own_registry_plan(preparations, record):
         return False
 
 
+def _controlled_entry_plan(preparations, record):
+    """Route only the retained typed entry profile to its strict binder."""
+    try:
+        from .native_template_yaml_server import _entry_reload_plan
+        _, composition = preparations.resolve_composition(record.plan.native_inputs)
+        return _entry_reload_plan(record.plan, composition)
+    except Exception:
+        return False
+
+
 def _dashboard_yaml_plan(record):
     from .native_template_yaml_server import _dashboard_plan
-    return _dashboard_plan(record.plan)
+    plan = getattr(record, 'plan', None)
+    return False if plan is None else _dashboard_plan(plan)
+
+
+def _controlled_powercalc_plan(preparations, record):
+    try:
+        from .native_template_yaml_server import _controlled_powercalc_plan as qualified
+        _, composition = preparations.resolve_composition(record.plan.native_inputs)
+        return qualified(record.plan, composition)
+    except Exception:
+        return False
 
 
 def _ordinary_review_owned(preparations, operation_id):
@@ -205,17 +231,44 @@ def _yaml_frozen_review(session, *, restored=False):
         identities.append([before.get(key) for key in ('id', 'platform', 'unique_id', 'device_id')]
                           if change.kind == 'entity' else change.identity)
     from .dependency_review import dependency_files
+    from .native_template_state_composition import ControlledReloadEntryComposition
+    controlled_entry = type(session.composition) is ControlledReloadEntryComposition
     receipt = session.receipt
     result = {'changes': changes, 'identities': identities, 'dependencies': {
         'domains': sorted([domain for domain in receipt.changed_domains
                            if domain in ('template', 'automation', 'script')]
-                          + (['dashboard'] if _dashboard_yaml_plan(session.record) else [])),
+                          + (['dashboard'] if (_dashboard_yaml_plan(session.record) or
+                             controlled_entry
+                             and 'dashboard' in session.record.plan.required_scopes) else [])),
         'yaml_file_count': len(receipt.proposed_files),
         'files': dependency_files(session.composition),
         'template_consumer_count': sum(
             row.domain in ('template.sensor', 'template.binary_sensor')
             for row in session.evidence.template_sources.ledger.definitions)}}
-    if _dashboard_yaml_plan(session.record):
+    if controlled_entry or getattr(session, 'entry_change', None) is not None:
+        import json
+        change = session.entry_change
+        old, new = next(iter(change.mapping.items()))
+        baseline = session.chain.baseline
+        rows = json.loads(next(row.raw for row in baseline.files
+                               if row.key == 'core.entity_registry'))['data']['entities']
+        consumers = [row for row in rows if row.get('config_entry_id') == change.before['identity']['entry_id']]
+        if len(consumers) != 1:
+            raise Refused('controlled_entry_review_consumer_unqualified')
+        result['dependencies']['config_entries'] = [{'entity_id': consumers[0]['entity_id'],
+                                                      'before': old, 'after': new}]
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    if type(session.composition) is ControlledPowercalcComposition:
+        from .dependency_review import dependency_powercalc_groups
+        from .prepared import decode_change
+        digests = dict(session.composition.prepared_digests)
+        helpers = [decode_change(session.preparations.resolve(step.prepared_ref, digests[step.prepared_ref]))
+                   for step in session.plan.steps if step.adapter == 'helpers']
+        result['dependencies'].setdefault('config_entries', []).extend(dependency_powercalc_groups(helpers))
+        result['dependencies']['domains'] = sorted(set(result['dependencies']['domains']
+            + ['powercalc'] + (['energy'] if 'energy' in session.plan.required_scopes else [])
+            + (['dashboard'] if 'dashboard' in session.plan.required_scopes else [])))
+    if _dashboard_yaml_plan(session.record) or (controlled_entry and 'dashboard' in session.record.plan.required_scopes):
         from .dependency_review import dependency_dashboards
         result['dependencies']['dashboards'] = dependency_dashboards(session.dashboard_changes, session.mapping)
     return result
@@ -362,7 +415,8 @@ class RecoveryController:
                 continue
             if record.status in ('applied', 'rolled_back'):
                 if (record.status == 'applied' and record.direction == 'forward'
-                        and (record.plan.required_scopes == ('registry', 'yaml')
+                        and (record.plan.required_scopes in (('registry', 'yaml'), ('registry', 'helpers', 'yaml'),
+                                                              ('registry', 'helpers', 'dashboard', 'yaml'))
                              or _dashboard_yaml_plan(record))):
                     # Snapshot inventory is never full native/source admission.
                     # Only explicit inspect may qualify this terminal plan.
@@ -386,6 +440,15 @@ class RecoveryController:
                     stored = (preparations.plans.get(native[0]) if type(native) is tuple and len(native) == 3
                               and type(native[0]) is str else None)
                     encoded = stored['payload'].get('composition') if stored is not None else None
+                    is_controlled_pc = _controlled_powercalc_plan(preparations, record)
+                    if (is_controlled_pc and record.status == 'applied' and record.direction == 'forward'
+                            and record.phases == ('verified',) * len(record.plan.steps)):
+                        operations.append({'operation_id': record.operation_id,
+                            'fingerprint': record.plan.fingerprint, 'status': record.status,
+                            'direction': record.direction, 'recovery_required': True,
+                            'reason': 'inspection_available', 'eligible': False})
+                        required = True
+                        continue
                     is_powercalc = (type(encoded) is dict
                                     and encoded.get('profile') == 'powercalc_source_own_binding_v1')
                     if is_powercalc:
@@ -482,6 +545,7 @@ class RecoveryController:
             stored = (preparations.plans.get(native[0]) if type(native) is tuple and len(native) == 3
                       and type(native[0]) is str else None)
             encoded = stored['payload'].get('composition') if stored is not None else None
+            controlled_powercalc = _controlled_powercalc_plan(preparations, record)
             if type(encoded) is dict and encoded.get('profile') == 'powercalc_source_own_binding_v1':
                 from .powercalc_composition import PowercalcComposition
                 _, composition = preparations.resolve_composition(native)
@@ -511,6 +575,7 @@ class RecoveryController:
                 if (record.restore_attempted is not True
                         or (record.plan.required_scopes != ('registry', 'yaml')
                             and not _dashboard_yaml_plan(record)
+                            and not _controlled_entry_plan(preparations, record) and not controlled_powercalc
                             and not _own_registry_plan(preparations, record))
                         or not _ordinary_review_owned(preparations, operation_id)):
                     return _result(operation_id, fingerprint, 'UNKNOWN', 'restored_unproven')
@@ -526,7 +591,7 @@ class RecoveryController:
                     result['frozen_review'] = _yaml_frozen_review(session, restored=True)
                 return result
             if (record.plan.required_scopes == ('registry', 'yaml') or _dashboard_yaml_plan(record)
-                    or _own_registry_plan(preparations, record)) and record.restore_attempted is not False:
+                    or _controlled_entry_plan(preparations, record) or _own_registry_plan(preparations, record) or controlled_powercalc) and record.restore_attempted is not False:
                 # A previous restore may have stopped before its first journal
                 # transition, including inside outer automation lifecycle.
                 return _result(operation_id, fingerprint, 'UNKNOWN',
@@ -542,7 +607,7 @@ class RecoveryController:
             if not terminal and not prefix and not uncertain_complete:
                 return _result(operation_id, fingerprint, 'UNKNOWN', 'unsupported_recovery_state')
             if (record.plan.required_scopes == ('registry', 'yaml') or _dashboard_yaml_plan(record)
-                    or _own_registry_plan(preparations, record)):
+                    or _controlled_entry_plan(preparations, record) or _own_registry_plan(preparations, record) or controlled_powercalc):
                 from . import _yaml_factory_for_plan
                 factory = _yaml_factory_for_plan(preparations, record.plan)
                 # Fresh actual source/history/auth admission, independently repeated

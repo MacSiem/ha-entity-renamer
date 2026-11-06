@@ -110,6 +110,36 @@ class BaselineFileTests(unittest.TestCase):
         finally:
             pinned.close()
 
+    def test_checker_snapshot_is_bound_in_baseline_and_reopens(self):
+        directories = tuple((path, entries, tuple(sorted((*names, 'repairs.issue_registry')))
+                             if path == '.storage' else names)
+                            for path, entries, names in self.receipt.source_directories)
+        absent = replace(self.receipt, source_directories=directories,
+                         checker_repairs_snapshot=('absent',))
+        captured = self.capture(absent)
+        self.assertEqual(baseline.decode_baseline(baseline.encode_baseline(captured)), captured)
+        repair = self.root / '.storage/repairs.issue_registry'
+        repair.write_bytes(b'{"issues":["native"]}')
+        self.assertEqual(self.capture(absent), captured)
+        receipt = receipt_for(self.root, self.version)
+        directories = []
+        for path, entries, names in receipt.source_directories:
+            if path == '.storage':
+                st = repair.stat()
+                entries = tuple(sorted((*entries, (repair.name, st.st_mode, st.st_dev, st.st_ino))))
+                names = tuple(sorted((*names, repair.name)))
+            directories.append((path, entries, names))
+        present = replace(receipt, source_directories=tuple(directories),
+                          checker_repairs_snapshot=('present', base64.b64encode(repair.read_bytes()).decode()))
+        captured = self.capture(present)
+        decoded = baseline.decode_baseline(baseline.encode_baseline(captured))
+        self.assertEqual(decoded, captured)
+        self.assertEqual(decoded.receipt.checker_repairs_snapshot, present.checker_repairs_snapshot)
+        repair.write_bytes(b'{"issues":["native", "new unrelated"]}')
+        self.assertEqual(self.capture(present), captured)
+        with self.assertRaises(ValueError):
+            baseline._receipt_bytes(replace(present, checker_repairs_snapshot=('present', 'e30=')))
+
     def test_raw_audit_order_unknowns_mode_and_codec_are_immutable(self):
         captured = self.capture()
         self.assertEqual(captured.receipt, self.receipt)

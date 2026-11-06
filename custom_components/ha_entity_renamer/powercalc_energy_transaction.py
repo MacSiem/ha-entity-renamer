@@ -40,15 +40,20 @@ class PowercalcEnergyEffect:
 class ReceiptedPowercalcEnergyAdapter(EnergyTransactionAdapter):
     """One journal phase, one actual native update, one chain receipt."""
     def __init__(self, native, lifecycle, phase_loader, verify_inventory, verify_original_inventory):
-        _need(type(native) is NativeEnergy and type(lifecycle) is PowercalcLifecycle
-              and native.hass is lifecycle.lease.hass and callable(phase_loader)
+        from .controlled_powercalc_handoff import ControlledPowercalcHandoff
+        controlled = type(lifecycle) is ControlledPowercalcHandoff
+        _need(type(native) is NativeEnergy and type(lifecycle) in (PowercalcLifecycle, ControlledPowercalcHandoff)
+              and native.hass is (lifecycle.hass if controlled else lifecycle.lease.hass) and callable(phase_loader)
               and callable(verify_inventory) and callable(verify_original_inventory), 'typed_scope_required')
+        self.controlled = controlled
         self.lifecycle, self.chain, self.phase_loader = lifecycle, lifecycle.chain, phase_loader
         self.context, self._issued = None, None
         def resolver(reference):
-            _need(self.context is not None and self.context.step.prepared_ref == reference,
+            matches = [index for index, step in enumerate(self.chain.plan.steps)
+                       if step.prepared_ref == reference and step.adapter == 'energy']
+            _need(len(matches) == 1 and (self.context is None or self.context.index == matches[0]),
                   'prepared_reference_changed')
-            value = self.chain._original_change(self.context.index)
+            value = self.chain._original_change(matches[0])
             _need(type(value) is PreparedEnergy, 'energy_preparation_required')
             return value
         super().__init__(native, resolver, verify_inventory, verify_original_inventory)
@@ -58,8 +63,12 @@ class ReceiptedPowercalcEnergyAdapter(EnergyTransactionAdapter):
         self.context = context
 
     def _scope(self):
-        self.lifecycle.check()
-        _need(self.native.hass is self.lifecycle.lease.hass and not self.native._failed,
+        if self.controlled:
+            self.lifecycle.require_inactive()
+        else:
+            self.lifecycle.check()
+        _need(self.native.hass is (self.lifecycle.hass if self.controlled else self.lifecycle.lease.hass)
+              and not self.native._failed,
               'native_scope_changed')
 
     async def _durable(self, guard, expected=None):
@@ -80,19 +89,23 @@ class ReceiptedPowercalcEnergyAdapter(EnergyTransactionAdapter):
         return tuple(RegistryRawObservation(row.key, row.raw, row.identity) for row in observed.files)
 
     async def _effect(self, step, guard, direction):
-        self.lifecycle.lease._task_check()
+        if not self.controlled:
+            self.lifecycle.lease._task_check()
         context = await self._durable(guard)
         context.require_effect(step, direction)
         _need(self._issued is None, 'effect_already_issued')
         change = self._change(step)
-        initial = self.lifecycle.lease.state
+        initial = (self.chain.reconstruct_inputs() if self.controlled else self.lifecycle.lease.state)
+        if self.controlled:
+            self.lifecycle.root.observation_state = initial
         await _drained(self.native.hass.async_add_executor_job,
                        lambda: initial.assert_current(self.chain.original_receipt))
         self._scope(); guard()
         before = await self._core(guard)
         energy_before = await observe_energy(self.native, self.lifecycle)
         intent = await self.chain.begin_powercalc_energy(context, before, energy_before)
-        self.lifecycle.lease.track_intent(intent)
+        if not self.controlled:
+            self.lifecycle.lease.track_intent(intent)
         self._scope(); guard()
         await self._durable(guard, context)
         prior = await observe_energy(self.native, self.lifecycle)
@@ -119,7 +132,10 @@ class ReceiptedPowercalcEnergyAdapter(EnergyTransactionAdapter):
         witness.before, witness.after, witness.used = energy_before, energy_after, False
         self._issued = witness
         receipt = await self.chain.complete_powercalc_energy(intent, context, before, after, witness)
-        self.lifecycle.lease.accept_receipt(receipt)
+        if self.controlled:
+            self.lifecycle.root.observation_state = self.chain.reconstruct_inputs()
+        else:
+            self.lifecycle.lease.accept_receipt(receipt)
         self._scope(); guard()
 
     async def apply(self, step, guard):

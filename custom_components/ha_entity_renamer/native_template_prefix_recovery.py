@@ -8,7 +8,7 @@ chain receipts. These predicates neither change phases nor permit intent replay.
 def _registry_only_shape(record):
     return (record.plan.required_scopes == record.plan.covered_scopes
             == record.plan.verification_adapters == ('registry',)
-            and len(record.plan.steps) in (1, 2)
+            and bool(record.plan.steps)
             and all(step.adapter == 'registry' and not step.caused_by for step in record.plan.steps))
 
 

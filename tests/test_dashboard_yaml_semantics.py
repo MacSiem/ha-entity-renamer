@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from custom_components.ha_entity_renamer.dashboard_yaml_semantics import qualify_dashboard_yaml
-from custom_components.ha_entity_renamer.yaml_plan import plan_yaml
+from custom_components.ha_entity_renamer.yaml_plan import Edit, plan_yaml
 
 
 class DashboardYAMLSemanticsTests(unittest.TestCase):
@@ -45,6 +45,22 @@ class DashboardYAMLSemanticsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             qualify_dashboard_yaml(replace(plan, patches=(replace(patch, proposed_bytes=b'views: []'),)),
                                    'board.yaml', raw, self.mapping)
+
+    def test_foreign_json_numeric_type_and_signed_zero_are_refused(self):
+        for before, after in ((b'1', b'true'), (b'1', b'1.0'), (b'0.0', b'-0.0')):
+            with self.subTest(before=before, after=after):
+                plan, raw = self.fixture('views:\n- cards:\n  - type: map\n'
+                    '    default_zoom: ' + before.decode() + '\n    entities: [sensor.old]\n')
+                patch, = plan.patches
+                start = raw.index(b'default_zoom: ') + len(b'default_zoom: ')
+                edits = tuple(sorted((*patch.edits, Edit(start, start + len(before), before, after)),
+                                     key=lambda item: item.start))
+                proposed = raw
+                for edit in reversed(edits):
+                    proposed = proposed[:edit.start] + edit.after + proposed[edit.end:]
+                forged = replace(plan, patches=(replace(patch, edits=edits, proposed_bytes=proposed),))
+                with self.assertRaises(ValueError):
+                    qualify_dashboard_yaml(forged, 'board.yaml', raw, self.mapping)
 
     def test_unknown_yaml_tag_and_duplicate_key_are_refused(self):
         for text in ('views: !secret board\n', 'views: []\nviews: []\n'):

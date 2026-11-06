@@ -26,6 +26,11 @@ def _event(chain, reference, key, kind):
 
 def validate_setup_receipt(chain, payload, change):
     from .powercalc_prepared_yaml import PreparedPowercalcYAML
+    from .native_template_state_yaml import PreparedMixedPowercalcYAML
+    if type(change) is PreparedMixedPowercalcYAML:
+        from .controlled_powercalc_setup_receipts import validate_controlled_setup
+        validate_controlled_setup(chain, payload, change)
+        return
     reference = payload.get('powercalc_setup')
     if type(change) is not PreparedPowercalcYAML:
         _need(reference is None, 'foreign_setup_subeffect')

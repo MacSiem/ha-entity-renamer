@@ -987,7 +987,25 @@ def _template_entry_projection(row):
                 for s in row.get('subentries',[])}}
 
 
-def _check_template_entries(root, request, version):
+def _check_template_entry_candidate(proposed_root, before, after):
+    """Bind this entry's candidate to the same full document used by Powercalc."""
+    from pathlib import Path
+    proposed = json.loads((Path(proposed_root)/'.storage/core.config_entries').read_bytes())
+    if (set(proposed) != {'version', 'minor_version', 'key', 'data'}
+            or proposed['key'] != 'core.config_entries'
+            or type(proposed['version']) is not int or type(proposed['minor_version']) is not int
+            or (proposed['version'], proposed['minor_version']) != (1, 5)
+            or set(proposed['data']) != {'entries'}):
+        raise ValueError('template_entry_candidate_schema')
+    candidate = [row for row in proposed['data']['entries']
+                 if row['entry_id'] == before['identity']['entry_id']]
+    def encoded(value):
+        return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    if len(candidate) != 1 or encoded(_template_entry_projection(candidate[0])) != encoded(after):
+        raise ValueError('template_entry_candidate_changed')
+
+
+def _check_template_entries(root, request, version, *, proposed_root=None, candidate_root=None):
     from pathlib import Path
     from homeassistant.components.template import sensor
     from homeassistant.components.template.config_flow import TemplateConfigFlowHandler
@@ -1004,6 +1022,19 @@ def _check_template_entries(root, request, version):
                    if row['entry_id'] == before['identity']['entry_id']]
         if len(matches) != 1 or _template_entry_projection(matches[0]) != before:
             raise ValueError('template_entry_original_changed')
+        if candidate_root is not None:
+            proposed = json.loads((Path(candidate_root)/'.storage/core.config_entries').read_bytes())
+            expected = json.loads(json.dumps(document))
+            expected_rows = [row for row in expected['data']['entries']
+                             if row['entry_id'] == before['identity']['entry_id']]
+            if len(expected_rows) != 1:
+                raise ValueError('template_entry_candidate_changed')
+            expected_rows[0]['options'] = after['options']
+            encode = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
+            if encode(proposed) != encode(expected):
+                raise ValueError('template_entry_candidate_changed')
+        if proposed_root is not None:
+            _check_template_entry_candidate(proposed_root, before, after)
         for snapshot in (before,after):
             ident = snapshot['identity']
             if (ident['version'],ident['minor_version']) != (
@@ -1022,7 +1053,7 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
                 powercalc_candidate=False, native_helpers=(), template_source_profile=None,
                 template_reference_mapping=None, template_state_program=False,
                 dependent_reference_mapping=None, registry_only_template=False,
-                stable_script_services=(), owned_script_services=()):
+                stable_script_services=(), owned_script_services=(), mixed_powercalc=False):
     from homeassistant.const import __version__
     from homeassistant.scripts.check_config import async_check_config
     if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4'):
@@ -1048,14 +1079,31 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
             or owned_script_services and (not template_state_program or dependent_reference_mapping is None
                 or any(value not in dependent_reference_mapping for value in owned_script_services))):
         raise ValueError('template_owned_script_service_scope_invalid')
+    if native_helpers and template_state_program:
+        if (len(native_helpers) != 1 or type(template_reference_mapping) is not dict
+                or len(native_helpers[0][2]['data']['mapping']) != 1
+                or not set(native_helpers[0][2]['data']['mapping'].items())
+                    <= set(template_reference_mapping.items())):
+            raise ValueError('controlled_entry_mapping_mismatch')
+    if (type(mixed_powercalc) is not bool or mixed_powercalc and
+            (not with_sources or not template_state_program or not powercalc_profiles
+             or not powercalc_candidate or dependent_reference_mapping != template_reference_mapping
+             or dependent_reference_mapping is None or registry_only_template)):
+        raise ValueError('mixed_powercalc_profile_request_invalid')
     reference_proof = (_template_reference_proof(before_root, proposed_root, template_reference_mapping,
                                                    stable_script_services=stable_script_services,
                                                    owned_script_services=owned_script_services)
                        if template_source_profile is not None else None)
     dependent_proof = None
     if dependent_reference_mapping is not None:
-        if not with_sources or native_helpers or powercalc_profiles or powercalc_candidate:
+        if (not with_sources or native_helpers and not (mixed_powercalc or template_state_program)
+                or (powercalc_profiles or powercalc_candidate) and not mixed_powercalc):
             raise ValueError('dependent_config_program_rejected')
+        if native_helpers and (len(native_helpers) != 1 or
+                len(native_helpers[0][2]['data']['mapping']) != 1 or
+                not set(native_helpers[0][2]['data']['mapping'].items()) <=
+                    set(dependent_reference_mapping.items())):
+            raise ValueError('mixed_native_helper_mapping_mismatch')
         dependent_proof = _template_reference_proof(before_root, proposed_root, dependent_reference_mapping,
                                                       owned_script_services=owned_script_services)
         program_module = _source_module('dependent_config_program')
@@ -1069,7 +1117,9 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
                 'warnings': len(checked.warnings), 'version': __version__}
     before, after = await _effective(before_root), await _effective(proposed_root)
     changed, unsupported = changed_domains(before, after)
-    helper_seal = _check_template_entries(before_root,native_helpers,__version__) if native_helpers else None
+    helper_seal = (_check_template_entries(before_root, native_helpers, __version__,
+                    proposed_root=proposed_root if mixed_powercalc else None,
+                    candidate_root=proposed_root if template_state_program and not mixed_powercalc else None) if native_helpers else None)
     if not changed and helper_seal is None and not registry_only_template:
         return {'status': 'no_effective_config_change'}
     if registry_only_template and (changed or helper_seal is not None):
@@ -1223,6 +1273,7 @@ def main():
                                        with_sources='--source-evidence' in sys.argv[3:],
                                        powercalc_profiles='--powercalc-profile-inputs' in sys.argv[3:],
                                        powercalc_candidate='--powercalc-candidate-inputs' in sys.argv[3:],
+                                       mixed_powercalc='--qualified-mixed-powercalc' in sys.argv[3:],
                                        template_source_profile=(TEMPLATE_STATE_SOURCE_PROFILE
                                            if '--template-state-source-v3' in sys.argv[3:] else None),
                                        template_reference_mapping=_template_mapping_request(sys.argv[3:]),

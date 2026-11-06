@@ -378,9 +378,12 @@ async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
             allowed = {'name', 'unique_id', 'sensor_type', 'group_type', 'group_power_entities',
                 'group_energy_entities', 'entity_id', 'subtract_entities', 'create_energy_sensor',
                 'force_calculate_group_energy', 'group_power_update_interval',
-                'group_energy_update_interval', '_power_entity', '_energy_entity'}
+                'group_energy_update_interval', 'energy_sensor_precision', '_power_entity', '_energy_entity'}
             need(not set(cfg) - allowed and cfg.get('group_type') in ('custom', 'subtract')
-                 and cfg.get('create_energy_sensor') is True, 'group_variant_unverified')
+                 and cfg.get('create_energy_sensor') is True
+                 and ('energy_sensor_precision' not in cfg or cfg.get('group_type') == 'custom'
+                      and type(cfg['energy_sensor_precision']) is int and 0 <= cfg['energy_sensor_precision'] <= 6),
+                 'group_variant_unverified')
             groups.append({'origin': origin, 'config_sha256': digest(cfg), 'config': cfg,
                            'unique_id': cfg.get('unique_id') or entry['unique_id'] or entry['entry_id']})
         else:

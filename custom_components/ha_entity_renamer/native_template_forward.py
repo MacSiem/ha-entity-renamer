@@ -37,7 +37,8 @@ class _UnchangedConsumers:
     """Task-local read comparisons, never an adapter or effect capability."""
 
     @classmethod
-    async def capture(cls, hass, mapping, *, guard, _powercalc_energy=None, _dashboard_effects=False):
+    async def capture(cls, hass, mapping, *, guard, _powercalc_energy=None, _dashboard_effects=False,
+                      _powercalc_reverse=False):
         from .native_discovery_consumers import async_observe_discovery_consumers
         from .discovery import _plain
         from .discovery_final_fence import _ConsumerFence
@@ -50,7 +51,7 @@ class _UnchangedConsumers:
         # Missing readers are never evidence for a loaded/native-present family.
         obj.presence = (id(hass.data.get(LOVELACE_DATA)), id(hass.data.get('energy_manager')))
         observed = await async_observe_discovery_consumers(hass, guard=guard)
-        _need(type(_dashboard_effects) is bool, 'dashboard_scope_invalid')
+        _need(type(_dashboard_effects) is bool and type(_powercalc_reverse) is bool, 'dashboard_scope_invalid')
         obj.dashboard_observed = observed if _dashboard_effects else None
         guard()
         names = []
@@ -71,14 +72,18 @@ class _UnchangedConsumers:
                 configs = [] if result.value.value is None else [result.value.value]
                 planner = plan_energy
             for config in configs:
-                plan = planner(_plain(config), mapping)
+                selected_mapping = ({new: old for old, new in mapping.items()}
+                                    if name == 'energy' and _powercalc_reverse else mapping)
+                plan = planner(_plain(config), selected_mapping)
                 _need(not plan.markers, name + '_dependency_unsupported')
                 if plan.changes and name == 'energy' and _powercalc_energy is not None:
                     from .energy_native import PreparedEnergy
                     from .native_registry_receipts import _exact_json_equal, _freeze_json
+                    before = _powercalc_energy.after if _powercalc_reverse else _powercalc_energy.before.value
+                    after = _powercalc_energy.before.value if _powercalc_reverse else _powercalc_energy.after
                     _need(type(_powercalc_energy) is PreparedEnergy
-                          and _exact_json_equal(_plain(config), _freeze_json(_powercalc_energy.before.value))
-                          and _exact_json_equal(plan.value, _freeze_json(_powercalc_energy.after)),
+                          and _exact_json_equal(_plain(config), _freeze_json(before))
+                          and _exact_json_equal(plan.value, _freeze_json(after)),
                           'energy_preparation_mismatch')
                     names.remove(name)  # This exact Energy step has its own receipt/physical CAS.
                 elif name != 'dashboard' or not _dashboard_effects:

@@ -205,8 +205,10 @@ def _powercalc_group_suggested_move(before, after):
             or before.get('suggested_object_id') != old.removeprefix('sensor.')
             or after.get('suggested_object_id') != new.removeprefix('sensor.')):
         return False
+    # A separately authorized group move can also carry the ordinary user
+    # name update in the same native registry call.
     return all(_equal(before[key], after[key]) for key in before
-               if key not in ('entity_id', 'suggested_object_id'))
+               if key not in ('entity_id', 'suggested_object_id', 'name'))
 
 
 def _native_script_unique_move(before, after):

@@ -28,7 +28,7 @@ async def _frozen_review(controller, chain, *, restored):
     from .native_registry import PreparedRegistryChange
     from .powercalc_prepared_yaml import PreparedPowercalcYAML
     from .yaml_plan import plan_yaml
-    from .dependency_review import dependency_files
+    from .dependency_review import dependency_files, dependency_powercalc_groups
 
     registry = [change for change in chain.changes if type(change) is PreparedRegistryChange]
     yaml = [change for change in chain.changes if type(change) is PreparedPowercalcYAML]
@@ -64,7 +64,8 @@ async def _frozen_review(controller, chain, *, restored):
         raise Refused('powercalc_public_frozen_review_changed')
     return {'changes': changes, 'identities': identities, 'dependencies': {
         'domains': ['powercalc'] + (['energy'] if 'energy' in chain.plan.required_scopes else []),
-        'yaml_file_count': len(yaml[0].files), 'files': files, 'template_consumer_count': 0}}
+        'yaml_file_count': len(yaml[0].files), 'files': files, 'template_consumer_count': 0,
+        'config_entries': dependency_powercalc_groups(chain.changes)}}
 
 
 async def _restored(controller, record):

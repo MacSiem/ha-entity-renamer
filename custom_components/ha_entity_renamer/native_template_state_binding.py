@@ -490,7 +490,7 @@ def _graph(runtime, entity):
         id(getattr(entity, '_delay_cancel', None)))
 
 
-def sample_state_bindings(runtime, program, prefix, yaml_position, documents):
+def sample_state_bindings(runtime, program, prefix, yaml_position, documents, *, entry_witness=None):
     """Synchronous actual full inventory and native-config bijection sample."""
     from homeassistant.helpers import entity_platform as ep, entity_registry as er
     from homeassistant.components import template as component
@@ -507,9 +507,20 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents):
     accepted_rows = documents['core.entity_registry']['data']['entities']
     registry_rows = {r['entity_id']: r for r in accepted_rows if r['platform'] == 'template'}
     rows, inventory, matched, live = [], [], set(), set()
+    if entry_witness is not None:
+        from .controlled_template_entry_witness import ControlledTemplateEntryWitness
+        _need(type(entry_witness) is ControlledTemplateEntryWitness and entry_witness.hass is hass,
+              'template_state_entry_witness_required')
+        entry_token = entry_witness.sample(documents)
+        owned = [r for r in registry_rows.values() if r.get('config_entry_id') == entry_witness.entry_id]
+        _need(len(owned) == 1 and owned[0]['id'] == entry_token[2], 'template_state_entry_scope_changed')
+        registry_rows.pop(owned[0]['entity_id'])
+        inventory.append(('entry', entry_token))
     for platform in ep.async_get_platforms(hass, 'template'):
         _need(type(platform) is ep.EntityPlatform and platform.hass is hass
               and all(task.done() for task in platform._tasks), 'template_state_platform_unsettled')
+        if entry_witness is not None and platform.config_entry is entry_witness.entry:
+            continue  # This exact platform is covered by the independent entry witness above.
         inventory.append(('platform', platform.domain, id(platform), id(platform.config_entry)))
         for entity_id, entity in platform.entities.items():
             _need(entity.entity_id == entity_id and entity.hass is hass and entity.platform is platform,
@@ -607,7 +618,8 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents):
 
 
 async def async_observe_accepted_state_bindings(hass, chain, program, *, guard,
-        input_state=None, live_intent=None, live_context=None, live_calls=(), runtime_original=False):
+        input_state=None, live_intent=None, live_context=None, live_calls=(), runtime_original=False,
+        entry_witness=None):
     """Two samples, code/source pins and SAME accepted whole-input manager fence."""
     from .native_discovery_inputs import (async_observe_discovery_inputs,
         assert_discovery_managers_current)
@@ -645,7 +657,8 @@ async def async_observe_accepted_state_bindings(hass, chain, program, *, guard,
     _need(current in (original, proposed), 'template_state_physical_yaml_image_changed')
     position = 'original' if current == original else 'proposed'
     _need(not runtime_original or position == 'original', 'template_state_original_projection_requires_original_yaml')
-    first = sample_state_bindings(runtime, program, prefix, position, chain.accepted_documents())
+    first = sample_state_bindings(runtime, program, prefix, position, chain.accepted_documents(),
+                                  entry_witness=entry_witness)
     await asyncio.sleep(0)
     check()
     await _settled_executor(hass, runtime.sources)
@@ -654,7 +667,8 @@ async def async_observe_accepted_state_bindings(hass, chain, program, *, guard,
     check()
     assert_discovery_managers_current(hass, observed, guard=check)
     _documents(state, observed); runtime.bindings()
-    second = sample_state_bindings(runtime, program, prefix, position, chain.accepted_documents())
+    second = sample_state_bindings(runtime, program, prefix, position, chain.accepted_documents(),
+                                   entry_witness=entry_witness)
     _need(first.same_bindings(second), 'template_state_native_observation_changed')
     check()
     return second

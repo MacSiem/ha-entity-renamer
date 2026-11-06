@@ -20,13 +20,20 @@ from .yaml_plan import Limits, _Reader
 from .yaml_validation import assert_proposal_matches, assert_validation_current
 
 
+def _identity_payload(value):
+    payload = asdict(value)
+    if value.receipt.checker_repairs_snapshot is None:
+        payload['receipt'].pop('checker_repairs_snapshot', None)
+    return payload
+
+
 @dataclass(frozen=True)
 class PreparedTemplateStateYAML(PreparedYAML):
     source_program_sha256: str
 
     @property
     def identity(self):
-        return 'template_state_yaml:' + _digest(asdict(self))
+        return 'template_state_yaml:' + _digest(_identity_payload(self))
 
     def checked(self):
         if decode_template_state_yaml(asdict(self)) != self:
@@ -49,7 +56,7 @@ class PreparedMixedTemplateStateYAML(PreparedYAML):
 
     @property
     def identity(self):
-        return 'template_mixed_state_yaml:' + _digest(asdict(self))
+        return 'template_mixed_state_yaml:' + _digest(_identity_payload(self))
 
     def checked(self):
         if decode_mixed_template_state_yaml(asdict(self)) != self:
@@ -67,6 +74,53 @@ def decode_mixed_template_state_yaml(data):
     return PreparedMixedTemplateStateYAML(base.receipt, base.files, program_sha)
 
 
+@dataclass(frozen=True)
+class PreparedMixedPowercalcYAML(PreparedYAML):
+    """One YAML effect bound to both source proofs under one receipt."""
+    source_program_sha256: str
+    powercalc_original_sha256: str
+    powercalc_candidate_sha256: str
+
+    @property
+    def original_sources_sha256(self):
+        return self.powercalc_original_sha256
+
+    @property
+    def candidate_sources_sha256(self):
+        return self.powercalc_candidate_sha256
+
+    @property
+    def identity(self):
+        return 'template_powercalc_yaml:' + _digest(_identity_payload(self))
+
+    def checked(self):
+        if decode_mixed_powercalc_yaml(asdict(self)) != self:
+            raise ValueError('noncanonical_prepared_mixed_powercalc_yaml')
+        return self
+
+
+def decode_mixed_powercalc_yaml(data):
+    if type(data) is not dict or set(data) != {
+            'receipt', 'files', 'source_program_sha256',
+            'powercalc_original_sha256', 'powercalc_candidate_sha256'}:
+        raise ValueError('invalid_prepared_mixed_powercalc_yaml')
+    values = tuple(_sha(data[key]) for key in ('source_program_sha256',
+                   'powercalc_original_sha256', 'powercalc_candidate_sha256'))
+    base = _decode_yaml({key: data[key] for key in ('receipt', 'files')}, mixed_powercalc_mode=True)
+    return PreparedMixedPowercalcYAML(base.receipt, base.files, *values)
+
+
+def capture_mixed_powercalc_yaml(bundle, plan, mapping):
+    from .powercalc_source_binding import OriginalPowercalcSources
+    from .powercalc_candidate_sources import CandidatePowercalcSources
+    original, candidate = bundle.evidence.powercalc_sources, bundle.evidence.powercalc_candidate_sources
+    if type(original) is not OriginalPowercalcSources or type(candidate) is not CandidatePowercalcSources:
+        raise ValueError('mixed_powercalc_original_required')
+    candidate.assert_original(bundle.receipt, original)
+    return _capture_template_state_yaml(bundle, plan, mapping, PreparedMixedPowercalcYAML,
+                                        original.sha256, candidate.sha256)
+
+
 def capture_template_state_yaml(bundle, plan, mapping):
     return _capture_template_state_yaml(bundle, plan, mapping, PreparedTemplateStateYAML)
 
@@ -75,7 +129,7 @@ def capture_mixed_template_state_yaml(bundle, plan, mapping):
     return _capture_template_state_yaml(bundle, plan, mapping, PreparedMixedTemplateStateYAML)
 
 
-def _capture_template_state_yaml(bundle, plan, mapping, prepared_type):
+def _capture_template_state_yaml(bundle, plan, mapping, prepared_type, *additional_seals):
     """Capture actual ORIGINAL bytes under caller's locks, after actual check.
 
     This consumes the same native validation bundle as StateComposition. It
@@ -100,7 +154,7 @@ def _capture_template_state_yaml(bundle, plan, mapping, prepared_type):
                 raise Refused('yaml_source_changed')
             files.append(YAMLFile(patch.path, before.hex(), patch.proposed_bytes.hex(),
                                   info.st_dev, info.st_ino))
-        result = prepared_type(receipt, tuple(files), program.sha256).checked()
+        result = prepared_type(receipt, tuple(files), program.sha256, *additional_seals).checked()
         assert_validation_current(receipt)
         return result
     finally:
@@ -115,14 +169,38 @@ def _receipt_values(receipt):
     return tuple(getattr(receipt, field.name) for field in fields(ValidationReceipt))
 
 
+def retained_powercalc_original(chain):
+    """Reuse authenticated immutable ORIGINAL, never live state or receipts."""
+    if not chain._powercalc_preparations_unchanged():
+        return None
+    binding = getattr(chain, '_template_state_original_binding', None)
+    if binding is None:
+        return None
+    from .native_template_yaml_server import _baseline_stamp
+    from .native_registry_receipts import _exact_json_equal
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    if (type(binding) is not tuple or len(binding) != 8
+            or binding[0] != chain.plan.native_inputs
+            or binding[1] != _baseline_stamp(chain.baseline)
+            or type(binding[2]) is not ControlledPowercalcComposition
+            or not _exact_json_equal(binding[3], binding[7])
+            or not _exact_json_equal(_receipt_values(chain.original_receipt), binding[6])):
+        raise Refused('powercalc_retained_original_changed')
+    binding[4](binding[2])
+    return binding[2]
+
+
 def assert_state_yaml_composition(chain, change):
     """Every root/reopen binds the exact new preparation to retained sources."""
     from .native_template_state_composition import (TemplateStateComposition,
-        MixedTemplateStateComposition, retain_state_composition)
+        MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, retain_state_composition)
     from .native_script_program_composition import ScriptTemplateStateComposition
     from .native_automation_program_composition import AutomationTemplateStateComposition
+    from .controlled_script_composition import ControlledScriptComposition
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
     expected = {PreparedTemplateStateYAML: (TemplateStateComposition,),
-                PreparedMixedTemplateStateYAML: (MixedTemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)}
+                PreparedMixedTemplateStateYAML: (MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition),
+                PreparedMixedPowercalcYAML: (ControlledPowercalcComposition,)}
     if type(change) not in expected:
         raise Refused('template_state_yaml_preparation_required')
     from .native_template_composition import decode_composition
@@ -147,22 +225,26 @@ def assert_state_yaml_composition(chain, change):
         # fields are checked against both live receipt objects at every fence.
         original_receipt = _freeze_json(_receipt_values(baseline.receipt))
         binding = (reference, _baseline_stamp(baseline), composition, wire, check,
-                   _freeze_json(payload), original_receipt)
+                   _freeze_json(payload), original_receipt, _freeze_json(wire))
         chain._template_state_original_binding = binding
     else:
-        if (type(binding) is not tuple or len(binding) != 7 or binding[0] != reference
+        if (type(binding) is not tuple or len(binding) != 8 or binding[0] != reference
                 or binding[1] != _baseline_stamp(baseline)):
             raise Refused('template_state_yaml_original_baseline_changed')
         if not _exact_json_equal(payload, binding[5]):
             raise Refused('template_state_yaml_preparation_changed')
         composition = binding[2]
-    binding[4]()
-    if binding[3] != payload.get('composition'):
+    binding[4](composition)
+    if (not _exact_json_equal(binding[3], binding[7])
+            or not _exact_json_equal(payload.get('composition'), binding[7])):
         raise Refused('template_state_yaml_original_composition_changed')
     if (type(composition) not in expected[type(change)] or baseline != chain.baseline
             or not _exact_json_equal(_receipt_values(chain.original_receipt), binding[6])
             or not _exact_json_equal(_receipt_values(change.receipt), binding[6])
-            or change.source_program_sha256 != composition.state_config_program.sha256):
+            or change.source_program_sha256 != composition.state_config_program.sha256
+            or (type(change) is PreparedMixedPowercalcYAML and
+                (change.powercalc_original_sha256 != composition.evidence.powercalc_sources.sha256
+                 or change.powercalc_candidate_sha256 != composition.evidence.powercalc_candidate_sources.sha256))):
         raise Refused('template_state_yaml_original_composition_mismatch')
     patches = composition.yaml_plan.patches
     if (tuple((row.path, _hash(row.before), row.after) for row in change.files)
@@ -182,21 +264,24 @@ class NativeTemplateStateYAMLRuntimeReadback:
     BEFORE/AFTER describe disk only AFTER the runtime proof succeeds. Reverse
     YAML restores ORIGINAL while registry/runtime may still be at FINAL.
     """
-    def __init__(self, hass, chain, composition, *, guard):
+    def __init__(self, hass, chain, composition, *, guard, entry_witness=None):
         from .native_registry_receipts import RegistryReceiptChain
-        from .native_template_state_composition import TemplateStateComposition, MixedTemplateStateComposition
+        from .native_template_state_composition import TemplateStateComposition, MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition
         from .native_template_mixed_state_yaml import NativeMixedTemplateStateYAMLRuntimeReadback
         from .native_template_state_binding import _StateRuntime
         from .native_script_program_composition import ScriptTemplateStateComposition
         from .native_automation_program_composition import AutomationTemplateStateComposition
+        from .controlled_script_composition import ControlledScriptComposition
+        from .controlled_powercalc_composition import ControlledPowercalcComposition
         expected = {NativeTemplateStateYAMLRuntimeReadback: (TemplateStateComposition,),
-                    NativeMixedTemplateStateYAMLRuntimeReadback: (MixedTemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)}
+                    NativeMixedTemplateStateYAMLRuntimeReadback: (MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition, ControlledPowercalcComposition)}
         _need(type(chain) is RegistryReceiptChain and type(self) in expected
               and type(composition) in expected[type(self)], 'template_state_original_chain_required')
         composition.assert_baseline(chain.baseline)
         self.composition = composition
         self.hass, self.chain, self.program, self.guard = hass, chain, composition.state_config_program, guard
         self.receipt, self._last_runtime = chain.original_receipt, None
+        self.entry_witness = entry_witness
         self.runtime_original = False
         self.native = _StateRuntime(hass)
         _need(self.native.native.version == self.receipt.version,
@@ -205,7 +290,8 @@ class NativeTemplateStateYAMLRuntimeReadback:
         self.assert_change(chain._original_change(chain.yaml_index))
         documents = {row.key: json.loads(row.raw) for row in chain.baseline.files}
         rows = [row for row in documents['core.entity_registry']['data']['entities']
-                if row['platform'] == 'template']
+                if row['platform'] == 'template' and (entry_witness is None
+                    or row.get('config_entry_id') != entry_witness.entry_id)]
         self.identities = {(row['entity_id'].split('.')[0], row['unique_id']):
                            (row['entity_id'], row['id']) for row in rows}
         self.physical_consumers = composition.physical_consumers
@@ -255,7 +341,7 @@ class NativeTemplateStateYAMLRuntimeReadback:
             _need(image == 'original', 'template_state_original_projection_requires_original_yaml')
             prefix = replace(prefix, active=frozenset())
         snapshot = sample_state_bindings(runtime, self.program, prefix, image,
-                                         self.chain.accepted_documents())
+                                         self.chain.accepted_documents(), entry_witness=self.entry_witness)
         return (Position.BEFORE if image == 'original' else Position.AFTER), snapshot
 
     async def position(self, change):
@@ -274,7 +360,7 @@ class NativeTemplateStateYAMLRuntimeReadback:
             self._check(state, live)
             snapshot = await async_observe_accepted_state_bindings(self.hass, self.chain,
                 self.program, guard=lambda: self._check(state, live), input_state=state,
-                runtime_original=self.runtime_original, **live)
+                runtime_original=self.runtime_original, entry_witness=self.entry_witness, **live)
             self._check(state, live)
             runtime = self.native
             await _settled_executor(self.hass, runtime.sources)

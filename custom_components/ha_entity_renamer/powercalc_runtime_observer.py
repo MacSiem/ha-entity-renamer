@@ -61,6 +61,34 @@ class PowercalcRuntimeCapture:
     blockers: tuple[str, ...] = BLOCKERS
 
 
+def selected_powercalc_reference(capture, mapping, registry_rows):
+    """Select the PC lifecycle only for a recognized selected native relation.
+
+    This is routing evidence, never a claim that the partial inventory is
+    complete or that unrecognized custom references are safe to rewrite.
+    """
+    if type(capture) is not PowercalcRuntimeCapture or type(mapping) is not dict or type(registry_rows) is not list:
+        raise ValueError('powercalc_routing_inputs_invalid')
+    selected = set(mapping)
+    if any(row.get('platform') == 'powercalc' and row.get('entity_id') in selected
+           for row in registry_rows if type(row) is dict):
+        return True
+    payload = json.loads(capture.payload_json)
+    objects = payload.get('objects')
+    if type(objects) is not list:
+        raise ValueError('powercalc_routing_inventory_invalid')
+    for row in objects:
+        if type(row) is not dict or type(row.get('fields')) is not dict:
+            raise ValueError('powercalc_routing_inventory_invalid')
+        source = row['fields'].get('_source_entity')
+        if type(source) is str and source in selected:
+            return True
+        if (type(source) is dict and type(source.get('entity_id')) is str
+                and source['entity_id'] in selected):
+            return True
+    return False
+
+
 def capture_powercalc_runtime(hass, *, guard):
     """Read the full existing collection; no claim of semantic completeness.
 

@@ -127,7 +127,7 @@ class PowercalcSourceInputs:
     """Opaque immutable profile/settings inputs, not YAML parser roots."""
     files: tuple[FileSnapshot, ...]
     # Existing receipt directory shape: path, entries, optional filtered names.
-    directories: tuple[tuple[str, tuple, tuple[str, ...] | None], ...]
+    directories: tuple[tuple[str, tuple[tuple[str, int, int, int], ...], tuple[str, ...] | None], ...]
 
 
 @dataclass(frozen=True)

@@ -242,10 +242,16 @@ class MixedTemplateComposition(TemplateComposition):
 
 
 def encode_composition(composition, baseline):
+    from .controlled_powercalc_composition import ControlledPowercalcComposition, encode_controlled_powercalc
+    if type(composition) is ControlledPowercalcComposition:
+        return encode_controlled_powercalc(composition, baseline)
     if type(composition).__module__ == __package__ + '.powercalc_composition':
         from .powercalc_composition import PowercalcComposition, encode_powercalc_composition
         _need(type(composition) is PowercalcComposition)
         return encode_powercalc_composition(composition, baseline)
+    from .controlled_script_composition import ControlledScriptComposition, encode_controlled_script_composition
+    if type(composition) is ControlledScriptComposition:
+        return encode_controlled_script_composition(composition, baseline)
     from .native_automation_program_composition import AutomationTemplateStateComposition, encode_automation_state_composition
     if type(composition) is AutomationTemplateStateComposition:
         return encode_automation_state_composition(composition, baseline)
@@ -253,7 +259,12 @@ def encode_composition(composition, baseline):
     if type(composition) is ScriptTemplateStateComposition:
         return encode_script_state_composition(composition, baseline)
     from .native_template_state_composition import (TemplateStateComposition,
-        MixedTemplateStateComposition, encode_state_composition, encode_mixed_state_composition)
+        MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, encode_reload_entry_composition, encode_state_composition,
+        encode_mixed_state_composition, encode_reload_composition)
+    if type(composition) is ControlledReloadEntryComposition:
+        return encode_reload_entry_composition(composition, baseline)
+    if type(composition) is ControlledReloadComposition:
+        return encode_reload_composition(composition, baseline)
     if type(composition) is MixedTemplateStateComposition:
         return encode_mixed_state_composition(composition, baseline)
     if type(composition) is TemplateStateComposition:
@@ -275,6 +286,18 @@ def encode_composition(composition, baseline):
 
 
 def decode_composition(payload, baseline):
+    if type(payload) is dict and payload.get('profile') == 'template_controlled_script_reload_v1':
+        from .controlled_script_composition import decode_controlled_script_composition
+        return decode_controlled_script_composition(payload, baseline)
+    if type(payload) is dict and payload.get('profile') == 'template_controlled_reload_entry_v1':
+        from .native_template_state_composition import decode_reload_entry_composition
+        return decode_reload_entry_composition(payload, baseline)
+    if type(payload) is dict and payload.get('profile') == 'template_controlled_powercalc_v1':
+        from .controlled_powercalc_composition import decode_controlled_powercalc
+        return decode_controlled_powercalc(payload, baseline)
+    if type(payload) is dict and payload.get('profile') == 'template_controlled_reload_v1':
+        from .native_template_state_composition import decode_reload_composition
+        return decode_reload_composition(payload, baseline)
     if type(payload) is dict and payload.get('profile') == 'powercalc_source_own_binding_v1':
         from .powercalc_composition import decode_powercalc_composition
         return decode_powercalc_composition(payload, baseline)

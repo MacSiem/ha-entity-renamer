@@ -35,6 +35,7 @@ _KEYS = ('core.entity_registry', 'core.device_registry', 'core.config_entries')
 _SCHEMAS = {'2025.6.0': ((1, 17), (1, 9), (1, 5)),
             '2026.10.2': ((1, 23), (3, 4), (1, 5)), '2026.10.4': ((1, 23), (3, 4), (1, 5))}
 _RECEIPT_FIELDS = frozenset(f.name for f in fields(ValidationReceipt))
+_LEGACY_RECEIPT_FIELDS = _RECEIPT_FIELDS - {'checker_repairs_snapshot'}
 
 
 class NativeInputBaselineError(ValueError):
@@ -132,7 +133,7 @@ def _integer(value):
 
 def _receipt(raw):
     data = _loads(raw, MAX_RECEIPT_BYTES)
-    if type(data) is not dict or set(data) != _RECEIPT_FIELDS:
+    if type(data) is not dict or set(data) not in (_RECEIPT_FIELDS, _LEGACY_RECEIPT_FIELDS):
         _fail('native_input_receipt_invalid')
     try:
         receipt = ValidationReceipt(**{k: _tuple(v) for k, v in data.items()})
@@ -150,6 +151,22 @@ def _receipt(raw):
             if path in paths or not _digest_string(digest) or not all(map(_integer, (device, inode))):
                 _fail('native_input_receipt_invalid')
             paths.add(path)
+        snapshot = receipt.checker_repairs_snapshot
+        if snapshot is not None:
+            path = '.storage/repairs.issue_registry'
+            source = next((row for row in receipt.source_files if row[0] == path), None)
+            if snapshot == ('absent',):
+                if source is not None:
+                    _fail('native_input_receipt_invalid')
+            elif type(snapshot) is tuple and len(snapshot) == 2 and snapshot[0] == 'present' and type(snapshot[1]) is str:
+                raw_snapshot = base64.b64decode(snapshot[1], validate=True)
+                from .yaml_validation import _MAX_REPAIRS_SNAPSHOT
+                if (len(raw_snapshot) > _MAX_REPAIRS_SNAPSHOT or source is None
+                        or _sha(raw_snapshot) != source[1]
+                        or base64.b64encode(raw_snapshot).decode('ascii') != snapshot[1]):
+                    _fail('native_input_receipt_invalid')
+            else:
+                _fail('native_input_receipt_invalid')
         directories = set()
         for path, entries, names in receipt.source_directories:
             if path != '.':
@@ -175,6 +192,27 @@ def _receipt(raw):
             _relative(path)
             if not _digest_string(digest):
                 _fail('native_input_receipt_invalid')
+        if snapshot is not None:
+            repair_path = '.storage/repairs.issue_registry'
+            if any(path == repair_path for path, _ in receipt.proposed_files):
+                _fail('native_input_receipt_invalid')
+            storage = next((row for row in receipt.source_directories if row[0] == '.storage'), None)
+            source = next((row for row in receipt.source_files if row[0] == repair_path), None)
+            if storage is None:
+                root = next(row for row in receipt.source_directories if row[0] == '.')
+                if (source is not None or snapshot != ('absent',)
+                        or any(row[0] == '.storage' for row in root[1])
+                        or root[2] is not None and '.storage' not in root[2]):
+                    _fail('native_input_receipt_invalid')
+            else:
+                _, entries, names = storage
+                if names is None or 'repairs.issue_registry' not in names:
+                    _fail('native_input_receipt_invalid')
+                entry = next((row for row in entries if row[0] == 'repairs.issue_registry'), None)
+                if ((source is None) != (entry is None)
+                        or entry is not None and (not stat.S_ISREG(entry[1])
+                                                   or source[2:] != entry[2:])):
+                    _fail('native_input_receipt_invalid')
         for values in (receipt.changed_domains, receipt.unsupported_domains):
             if type(values) is not tuple or any(type(v) is not str for v in values):
                 _fail('native_input_receipt_invalid')
@@ -192,7 +230,10 @@ def _receipt(raw):
 def _receipt_bytes(receipt):
     if type(receipt) is not ValidationReceipt:
         _fail('native_input_receipt_invalid')
-    raw = _json(asdict(receipt))
+    value = asdict(receipt)
+    if receipt.checker_repairs_snapshot is None:
+        value.pop('checker_repairs_snapshot')
+    raw = _json(value)
     if len(raw) > MAX_RECEIPT_BYTES or _receipt(raw) != receipt:
         _fail('native_input_receipt_invalid')
     return raw

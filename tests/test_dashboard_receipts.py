@@ -17,8 +17,15 @@ class DashboardReceiptTests(unittest.TestCase):
         plan = Plan('plan', scopes, scopes, tuple(step(kind, i) for i, kind in
             enumerate(('registry', 'dashboard', 'yaml'))), 'coverage', scopes)
         self.assertTrue(_dashboard_plan(plan))
+        yaml_only = Plan('plan', scopes, scopes, tuple(step(kind, i) for i, kind in
+            enumerate(('registry', 'yaml'))), 'coverage', scopes)
+        self.assertTrue(_dashboard_plan(yaml_only))
+        storage_scopes = ('registry', 'dashboard')
+        storage_only = Plan('plan', storage_scopes, storage_scopes, tuple(step(kind, i) for i, kind in
+            enumerate(('registry', 'dashboard'))), 'coverage', storage_scopes)
+        self.assertTrue(_dashboard_plan(storage_only))
         for kinds in (('dashboard', 'registry', 'yaml'), ('registry', 'yaml', 'dashboard'),
-                      ('registry', 'yaml'), ('dashboard', 'yaml')):
+                      ('dashboard', 'yaml'), ('registry', 'dashboard')):
             with self.subTest(kinds=kinds):
                 self.assertFalse(_dashboard_plan(Plan('plan', scopes, scopes,
                     tuple(step(kind, i) for i, kind in enumerate(kinds)), 'coverage', scopes)))
@@ -62,6 +69,13 @@ class DashboardReceiptTests(unittest.TestCase):
         with self.assertRaises(Exception):
             fold_receipt(chain, {}, after_sources, intent, receipt)
         receipt['dashboard_after']['physical'] = restored
+        # bool and float compare equal to int in Python, but are foreign JSON.
+        for foreign_value in (True, 1.0):
+            forged = {path: restored, 'foreign': [foreign[0], foreign_value, *foreign[2:]]}
+            baseline = {path: forward, 'foreign': [foreign[0], 1, *foreign[2:]]}
+            receipt['input_result'] = forged
+            with self.assertRaises(Exception):
+                fold_receipt(chain, {}, baseline, intent, receipt)
         receipt['input_result'] = {path: restored, 'foreign': [*foreign[:4], 502, 20]}
         with self.assertRaises(Exception):
             fold_receipt(chain, {}, after_sources, intent, receipt)

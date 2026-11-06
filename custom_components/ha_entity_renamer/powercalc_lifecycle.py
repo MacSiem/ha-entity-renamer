@@ -29,8 +29,9 @@ def _need(condition, reason):
 def _original(chain):
     _need(type(chain) is RegistryReceiptChain and type(chain.store) is RegistryReceiptStore,
           'registry_chain_required')
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
     baseline, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
-    _need(baseline == chain.baseline and type(composition) is PowercalcComposition
+    _need(baseline == chain.baseline and type(composition) in (PowercalcComposition, ControlledPowercalcComposition)
           and baseline.receipt == chain.original_receipt, 'same_original_required')
     return composition
 

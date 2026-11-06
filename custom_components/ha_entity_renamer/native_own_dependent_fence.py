@@ -19,11 +19,12 @@ def _need(value, reason):
 
 
 class NativeOwnDependentFence:
-    def __init__(self, root, change, sample):
+    def __init__(self, root, change, sample, *, native_readd=False):
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         _need(change.before.get('platform') in ('automation', 'script') and len(change.mapping) == 1,
               'own_dependent_scope_required')
         self.root, self.change, self.node = root, change, None
+        self.native_readd = native_readd
         self.domain = change.before['platform']
         self.old, self.new = next(iter(change.mapping.items()))
         rows, blockers, tokens = sample
@@ -45,6 +46,8 @@ class NativeOwnDependentFence:
         _need(len(token_rows) == 1 and token_rows[0][0] == self.original_row.entity_id,
               'own_dependent_original_token_missing')
         self.original_token = token_rows[0]
+        self.current_token = self.original_token
+        self.adopted_node = None
         self.accepted_script_service = None
         self.automation_service = None
         if self.domain == 'automation':
@@ -94,23 +97,78 @@ class NativeOwnDependentFence:
                 else:
                     move.check_moved()
             receipted = _content(accepted) == _content(actual)
+            cutover = None if node is None else getattr(node, 'script_cutover', None)
+            recreated = (self.native_readd and cutover is not None and cutover.phase == 'added'
+                         and cutover.target_entity is self.entity and cutover.mutation is not None
+                         and cutover.mutation.identity == self.change.identity)
             _need(_native_script_unique_move(self.change.before, self.change.after)
                   and current.entity_id == self.old and _content(actual) == _content(alternate)
-                  and (live or receipted), 'own_dependent_native_row_changed')
+                  and (live or receipted or recreated), 'own_dependent_native_row_changed')
         if accepted['entity_id'] != current.entity_id:
             node = self.node
             handoff = None if node is None or node.witness is None else node.witness.source_handoff
+            readded = (self.native_readd and node is not None and node.witness is not None
+                       and node.witness.source_handoff is None and node.witness.finished
+                       and node.witness.mutation is not None and node.target == current.entity_id
+                       and node.witness.mutation.identity == self.change.identity)
+            cutover = None if node is None else getattr(node, 'script_cutover', None)
+            recreated = (self.native_readd and self.domain == 'script' and cutover is not None
+                         and cutover.phase == 'added' and cutover.mutation is not None
+                         and cutover.mutation.identity == self.change.identity
+                         and cutover.target_entity is self.entity and node.target == current.entity_id)
+            retained = (type(handoff) is NativeSourceHandoff and handoff.source is self.entity
+                        and handoff.attempted and handoff.new_row is current and handoff.error is None
+                        and handoff.registry_calls == handoff.api_calls == 1)
             _need(node is not None and node.root is self.root and node.change == self.change
                   and node.phase in ('registry_attempted', 'observed_effect')
-                  and self.root.chain.active is node.intent
-                  and type(handoff) is NativeSourceHandoff and handoff.source is self.entity
-                  and handoff.attempted and handoff.new_row is current and handoff.error is None
-                  and handoff.registry_calls == handoff.api_calls == 1,
+                  and self.root.chain.active is node.intent and (readded or recreated or retained),
                   'own_dependent_unacknowledged_row_unqualified')
             rows[index] = actual
         else:
             _need(_content(accepted) == _content(actual), 'own_dependent_accepted_row_changed')
         return tuple(rows)
+
+    def rebind_after_controlled_reload(self):
+        """Accept the selected native entity recreated by our checked reload."""
+        from homeassistant.components.automation import AutomationEntity
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        _need(self.native_readd and self.domain == 'automation', 'own_dependent_rebind_unqualified')
+        transition = getattr(self.root, 'controlled_automation', None)
+        component = self.root.hass.data.get(DATA_INSTANCES, {}).get('automation')
+        matches = ([] if component is None else [entity for entity in component.entities
+                   if entity.registry_entry is not None and entity.registry_entry.id == self.change.identity])
+        _need(transition is not None and len(matches) == 1 and type(matches[0]) is AutomationEntity
+              and matches[0].unique_id == self.original_row.native_key
+              and matches[0].entity_id in (self.old, self.new)
+              and matches[0]._is_enabled is transition.expected_enabled[matches[0].unique_id],
+              'own_dependent_rebind_unqualified')
+        self.entity = matches[0]
+        self.current_token = None
+        admission = getattr(self.root, 'own_record_admission', None)
+        if admission is not None:
+            admission.entity, admission.script = self.entity, self.entity.action_script
+
+    def rebind_after_controlled_script_reload(self):
+        """Accept only the same UUID and actual owned service after HA reload."""
+        from homeassistant.components.script import ScriptEntity
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        from .native_own_id_inventory import NativeOwnIDInventory
+        _need(self.native_readd and self.domain == 'script', 'own_dependent_rebind_unqualified')
+        component = self.root.hass.data.get(DATA_INSTANCES, {}).get('script')
+        matches = ([] if component is None else [entity for entity in component.entities
+                   if entity.registry_entry is not None and entity.registry_entry.id == self.change.identity])
+        _need(len(matches) == 1 and type(matches[0]) is ScriptEntity
+              and matches[0].entity_id in (self.old, self.new), 'own_dependent_rebind_unqualified')
+        entity = matches[0]
+        target = self.old if entity.entity_id == self.new else self.new
+        inventory = NativeOwnIDInventory.capture(self.root.hass,
+            {entity.entity_id: target}, moving_change=self.change, allow_running=True)
+        _need(inventory.selected_entity is entity, 'own_dependent_rebind_unqualified')
+        self.entity, self.current_token = entity, None
+        admission = getattr(self.root, 'own_record_admission', None)
+        if admission is not None:
+            admission.entity, admission.script, admission.inventory = entity, entity.script, inventory
+            admission.controlled_service = None
 
     def normalize(self, sample):
         rows, blockers, tokens = sample
@@ -132,8 +190,21 @@ class NativeOwnDependentFence:
             replacement = []
             for token in group:
                 if domain == self.domain and token[1] == id(self.entity):
-                    _need(token[0] == self.entity.entity_id and token[2:4] == self.original_token[2:4],
-                          'own_dependent_native_object_changed')
+                    _need(token[0] == self.entity.entity_id, 'own_dependent_native_object_changed')
+                    if self.native_readd:
+                        node = self.node
+                        if self.current_token is None:
+                            self.current_token = token
+                        if (node is not None and self.adopted_node is not node
+                                and node.witness is not None and node.witness.finished
+                                and node.target == self.entity.entity_id):
+                            self.current_token = token
+                            self.adopted_node = node
+                        _need(self.current_token == token, 'own_dependent_native_object_changed')
+                        replacement.append(self.original_token)
+                        found += 1
+                        continue
+                    _need(token[2:4] == self.original_token[2:4], 'own_dependent_native_object_changed')
                     from .native_registry_transition import _native_script_unique_move
                     if _native_script_unique_move(self.change.before, self.change.after):
                         move = None if self.node is None else self.node.script_service_move
@@ -178,7 +249,7 @@ class NativeOwnDependentFence:
         return tuple(normalized), blockers, tuple(normalized_tokens)
 
 
-def qualify_dependent_own_changes(hass, changes, *, guard):
+def qualify_dependent_own_changes(hass, changes, *, guard, native_readd=False):
     """Qualify one Automation or one positively owned native Script service."""
     from homeassistant.helpers.entity_component import DATA_INSTANCES
     from .native_registry import NativeRegistryIO
@@ -206,18 +277,23 @@ def qualify_dependent_own_changes(hass, changes, *, guard):
     from .native_registry_transition import _native_script_unique_move
     for change in changes:
         script_move = change is own[0] and _native_script_unique_move(change.before, change.after)
+        excluded = ('entity_id', 'modified_at', 'name') if (
+            native_readd and change is own[0] and change.before.get('platform') == 'automation'
+            and change.runtime_before_json) else ('entity_id', 'modified_at')
         _need(change.kind == 'entity' and len(change.mapping) == 1
               and (script_move or {key: value for key, value in change.before.items()
-                   if key not in ('entity_id', 'modified_at')}
+                   if key not in excluded}
                   == {key: value for key, value in change.after.items()
-                      if key not in ('entity_id', 'modified_at')}),
+                      if key not in excluded}),
               'own_dependent_registry_change_unqualified')
         old, new = next(iter(change.mapping.items()))
         before, after = registry.async_get(old), registry.async_get(new)
         _need((before is None) != (after is None), 'own_dependent_position_ambiguous')
         row = before if before is not None else after
         target = change.after if before is not None else change.before
-        _need(row.id == change.identity and NativeSourceHandoff.supports_source(io, change, target),
+        direct = (native_readd and change is own[0] and
+                  (row.platform == 'automation' or row.platform == 'script' and script_move))
+        _need(row.id == change.identity and (direct or NativeSourceHandoff.supports_source(io, change, target)),
               'own_dependent_handoff_unqualified')
         if change is own[0]:
             domain = row.platform
@@ -229,14 +305,23 @@ def qualify_dependent_own_changes(hass, changes, *, guard):
             if domain == 'automation':
                 from .native_own_automation_service import capture
                 capture(hass)
-            capture_census(entity.action_script if domain == 'automation' else entity.script)
+            if not direct:
+                capture_census(entity.action_script if domain == 'automation' else entity.script)
+            elif domain == 'automation':
+                from homeassistant.components.automation import AutomationEntity
+                _need(type(entity) is AutomationEntity and type(entity._is_enabled) is bool,
+                      'own_automation_readd_unqualified')
+            else:
+                from homeassistant.components.script import ScriptEntity
+                _need(type(entity) is ScriptEntity, 'own_script_recreate_unqualified')
             if domain == 'script':
                 _need(script_move or change.after['entity_id'] == 'script.' + entity.unique_id,
                       'own_script_service_rename_unsupported')
                 from .native_own_id_inventory import NativeOwnIDInventory
                 NativeOwnIDInventory.capture(hass, {row.entity_id: target['entity_id']},
                                              stable_change=None if script_move else change,
-                                             moving_change=change if script_move else None)
+                                             moving_change=change if script_move else None,
+                                             allow_running=native_readd)
         guard()
     return own[0]
 
@@ -248,9 +333,10 @@ class NativeOwnDependentAdmission:
         from .native_own_id_inventory import NativeOwnIDInventory
         self.fence, self.entity = fence, fence.entity
         self.script = (self.entity.action_script if fence.domain == 'automation' else self.entity.script)
-        self.census = capture_census(self.script)
+        self.census = None if fence.native_readd else capture_census(self.script)
         self.automation_service = fence.automation_service
         self.caller_bus = self.caller_listeners = None
+        self.controlled_service = None
         if fence.domain == 'automation':
             from collections import defaultdict
             from homeassistant.core import EventBus
@@ -267,14 +353,16 @@ class NativeOwnDependentAdmission:
         moving = _native_script_unique_move(fence.change.before, fence.change.after)
         self.inventory = (NativeOwnIDInventory.capture(fence.root.hass,
             {self.entity.entity_id: target}, stable_change=None if moving else fence.change,
-            moving_change=fence.change if moving else None)
+            moving_change=fence.change if moving else None, allow_running=fence.native_readd)
             if fence.domain == 'script' else None)
         if self.inventory is not None and self.inventory.service_event_census is not None:
             self.inventory.service_event_census.project_scene_fence(fence.root.scene_fence)
 
     def bind_scene_session(self, session):
-        """Accept only the freshly bound Root for this same retained owner."""
-        if self.inventory is None or self.inventory.service_event_census is None:
+        """Bind the review owner to the same entity in the fresh execution root."""
+        controlled_script = self.fence.native_readd and self.fence.domain == 'script'
+        census = None if self.inventory is None else self.inventory.service_event_census
+        if not controlled_script and census is None:
             return
         from .native_template_state_server import NativeTemplateStateServer
         other = getattr(session, 'own_dependent_fence', None)
@@ -284,15 +372,20 @@ class NativeOwnDependentAdmission:
               and other.entity is self.entity and other.change == self.fence.change
               and session.hass is self.fence.root.hass,
               'own_dependent_review_actor_changed')
-        self.inventory.service_event_census.attach_scene_fence(session.scene_fence)
+        if census is not None:
+            census.attach_scene_fence(session.scene_fence)
+        if controlled_script:
+            self.fence = other
 
     def check_execution(self):
         from .native_active_execution_pins import check_census
         fence = self.fence
         _need(self.entity is fence.entity
-              and (self.entity.action_script if fence.domain == 'automation' else self.entity.script) is self.script,
+              and (fence.native_readd or
+                   (self.entity.action_script if fence.domain == 'automation' else self.entity.script) is self.script),
               'own_dependent_review_actor_changed')
-        check_census(self.script, self.census)
+        if self.census is not None:
+            check_census(self.script, self.census)
         if self.caller_bus is not None:
             from .native_own_id_inventory import _foreign_static_callers
             _need(fence.root.hass.bus is self.caller_bus
@@ -300,6 +393,14 @@ class NativeOwnDependentAdmission:
                   'own_dependent_caller_bus_changed')
             _foreign_static_callers(fence.root.hass, self.caller_listeners,
                                     frozenset((fence.old, fence.new)))
+        if self.controlled_service is not None:
+            table, key, old_key, service, job, target, schema, response = self.controlled_service
+            _need(fence.domain == 'script' and fence.root.hass.services._services.get('script') is table
+                  and table.get(key) is service and old_key not in table
+                  and service.job is job and job.target is target
+                  and getattr(target, '__self__', None) is self.entity
+                  and service.schema is schema and service.supports_response is response,
+                  'own_dependent_controlled_service_changed')
         if self.inventory is not None:
             # Source/program prefixes may advance naturally after one own
             # registry receipt; the direct native service must still be this
@@ -316,7 +417,7 @@ class NativeOwnDependentAdmission:
             from .native_own_id_inventory import _sample
             entity, service, callers, signature = _sample(
                 self.inventory.hass, self.inventory.old, self.inventory.new,
-                stable_service=self.inventory.stable_service)
+                stable_service=self.inventory.stable_service, allow_running=self.inventory.allow_running)
             _need(entity is self.inventory.selected_entity and entity.script is self.inventory.selected_script
                   and service is self.inventory.service and service.job is self.inventory.service_job
                   and service.job.target is self.inventory.service_target

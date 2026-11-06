@@ -161,8 +161,9 @@ class PowercalcComposition:
     coverage_sha256: str
     energy_original_physical: tuple[str, int, int, int, int, int] | None = None
 
-    def assert_baseline(self, baseline):
-        _need(type(baseline) is NativeInputBaseline and type(self.evidence) is OriginalSourceEvidence)
+    def assert_baseline(self, baseline, *, _mixed_template=False):
+        _need(type(_mixed_template) is bool and type(baseline) is NativeInputBaseline
+              and type(self.evidence) is OriginalSourceEvidence)
         evidence, receipt = self.evidence, baseline.receipt
         evidence.assert_receipt(receipt)
         _need(type(evidence.template_sources) is OriginalTemplateSources
@@ -170,20 +171,22 @@ class PowercalcComposition:
               and type(evidence.powercalc_candidate_sources) is CandidatePowercalcSources
               and evidence.powercalc_sources.receipt_json == baseline.receipt_json
               and evidence.powercalc_sources.closed_graph_json is not None
-              and set(receipt.unsupported_domains) <= {'powercalc'}
-              and set(receipt.changed_domains) <= {'powercalc'})
+              and set(receipt.unsupported_domains) <= ({'powercalc', 'template'} if _mixed_template else {'powercalc'})
+              and set(receipt.changed_domains) <= ({'powercalc', 'template', 'automation', 'script'}
+                                                     if _mixed_template else {'powercalc'})
+              and (not _mixed_template or 'powercalc' in receipt.changed_domains))
         template = evidence.template_sources
         _ledger(template.ledger, 2)
-        _need(not template.ledger.definitions and not template.ledger.findings
+        _need(not template.ledger.findings
               and template.ledger.original_graph_sha256 == evidence.ledger.original_graph_sha256
-              and template.rows in (None, ()))
+              and (_mixed_template or not template.ledger.definitions and template.rows in (None, ())))
         native = {'version': receipt.version, 'projection': template.projection,
                   'rows': None if template.rows is None else [list(row) for row in template.rows]}
         _need(seal_template_sources(receipt, template.ledger, native) == template)
         if evidence.template_candidate_sources is not None:
             _need(type(evidence.template_candidate_sources) is CandidateTemplateSources)
             evidence.template_candidate_sources.assert_original(receipt, template)
-            _need(evidence.template_candidate_sources.sources == template)
+            _need(_mixed_template or evidence.template_candidate_sources.sources == template)
         _ledger(evidence.ledger, 1)
         _ledger(evidence.powercalc_sources.ledger, 3)
         _need(evidence.ledger.original_graph_sha256 ==

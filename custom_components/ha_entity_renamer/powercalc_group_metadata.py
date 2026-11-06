@@ -74,11 +74,12 @@ def assert_original_group(chain, change):
     from .native_input_baseline import _envelope
     from .native_registry import PreparedRegistryChange
     from .powercalc_composition import PowercalcComposition
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
     if type(change) is not PreparedPowercalcGroupMetadata:
         raise Refused('powercalc_group_metadata_type')
     change.plan()
     baseline, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
-    if baseline != chain.baseline or type(composition) is not PowercalcComposition:
+    if baseline != chain.baseline or type(composition) not in (PowercalcComposition, ControlledPowercalcComposition):
         raise Refused('powercalc_group_metadata_original')
     old, new = next(iter(change.mapping.items()))
     groups = [group for group in composition.previous.groups if group.entity_id == old]

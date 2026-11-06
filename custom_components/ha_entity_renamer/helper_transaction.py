@@ -70,7 +70,11 @@ class HelperTransactionAdapter:
     """
     def __init__(self, hass, resolver, *, resolve_step, settle, validate_snapshot,
                  verify_activation, verify_runtime, verify_inventory,
-                 verify_original_inventory, persistence=None, registry_adapter="registry"):
+                 verify_original_inventory, persistence=None, registry_adapter="registry",
+                 controlled_template_reload=False):
+        if type(controlled_template_reload) is not bool:
+            raise ValueError('helper_reload_policy_invalid')
+        self.controlled_template_reload = controlled_template_reload
         self.hass, self.resolver = hass, resolver
         self.resolve_step = resolve_step
         self.registry_adapter = registry_adapter
@@ -208,7 +212,8 @@ class HelperTransactionAdapter:
 
         result = await apply_entry(self.hass, write_plan, guard=guard, settle=checked_settle,
             record_intent=already_journaled, verify_runtime=checked_activation,
-            validate_snapshot=checked_validation, before_mutation=before_mutation)
+            validate_snapshot=checked_validation, before_mutation=before_mutation,
+            controlled_template_reload=getattr(self, 'controlled_template_reload', False))
         guard()
         await self.persistence.flush(desired, guard)
         guard()

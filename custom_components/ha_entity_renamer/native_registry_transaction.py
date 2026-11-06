@@ -27,6 +27,7 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
         self.context = None
         self._own_escrows = {}
         self._template_state_root = None
+        self._controlled_handoff = None
 
     def bind_template_state_root(self, root):
         from .native_template_state_server import NativeTemplateStateServer
@@ -35,6 +36,12 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
             raise Refused('template_state_root_binding_required')
         root._scope()
         self._template_state_root = root
+
+    def bind_controlled_powercalc(self, handoff):
+        from .controlled_powercalc_handoff import ControlledPowercalcHandoff
+        if type(handoff) is not ControlledPowercalcHandoff or handoff.chain is not self.chain:
+            raise Refused('controlled_powercalc_handoff_binding_required')
+        self._controlled_handoff = handoff
 
     def bind_own_helper_escrow(self, escrow, token, *, source_fence):
         """Trusted ephemeral composition; saved escrow data cannot bind a writer.
@@ -222,9 +229,14 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
                 if binding is not None:
                     raise Refused('template_state_helper_effect_composition_unqualified')
                 from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
-                node = await NativeTemplateStateRegistryEffect.capture(self._template_state_root,
-                    self.bridge.io, change, context, intent, before,
-                    self._template_state_root.observation_state, guard)
+                if self._controlled_handoff is not None and change.before.get('platform') == 'powercalc':
+                    from .controlled_powercalc_registry import ControlledPowercalcRegistryNode
+                    node = await ControlledPowercalcRegistryNode.capture(self._template_state_root,
+                        self._controlled_handoff, self.bridge.io, change, context, intent, before, guard)
+                else:
+                    node = await NativeTemplateStateRegistryEffect.capture(self._template_state_root,
+                        self.bridge.io, change, context, intent, before,
+                        self._template_state_root.observation_state, guard)
                 try:
                     await self._durable_context(guard, context)
                     before = await self._read(guard)
@@ -233,7 +245,12 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
                     await node.before_attempt()
                     return node
                 except BaseException:
-                    node.abort_before_attempt()
+                    # Script removal itself is already an irreversible native
+                    # attempt under this intent; never mask its primary error
+                    # with a pre-effect cleanup or recreate it blindly.
+                    cutover = getattr(node, 'script_cutover', None)
+                    if cutover is None or cutover.phase == 'captured':
+                        node.abort_before_attempt()
                     raise
             if binding is not None:
                 node = self._own_node(binding, own, change, context, intent, before, guard)
@@ -251,7 +268,25 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
                     raise
 
         method = self.bridge.apply if direction == 'forward' else self.bridge.compensate
-        mutation = await method(change, guard, before_mutation=before_mutation)
+        try:
+            mutation = await method(change, guard, before_mutation=before_mutation)
+        except BaseException:
+            # An intent can already have detached Automation triggers even if
+            # the registry call was never reached. Drain only that temporary
+            # ownership cleanup; the original failure and UNKNOWN remain.
+            cutover = getattr(node, 'script_cutover', None)
+            if cutover is not None and cutover.suspended_automations:
+                cleanup = asyncio.create_task(cutover.cleanup_suspended_automations())
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        continue
+                    except BaseException:
+                        break
+                if not cleanup.cancelled():
+                    cleanup.exception()  # Retrieve without masking the primary error.
+            raise
         guard()
         if intent is None or type(mutation) is not self._mutation_type():
             raise Refused('Native registry call not confirmed')
@@ -286,6 +321,12 @@ class ReceiptedRegistryTransactionAdapter(RegistryTransactionAdapter):
                 raise Refused('template_state_registry_effect_required')
             await node.verify_effect(mutation, after)
             await self._durable_context(guard, context)
+            from .controlled_powercalc_registry import ControlledPowercalcRegistryNode
+            if type(node) is ControlledPowercalcRegistryNode:
+                extra['powercalc_group_effect'] = node
+        if self._controlled_handoff is not None:
+            self._controlled_handoff.require_inactive()
+            extra['controlled_powercalc_handoff'] = self._controlled_handoff
         reference = await self.chain.complete(intent, context, before, after,
                                               mutation=mutation, audit=audit, **extra)
         self._receipt_completed(reference)

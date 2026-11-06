@@ -17,8 +17,8 @@ def prepare_group_registry(change, group, version):
         raise Refused('powercalc_group_registry_preparation_scope')
     before, after = change.before, change.after
     if (before.get('suggested_object_id') != before['entity_id'].removeprefix('sensor.')
-            or {k: v for k, v in before.items() if k != 'entity_id'} !=
-               {k: v for k, v in after.items() if k != 'entity_id'}):
+            or {k: v for k, v in before.items() if k not in ('entity_id', 'name')} !=
+               {k: v for k, v in after.items() if k not in ('entity_id', 'name')}):
         raise Refused('powercalc_group_registry_suggested_unqualified')
     derived = dict(after, suggested_object_id=after['entity_id'].removeprefix('sensor.'))
     if not _powercalc_group_suggested_move(before, derived):

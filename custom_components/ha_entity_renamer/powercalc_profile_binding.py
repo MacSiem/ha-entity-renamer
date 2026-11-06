@@ -44,6 +44,7 @@ def extend_vendor(vendor):
         ('sensors.group.custom', 'PreviousStateStoreStore', ('_async_migrate_func',)),
         ('sensors.group.custom', 'PreviousStateStore', ('__init__', 'get_entity_state',
             'set_entity_state', 'cleanup_entity_states', 'persist_states', 'async_setup_dump')),
+        ('sensors.energy', 'VirtualEnergyExtraStoredData', ('as_dict',)),
         ('sensors.energy', 'VirtualEnergySensor', ('__init__', '_integrate_on_state_change',
             '_schedule_max_sub_interval_exceeded_if_state_is_numeric', '_sanitize_new_state',
             '_replace_outlier_state', 'extra_restore_state_data')),
@@ -412,6 +413,7 @@ def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity
                 members, reason, kind = [parent.entity_id], 'integration_energy_source_bound', 'energy_integral'
             else:
                 members = group_cfg.get('group_energy_entities', [])
+                precision = group_cfg.get('energy_sensor_precision', globals_.get('energy_sensor_precision', 4))
                 need(type(entity) is cls['GroupedEnergySensor'] and entity._entities == set(members)
                      and set(members) <= energies and bool(members) and entity._update_interval == 0
                      and type(entity._prev_state_store) is cls['PreviousStateStore']
@@ -422,7 +424,10 @@ def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity
                      and Path(entity._prev_state_store.store.path) ==
                          Path(hass.config.path('.storage', 'powercalc_group'))
                      and entity.native_unit_of_measurement == 'kWh'
-                     and entity._rounding_digits == globals_.get('energy_sensor_precision', 4)
+                     and type(precision) is int
+                     and ('energy_sensor_precision' not in group_cfg or 0 <= precision <= 6)
+                     and entity._rounding_digits == precision
+                     and entity._sensor_config.get('energy_sensor_precision', 4) == precision
                      and entity._sensor_config.get('group_energy_start_at_zero', True) is True,
                      'energy_delta_members_changed')
                 previous = entity._prev_state_store.states.get(entity.entity_id, {})

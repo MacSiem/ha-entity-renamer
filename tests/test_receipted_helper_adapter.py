@@ -108,6 +108,38 @@ class Harness(registry_fixture.Harness):
 
 
 class ReceiptedHelperAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_template_receipts_carry_owned_handoff_in_both_directions(self):
+        entry_module = importlib.import_module(base.PACKAGE + '.controlled_template_entry_adapter')
+        handoff_module = importlib.import_module(base.PACKAGE + '.controlled_powercalc_handoff')
+        h = await Harness().initialize(self)
+        chain = h.f['chain']
+        handoff = object.__new__(handoff_module.ControlledPowercalcHandoff)
+        handoff.chain, handoff.receipt, handoff.setup_reference = chain, ('receipt', 'digest'), None
+        adapter = entry_module.ControlledEntryReceiptAdapter(
+            h.helper, chain, h.observe, h.log.load, h.guard,
+            full_verify=h.final_verify, full_verify_rollback=h.final_verify)
+        adapter.bind_controlled_powercalc(handoff)
+        h.registry_adapter.guard = adapter.guard
+        coordinator = h.make_coordinator(adapter, h.registry_adapter)
+        original_complete, calls = chain.complete, []
+
+        async def capture(intent, context, *args, **kwargs):
+            actual = kwargs.pop('controlled_powercalc_handoff', None)
+            if context.index in (1, 2):
+                self.assertIs(actual, handoff)
+                calls.append(context.record.direction)
+            else:
+                self.assertIsNone(actual)
+            return await original_complete(intent, context, *args, **kwargs)
+
+        chain.complete = capture
+        with patch.object(native, '_config_row_json', h.stamp), \
+             patch.object(handoff_module.ControlledPowercalcHandoff, 'require_inactive'):
+            self.assertEqual((await coordinator.apply(h.f['plan'], h.f['plan'].fingerprint,
+                                                      'provided-operation-id')).status, 'applied')
+            self.assertEqual((await coordinator.rollback('provided-operation-id')).status, 'rolled_back')
+        self.assertEqual(calls, ['forward', 'forward', 'rollback', 'rollback'])
+
     async def test_mixed_forward_reverse_no_replay_and_actual_helper_boundary(self):
         h = await Harness().initialize(self)
         with patch.object(native, '_config_row_json', h.stamp):
@@ -210,7 +242,7 @@ class ReceiptedHelperAdapterTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(native, '_config_row_json', h.stamp):
             # Poisoned PreparedStore also invalidates the shared lifecycle guard.
             # Original durable intent remains; recover with freshly reopened IO.
-            with self.assertRaisesRegex(ValueError, 'preparations_unavailable'):
+            with self.assertRaisesRegex(OSError, 'synthetic lost save acknowledgement'):
                 await h.apply()
             self.assertEqual(h.helper_calls, 1)
             self.assertEqual((await h.log.load('provided-operation-id')).phases,

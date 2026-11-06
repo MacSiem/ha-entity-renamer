@@ -189,8 +189,10 @@ def _live(hass, vendor, rows):
     return tuple(group_results), _json(data), store
 
 
-async def async_capture_powercalc_previous_original(hass, receipt, evidence, original, *, guard):
+async def async_capture_powercalc_previous_original(hass, receipt, evidence, original, *, guard,
+                                                    allow_live_progress=False):
     """Capture once before effects; this data alone cannot authorize any write."""
+    _need(type(allow_live_progress) is bool, 'live_progress_option')
     _guard(guard)
     bound = await async_bind_powercalc_sources(hass, receipt, evidence, original, guard=guard)
     vendor = PowercalcVendor(hass, with_profiles=True)
@@ -200,17 +202,21 @@ async def async_capture_powercalc_previous_original(hass, receipt, evidence, ori
         raw, identity = await _drained(hass.async_add_executor_job, pinned.capture)
         _guard(guard)
         _disk_shape(raw)
+        def same_graph(rows):
+            return tuple((group.entity_id, group.registry_id, group.members) for group in rows)
         again, memory_after, current_store = _live(hass, vendor, bound.rows)
-        _need(again == groups and memory_after == memory and current_store is store,
+        _need(current_store is store and same_graph(again) == same_graph(groups)
+              and (allow_live_progress or (again == groups and memory_after == memory)),
               'live_capture_changed')
         await _drained(hass.async_add_executor_job, pinned.verify)
         _guard(guard)
         final, final_memory, final_store = _live(hass, vendor, bound.rows)
-        _need(final == groups and final_memory == memory and final_store is store,
+        _need(final_store is store and same_graph(final) == same_graph(groups)
+              and (allow_live_progress or (final == groups and final_memory == memory)),
               'live_capture_changed')
         evidence.assert_receipt(receipt)
         return PowercalcPreviousOriginal(hashlib.sha256(evidence.receipt_json).hexdigest(),
-            evidence.powercalc_sources.sha256, receipt.version, groups, memory, raw, identity,
+            evidence.powercalc_sources.sha256, receipt.version, final, final_memory, raw, identity,
             pinned.root_sig[:3], pinned.storage_sig[:3])
     finally:
         pinned.close()

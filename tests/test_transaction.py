@@ -120,6 +120,33 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         selected = plan_ or self.plan
         return await self.coordinator.apply(selected, selected.fingerprint, operation)
 
+    async def test_primary_effect_error_survives_unknown_journal_guard_failure(self):
+        async def fail_after_effect(step, guard):
+            self.authorized = False
+            raise OSError('original effect failure')
+        self.adapter.apply = fail_after_effect
+        with self.assertRaisesRegex(OSError, 'original effect failure') as captured:
+            await self.apply()
+        self.assertTrue(any('UNKNOWN journal write refused' in note for note in captured.exception.__notes__))
+
+    async def test_server_selected_reverse_order_is_used_without_skipping_intents(self):
+        self.coordinator = tx.Coordinator({'fake': self.adapter}, self.journal, self.guard,
+            required_scopes=('all',), rollback_order=lambda: (0, 1))
+        applied = await self.apply()
+        self.assertEqual(applied.status, 'applied')
+        restored = await self.coordinator.rollback('op')
+        self.assertEqual(restored.status, 'rolled_back')
+        self.assertEqual(self.adapter.effects[-2:], ['undo:one', 'undo:two'])
+
+    async def test_invalid_server_reverse_order_refuses_before_compensation(self):
+        self.coordinator = tx.Coordinator({'fake': self.adapter}, self.journal, self.guard,
+            required_scopes=('all',), rollback_order=lambda: (0, 0))
+        await self.apply()
+        restored = await self.coordinator.rollback('op')
+        self.assertEqual(restored.status, 'unknown')
+        self.assertEqual(restored.reason, 'compensation_order_unqualified')
+        self.assertEqual(self.adapter.effects, ['one', 'two'])
+
     def cascading(self):
         self.plan = replace(self.plan, steps=(self.plan.steps[0],
             replace(self.plan.steps[1], caused_by=('one',))))

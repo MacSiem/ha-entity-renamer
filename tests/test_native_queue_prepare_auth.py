@@ -184,6 +184,28 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await runtime.journal.load(review['operation_id']))
         await self.stimulus(7)
 
+    async def test_script_state_trigger_refusal_identifies_dependency_without_write(self):
+        from unittest.mock import patch
+        runtime, old, new, uuids, original, payload = await self.selection()
+        hass = self.f.hass
+        native = self.module('native_registry').NativeRegistryIO(hass)
+        before = (native.document('entity'), native.document('device'))
+        connection, _, output = await self._connection(admin=True)
+        refused = self.module('transaction').Refused
+        async def unsupported(*args, **kwargs):
+            raise refused('own_id_script_state_trigger_unqualified:automation.watcher:script.selected')
+        with patch.object(type(runtime), 'native_yaml_prepare', unsupported):
+            connection.async_handle({'id': 1, 'type': 'ha_entity_renamer/prepare', **payload})
+            response = await output
+        self.assertFalse(response['success'])
+        self.assertEqual(response['error']['code'], 'unsupported_script_state_trigger')
+        self.assertEqual(json.loads(response['error']['message']),
+            {'automation': 'automation.watcher', 'script': 'script.selected'})
+        self.assertEqual((native.document('entity'), native.document('device')), before)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        self.assertEqual(await runtime.journal.active(), ())
+        self.assertFalse(runtime.reviews)
+
     async def test_household_prepare_denied_without_review(self):
         runtime, old, new, uuids, original, payload = await self.selection()
         connection, user, output = await self._connection(admin=False)

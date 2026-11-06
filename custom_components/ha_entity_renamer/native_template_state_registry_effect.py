@@ -47,7 +47,8 @@ class NativeTemplateStateRegistryEffect:
                   and context.index == 0 and len(root.registry_changes) == 1,
                   'cold_original_prefix_context_changed')
         snapshot = await async_observe_accepted_state_bindings(root.hass, root.chain,
-            root.program, guard=guard, input_state=state, runtime_original=cold_original)
+            root.program, guard=guard, input_state=state, runtime_original=cold_original,
+            entry_witness=getattr(root, 'entry_witness', None))
         guard()
         root.chain.verify_intent_source(intent, context, before)
         old, new = next(iter(change.mapping.items()))
@@ -78,7 +79,7 @@ class NativeTemplateStateRegistryEffect:
             registry_ids=tuple((identity, obj.target if identity == change.identity else value)
                                for identity, value in snapshot.prefix.registry_ids))
         obj.transport = obj.this_transfer = None
-        obj.own_entity = obj.dependent_entity = obj.script_service_move = None
+        obj.own_entity = obj.dependent_entity = obj.script_service_move = obj.script_cutover = None
         obj.transfer_entities = transition.entities
         obj.witness = obj.delivery = obj.ingress = None
         from .native_script_program_composition import ScriptTemplateStateComposition
@@ -93,9 +94,14 @@ class NativeTemplateStateRegistryEffect:
             _need(type(obj.script_phase) is NativeScriptPrefixPhase, 'typed_script_phase_required')
         from .native_registry_transition import _native_script_unique_move
         script_unique_move = _native_script_unique_move(change.before, change.after)
+        from .native_template_yaml_server import _controlled_reload
+        named_automation = (_controlled_reload(root.composition)
+                            and change.before.get('platform') == 'automation'
+                            and bool(change.runtime_before_json))
+        excluded = ('entity_id', 'modified_at', 'name') if named_automation else ('entity_id', 'modified_at')
         pure = (script_unique_move or
-                {key: value for key, value in change.before.items() if key not in ('entity_id', 'modified_at')}
-                == {key: value for key, value in change.after.items() if key not in ('entity_id', 'modified_at')})
+                {key: value for key, value in change.before.items() if key not in excluded}
+                == {key: value for key, value in change.after.items() if key not in excluded})
         if change.before.get('platform') == 'template':
             hits = [row.entity for row in snapshot.rows if row.registry_id == change.identity]
             _need(len(hits) == 1 and pure, 'own_template_identity_unqualified')
@@ -108,7 +114,14 @@ class NativeTemplateStateRegistryEffect:
         producer_entities = transition.entities
         if obj.own_entity is not None and not any(e is obj.own_entity for e in producer_entities):
             producer_entities = (*producer_entities, obj.own_entity)
-        if (transition.entities or obj.script_phase is not None or obj.own_entity is not None
+        from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+        direct_script = (is_controlled_script(root.composition)
+                         and obj.dependent_entity is not None and script_unique_move)
+        if direct_script:
+            from .controlled_script_cutover import ControlledScriptCutover
+            obj.script_cutover = await ControlledScriptCutover.capture(
+                obj, root.composition.dependent_config_program, target)
+        elif (transition.entities or obj.script_phase is not None or obj.own_entity is not None
                 or obj.dependent_entity is not None) and pure:
             from .native_rename_emission_classifier import NativeRenameEmissions
             from .native_template_rename_ingress import NativeTemplateProducerDelivery
@@ -118,8 +131,11 @@ class NativeTemplateStateRegistryEffect:
             # Dependent A/S lifecycle retains its existing source-event proof
             # until the separate full program/phase transport is integrated.
             from .native_template_state_composition import TemplateStateComposition
-            supported = NativeSourceHandoff.supports_source(io, change, target_image)
-            if obj.script_phase is not None or obj.own_entity is not None or obj.dependent_entity is not None:
+            from .native_template_yaml_server import _controlled_reload
+            direct_readd = (_controlled_reload(root.composition) and obj.dependent_entity is not None
+                            and change.before.get('platform') == 'automation')
+            supported = False if direct_readd else NativeSourceHandoff.supports_source(io, change, target_image)
+            if (obj.script_phase is not None or obj.own_entity is not None or obj.dependent_entity is not None) and not direct_readd:
                 _need(supported, 'dependent_prefix_source_handoff_unsupported')
             if (type(root.composition) in (TemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)
                     and supported):
@@ -161,6 +177,10 @@ class NativeTemplateStateRegistryEffect:
     async def before_attempt(self):
         if self.delivery is not None:
             await self.delivery.drain()
+        if self.script_cutover is not None:
+            self.root.controlled_script_cutover = self.script_cutover
+            await self.script_cutover.suspend_affected_automations()
+            await self.script_cutover.remove()
 
     def abort_before_attempt(self):
         _need(self.phase in ('captured', 'failed_before_attempt'), 'attempt_cannot_be_aborted')
@@ -192,6 +212,8 @@ class NativeTemplateStateRegistryEffect:
                 self.witness.close()
 
     async def finish_native(self):
+        if self.script_cutover is not None:
+            await self.script_cutover.add(self.script_cutover.mutation)
         if self.witness is not None:
             try:
                 await self.witness.finish()
@@ -226,15 +248,20 @@ class NativeTemplateStateRegistryEffect:
         self.root.chain.verify_intent_source(self.intent, self.context, self.before)
         admission = getattr(self.root, 'own_record_admission', None)
         if admission is not None:
-            admission.check_execution()
-            if self.snapshot.prefix.head == self.root.own_record_head:
-                admission.check()
+            if self.script_cutover is not None and self.script_cutover.phase != 'captured':
+                self.script_cutover._scope()
+                self.script_cutover._foreign()
+            else:
+                admission.check_execution()
+                if self.snapshot.prefix.head == self.root.own_record_head:
+                    admission.check()
         dependent = getattr(self.root, 'own_dependent_fence', None)
         if dependent is not None:
             dependent.check_sources()
         self.runtime.sources()
         fresh = sample_state_bindings(self.runtime, self.root.program, self.snapshot.prefix,
-            self.snapshot.yaml_position, self.root.chain.accepted_documents())
+            self.snapshot.yaml_position, self.root.chain.accepted_documents(),
+            entry_witness=getattr(self.root, 'entry_witness', None))
         _need(self.snapshot.same_bindings(fresh), 'source_identity_changed')
         self.snapshot = fresh
         if self.cold_original:
@@ -270,7 +297,8 @@ class NativeTemplateStateRegistryEffect:
         self.runtime.sources()
         expected = self.snapshot.prefix if stage in ('capture', 'install') else self.expected
         actual = sample_state_bindings(self.runtime, self.root.program, expected,
-            self.snapshot.yaml_position, self.root.chain.accepted_documents())
+            self.snapshot.yaml_position, self.root.chain.accepted_documents(),
+            entry_witness=getattr(self.root, 'entry_witness', None))
         if stage in ('capture', 'install'):
             _need(actual == self.snapshot, 'source_runtime_changed')
         else:
@@ -280,6 +308,8 @@ class NativeTemplateStateRegistryEffect:
         return True
 
     def _registry_attempted(self):
+        if self.script_cutover is not None and self.script_cutover.phase != 'captured':
+            return True
         witness = self.witness
         if witness is None or not witness.attempted:
             return False
@@ -361,7 +391,8 @@ class NativeTemplateStateRegistryEffect:
                 self.this_transfer.install()
                 handoff.bind_installed_this(self.this_transfer)
         except BaseException:
-            self.abort_before_attempt()
+            if self.script_cutover is None or self.script_cutover.phase == 'captured':
+                self.abort_before_attempt()
             raise
         if self.dependent_entity is not None:
             try:
@@ -369,7 +400,8 @@ class NativeTemplateStateRegistryEffect:
                 _need(fence.node is None and fence.entity is self.dependent_entity,
                       'own_dependent_node_changed')
             except BaseException:
-                self.abort_before_attempt()
+                if self.script_cutover is None or self.script_cutover.phase == 'captured':
+                    self.abort_before_attempt()
                 raise
         self.phase = 'registry_attempted'
         if self.dependent_entity is not None:
@@ -381,8 +413,19 @@ class NativeTemplateStateRegistryEffect:
                 if self.script_phase is not None:
                     self.script_phase.mark_attempt(self)
                 return result
-            return self.io.mutate(self.change,
-                self.change.before if self.context.record.direction == 'rollback' else self.change.after)
+            target = self.change.before if self.context.record.direction == 'rollback' else self.change.after
+            if self.script_cutover is not None:
+                _need(getattr(self.io, '_script_service_capability', None) is None,
+                      'script_cutover_capability_occupied')
+                self.io._script_service_capability = self.script_cutover
+                try:
+                    result = self.io.mutate(self.change, target)
+                    self.script_cutover.mutation = result
+                    return result
+                finally:
+                    if getattr(self.io, '_script_service_capability', None) is self.script_cutover:
+                        del self.io._script_service_capability
+            return self.io.mutate(self.change, target)
         except BaseException:
             if self.witness is not None and not self._registry_attempted():
                 # The final owning guard can refuse after installing bindings
@@ -422,11 +465,11 @@ class NativeTemplateStateRegistryEffect:
             _need(fence.documents() == documents, 'native_readback_changed')
         await checked_sources()
         first = sample_state_bindings(self.runtime, self.root.program, self.expected,
-            self.snapshot.yaml_position, documents)
+            self.snapshot.yaml_position, documents, entry_witness=getattr(self.root, 'entry_witness', None))
         await asyncio.sleep(0)
         await checked_sources()
         second = sample_state_bindings(self.runtime, self.root.program, self.expected,
-            self.snapshot.yaml_position, documents)
+            self.snapshot.yaml_position, documents, entry_witness=getattr(self.root, 'entry_witness', None))
         _need(first.same_bindings(second), 'native_runtime_changed')
         self.phase = 'observed_effect'
 
@@ -434,7 +477,8 @@ class NativeTemplateStateRegistryEffect:
         _need(self.phase == 'observed_effect', 'effect_observation_required')
         self.guard()
         actual = await async_observe_accepted_state_bindings(self.root.hass,
-            self.root.chain, self.root.program, guard=self.guard)
+            self.root.chain, self.root.program, guard=self.guard,
+            entry_witness=getattr(self.root, 'entry_witness', None))
         self.guard()
         _need(actual.prefix.active == self.expected.active
               and actual.prefix.registry_ids == self.expected.registry_ids,
@@ -457,5 +501,25 @@ class NativeTemplateStateRegistryEffect:
                     _need(fresh.selected_entity is self.dependent_entity and fresh.service is move.replacement,
                           'own_dependent_service_rebind_changed')
                     admission.inventory = fresh
+            if self.script_cutover is not None:
+                admission = getattr(self.root, 'own_record_admission', None)
+                if admission is not None:
+                    # Callers still carry their sealed BEFORE program until the
+                    # subsequent YAML reload. The controlled phase reads their
+                    # exact hybrid projection; do not invent a fresh caller
+                    # inventory against the not-yet-updated direct service.
+                    cutover = self.script_cutover
+                    service = cutover.service_table.get(cutover.new_key)
+                    _need(service is not None and getattr(service.job.target, '__self__', None) is fence.entity,
+                          'controlled_script_service_changed')
+                    admission.entity, admission.script = fence.entity, fence.entity.script
+                    admission.controlled_service = (cutover.service_table, cutover.new_key, cutover.old_key,
+                        service, service.job, service.job.target, service.schema, service.supports_response)
+                    admission.inventory = None
             fence.node = None
+        from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+        if is_controlled_script(self.root.composition):
+            self.root.consumers.phases.accept_registry(self.change)
+            if self.script_cutover is not None:
+                self.root.controlled_script_cutover = None
         self.phase = 'accepted'

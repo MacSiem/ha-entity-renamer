@@ -34,7 +34,7 @@ def _yaml_factory_for_plan(preparations, plan):
     if profile == 'powercalc_source_own_binding_v1':
         from .powercalc_public_server import PowercalcPublicServer
         return PowercalcPublicServer
-    if profile in ('template_state_binding_v3', 'template_mixed_state_binding_v1', 'template_script_prefix_binding_v1', 'template_automation_prefix_binding_v1'):
+    if profile in ('template_state_binding_v3', 'template_mixed_state_binding_v1', 'template_controlled_reload_v1', 'template_controlled_reload_entry_v1', 'template_controlled_script_reload_v1', 'template_script_prefix_binding_v1', 'template_automation_prefix_binding_v1', 'template_controlled_powercalc_v1'):
         return NativeTemplateStateServer
     if profile == 'template_numeric_entry_reverse_v1' and plan.required_scopes == ('registry', 'helpers'):
         from .native_template_forward import NativeTemplateForward
@@ -139,17 +139,44 @@ class Runtime:
             await self.preparations.create('review-' + prefix, review_lease(prefix, actor_id))
             current()
             try:
-                if 'powercalc' in hass.config.components:
-                    from .powercalc_public_server import PowercalcPublicServer
-                    session = await PowercalcPublicServer.prepare(hass, mapping,
+                powercalc_selected = False
+                if 'powercalc' in hass.config.components and mapping:
+                    from .native_registry import NativeRegistryIO
+                    from .powercalc_runtime_observer import capture_powercalc_runtime, selected_powercalc_reference
+                    rows = NativeRegistryIO(hass).document('entity')['entities']
+                    powercalc_selected = any(row.get('platform') == 'powercalc'
+                        and row.get('entity_id') in mapping for row in rows)
+                    if not powercalc_selected:
+                        try:
+                            inventory = capture_powercalc_runtime(hass, guard=current)
+                            powercalc_selected = selected_powercalc_reference(inventory, mapping, rows)
+                        except ValueError:
+                            # Discovery retains the unavailable/partial PC
+                            # inventory as an explicit coverage limitation.
+                            current()
+                if powercalc_selected:
+                    session = await NativeTemplateStateServer.prepare(hass, mapping,
                         guard=current, refresh=refresh, entity_names=entity_names,
-                        device_names=device_names, review_id=prefix)
-                elif hass.config_entries.async_entries('template'):
-                    from .native_template_forward import NativeTemplateForward
-                    if entity_names or device_names:
-                        raise Refused('template_forward_names_unsupported')
-                    session = await NativeTemplateForward.prepare(hass, mapping,
-                        guard=current, refresh=refresh, review_id=prefix)
+                        device_names=device_names, review_id=prefix, _mixed_powercalc=True)
+                elif hass.config_entries.async_entries('template') and 'powercalc' not in hass.config.components:
+                    # YAML dependencies belong to the same ordinary plan. The
+                    # legacy one-entry path remains only for no-YAML requests.
+                    from pathlib import Path
+                    from .native_input_baseline import _drained
+                    from .yaml_plan import plan_yaml
+                    root = Path(hass.config.config_dir).resolve()
+                    proposal = await _drained(hass.async_add_executor_job, lambda: plan_yaml(root, mapping))
+                    current()
+                    if proposal.patches or not proposal.ready:
+                        session = await NativeTemplateStateServer.prepare(hass, mapping,
+                            guard=current, refresh=refresh, entity_names=entity_names,
+                            device_names=device_names, review_id=prefix)
+                    else:
+                        from .native_template_forward import NativeTemplateForward
+                        if entity_names or device_names:
+                            raise Refused('template_forward_names_unsupported')
+                        session = await NativeTemplateForward.prepare(hass, mapping,
+                            guard=current, refresh=refresh, review_id=prefix)
                 else:
                     session = await NativeTemplateStateServer.prepare(hass, mapping,
                         guard=current, refresh=refresh, entity_names=entity_names,
@@ -187,15 +214,25 @@ class Runtime:
                 # Aggregate only the admitted planned YAML scope. Paths, YAML,
                 # native keys, receipts and private consumer configuration stay here.
                 from .powercalc_composition import PowercalcComposition
-                powercalc = type(composition) is PowercalcComposition
+                from .controlled_powercalc_composition import ControlledPowercalcComposition
+                powercalc = type(composition) in (PowercalcComposition, ControlledPowercalcComposition)
                 dependencies = {
-                    'domains': (['powercalc'] + (['energy'] if 'energy' in plan.required_scopes else [])) if powercalc else (['template'] if is_entry else sorted(domain for domain in receipt.changed_domains
+                    'domains': (sorted(set(['powercalc'] + (['energy'] if 'energy' in plan.required_scopes else [])
+                        + [domain for domain in receipt.changed_domains if domain in ('template', 'automation', 'script')]))) if powercalc else (['template'] if is_entry else sorted(domain for domain in receipt.changed_domains
                                       if domain in ('template', 'automation', 'script'))),
                     'yaml_file_count': len(receipt.proposed_files),
-                    'files': session.dependency_files if powercalc else ([] if is_entry else dependency_files(composition)),
-                    'template_consumer_count': 0 if powercalc else (1 if is_entry else sum(
+                    'files': (session.dependency_files if type(composition) is PowercalcComposition
+                              else ([] if is_entry else dependency_files(composition))),
+                    'template_consumer_count': 0 if type(composition) is PowercalcComposition else (1 if is_entry else sum(
                         row.domain in ('template.sensor', 'template.binary_sensor')
                         for row in session.evidence.template_sources.ledger.definitions))}
+                if powercalc:
+                    from .dependency_review import dependency_powercalc_groups
+                    from .prepared import decode_change
+                    digests = dict(composition.prepared_digests)
+                    helpers = [decode_change(self.preparations.resolve(step.prepared_ref, digests[step.prepared_ref]))
+                               for step in plan.steps if step.adapter == 'helpers']
+                    dependencies['config_entries'] = dependency_powercalc_groups(helpers)
                 if 'dashboard' in plan.required_scopes:
                     dependencies['domains'] = sorted([*dependencies['domains'], 'dashboard'])
                     from .dependency_review import dependency_dashboards
@@ -204,6 +241,70 @@ class Runtime:
                     old, new = next(iter(session.mapping.items()))
                     dependencies['config_entries'] = [{'entity_id': session.observer.rows[0]['entity_id'],
                                                        'before': old, 'after': new}]
+                elif getattr(session, 'entry_change', None) is not None:
+                    import json
+                    change = session.entry_change
+                    old, new = next(iter(change.mapping.items()))
+                    rows = json.loads(next(f.raw for f in baseline.files if f.key == 'core.entity_registry'))['data']['entities']
+                    consumers = [row for row in rows if row.get('config_entry_id') == change.before['identity']['entry_id']]
+                    if len(consumers) != 1:
+                        raise Refused('controlled_entry_review_consumer_unqualified')
+                    dependencies.setdefault('config_entries', []).append(
+                        {'entity_id': consumers[0]['entity_id'], 'before': old, 'after': new})
+                # Use the existing discovery and the same prepared YAML graph.
+                # Its unverified families are limitations, not proof of an
+                # affected reference and not an automatic custom-integration ban.
+                from .discovery import async_discover
+                from .discovery_final_fence import async_finalize_discovery
+                from .native_template_state_composition import ControlledReloadComposition, ControlledReloadEntryComposition
+                from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+                names = entity_names or {}
+                registry_devices = {change.before['entity_id']: change.before.get('device_id')
+                                    for change in registry_changes if change.kind == 'entity'}
+                proposal = {'entities': [
+                    {'entity_id': old, 'proposed_entity_id': mapping.get(old, old),
+                     'device_id': registry_devices.get(old),
+                     **({'proposed_name': names[old]} if old in names else {})}
+                    for old in sorted(set(mapping) | set(names))],
+                    'devices': [{'device_id': identity, 'proposed_name': name}
+                                for identity, name in sorted((device_names or {}).items())],
+                    'statistics': []}
+                owned_script = ()
+                if is_controlled_script(composition):
+                    from .dependent_config_program import verified_script_key_edits
+                    key_edits = verified_script_key_edits(composition.evidence, composition.yaml_plan, mapping)
+                    if len(key_edits) != 1:
+                        raise Refused('review_script_definition_unqualified')
+                    owned_script = tuple(key_edits)
+                expected_yaml = (composition.yaml_plan if type(composition) in
+                    (ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition,
+                     ControlledPowercalcComposition) else None)
+                if type(composition) is ControlledPowercalcComposition:
+                    # Discovery scans YAML; the separately sealed Powercalc
+                    # profile inputs are verified by the existing PC fence.
+                    from dataclasses import replace
+                    expected_yaml = replace(expected_yaml, powercalc_inputs=None)
+                capture = await async_discover(hass, proposal, session._scope,
+                    _expected_yaml=expected_yaml,
+                    _owned_script_services=owned_script)
+                from homeassistant import loader
+                custom = await loader.async_get_custom_components(hass)
+                capture = await async_finalize_discovery(hass, capture, session._scope)
+                if capture.conflicts:
+                    raise Refused('review_discovery_source_changed')
+                limitations = [{'source': row.name, 'status': row.status,
+                    'reason': ('external_consumers_not_enumerated' if row.name == 'external' else row.reason),
+                    'blockers': list(row.blockers)} for row in capture.families
+                    if row.status != 'COMPLETE' or row.blockers]
+                current()
+                session._scope()
+                limitations.extend({'source': 'config_entry:' + row['domain'] + '/' + row['entry_id'],
+                    'status': 'UNKNOWN', 'reason': 'dynamic_reference_unverified', 'blockers': row['reasons']}
+                    for row in getattr(session, 'config_entry_limitations', ()))
+                limitations.extend({'source': 'custom:' + domain, 'status': 'UNKNOWN',
+                    'reason': 'integration_code_not_enumerated', 'blockers': []}
+                    for domain in sorted(set(custom) & set(hass.config.components) - {'ha_entity_renamer'}))
+                dependencies['coverage'] = limitations
                 current()
                 phases = getattr(getattr(session, 'consumers', None), 'phases', None)
                 admission = tuple(getattr(phases, 'admission', ()))

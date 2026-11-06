@@ -93,6 +93,8 @@ class PreparedYAML:
         if not self.receipt.runtime_expected:
             # Preserve identities of durable preparations created before this field.
             payload['receipt'].pop('runtime_expected', None)
+        if self.receipt.checker_repairs_snapshot is None:
+            payload['receipt'].pop('checker_repairs_snapshot', None)
         return 'yaml:' + _digest(payload)
 
     @property
@@ -116,13 +118,20 @@ def decode_yaml(data):
     return _decode_yaml(data)
 
 
-def _assert_mixed_state_scope(receipt, *, allow_dependent_only=False):
+def _assert_mixed_state_scope(receipt, *, allow_dependent_only=False, allow_template_entry=False):
     """Private codec scope only; full Template source proof lives in composition.
 
     Template may retain genuine missing legacy projections. Automation/script
     still require the same exact checker seals as the legacy mixed profile.
     """
     domains, expected = receipt.changed_domains, receipt.runtime_expected
+    if allow_template_entry:
+        entries = tuple(row for row in expected if row[0] == 'template.config_entries')
+        if len(entries) != 1 or len(entries[0]) != 3:
+            raise ValueError('template_entry_seal_required')
+        for digest in entries[0][1:]:
+            _sha(digest)
+        expected = tuple(row for row in expected if row[0] != 'template.config_entries')
     dependent_only = allow_dependent_only and domains in (('script',), ('automation',), ('automation', 'script'))
     if (type(allow_dependent_only) is not bool or type(domains) is not tuple
             or not (dependent_only or len(domains) in (2, 3) and 'template' in domains)
@@ -145,9 +154,9 @@ def _assert_mixed_state_scope(receipt, *, allow_dependent_only=False):
 
 
 def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_owner_mode=False,
-                 powercalc_mode=False):
+                 powercalc_mode=False, mixed_powercalc_mode=False):
     """Shared bounded file codec, with explicit disjoint selective gates."""
-    if (sum(bool(flag) for flag in (state_mode, mixed_state_mode, powercalc_mode)) > 1
+    if (sum(bool(flag) for flag in (state_mode, mixed_state_mode, powercalc_mode, mixed_powercalc_mode)) > 1
             or dependent_owner_mode and not mixed_state_mode):
         raise ValueError('ambiguous_prepared_yaml_mode')
     _keys(data, ('receipt', 'files'))
@@ -155,7 +164,8 @@ def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_ow
     receipt_keys = ('config_root', 'source_files', 'source_directories', 'proposed_files',
                 'changed_domains', 'unsupported_domains', 'version')
     # Old durable preparations remain decodable, but lack runtime proof.
-    _keys(raw, receipt_keys + (('runtime_expected',) if 'runtime_expected' in raw else ()))
+    _keys(raw, receipt_keys + (('runtime_expected',) if 'runtime_expected' in raw else ())
+          + (('checker_repairs_snapshot',) if 'checker_repairs_snapshot' in raw else ()))
     root = _text(raw['config_root'])
     if not Path(root).is_absolute() or str(Path(root)) != root or '..' in Path(root).parts:
         raise ValueError('invalid_prepared_yaml_root')
@@ -202,13 +212,17 @@ def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_ow
             raise ValueError('invalid_prepared_yaml_proposal')
         proposed.append((_path(row[0]), _sha(row[1])))
     domains = tuple(sequence(raw['changed_domains'], 4))
-    allowed = _SUPPORTED | {'powercalc'} if powercalc_mode else _SUPPORTED
-    unsupported = sequence(raw['unsupported_domains'], 1 if (state_mode or mixed_state_mode or powercalc_mode) else 0)
+    allowed = _SUPPORTED | {'powercalc'} if powercalc_mode or mixed_powercalc_mode else _SUPPORTED
+    unsupported = sequence(raw['unsupported_domains'], 2 if mixed_powercalc_mode else
+                           1 if (state_mode or mixed_state_mode or powercalc_mode) else 0)
     if (not domains or any(type(d) is not str or d not in allowed for d in domains)
             or len(set(domains)) != len(domains)
             or (powercalc_mode and (domains != ('powercalc',) or tuple(unsupported) != ('powercalc',)))
             or ((state_mode or mixed_state_mode) and tuple(unsupported) not in ((), ('template',)))
-            or (not (state_mode or mixed_state_mode or powercalc_mode) and unsupported)):
+            or (mixed_powercalc_mode and ('powercalc' not in domains
+                or set(unsupported) not in ({'powercalc'}, {'powercalc', 'template'})
+                or domains != tuple(sorted(domains))))
+            or (not (state_mode or mixed_state_mode or powercalc_mode or mixed_powercalc_mode) and unsupported)):
         raise ValueError('unsupported_prepared_yaml_activation')
     files, total = [], 0
     for row in sequence(data['files'], 512):
@@ -224,14 +238,18 @@ def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_ow
         files.append(YAMLFile(path, *encoded, _number(row['device']), _number(row['inode'])))
     if not files or len({f.path for f in files}) != len(files):
         raise ValueError('invalid_prepared_yaml_files')
+    if (raw.get('checker_repairs_snapshot') is not None
+            and any(f.path == '.storage/repairs.issue_registry' for f in files)):
+        raise ValueError('checker_snapshot_real_source_conflict')
     source_map = {r[0]: r[1:] for r in sources}
     if any(source_map.get(f.path) != (_hash(f.before), f.device, f.inode) for f in files):
         raise ValueError('prepared_yaml_source_mismatch')
     if tuple(sorted(proposed)) != tuple(sorted((f.path, _hash(f.after)) for f in files)):
         raise ValueError('prepared_yaml_proposal_mismatch')
     runtime_expected = []
-    for row in sequence(raw.get('runtime_expected', ()), 4):
-        if type(row) not in (tuple, list) or len(row) != 3 or row[0] not in domains:
+    for row in sequence(raw.get('runtime_expected', ()), 5 if mixed_powercalc_mode else 4):
+        if (type(row) not in (tuple, list) or len(row) != 3
+                or row[0] not in domains and not ((mixed_powercalc_mode or mixed_state_mode) and row[0] == 'template.config_entries')):
             raise ValueError('invalid_prepared_yaml_runtime')
         domain, before, after = row
         runtime_expected.append((domain, None if before is None else _sha(before),
@@ -240,7 +258,7 @@ def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_ow
         raise ValueError('invalid_prepared_yaml_runtime')
     if state_mode and domains != ('template',):
         raise ValueError('template_state_only_preparation_required')
-    if not state_mode and not mixed_state_mode and 'template' in domains:
+    if not state_mode and not mixed_state_mode and not mixed_powercalc_mode and 'template' in domains:
         # Parsing one aggregate ordinary YAML change does not grant activation.
         # The receipted adapter still requires its exact typed composite observer
         # and ORIGINAL composition. Every changed domain needs checker seals;
@@ -250,10 +268,34 @@ def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_ow
                 or tuple(row[0] for row in runtime_expected) != domains
                 or any(None in row[1:] or row[1] == row[2] for row in runtime_expected)):
             raise ValueError('template_prepared_runtime_subset_required')
+    snapshot = raw.get('checker_repairs_snapshot')
+    if snapshot is not None:
+        if type(snapshot) not in (list, tuple):
+            raise ValueError('invalid_checker_repairs_snapshot')
+        snapshot = tuple(snapshot)
     receipt = ValidationReceipt(root, tuple(sources), tuple(directories), tuple(proposed),
-                                domains, tuple(raw['unsupported_domains']), _text(raw['version']), tuple(runtime_expected))
+                                domains, tuple(raw['unsupported_domains']), _text(raw['version']),
+                                tuple(runtime_expected), snapshot)
+    if snapshot is not None:
+        from .native_input_baseline import _receipt_bytes
+        _receipt_bytes(receipt)
     if mixed_state_mode:
-        _assert_mixed_state_scope(receipt, allow_dependent_only=dependent_owner_mode)
+        _assert_mixed_state_scope(receipt, allow_dependent_only=dependent_owner_mode,
+                                  allow_template_entry=any(row[0] == 'template.config_entries' for row in runtime_expected))
+    if mixed_powercalc_mode:
+        from dataclasses import replace
+        scoped = replace(receipt, changed_domains=tuple(d for d in domains if d != 'powercalc'),
+            unsupported_domains=tuple(d for d in unsupported if d != 'powercalc'),
+            runtime_expected=tuple(row for row in runtime_expected
+                                   if row[0] not in ('powercalc', 'template.config_entries')))
+        if not scoped.changed_domains:
+            if scoped.unsupported_domains or scoped.runtime_expected:
+                raise ValueError('powercalc_only_preparation_required')
+        elif scoped.changed_domains == ('template',):
+            if scoped.unsupported_domains not in ((), ('template',)):
+                raise ValueError('template_state_only_preparation_required')
+        else:
+            _assert_mixed_state_scope(scoped, allow_dependent_only=True)
     return PreparedYAML(receipt, tuple(files))
 
 

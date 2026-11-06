@@ -10,6 +10,50 @@ from copy import deepcopy
 from dataclasses import dataclass
 
 from .helper_plan import HelperPlan, plan_helper, rebase_after_listeners, snapshot_equal
+from .transaction import Refused
+
+
+class UnsupportedEntryReferences(Refused):
+    """A reviewed ConfigEntry scope is unsupported; contains metadata only."""
+    def __init__(self, plans, mapping):
+        import re
+        def references(plan):
+            values = [change.before for change in plan.changes]
+            def strings(value):
+                if type(value) is str:
+                    yield value
+                elif type(value) is dict:
+                    for key, child in value.items():
+                        if type(key) is str:
+                            yield key
+                        yield from strings(child)
+                elif type(value) is list:
+                    for child in value:
+                        yield from strings(child)
+            for marker in plan.markers:
+                value = plan.before
+                try:
+                    for part in marker.path:
+                        value = value[part]
+                except (KeyError, IndexError, TypeError):
+                    continue
+                values.extend(strings(value))
+            return sorted(old for old in mapping if any(
+                re.search(r'(?<![A-Za-z0-9_.])' + re.escape(old) + r'(?![A-Za-z0-9_.])', value)
+                for value in values))
+        self.sources = tuple({'domain': plan.before['domain'],
+            'entry_id': plan.before['identity']['entry_id'],
+            'references': references(plan),
+            'reasons': sorted({marker.code for marker in plan.markers}) or ['unsupported_config_entry_change']}
+            for plan in plans if plan.blocked or plan.changes)
+        super().__init__('unsupported_config_entry_scope')
+
+
+def partition_entry_coverage(plans, mapping):
+    """Separate proven affected entries from unverified, unrelated scope."""
+    rows = UnsupportedEntryReferences(plans, mapping).sources
+    return (tuple(row for row in rows if row['references']),
+            tuple(row for row in rows if not row['references']))
 
 
 
@@ -88,8 +132,19 @@ def read_entry(hass, entry_id: str) -> dict:
     }
 
 
+def _controlled_template_explicit_reload(entry, native_listener):
+    """Use HA's own registered Template listener when present, else reload once."""
+    listeners = tuple(entry.update_listeners)
+    if not listeners:
+        return True
+    if native_listener is not None and len(listeners) == 1 and listeners[0] is native_listener:
+        return False
+    raise ValueError('controlled_template_reload_contract_unavailable')
+
+
 async def apply_entry(hass, plan: HelperPlan, *, guard, settle, record_intent,
-                      verify_runtime, validate_snapshot, before_mutation=None) -> dict:
+                      verify_runtime, validate_snapshot, before_mutation=None,
+                      controlled_template_reload=False) -> dict:
     """Apply one entry inside owner's exclusive transaction lock.
 
     guard(): synchronous fresh admin/operation authorization, raises on failure.
@@ -109,6 +164,10 @@ async def apply_entry(hass, plan: HelperPlan, *, guard, settle, record_intent,
     its existing meaning (an adapter call was attempted), independent of HA's
     returned bool. An exception after intent/write is UNKNOWN: inspect before retry.
     """
+    if type(controlled_template_reload) is not bool:
+        raise ValueError('helper_reload_policy_invalid')
+    if controlled_template_reload and plan.before['domain'] != 'template':
+        raise ValueError('helper_reload_policy_invalid')
     if plan.blocked:
         raise ValueError('helper_coverage_blocked')
     entry_id = plan.before['identity']['entry_id']
@@ -145,10 +204,20 @@ async def apply_entry(hass, plan: HelperPlan, *, guard, settle, record_intent,
             lifecycle = entry.state.value
             if lifecycle not in ('loaded', 'not_loaded'):
                 raise ValueError('helper_lifecycle_unsettled')
+        explicit_reload = desired['domain'] != 'powercalc' and lifecycle == 'loaded'
+        if controlled_template_reload:
+            # Older Template releases install this exact native update listener;
+            # newer releases do not. Refuse any other listener population before
+            # the write instead of inferring behaviour from a patch version.
+            from homeassistant.components import template as native_template
+            if lifecycle != 'loaded':
+                raise ValueError('controlled_template_reload_contract_unavailable')
+            explicit_reload = _controlled_template_explicit_reload(
+                entry, getattr(native_template, 'config_entry_update_listener', None))
         # No await between final compare and native synchronous mutation.
         mutation = _mutate_entry(
             hass.config_entries, entry, data=desired['data'], options=desired['options'])
-        if desired['domain'] != 'powercalc' and lifecycle == 'loaded':
+        if explicit_reload:
             # options_flow_reloads only applies to OptionsFlowWithReload, not
             # direct manager writes. Do not infer automatic reload from it.
             guard()

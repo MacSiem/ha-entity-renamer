@@ -48,6 +48,9 @@ MAX_EVENTS = 4096  # 584 forward + reverse steps: 2337 events, including root.
 
 
 def _is_powercalc_yaml(change):
+    from .native_template_state_yaml import PreparedMixedPowercalcYAML
+    if type(change) is PreparedMixedPowercalcYAML:
+        return True
     if type(change).__module__ != __package__ + '.powercalc_prepared_yaml':
         return False
     from .powercalc_prepared_yaml import PreparedPowercalcYAML
@@ -224,7 +227,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
     def __init__(self, store: RegistryReceiptStore, operation_id: str, plan: Plan,
                  receipt: ValidationReceipt, prepared_digests: dict[str, str], *, yaml_original_metadata=None,
                  dashboard_original_metadata=None):
-        from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, assert_state_yaml_composition
+        from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML, assert_state_yaml_composition
         if (type(store) is not RegistryReceiptStore or type(plan) is not Plan
                 or type(operation_id) is not str or not operation_id):
             _fail('binding_invalid')
@@ -301,7 +304,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                            'dashboard_digest': _digest(json.loads(_json(asdict(change))))}
             elif step.adapter == 'yaml':
                 change.checked()
-                if type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
+                if type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML):
                     assert_state_yaml_composition(self, change)
                 if _is_powercalc_yaml(change):
                     _assert_powercalc_yaml(self, change)
@@ -352,7 +355,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                              if step.adapter == 'dashboard']
         if dashboard_changes:
             if self.yaml_index is None:
-                _fail('dashboard_requires_yaml_scope')
+                self.root.update(schema=2, original_receipt_sha256=_sha(self.baseline.receipt_json))
             if dashboard_original_metadata is None:
                 saved = store.read(self.root_id)
                 if saved is None:
@@ -473,11 +476,15 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 'registry': 'registry_digest', 'energy': 'energy_digest',
                 'dashboard': 'dashboard_digest'}[context.step.adapter]
         result[name] = binding[name]
+        if direction == 'rollback' and self._script_reverse_order() is not None:
+            if context.record.restore_attempted is not True:
+                _fail('script_reverse_admission_required')
+            result['restore_attempted'] = True
         return result
 
     def _original_change(self, index):
         """Re-resolve immutable original; never validate mutable cached helpers."""
-        from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, assert_state_yaml_composition
+        from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML, assert_state_yaml_composition
         if self.plan.steps[index].adapter == 'yaml':
             binding = self.root['bindings'][index]
             payload = self.preparations.resolve(binding['ref'], binding['digest'])
@@ -490,7 +497,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                     or self.changes[index] != original_change):
                 _fail('preparation_mismatch')
             change = deepcopy(original_change)
-            if type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML):
+            if type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML):
                 assert_state_yaml_composition(self, change)
             if _is_powercalc_yaml(change) and not self._powercalc_preparations_unchanged():
                 _assert_powercalc_yaml(self, change)
@@ -579,6 +586,15 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
 
     def _advance(self, states, payload, change):
         """Replay an already accepted immutable delta, never a fresh image."""
+        from .powercalc_source_receipts import _composition
+        from .controlled_powercalc_composition import ControlledPowercalcComposition
+        composition = _composition(self)
+        if type(composition) is ControlledPowercalcComposition:
+            from .controlled_powercalc_setup_receipts import validate_handoff
+            validate_handoff(self, payload.get('controlled_powercalc_handoff'),
+                             payload['binding']['direction'])
+        elif payload.get('controlled_powercalc_handoff') is not None:
+            _fail('foreign_controlled_powercalc_handoff')
         from .native_helper_placeholder_receipts import validate_placeholder_receipt
         validate_placeholder_receipt(self, payload, change)
         from .powercalc_group_receipts import validate_group_receipt
@@ -626,7 +642,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         validate_registry_transition(source_content, result_content, change,
             version=self.version, direction=content_audit.direction,
             native_effect_audit=content_audit,
-            powercalc_group_effect=payload.get('powercalc_group_own_id') is not None)
+            powercalc_group_effect=(payload.get('powercalc_group_own_id') is not None
+                                    or payload.get('controlled_powercalc_group') is not None))
         source_summary = self._summary(states)
         for item_key in KEYS:
             identity = observed[item_key]['identity']
@@ -711,7 +728,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         if self._cache is not None and self._cache[0] == token:
             return self._cache[1]
         states, completed = self._initial(), {}
-        yaml_sources = self._initial_sources() if self.yaml_index is not None else None
+        yaml_sources = self._initial_sources() if (self.yaml_index is not None
+                        or any(step.adapter == 'dashboard' for step in self.plan.steps)) else None
         head, sequence, pending = self.root_digest, 0, None
         self._setup_history = []
         self._setup_positions = {head: {}}
@@ -834,21 +852,67 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
     def _historical_context(self, binding):
         from .transaction import Record
         return PhaseContext(Record(self.operation_id, self.plan, binding['status'],
-                                   tuple(binding['phases']), direction=binding['direction']),
+                                   tuple(binding['phases']), direction=binding['direction'],
+                                   restore_attempted=binding.get('restore_attempted')),
                             binding['index'])
+
+    def _script_reverse_order(self):
+        """Typed Script inverse keeps its registry key aligned with YAML reload."""
+        from .controlled_script_composition import ControlledScriptComposition
+        stored = self.preparations.plans.get(self.plan.native_inputs[0])
+        payload = stored.get('payload') if type(stored) is dict else None
+        encoded = payload.get('composition') if type(payload) is dict else None
+        if type(encoded) is not dict or encoded.get('profile') != 'template_controlled_script_reload_v1':
+            return None
+        baseline, composition = self.preparations.resolve_composition(self.plan.native_inputs)
+        if type(composition) is not ControlledScriptComposition:
+            return None
+        if baseline != self.baseline:
+            _fail('script_reverse_composition_changed')
+        forward = {i: 'forward' for i in range(len(self.plan.steps))}
+        heads = [head for head, positions in self._setup_positions.items() if positions == forward]
+        if len(heads) != 1:
+            return None
+        adapters = tuple(step.adapter for step in self.plan.steps)
+        if (not adapters or any(name not in ('registry', 'helpers', 'dashboard', 'yaml') for name in adapters)
+                or adapters.count('yaml') != 1 or adapters[-1] != 'yaml'):
+            _fail('script_reverse_order_invalid')
+        order = tuple(index for kind in ('registry', 'helpers', 'dashboard', 'yaml')
+                      for index in reversed(range(len(adapters))) if adapters[index] == kind)
+        if len(order) != len(adapters) or len(set(order)) != len(adapters):
+            _fail('script_reverse_order_invalid')
+        return order
 
     def _powercalc_reverse_order(self):
         """Only a validated inverse root can select Powercalc's staged order."""
         if self._powercalc_preparation_snapshot is None:
             return None
         from .powercalc_composition import PowercalcComposition
+        from .controlled_powercalc_composition import ControlledPowercalcComposition
         baseline, composition = self.preparations.resolve_composition(self.plan.native_inputs)
-        if type(composition) is not PowercalcComposition or baseline != self.baseline:
+        if type(composition) not in (PowercalcComposition, ControlledPowercalcComposition) or baseline != self.baseline:
             _fail('powercalc_reverse_composition_changed')
         forward_positions = {i: 'forward' for i in range(len(self.plan.steps))}
         heads = [head for head, positions in self._setup_positions.items() if positions == forward_positions]
         if len(heads) != 1:
             return None
+        if type(composition) is ControlledPowercalcComposition:
+            key = _event_id(['controlled_pc_inverse', self.root_id, heads[0]])
+            row = self.store.read(key)
+            if row is None:
+                return None
+            expected = {'kind': 'controlled_powercalc_inverse_admission', 'schema': 1,
+                        'root': self.root_id, 'operation_id': self.operation_id,
+                        'fingerprint': self.plan.fingerprint, 'forward_head': heads[0],
+                        'population': [list(item) for item in composition.population]}
+            if row != {'digest': _digest(expected), 'payload': expected}:
+                _fail('controlled_powercalc_inverse_admission_changed')
+            order = tuple(index for kind in ('registry', 'helpers', 'energy', 'dashboard', 'yaml')
+                          for index in reversed(range(len(self.plan.steps)))
+                          if self.plan.steps[index].adapter == kind)
+            if len(order) != len(self.plan.steps) or not order or self.plan.steps[order[-1]].adapter != 'yaml':
+                _fail('powercalc_reverse_order_invalid')
+            return order
         key = _event_id(['powercalc_lifecycle_rollback', self.operation_id,
                          self.plan.fingerprint, heads[0]])
         row = self.store.read(key)
@@ -856,7 +920,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             return None
         from .powercalc_lifecycle import validate_reverse_root
         validate_reverse_root(self, (key, row['digest']))
-        order = tuple(index for kind in ('registry', 'helpers', 'energy', 'yaml')
+        order = tuple(index for kind in ('registry', 'helpers', 'energy', 'dashboard', 'yaml')
                       for index in reversed(range(len(self.plan.steps)))
                       if self.plan.steps[index].adapter == kind)
         if (len(order) != len(self.plan.steps) or not order
@@ -867,7 +931,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
 
     def _phase_state(self, context, completed):
         forward = context.record.direction == 'forward'
-        special = None if forward else self._powercalc_reverse_order()
+        special = None if forward else (self._script_reverse_order() or self._powercalc_reverse_order())
         for index, phase in enumerate(context.record.phases):
             if index == context.index:
                 expected = None if forward else 'forward'
@@ -885,7 +949,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             at = special.index(context.index)
             if any(context.record.phases[index] != ('undone' if pos < at else 'verified')
                    for pos, index in enumerate(special) if index != context.index):
-                _fail('powercalc_reverse_phase_order_mismatch')
+                _fail('special_reverse_phase_order_mismatch')
 
     def _observe(self, observations, states):
         if (type(observations) is not tuple or len(observations) != 3
@@ -1011,7 +1075,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                        mutation: NativeRegistryMutation | NativeConfigMutation,
                        audit: NativeRegistryEffectAudit | NativeConfigEffectAudit,
                        placeholder_stamp=None, escrow_root_reference=None,
-                       powercalc_source_effect=None, powercalc_group_effect=None) -> tuple[str, str]:
+                       powercalc_source_effect=None, powercalc_group_effect=None,
+                       controlled_powercalc_handoff=None) -> tuple[str, str]:
         """Persist receipt only from actual call rows + full independent reads.
 
         No effect is performed here. Caller performs fresh auth/lock checks after
@@ -1063,7 +1128,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 direction=direction, native_effect_audit=audit, native_mutation=mutation)
         else:
             from .powercalc_group_own_id import PowercalcGroupOwnID
-            group_effect = (type(powercalc_group_effect) is PowercalcGroupOwnID
+            from .controlled_powercalc_registry import ControlledPowercalcRegistryNode
+            group_effect = (type(powercalc_group_effect) in (PowercalcGroupOwnID, ControlledPowercalcRegistryNode)
                             and powercalc_group_effect.change == change
                             and powercalc_group_effect.mutation is mutation
                             and powercalc_group_effect.stage == 'recorded')
@@ -1079,6 +1145,14 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                    'binding': binding, 'source_chain': head, 'sequence': sequence,
                    'intent': list(intent.reference), 'mutation': asdict(mutation),
                    'audit': asdict(audit), 'result': self._summary(result_states)}
+        if controlled_powercalc_handoff is not None:
+            from .controlled_powercalc_handoff import ControlledPowercalcHandoff
+            if (type(controlled_powercalc_handoff) is not ControlledPowercalcHandoff
+                    or controlled_powercalc_handoff.chain is not self
+                    or controlled_powercalc_handoff.direction != binding['direction']):
+                _fail('controlled_powercalc_handoff_required')
+            controlled_powercalc_handoff.require_inactive()
+            payload['controlled_powercalc_handoff'] = list(controlled_powercalc_handoff.receipt)
         if placeholder_stamp is not None or escrow_root_reference is not None:
             from .native_helper_placeholder_receipts import encode_placeholder_subeffect
             payload['own_helper_placeholder'] = encode_placeholder_subeffect(
@@ -1091,10 +1165,12 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 powercalc_source_effect.claim(self, intent, context, mutation))
         if powercalc_group_effect is not None:
             from .powercalc_group_own_id import PowercalcGroupOwnID
-            if type(powercalc_group_effect) is not PowercalcGroupOwnID:
+            from .controlled_powercalc_registry import ControlledPowercalcRegistryNode
+            if type(powercalc_group_effect) not in (PowercalcGroupOwnID, ControlledPowercalcRegistryNode):
                 _fail('powercalc_group_effect_required')
-            payload['powercalc_group_own_id'] = list(
-                powercalc_group_effect.claim(self, intent, context, mutation))
+            field = ('controlled_powercalc_group' if type(powercalc_group_effect) is ControlledPowercalcRegistryNode
+                     else 'powercalc_group_own_id')
+            payload[field] = list(powercalc_group_effect.claim(self, intent, context, mutation))
         payload['source_index'] = self._row(states[key]['document'], kind, identity)[1]
         payload['result_index'] = self._row(result_states[key]['document'], kind, identity)[1]
         if self._summary(self._advance(states, payload, change)) != self._summary(result_states):
@@ -1154,8 +1230,14 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             sources[path] = list(value)
         if any(step.adapter == 'energy' for step in self.plan.steps):
             from .powercalc_composition import PowercalcComposition
-            baseline, composition = self.preparations.resolve_composition(self.plan.native_inputs)
-            if (baseline != self.baseline or type(composition) is not PowercalcComposition
+            from .controlled_powercalc_composition import ControlledPowercalcComposition
+            from .native_template_state_yaml import retained_powercalc_original
+            composition = retained_powercalc_original(self)
+            if composition is None:
+                baseline, composition = self.preparations.resolve_composition(self.plan.native_inputs)
+            else:
+                baseline = self.baseline
+            if (baseline != self.baseline or type(composition) not in (PowercalcComposition, ControlledPowercalcComposition)
                     or composition.energy_original_physical is None):
                 _fail('powercalc_energy_original_missing')
             sources['.storage/energy'] = list(composition.energy_original_physical)
@@ -1323,7 +1405,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                    'input_result': result, 'result': self._summary(states)}
         if powercalc_setup is not None:
             from .powercalc_phase_session import PowercalcPhaseSession
-            if type(powercalc_setup) is not PowercalcPhaseSession:
+            from .controlled_powercalc_handoff import ControlledPowercalcHandoff
+            if type(powercalc_setup) not in (PowercalcPhaseSession, ControlledPowercalcHandoff):
                 _fail('powercalc_setup_live_phase_required')
             payload['powercalc_setup'] = list(powercalc_setup.claim_activation(self, intent, context))
         from .powercalc_setup_receipts import validate_setup_receipt

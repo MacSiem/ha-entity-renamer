@@ -199,7 +199,8 @@ class Coordinator:
     def __init__(self, adapters: dict[str, Adapter], journal: Journal,
                  guard: Callable[[], None], *, required_scopes: tuple[str, ...],
                  lock: asyncio.Lock | None = None,
-                 record_admission: Callable[[str], None] | None = None):
+                 record_admission: Callable[[str], None] | None = None,
+                 rollback_order: Callable[[], tuple[int, ...]] | None = None):
         if not required_scopes:
             raise ValueError("Server must define required migration scope")
         self.required_scopes = frozenset(required_scopes)
@@ -210,6 +211,9 @@ class Coordinator:
         if record_admission is not None and not callable(record_admission):
             raise ValueError("Server record admission must be callable")
         self.record_admission = record_admission
+        if rollback_order is not None and not callable(rollback_order):
+            raise ValueError("Server rollback order must be callable")
+        self.rollback_order = rollback_order
 
     def _admit_record(self, direction):
         """Trusted synchronous admission immediately before durable mutation."""
@@ -351,8 +355,12 @@ class Coordinator:
             except asyncio.CancelledError:
                 # Durable intent survives cancellation; recovery must inspect.
                 raise
-            except Exception:
-                return await self._unknown(record, "effect_or_verification_uncertain")
+            except Exception as primary:
+                try:
+                    return await self._unknown(record, "effect_or_verification_uncertain")
+                except Exception as status_error:
+                    primary.add_note("UNKNOWN journal write refused: " + type(status_error).__name__)
+                    raise primary from status_error
             if position != Position.AFTER:
                 return await self._unknown(record, "effect_unverified")
             record = await self._phase(record, index, "verified")
@@ -437,7 +445,18 @@ class Coordinator:
             self._admit_record("rollback")
             # Persist recovery direction before compensation, even if its ACK is lost.
             record = await self._save(replace(record, direction="rollback", status="rolling_back"))
-            for index in reversed(range(len(record.plan.steps))):
+            try:
+                order = (tuple(reversed(range(len(record.plan.steps)))) if self.rollback_order is None
+                         else self.rollback_order())
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return await self._unknown(record, "compensation_order_unqualified")
+            if (type(order) is not tuple or len(order) != len(record.plan.steps)
+                    or any(type(index) is not int for index in order)
+                    or set(order) != set(range(len(record.plan.steps)))):
+                return await self._unknown(record, "compensation_order_unqualified")
+            for index in order:
                 if record.phases[index] in ("pending", "undone"):
                     continue
                 step = record.plan.steps[index]

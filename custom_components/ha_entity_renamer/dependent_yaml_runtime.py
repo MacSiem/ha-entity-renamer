@@ -18,21 +18,26 @@ def _need(value):
 
 
 class DependentYAMLRuntime:
-    def __init__(self, hass, evidence, observed, receipt, *, position):
+    def __init__(self, hass, evidence, observed, receipt, *, position, allow_running=False):
         _need(type(position) is Position and position in (Position.BEFORE, Position.AFTER))
+        _need(type(allow_running) is bool)
+        self.allow_running = allow_running
         self.hass, self.evidence, self.observed, self.receipt = hass, evidence, observed, receipt
         self.sampler = _RuntimeSourceSampler.bind(evidence, observed)
         self.positions = tuple((domain, position) for domain in ('automation', 'script'))
         self.active, self.unresolved = None, False
+        self.own_fence = None
         self._assert_reload_idle()
         self.sample = self._sample(self.positions)
         _need(not self.sample[1])
 
     def _sample(self, positions):
         return self.sampler.sample_at_positions(self.hass, self.evidence, self.observed,
-                                                self.receipt, positions)
+                                                self.receipt, positions, own_fence=self.own_fence)
 
     def _assert_reload_idle(self):
+        if self.allow_running:
+            return
         # Readable inventory is not permission to reload every Script.
         if 'script' in self.receipt.changed_domains:
             from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -42,6 +47,12 @@ class DependentYAMLRuntime:
 
     def check(self):
         _need(not self.unresolved and self.active is None)
+        # Registry mutation is journalled and bounded by the selected native
+        # automation's re-add guard; verify the full sample again afterwards.
+        if self.own_fence is not None:
+            transition = getattr(self.own_fence.root, 'controlled_automation', None)
+            if transition is not None and transition.registry_readd_active:
+                return
         self._assert_reload_idle()
         _need(self._sample(self.positions) == self.sample)
 

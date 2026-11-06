@@ -38,7 +38,8 @@ class MixedYAMLConsumers(_UnchangedConsumers):
         await super().bind_sources(receipt, evidence, guard=guard, owned_automation=owned)
 
     def bind_phases(self, receipt, evidence, observed, position):
-        phases = DependentYAMLRuntime(self.hass, evidence, observed, receipt, position=position)
+        phases = DependentYAMLRuntime(self.hass, evidence, observed, receipt, position=position,
+            allow_running=getattr(self, 'allow_controlled_reload', False))
         self.evidence, self.observed = evidence, observed
         self.runtime_sample = None
         self.phases = phases

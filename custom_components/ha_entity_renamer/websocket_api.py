@@ -181,7 +181,7 @@ class _InvalidSelection(ValueError):
 def _ordinary_selection(message):
     """Copy only ordinary requested fields; clients never supply a Plan/root."""
     mapping, names, devices, seen = {}, {}, {}, set()
-    if not message['entities'] or len(message['entities']) + len(message.get('devices', ())) > 10000:
+    if not (message['entities'] or message.get('devices')) or len(message['entities']) + len(message.get('devices', ())) > 10000:
         raise _InvalidSelection()
     for row in message['entities']:
         old = row['entity_id']
@@ -223,7 +223,7 @@ _DEVICE_SELECTION = vol.Schema({
 
 
 @websocket_api.websocket_command({vol.Required('type'): DOMAIN + '/prepare',
-    vol.Required('entities'): vol.All([_ENTITY_SELECTION], vol.Length(min=1, max=10000)),
+    vol.Required('entities'): vol.All([_ENTITY_SELECTION], vol.Length(max=10000)),
     vol.Optional('devices'): vol.All([_DEVICE_SELECTION], vol.Length(max=10000))})
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -249,6 +249,22 @@ async def ws_prepare(hass, connection, message):
     except _InvalidSelection:
         connection.send_error(message['id'], 'invalid_selection', 'The rename selection is invalid')
     except Refused as error:
+        from .helper_native import UnsupportedEntryReferences
+        if type(error) is UnsupportedEntryReferences:
+            import json
+            # Admin-only, metadata and selected entity IDs only; never entry data/options.
+            connection.send_error(message['id'], 'unsupported_config_entry',
+                json.dumps({'sources': error.sources}, ensure_ascii=True, separators=(',', ':')))
+            return
+        # This narrow prewrite refusal identifies a recognized dependency.
+        # Only validated entity IDs are projected to the administrator.
+        import re
+        match = re.fullmatch(r'own_id_script_state_trigger_unqualified:(automation\.[a-z0-9_]+):(script\.[a-z0-9_]+)', str(error))
+        if match:
+            import json
+            connection.send_error(message['id'], 'unsupported_script_state_trigger',
+                json.dumps({'automation': match.group(1), 'script': match.group(2)}, separators=(',', ':')))
+            return
         _log_prepare_failure(error)
         code, text = {
             'powercalc_public_graph_unsupported':
@@ -261,6 +277,8 @@ async def ws_prepare(hass, connection, message):
                 ('unsupported_template_reference', 'A Template reference could not be safely interpreted'),
             'template_state_server_affected_unsupported_family':
                 ('unsupported_template_family', 'An affected Template form is not supported'),
+            'controlled_automation_scope_unsupported':
+                ('unsupported_automation_scope', 'Automation state or configuration could not be safely verified'),
         }.get(str(error), ('unsupported_selection', 'This selection cannot be verified for migration'))
         connection.send_error(message['id'], code, text)
     except Exception as error:

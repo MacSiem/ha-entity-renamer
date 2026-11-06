@@ -216,7 +216,8 @@ class _RuntimeSourceSampler:
         return _runtime_rows_sample(hass, evidence,
                                     (json.loads(row) for row in self._rows), owned_automation=owned_automation)
 
-    def sample_at_positions(self, hass, evidence, observed, receipt, positions, *, owned_automation=None):
+    def sample_at_positions(self, hass, evidence, observed, receipt, positions, *, owned_automation=None,
+                            own_fence=None):
         """Read dependent runtimes against ORIGINAL checker seals at each phase.
 
         This is a synchronous semantic/UUID sample, not an effect or source
@@ -252,9 +253,16 @@ class _RuntimeSourceSampler:
                   and before == evidence.domain_projection(domain))
             if position is Position.AFTER:
                 overrides.append((domain, after))
-        return _runtime_rows_sample(hass, evidence,
-            (json.loads(row) for row in self._rows),
+        if own_fence is None:
+            rows = (json.loads(row) for row in self._rows)
+        else:
+            from .native_own_dependent_fence import NativeOwnDependentFence
+            _need(type(own_fence) is NativeOwnDependentFence and own_fence.root.hass is hass
+                  and own_fence.domain == 'automation')
+            rows = own_fence.rows()
+        result = _runtime_rows_sample(hass, evidence, rows,
             expected_projections=tuple(overrides), owned_automation=owned_automation)
+        return result if own_fence is None else own_fence.normalize(result)
 
 
 def _runtime_sample(hass, evidence, observed, *, owned_automation=None):

@@ -347,7 +347,7 @@ def _script_attr_descriptor(entity, name):
     return descriptor
 
 
-def _sample(hass, old, new, *, stable_service=False):
+def _sample(hass, old, new, *, stable_service=False, allow_running=False):
     from homeassistant.const import __version__
     from homeassistant.components.script import ScriptEntity, SCRIPT_SERVICE_SCHEMA
     from homeassistant.core import HomeAssistant, HassJob, Service, ServiceRegistry, SupportsResponse
@@ -359,7 +359,7 @@ def _sample(hass, old, new, *, stable_service=False):
     from .yaml_runtime_observer import NativeYAMLRuntimeReadback
     from .yaml_validation_worker import _normal
 
-    _need(type(stable_service) is bool
+    _need(type(stable_service) is bool and type(allow_running) is bool
           and __version__ in ('2025.6.0', '2026.10.2', '2026.10.4')
           and type(hass) is HomeAssistant and type(old) is str and type(new) is str
           and old.startswith('script.') and new.startswith('script.') and old != new,
@@ -448,6 +448,10 @@ def _sample(hass, old, new, *, stable_service=False):
                 _need(type(trigger) in (dict, NodeDictClass), 'own_id_service_event_trigger_unqualified')
                 platform = trigger.get('platform')
                 _need(platform in ('state', 'event'), 'own_id_service_event_trigger_unsupported')
+                if allow_running and platform == 'state':
+                    # Validate static IDs now; the controlled cutover detaches
+                    # affected enabled triggers under the existing intent.
+                    _ids(trigger.get('entity_id'))
                 if platform == 'event':
                     value = trigger.get('event_type')
                     kinds = value if type(value) in (list, NodeListClass) else (value,)
@@ -539,11 +543,16 @@ def _sample(hass, old, new, *, stable_service=False):
             raise Refused('own_id_native_inventory_unavailable') from error
     for key, actor in sorted(actors.items()):
         script = actor.action_script if key[0] == 'automation' else actor.script
-        _need(type(script._runs) is list, 'own_id_script_run_inventory_changed')
         scan(script.sequence, key)
-        caches.append((key, id(actor), id(script), _graph(script.sequence),
-            tuple((name, _graph(getattr(script, name), include_scripts=True)) for name in _cache_names()),
-            tuple((id(run), id(run._context), id(run._variables), id(run._stop)) for run in script._runs)))
+        if allow_running:
+            # Native removal may interrupt active A/S. Do not retain a run,
+            # Context, deadline, or mutable run-specific execution cache.
+            caches.append((key, id(actor), id(script)))
+        else:
+            _need(type(script._runs) is list, 'own_id_script_run_inventory_changed')
+            caches.append((key, id(actor), id(script), _graph(script.sequence),
+                tuple((name, _graph(getattr(script, name), include_scripts=True)) for name in _cache_names()),
+                tuple((id(run), id(run._context), id(run._variables), id(run._stop)) for run in script._runs)))
     calls.sort(key=lambda item: repr(item))
     # Sample both logical projections and exact physical object edges. The
     # target identity stays a registry UUID, not a guessed script service key.
@@ -592,9 +601,10 @@ class NativeOwnIDInventory:
     entity_cached_name: object
     unique_attr_descriptor: object
     name_attr_descriptor: object
+    allow_running: bool
 
     @classmethod
-    def capture(cls, hass, mapping, *, stable_change=None, moving_change=None):
+    def capture(cls, hass, mapping, *, stable_change=None, moving_change=None, allow_running=False):
         _need(type(mapping) is dict and len(mapping) == 1 and asyncio.current_task() is not None)
         old, new = next(iter(mapping.items()))
         _need(stable_change is None or moving_change is None, 'own_id_service_proof_ambiguous')
@@ -638,7 +648,7 @@ class NativeOwnIDInventory:
                       == _content(before if old == before['entity_id'] else after),
                   'own_id_stable_service_preparation_unqualified')
             stable = True
-        entity, service, callers, signature = _sample(hass, old, new, stable_service=stable)
+        entity, service, callers, signature = _sample(hass, old, new, stable_service=stable, allow_running=allow_running)
         description_cache, description, description_graph, description_holds = _service_description(hass, entity)
         automation_service = None
         if any(call[2] == 'automation' for call in callers):
@@ -667,7 +677,7 @@ class NativeOwnIDInventory:
                      default_name, entity.script.__dict__, entity.script.name,
                      entity.__dict__.get('__attr_name'), entity.__dict__.get('name'),
                      _script_attr_descriptor(entity, 'unique_id'),
-                     _script_attr_descriptor(entity, 'name'))
+                     _script_attr_descriptor(entity, 'name'), allow_running)
         result.check_service()
         return result
 
@@ -749,7 +759,7 @@ class NativeOwnIDInventory:
         _need(asyncio.current_task() is self.task, 'own_id_inventory_task_changed')
         self.check_service()
         entity, service, callers, signature = _sample(
-            self.hass, self.old, self.new, stable_service=self.stable_service)
+            self.hass, self.old, self.new, stable_service=self.stable_service, allow_running=self.allow_running)
         _need(entity is self.selected_entity and entity.script is self.selected_script
               and service is self.service and service.job is self.service_job
               and service.job.target is self.service_target and service.schema is self.service_schema

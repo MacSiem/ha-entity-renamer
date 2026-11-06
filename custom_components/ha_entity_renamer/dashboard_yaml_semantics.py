@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import yaml
 
 from .dashboard_plan import plan_dashboard
+from .lovelace_native import revision
 from .yaml_plan import Plan
 
 
@@ -91,7 +92,7 @@ def qualify_dashboard_yaml(plan, path, original, mapping):
         semantic = plan_dashboard(before, mapping)
     except (yaml.YAMLError, ValueError, TypeError, RecursionError):
         raise ValueError('dashboard_yaml_semantics_unqualified') from None
-    if semantic.markers or semantic.value != after or bool(semantic.changes) != bool(patches):
+    if semantic.markers or revision(semantic.value) != revision(after) or bool(semantic.changes) != bool(patches):
         raise ValueError('dashboard_yaml_semantics_mismatch')
     return before, after
 

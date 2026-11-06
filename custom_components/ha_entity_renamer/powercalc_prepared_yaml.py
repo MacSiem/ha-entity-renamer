@@ -21,7 +21,10 @@ class PreparedPowercalcYAML(PreparedYAML):
 
     @property
     def identity(self):
-        return 'powercalc_yaml:' + _digest(asdict(self))
+        payload = asdict(self)
+        if self.receipt.checker_repairs_snapshot is None:
+            payload['receipt'].pop('checker_repairs_snapshot', None)
+        return 'powercalc_yaml:' + _digest(payload)
 
     def checked(self):
         if decode_powercalc_yaml(asdict(self)) != self:
@@ -67,10 +70,13 @@ def capture_powercalc_yaml(receipt, evidence, plan):
 def assert_powercalc_yaml_composition(chain, change):
     """Reopen the immutable preparation; never upgrade a read-only chain."""
     from .powercalc_composition import PowercalcComposition
-    if type(change) is not PreparedPowercalcYAML:
+    from .native_template_state_yaml import PreparedMixedPowercalcYAML
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    if type(change) not in (PreparedPowercalcYAML, PreparedMixedPowercalcYAML):
         raise Refused('powercalc_yaml_preparation_required')
     baseline, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
-    if (baseline != chain.baseline or type(composition) is not PowercalcComposition
+    if (baseline != chain.baseline
+            or type(composition) is not (ControlledPowercalcComposition if type(change) is PreparedMixedPowercalcYAML else PowercalcComposition)
             or baseline.receipt != change.receipt
             or composition.evidence.powercalc_sources.sha256 != change.original_sources_sha256
             or composition.evidence.powercalc_candidate_sources.sha256 != change.candidate_sources_sha256
@@ -88,29 +94,71 @@ def assert_powercalc_yaml_composition(chain, change):
     before, after = {}, {}
     for key, old, new in documents:
         old_doc, new_doc = _envelope(old, key, baseline.receipt.version), _envelope(new, key, baseline.receipt.version)
-        if key == 'core.entity_registry':
-            before = {row['id']: row['entity_id'] for row in old_doc['data']['entities']}
-            after = {row['id']: row['entity_id'] for row in new_doc['data']['entities']}
+        if key in ('core.entity_registry', 'core.device_registry'):
+            from copy import deepcopy
+            kind = 'entity' if key == 'core.entity_registry' else 'device'
+            member = 'entities' if kind == 'entity' else 'devices'
+            if kind == 'entity':
+                before = {row['id']: row['entity_id'] for row in old_doc['data']['entities']}
+                after = {row['id']: row['entity_id'] for row in new_doc['data']['entities']}
+            expected_doc = deepcopy(old_doc)
+            rows = expected_doc['data'][member]
+            seen = set()
+            for step in chain.plan.steps:
+                if step.adapter != 'registry':
+                    continue
+                digest = dict(composition.prepared_digests)[step.prepared_ref]
+                prepared = decode_change(chain.preparations.resolve(step.prepared_ref, digest))
+                if type(prepared) is not PreparedRegistryChange or prepared.kind != kind:
+                    continue
+                matches = [row for row in rows if row.get('id') == prepared.identity]
+                if (len(matches) != 1 or prepared.identity in seen
+                        or _json(matches[0]) != _json(prepared.before)):
+                    raise Refused('powercalc_candidate_native_effect_unprepared')
+                seen.add(prepared.identity)
+                index = rows.index(matches[0])
+                rows[index] = deepcopy(prepared.after)
+                if kind == 'entity' and prepared.mapping:
+                    rows.append(rows.pop(index))
+            if _json(expected_doc) != _json(new_doc):
+                raise Refused('powercalc_candidate_native_effect_unprepared')
         elif key == 'core.config_entries':
             from copy import deepcopy
             from .powercalc_group_metadata import PreparedPowercalcGroupMetadata
+            from .helper_transaction import PreparedHelper
+            from .helper_plan import snapshot_equal
+            from .native_config_transition import _projection
             expected_doc = deepcopy(old_doc)
+            seen = set()
             for step in chain.plan.steps:
                 if step.adapter != 'helpers':
                     continue
                 digest = dict(composition.prepared_digests)[step.prepared_ref]
                 prepared = decode_change(chain.preparations.resolve(step.prepared_ref, digest))
-                if type(prepared) is not PreparedPowercalcGroupMetadata:
+                if (type(prepared) not in (PreparedPowercalcGroupMetadata, PreparedHelper)
+                        or type(prepared) is PreparedHelper and
+                           (type(composition) is not ControlledPowercalcComposition
+                            or prepared.before.get('domain') != 'template')):
                     raise Refused('powercalc_candidate_native_effect_unprepared')
+                prepared.plan()
                 matches = [row for row in expected_doc['data']['entries']
                            if row.get('entry_id') == prepared.before['identity']['entry_id']]
-                if (len(matches) != 1 or matches[0].get('domain') != 'powercalc'
-                        or _json(matches[0]['data']) != _json(prepared.before['data'])):
+                identity = prepared.before['identity']['entry_id']
+                if len(matches) != 1 or identity in seen:
                     raise Refused('powercalc_candidate_native_effect_unprepared')
-                matches[0]['data'] = deepcopy(prepared.after['data'])
+                seen.add(identity)
+                if type(prepared) is PreparedPowercalcGroupMetadata:
+                    if (matches[0].get('domain') != 'powercalc'
+                            or _json(matches[0]['data']) != _json(prepared.before['data'])):
+                        raise Refused('powercalc_candidate_native_effect_unprepared')
+                    matches[0]['data'] = deepcopy(prepared.after['data'])
+                else:
+                    if not snapshot_equal(_projection(matches[0]), prepared.before):
+                        raise Refused('powercalc_candidate_native_effect_unprepared')
+                    matches[0]['options'] = deepcopy(prepared.after['options'])
             if _json(expected_doc) != _json(new_doc):
                 raise Refused('powercalc_candidate_native_effect_unprepared')
-        elif old_doc != new_doc:
+        elif _json(old_doc) != _json(new_doc):
             raise Refused('powercalc_candidate_native_effect_unprepared')
     if set(before) != set(after):
         raise Refused('powercalc_candidate_registry_membership_changed')

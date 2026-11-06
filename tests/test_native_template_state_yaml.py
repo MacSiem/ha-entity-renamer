@@ -59,10 +59,36 @@ class SelectiveYAMLCodecTests(unittest.TestCase):
         self.assertEqual(legacy.prepared.decode_change(encoded), change)
         old_identity = asdict(change)
         old_identity['receipt'].pop('runtime_expected')
+        old_identity['receipt'].pop('checker_repairs_snapshot')
         self.assertEqual(change.identity, 'yaml:' + legacy.module._digest(old_identity))
         # Durable envelope created before runtime_expected must still decode.
         encoded['data']['receipt'].pop('runtime_expected')
         self.assertEqual(legacy.prepared.decode_change(encoded), change)
+
+    def test_checker_snapshot_codec_and_legacy_selective_identity(self):
+        old = self.change()
+        old_payload = asdict(old)
+        old_payload['receipt'].pop('checker_repairs_snapshot')
+        self.assertEqual(old.identity, 'template_state_yaml:' + legacy.module._digest(old_payload))
+        encoded_old = legacy.prepared.encode_change(old)
+        encoded_old['data']['receipt'].pop('checker_repairs_snapshot')
+        self.assertEqual(legacy.prepared.decode_change(encoded_old), old)
+        root, entries, names = old.receipt.source_directories[0]
+        new = replace(old, receipt=replace(old.receipt,
+            source_directories=((root, entries, tuple(sorted((*names, '.storage')))),),
+            checker_repairs_snapshot=('absent',)))
+        encoded = legacy.prepared.encode_change(new)
+        self.assertEqual(legacy.prepared.decode_change(encoded), new)
+        self.assertNotEqual(new.identity, old.identity)
+        encoded['data']['receipt']['checker_repairs_snapshot'] = ['present', 'e30=']
+        with self.assertRaises(ValueError):
+            legacy.prepared.decode_change(encoded)
+        conflict = legacy.prepared.encode_change(new)
+        conflict['data']['files'][0]['path'] = '.storage/repairs.issue_registry'
+        conflict['data']['receipt']['source_files'][0][0] = '.storage/repairs.issue_registry'
+        conflict['data']['receipt']['proposed_files'][0][0] = '.storage/repairs.issue_registry'
+        with self.assertRaisesRegex(ValueError, 'checker_snapshot_real_source_conflict'):
+            legacy.prepared.decode_change(conflict)
 
     def test_strict_shape_program_digest_and_file_cas(self):
         raw = legacy.prepared.encode_change(self.change())

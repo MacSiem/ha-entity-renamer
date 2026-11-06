@@ -23,6 +23,8 @@ from .yaml_plan import (Plan, FileSnapshot, DirectorySnapshot, IncludeEdge, File
 
 _PROFILE = 'template_state_binding_v3'
 _MIXED_PROFILE = 'template_mixed_state_binding_v1'
+_RELOAD_PROFILE = 'template_controlled_reload_v1'
+_ENTRY_PROFILE = 'template_controlled_reload_entry_v1'
 _TYPES.update({t.__name__: t for t in (OriginalTemplateStateSources,
     CandidateTemplateStateSources, StateConfigProgram, Plan, FileSnapshot, DirectorySnapshot,
     IncludeEdge, FilePatch, Edit, Issue, VariableBindingProof, TemplateVariableBinding, PowercalcSourceInputs)})
@@ -58,29 +60,31 @@ class TemplateStateComposition:
             return
         _need(receipt.changed_domains == ('template',) and set(receipt.unsupported_domains) <= {'template'})
 
-    def assert_baseline(self, baseline):
+    def assert_baseline(self, baseline, *, _mixed_powercalc=False):
+        _need(type(_mixed_powercalc) is bool)
         _need(type(baseline) is NativeInputBaseline and type(self.yaml_plan) is Plan
-              and self.yaml_plan.ready and self.yaml_plan.powercalc_inputs is None)
+              and self.yaml_plan.ready and ((self.yaml_plan.powercalc_inputs is not None)
+                                            if _mixed_powercalc else (self.yaml_plan.powercalc_inputs is None)))
         receipt, evidence = baseline.receipt, self.evidence
         self._assert_changed_scope(receipt)
         if not receipt.proposed_files:
             documents = {row.key: json.loads(row.raw) for row in baseline.files}
             rows = documents['core.entity_registry']['data']['entities']
             selected = [row for row in rows if row['entity_id'] in dict(self.mapping)]
-            _need(len(selected) == len(self.mapping) and len(selected) in (1, 2)
-                  and sum(row.get('platform') in ('template', 'automation', 'script')
-                          for row in selected) == 1
-                  and not self.yaml_plan.patches)
+            _need(len(selected) == len(self.mapping) and not self.yaml_plan.patches)
         _need(type(evidence) is OriginalSourceEvidence
-              and evidence.powercalc_sources is None and evidence.powercalc_candidate_sources is None
+              and ((evidence.powercalc_sources is not None and evidence.powercalc_candidate_sources is not None)
+                   if _mixed_powercalc else
+                   (evidence.powercalc_sources is None and evidence.powercalc_candidate_sources is None))
               and evidence.template_sources is not None
               and evidence.template_candidate_sources is not None)
-        _need(type(self.mapping) is tuple and bool(self.mapping)
+        _need(type(self.mapping) is tuple
               and all(type(row) is tuple and len(row) == 2 for row in self.mapping)
               and self.mapping == tuple(sorted(self.mapping))
               and len(dict(self.mapping)) == len(self.mapping))
         mapping = _mapping(dict(self.mapping))
-        if 'template' not in receipt.changed_domains and receipt.changed_domains:
+        if ('template' not in receipt.changed_domains and receipt.changed_domains
+                and type(self) not in (ControlledReloadComposition, ControlledReloadEntryComposition) and not _mixed_powercalc):
             native = next((item for item in baseline.files if item.key == 'core.entity_registry'), None)
             _need(native is not None)
             rows = json.loads(native.raw)['data']['entities']
@@ -102,7 +106,12 @@ class TemplateStateComposition:
             template_native=_native(original, receipt.version),
             template_candidate_native=_native(evidence.template_candidate_sources.sources,
                                              receipt.version))
-        _need(rebuilt == evidence and type(self.original_sources) is OriginalTemplateStateSources
+        if _mixed_powercalc:
+            from dataclasses import replace
+            template_evidence = replace(evidence, powercalc_sources=None, powercalc_candidate_sources=None)
+        else:
+            template_evidence = evidence
+        _need(rebuilt == template_evidence and type(self.original_sources) is OriginalTemplateStateSources
               and type(self.candidate_sources) is CandidateTemplateStateSources
               and self.original_sources.ledger == original.ledger
               and self.original_sources.source_matched
@@ -155,12 +164,43 @@ class MixedTemplateStateComposition(TemplateStateComposition):
         _need(bool(receipt.proposed_files))
 
 
+@dataclass(frozen=True)
+class ControlledReloadComposition(MixedTemplateStateComposition):
+    """New review contract: A/S may be reloaded after explicit warning."""
+
+    def assert_baseline(self, baseline):
+        super().assert_baseline(baseline)
+        rows = json.loads(next(row.raw for row in baseline.files
+                               if row.key == 'core.entity_registry'))['data']['entities']
+        selected = [row for row in rows if row.get('entity_id') in dict(self.mapping)]
+        _need(len(selected) == len(self.mapping)
+              and all(row.get('platform') not in ('template', 'script') for row in selected))
+
+
+@dataclass(frozen=True)
+class ControlledReloadEntryComposition(ControlledReloadComposition):
+    """One ordinary reload plan including one sealed numeric entry."""
+
+    def _assert_changed_scope(self, receipt):
+        from .yaml_transaction import _assert_mixed_state_scope
+        _assert_mixed_state_scope(receipt, allow_dependent_only=True, allow_template_entry=True)
+        _need(bool(receipt.proposed_files))
+
+
+
 def encode_state_composition(value, baseline):
     return _encode_state_composition(value, baseline, TemplateStateComposition, _PROFILE)
 
 
 def encode_mixed_state_composition(value, baseline):
     return _encode_state_composition(value, baseline, MixedTemplateStateComposition, _MIXED_PROFILE)
+
+def encode_reload_composition(value, baseline):
+    return _encode_state_composition(value, baseline, ControlledReloadComposition, _RELOAD_PROFILE)
+
+
+def encode_reload_entry_composition(value, baseline):
+    return _encode_state_composition(value, baseline, ControlledReloadEntryComposition, _ENTRY_PROFILE)
 
 
 def _encode_state_composition(value, baseline, cls, profile):
@@ -187,6 +227,13 @@ def decode_state_composition(payload, baseline):
 
 def decode_mixed_state_composition(payload, baseline):
     return _decode_state_composition(payload, baseline, MixedTemplateStateComposition, _MIXED_PROFILE)
+
+def decode_reload_composition(payload, baseline):
+    return _decode_state_composition(payload, baseline, ControlledReloadComposition, _RELOAD_PROFILE)
+
+
+def decode_reload_entry_composition(payload, baseline):
+    return _decode_state_composition(payload, baseline, ControlledReloadEntryComposition, _ENTRY_PROFILE)
 
 
 def _decode_state_composition(payload, baseline, cls, profile):
@@ -224,7 +271,10 @@ def _retained_fields(value):
     if kind is dict:
         return (kind, frozenset((_retained_fields(key), _retained_fields(item))
                                 for key, item in value.items()))
-    if kind in (TemplateStateComposition, MixedTemplateStateComposition) or kind in _TYPES.values():
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    from .powercalc_composition import _TYPES as powercalc_types
+    if (kind in (TemplateStateComposition, MixedTemplateStateComposition, ControlledReloadComposition,
+                 ControlledReloadEntryComposition, ControlledPowercalcComposition) or kind in _TYPES.values() or kind in powercalc_types.values()):
         return (kind, tuple((field.name, _retained_fields(getattr(value, field.name)))
                              for field in fields(kind)))
     from .transaction import Refused
@@ -242,8 +292,8 @@ def retain_state_composition(value, baseline):
     from .native_template_composition import encode_composition
     wire = encode_composition(value, baseline)
     original, original_baseline = _retained_fields(value), _baseline_stamp(baseline)
-    def check():
-        if (_retained_fields(value) != original
+    def check(candidate=value):
+        if (candidate is not value or _retained_fields(value) != original
                 or _baseline_stamp(baseline) != original_baseline):
             raise Refused('template_state_retained_original_changed')
     return wire, check

@@ -242,12 +242,18 @@ def _consumer_family(name, outcome, mapping):
     return _family(name, _plain(value), rows, blockers=blockers)
 
 
-async def async_discover(hass, proposal, guard):
+def _scan_yaml(root, mapping, yaml_roots, owned_script_services):
+    # Every discovery and final-fence pass uses the same native planner scope.
+    from .yaml_plan import plan_yaml
+    return plan_yaml(root, mapping, yaml_dashboards=yaml_roots,
+                     owned_script_services=owned_script_services)
+
+
+async def async_discover(hass, proposal, guard, *, _expected_yaml=None, _owned_script_services=()):
     """Capture native sources and dependent families without any mutation API."""
     from homeassistant.const import __version__
     from .native_discovery_inputs import async_observe_discovery_inputs
     from .helper_native import inventory
-    from .yaml_plan import plan_yaml
     from .native_input_baseline import _drained
     from .recorder_guard import NativeRecorderGuard, prepare as recorder_preflight
     from .history_guard import NativeHistoryGuard
@@ -256,6 +262,11 @@ async def async_discover(hass, proposal, guard):
                                             assert_powercalc_runtime_current)
     proposal_json, manifest = _proposal(proposal)
     mapping = {row.old_id: row.new_id for row in manifest.entities if row.old_id != row.new_id}
+    if (type(_owned_script_services) is not tuple or len(_owned_script_services) > 1
+            or any(type(value) is not str or not value.startswith('script.') or value not in mapping
+                   for value in _owned_script_services)
+            or (_owned_script_services and _expected_yaml is None)):
+        raise ValueError('discovery_owned_script_scope_invalid')
     families = {name: _unknown(name, 'source_inventory_unavailable') for name in FAMILIES}
     conflicts, bound = [], None
     native = None
@@ -310,8 +321,11 @@ async def async_discover(hass, proposal, guard):
     # Runtime-known dashboard roots come from registered native managers.
     try:
         yaml = await _drained(hass.async_add_executor_job,
-            lambda: plan_yaml(hass.config.config_dir, mapping, yaml_dashboards=yaml_roots))
+            lambda: _scan_yaml(hass.config.config_dir, mapping, yaml_roots, _owned_script_services))
         guard()
+        if _expected_yaml is not None and yaml != _expected_yaml:
+            conflicts.append('source_changed_during_capture')
+            raise ValueError('prepared_yaml_graph_changed')
         payload = {'files': [asdict(row) for row in yaml.files],
                    'directories': [asdict(row) for row in yaml.directories],
                    'edges': [asdict(row) for row in yaml.edges]}
@@ -327,7 +341,7 @@ async def async_discover(hass, proposal, guard):
                         or (file.device, file.inode) != source.file_identity[:2]):
                     raise ValueError('yaml_dashboard_source_changed')
         yaml_again = await _drained(hass.async_add_executor_job,
-            lambda: plan_yaml(hass.config.config_dir, mapping, yaml_dashboards=yaml_roots))
+            lambda: _scan_yaml(hass.config.config_dir, mapping, yaml_roots, _owned_script_services))
         guard()
         if yaml_again != yaml:
             families['yaml_sources'] = _unknown('yaml_sources', 'source_changed_during_capture')
@@ -397,7 +411,7 @@ async def async_discover(hass, proposal, guard):
     if families['yaml_sources'].status == 'COMPLETE':
         try:
             final_yaml = await _drained(hass.async_add_executor_job,
-                lambda: plan_yaml(hass.config.config_dir, mapping, yaml_dashboards=yaml_roots))
+                lambda: _scan_yaml(hass.config.config_dir, mapping, yaml_roots, _owned_script_services))
             guard()
             if final_yaml != yaml:
                 families['yaml_sources'] = _unknown('yaml_sources', 'source_changed_during_capture')
@@ -473,8 +487,7 @@ async def async_discover(hass, proposal, guard):
                     raise ValueError('discovery_native_source_changed')
             finally:
                 pinned.close()
-        if yaml is not None and plan_yaml(hass.config.config_dir,mapping,
-                                          yaml_dashboards=yaml_roots) != yaml:
+        if yaml is not None and _scan_yaml(hass.config.config_dir, mapping, yaml_roots, _owned_script_services) != yaml:
             raise ValueError('discovery_yaml_source_changed')
 
     def physical():

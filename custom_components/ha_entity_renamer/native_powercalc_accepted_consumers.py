@@ -94,9 +94,23 @@ def _literal_documents(planned, accepted, original, chain, *, replay_owned_regis
             _need(len(matches) == 1, 'accepted_registry_order_identity_changed')
             rows.append(rows.pop(matches[0]))
     owned = {key: set() for key in _KEYS}
+    reversed_script_rows = {}
     for step, change in zip(chain.plan.steps, chain.changes, strict=True):
         if step.adapter == 'registry':
             owned['core.' + change.kind + '_registry'].add(change.identity)
+            from .native_registry_transition import _native_script_unique_move
+            if change.kind == 'entity' and _native_script_unique_move(change.before, change.after):
+                for _, receipt in chain._setup_history:
+                    mutation = receipt.get('mutation', {})
+                    if (receipt.get('kind') == 'registry_receipt'
+                            and receipt.get('binding', {}).get('direction') == 'rollback'
+                            and mutation.get('kind') == 'entity'
+                            and mutation.get('identity') == change.identity):
+                        observed = json.loads(mutation['after_json'])
+                        if (observed.get('entity_id') == change.before['entity_id']
+                                and observed.get('unique_id') == change.before['unique_id']
+                                and observed.get('previous_unique_id') == change.after['unique_id']):
+                            reversed_script_rows[change.identity] = observed
         elif step.adapter == 'helpers':
             owned['core.config_entries'].add(change.before['identity']['entry_id'])
     for key, collection, identity in (
@@ -109,6 +123,9 @@ def _literal_documents(planned, accepted, original, chain, *, replay_owned_regis
             uid = row[identity]
             if uid not in owned[key] or uid not in before or uid not in actual:
                 continue
+            if (key == 'core.entity_registry' and uid in reversed_script_rows
+                    and row == before[uid] and actual[uid] == reversed_script_rows[uid]):
+                row['previous_unique_id'] = reversed_script_rows[uid]['previous_unique_id']
             if ('modified_at' in row and 'modified_at' in before[uid]
                     and 'modified_at' in actual[uid]
                     and row['modified_at'] == before[uid]['modified_at']):
@@ -223,8 +240,10 @@ async def async_observe_accepted_powercalc_consumers(hass, chain, evidence, capt
     def check():
         _guard(guard)
         evidence.assert_receipt(chain.original_receipt)
-        _need(chain.preparations.resolve_native_inputs(chain.plan.native_inputs, receipt) == chain.baseline,
-              'accepted_original_preparation_changed')
+        from .native_template_state_yaml import retained_powercalc_original
+        if retained_powercalc_original(chain) is None:
+            _need(chain.preparations.resolve_native_inputs(chain.plan.native_inputs, receipt) == chain.baseline,
+                  'accepted_original_preparation_changed')
         _need(state.same_evidence(chain.reconstruct_inputs()), 'accepted_head_changed')
 
     check()
@@ -242,7 +261,21 @@ async def async_observe_accepted_powercalc_consumers(hass, chain, evidence, capt
           'accepted_native_root_changed')
     _documents(state, observed)
     vendor.bindings()
-    first = _sample(hass, vendor, selected, observed, captured, prepared)
+    removed = frozenset()
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    _, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
+    if type(composition) is ControlledPowercalcComposition:
+        from .native_registry_receipts import _event_id
+        from .controlled_powercalc_setup_receipts import validate_handoff
+        from .controlled_powercalc_population import removed_group_indexes
+        direction = 'forward' if position == 'proposed' else 'rollback'
+        key = _event_id(['controlled_pc_population', chain.root_id, direction, 'receipt'])
+        saved = chain.store.read(key)
+        if saved is not None:
+            handoff = validate_handoff(chain, [key, saved['digest']], direction)
+            removed = removed_group_indexes(hass, captured, handoff, vendor)
+    first = _sample(hass, vendor, selected, observed, captured, prepared,
+                    removed_group_ids=removed)
     _need(bool(first) and all(row.source_verified for row in first), 'accepted_runtime_unverified')
     runtime_current(hass, captured, first, guard=check)
     # LAST await: final vendor/HA public code pins and FULL accepted graph in
@@ -252,7 +285,11 @@ async def async_observe_accepted_powercalc_consumers(hass, chain, evidence, capt
     assert_discovery_managers_current(hass, observed, guard=check)
     _documents(state, observed)
     vendor.bindings()
-    second = _sample(hass, vendor, selected, observed, captured, prepared)
+    if removed:
+        _need(removed == removed_group_indexes(hass, captured, handoff, vendor),
+              'accepted_removed_group_index_changed')
+    second = _sample(hass, vendor, selected, observed, captured, prepared,
+                     removed_group_ids=removed)
     runtime_current(hass, captured, second, guard=check)
     _need(first == second, 'accepted_runtime_changed_during_observation')
     check()

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .transaction import Position, Refused
 from .native_template_state_yaml import (NativeTemplateStateYAMLRuntimeReadback,
-    PreparedMixedTemplateStateYAML, ReceiptedTemplateStateYAMLTransactionAdapter,
+    PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML, ReceiptedTemplateStateYAMLTransactionAdapter,
     _TemplateStateYAMLHooks, _TemplateStateRuntimeCheck, assert_state_yaml_composition)
 from .mixed_yaml_runtime import MixedYAMLConsumers
 
@@ -19,6 +19,15 @@ from .mixed_yaml_runtime import MixedYAMLConsumers
 def _need(value):
     if not value:
         raise Refused('mixed_template_state_runtime_unconfirmed') from None
+
+
+def _owner_in_domain(fence, domain):
+    return fence is not None and fence.domain == domain
+
+
+def _automation_owner_replaced(fence, replaced):
+    return (_owner_in_domain(fence, 'automation')
+            and fence.original_row.native_key in replaced)
 
 
 @dataclass(frozen=True)
@@ -48,13 +57,13 @@ class _MixedStateRuntimeCheck:
 
 
 class NativeMixedTemplateStateYAMLRuntimeReadback(NativeTemplateStateYAMLRuntimeReadback):
-    def __init__(self, hass, chain, composition, consumers, *, guard):
+    def __init__(self, hass, chain, composition, consumers, *, guard, entry_witness=None):
         _need(type(consumers) is MixedYAMLConsumers)
         self.dependents, self._composite = consumers, None
-        super().__init__(hass, chain, composition, guard=guard)
+        super().__init__(hass, chain, composition, guard=guard, entry_witness=entry_witness)
 
     def assert_change(self, change):
-        _need(type(change) is PreparedMixedTemplateStateYAML)
+        _need(type(change) in (PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML))
         change.checked()
         composition = assert_state_yaml_composition(self.chain, change)
         _need(composition.state_config_program == self.program and change.receipt == self.receipt
@@ -93,6 +102,11 @@ class NativeMixedTemplateStateYAMLRuntimeReadback(NativeTemplateStateYAMLRuntime
     def history_consumers(self):
         ids = {value[0] for value in self.identities.values()}
         ids.update(row.entity_id for row in self.dependents.phases.sample[0])
+        if self.entry_witness is not None:
+            rows = [row for row in self.chain.accepted_documents()['core.entity_registry']['data']['entities']
+                    if row.get('config_entry_id') == self.entry_witness.entry_id]
+            _need(len(rows) == 1)
+            ids.add(rows[0]['entity_id'])
         return tuple(sorted(ids))
 
 
@@ -125,20 +139,35 @@ class _MixedStateYAMLHooks(_TemplateStateYAMLHooks):
         if _script_prefix_composition(observer.composition):
             observer.dependents.phases.check()
             return
+        from .native_template_yaml_server import _controlled_reload
         for domain in ('script', 'automation'):
             if domain not in self.change.receipt.changed_domains:
                 continue
             await self.checkpoint()
-            if domain == 'automation':
+            if domain == 'automation' and not _controlled_reload(observer.composition):
                 await observer.automation_lifecycle.stage()
             else:
                 phases = observer.dependents.phases
                 ticket = phases.begin_reload(domain, self.context.record.direction)
                 try:
-                    await self.adapter.hass.services.async_call(domain, 'reload', {},
-                        blocking=True, context=self.adapter.context)
+                    if domain == 'automation':
+                        replaced = await observer.controlled_automation.stage_preserving_enabled()
+                        fence = getattr(phases, 'own_fence', None)
+                        if _automation_owner_replaced(fence, replaced):
+                            fence.rebind_after_controlled_reload()
+                    else:
+                        await self.adapter.hass.services.async_call(domain, 'reload', {},
+                            blocking=True, context=self.adapter.context)
+                        from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+                        if is_controlled_script(observer.composition):
+                            _need(_owner_in_domain(phases.own_fence, 'script'))
+                            phases.own_fence.rebind_after_controlled_script_reload()
                     phases.complete_reload(ticket)
-                except BaseException:
+                except BaseException as error:
+                    import logging
+                    code = str(error) if str(error) in ('automation_external_state_changed',
+                        'automation_enabled_population_changed', 'native_automation_transition_unconfirmed') else type(error).__name__
+                    logging.getLogger(__name__).warning('Controlled activation failed: %s', code)
                     if phases.active is not None:
                         phases.abandon_reload(ticket)
                     raise
@@ -153,7 +182,7 @@ class _MixedStateYAMLHooks(_TemplateStateYAMLHooks):
 class ReceiptedMixedTemplateStateYAMLTransactionAdapter(ReceiptedTemplateStateYAMLTransactionAdapter):
     def _change(self, step):
         change = self.resolver(step.prepared_ref)
-        _need(type(change) is PreparedMixedTemplateStateYAML)
+        _need(type(change) in (PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML))
         change.checked()
         _need(bool(self.chain.plan.steps) and step == self.chain.plan.steps[-1]
               and step.adapter == 'yaml' and change == self.chain._original_change(self.chain.yaml_index)
@@ -172,13 +201,44 @@ class ReceiptedMixedTemplateStateYAMLTransactionAdapter(ReceiptedTemplateStateYA
         return _MixedStateYAMLHooks(self, change, context, intent, guard)
 
 
+class _ControlledPowercalcYAMLHooks(_MixedStateYAMLHooks):
+    async def activate(self):
+        await self.checkpoint()
+        await self.adapter.handoff.activate(self.context, self.intent, self.state,
+                                             service_context=self.adapter.context)
+        await self.checkpoint()
+        await super().activate()
+
+
+class ReceiptedControlledPowercalcYAMLAdapter(ReceiptedMixedTemplateStateYAMLTransactionAdapter):
+    def __init__(self, *args, handoff, **kwargs):
+        from .controlled_powercalc_handoff import ControlledPowercalcHandoff
+        _need(type(handoff) is ControlledPowercalcHandoff)
+        self.handoff = handoff
+        super().__init__(*args, **kwargs)
+
+    def _change(self, step):
+        change = super()._change(step)
+        _need(type(change) is PreparedMixedPowercalcYAML)
+        return change
+
+    def _hooks(self, change, context, intent, guard):
+        return _ControlledPowercalcYAMLHooks(self, change, context, intent, guard)
+
+    def _completion_extra(self, hooks, context):
+        _need(type(hooks) is _ControlledPowercalcYAMLHooks and hooks.context == context
+              and self.handoff.setup_reference is not None)
+        return {'powercalc_setup': self.handoff}
+
+
 def compose_mixed_template_state_yaml_coordinator(adapters, journal, guard, *, required_scopes, lock=None,
-                                                 record_admission=None):
+                                                 record_admission=None, rollback_order=None):
     from .transaction import Coordinator
     adapter = adapters.get('yaml')
-    _need(type(adapter) is ReceiptedMixedTemplateStateYAMLTransactionAdapter
+    _need(type(adapter) in (ReceiptedMixedTemplateStateYAMLTransactionAdapter,
+                            ReceiptedControlledPowercalcYAMLAdapter)
           and type(adapter.observer) is NativeMixedTemplateStateYAMLRuntimeReadback)
     completion = _MixedStateCompletionGuard(guard)
     adapter._template_completion = completion
     return Coordinator(adapters, journal, completion, required_scopes=required_scopes, lock=lock,
-                       record_admission=record_admission)
+                       record_admission=record_admission, rollback_order=rollback_order)

@@ -112,7 +112,7 @@ class DashboardPhase:
         from .dashboard_yaml_semantics import qualify_dashboard_yaml
         from .native_discovery_consumers import _freeze
         from .yaml_plan import Limits, _Reader
-        files = {row.path: row for row in change.files}
+        files = {row.path: row for row in (() if change is None else change.files)}
         for route, path in self.yaml_routes:
             def read():
                 state.assert_current(self.chain.original_receipt)
@@ -129,7 +129,7 @@ class DashboardPhase:
             manager = self.native._managers().get(route)
             actual = await manager.async_load(False)
             guard(); self.check()
-            _need(_plain(_freeze(actual)) == expected, 'yaml_native_image_changed')
+            _need(revision(_plain(_freeze(actual))) == revision(expected), 'yaml_native_image_changed')
             await _drained(self.hass.async_add_executor_job,
                            lambda: state.assert_current(self.chain.original_receipt))
             guard(); self.check()

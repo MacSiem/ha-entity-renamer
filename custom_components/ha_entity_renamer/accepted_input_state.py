@@ -279,6 +279,9 @@ class AcceptedInputState:
         reader = _PhysicalReader(original.config_root, Limits(max_file_bytes=MAX_FILE_BYTES))
         try:
             for path, expected in self._sources.items():
+                if (path == '.storage/repairs.issue_registry'
+                        and original.checker_repairs_snapshot is not None):
+                    continue
                 raw, info = reader.read(path)
                 observed = [_sha(raw), info.st_dev, info.st_ino, info.st_mode,
                             info.st_uid, info.st_gid]
@@ -286,6 +289,11 @@ class AcceptedInputState:
                         or expected[4] is not None and observed[4:] != expected[4:]):
                     _fail('input_source_changed')
             for directory, expected, names in self.source_directories:
+                if directory == '.storage' and original.checker_repairs_snapshot is not None:
+                    if names is None:
+                        _fail('checker_snapshot_scope_invalid')
+                    expected = tuple(row for row in expected if row[0] != 'repairs.issue_registry')
+                    names = tuple(name for name in names if name != 'repairs.issue_registry')
                 fd = os.dup(reader.root) if directory == '.' else reader.open(directory, directory=True)
                 try:
                     with os.scandir(fd) as entries:

@@ -3,7 +3,8 @@
 Owner runs through FIFO after integration. No live HA config or reload is used.
 """
 import asyncio
-from dataclasses import FrozenInstanceError
+import base64
+from dataclasses import FrozenInstanceError, replace
 import importlib
 import os
 import stat
@@ -54,6 +55,112 @@ class CandidateTests(unittest.IsolatedAsyncioTestCase):
     def stage(self, reverse=False):
         return subject._stage(self.state, self.original, self.change, reverse,
                               self.before, self.after)
+
+    def test_checker_repairs_snapshot_survives_live_change_and_reopen(self):
+        from custom_components.ha_entity_renamer import yaml_validation
+        from importlib import import_module
+        baseline = import_module(fixture.PACKAGE + '.native_input_baseline')
+        repair = self.root / '.storage/repairs.issue_registry'
+        old = b'{"issues":["original"]}'
+        repair.write_bytes(old)
+        receipt = fixture.receipt_for(self.root)
+        directories = []
+        for path, entries, names in receipt.source_directories:
+            if path == '.storage':
+                st = repair.stat()
+                entries = tuple(sorted((*entries, (repair.name, st.st_mode, st.st_dev, st.st_ino))))
+                names = tuple(sorted((*names, repair.name)))
+            directories.append((path, entries, names))
+        receipt = replace(receipt, source_directories=tuple(directories),
+                          checker_repairs_snapshot=('present', base64.b64encode(old).decode()))
+        # The actual persisted codec is also used by fresh reopen.
+        encoded = baseline._receipt_bytes(receipt)
+        self.assertEqual(baseline._receipt(encoded), receipt)
+        self.original = baseline._receipt(encoded)
+        self.state = self.state_for_current()
+        repair.write_bytes(b'{"issues":["changed"]}')
+        fixture.validation.assert_validation_current(self.original)
+        self.stage()
+        self.assertEqual((self.before / '.storage/repairs.issue_registry').read_bytes(), old)
+        self.assertEqual((self.after / '.storage/repairs.issue_registry').read_bytes(), old)
+        (self.root / 'configuration.yaml').write_bytes(self.old)
+        self.state = self.state_for_current()
+        self.stage(reverse=True)
+        self.assertEqual((self.before / '.storage/repairs.issue_registry').read_bytes(), old)
+        self.assertEqual((self.after / '.storage/repairs.issue_registry').read_bytes(), old)
+        with self.assertRaises(ValueError):
+            baseline._receipt_bytes(replace(receipt, checker_repairs_snapshot=('present', 'e30=')))
+        with self.assertRaises(ValueError):
+            baseline._receipt_bytes(replace(receipt, proposed_files=(
+                ('.storage/repairs.issue_registry', fixture.digest(old)),)))
+        # An old receipt retains the strict live fence on reopen.
+        legacy = replace(receipt, checker_repairs_snapshot=None)
+        self.assertNotIn(b'checker_repairs_snapshot', baseline._receipt_bytes(legacy))
+        legacy_sources = self.state.sources()
+        _, digest, device, inode = next(row for row in legacy.source_files
+                                         if row[0] == '.storage/repairs.issue_registry')
+        mode = next(row[1] for path, entries, _ in legacy.source_directories
+                    if path == '.storage' for row in entries if row[0] == repair.name)
+        legacy_sources['.storage/repairs.issue_registry'][:4] = [digest, device, inode, mode]
+        old_state = accepted.AcceptedInputState(baseline._receipt_bytes(legacy),
+                                                self.state.head, legacy_sources, {})
+        with self.assertRaises(ValueError):
+            old_state.assert_current(baseline._receipt(baseline._receipt_bytes(legacy)))
+        (self.root / 'configuration.yaml').write_bytes(self.new)
+        with self.assertRaises(ValueError):
+            fixture.validation.assert_validation_current(legacy)
+
+    def test_absent_checker_repairs_and_explicit_sources(self):
+        from custom_components.ha_entity_renamer import yaml_validation
+        from importlib import import_module
+        baseline = import_module(fixture.PACKAGE + '.native_input_baseline')
+        plan = SimpleNamespace(files=(), directories=(), powercalc_inputs=None)
+        self.assertEqual(yaml_validation._checker_repairs_snapshot(plan, self.before,
+            (('.storage', (), ('repairs.issue_registry',)),), None, None), ('absent',))
+        plan.powercalc_inputs = SimpleNamespace(files=(),
+            directories=(('.storage', (), ('energy', 'repairs.issue_registry')),))
+        self.assertEqual(yaml_validation._checker_repairs_snapshot(plan, self.before,
+            (('.storage', (), ('energy', 'repairs.issue_registry')),), None, None), ('absent',))
+        plan.powercalc_inputs = None
+        plan.files = (SimpleNamespace(path='.storage/repairs.issue_registry'),)
+        self.assertIsNone(yaml_validation._checker_repairs_snapshot(plan, self.before,
+            (('.storage', (), ('repairs.issue_registry',)),), None, None))
+        plan.ready, plan.patches = True, ()
+        with self.assertRaisesRegex(ValueError, 'checker_snapshot_real_source_conflict'):
+            yaml_validation.assert_proposal_matches(
+                SimpleNamespace(proposed_files=(), checker_repairs_snapshot=('absent',)), plan)
+        plan.files = ()
+        dashboard = SimpleNamespace(files=(), tracked_names=('repairs.issue_registry',))
+        self.assertIsNone(yaml_validation._checker_repairs_snapshot(plan, self.before,
+            (('.storage', (), ('repairs.issue_registry',)),), None, dashboard))
+        self.assertIsNone(yaml_validation._checker_repairs_snapshot(plan, self.before,
+            (('.storage', (), None),), None, None))
+        directories = tuple((path, entries, tuple(sorted((*names, 'repairs.issue_registry')))
+                             if path == '.storage' else names)
+                            for path, entries, names in self.original.source_directories)
+        self.original = replace(self.original, source_directories=directories,
+                                checker_repairs_snapshot=('absent',))
+        self.state = self.state_for_current()
+        (self.root / '.storage/repairs.issue_registry').write_bytes(b'{"issues":[]}')
+        (self.root / 'configuration.yaml').write_bytes(self.old)
+        fixture.validation.assert_validation_current(self.original)
+        (self.root / 'configuration.yaml').write_bytes(self.new)
+        self.stage()
+        self.assertFalse((self.before / '.storage/repairs.issue_registry').exists())
+        self.assertFalse((self.after / '.storage/repairs.issue_registry').exists())
+        legacy = replace(self.original, checker_repairs_snapshot=None)
+        old_state = accepted.AcceptedInputState(baseline._receipt_bytes(legacy),
+                                                self.state.head, self.state.sources(), {})
+        with self.assertRaises(ValueError):
+            old_state.assert_current(legacy)
+        (self.root / 'configuration.yaml').write_bytes(self.old)
+        with self.assertRaises(ValueError):
+            fixture.validation.assert_validation_current(legacy)
+        inconsistent = tuple((path, entries + (('repairs.issue_registry', 33188, 1, 2),), names)
+                             if path == '.storage' else (path, entries, names)
+                             for path, entries, names in self.original.source_directories)
+        with self.assertRaises(ValueError):
+            baseline._receipt_bytes(replace(self.original, source_directories=inconsistent))
 
     def test_actual_accepted_native_in_both_roots_only_original_yaml_differs(self):
         self.stage()

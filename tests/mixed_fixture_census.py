@@ -228,7 +228,7 @@ def audit(observed):
             'unverified': sorted(set(tuple(x) for x in gaps)), 'complete': not gaps}
 
 
-def consumer_evidence(original, observed, *, allow_unrendered=False):
+def consumer_evidence(original, observed, *, allow_unrendered=False, script_renames=None):
     """Bind comparator checks to independent census observations for this fixture."""
     from batch_readback import ConsumerCheck
     for census in (original, observed):
@@ -242,15 +242,18 @@ def consumer_evidence(original, observed, *, allow_unrendered=False):
     if original['inactive_blueprints'] != observed['inactive_blueprints']:
         raise ValueError('blueprint activity changed')
     inventory, checks = {}, []
+    script_renames = script_renames or {}
     bindings = {'mixed_automations.yaml': [], 'mixed_scripts.yaml': [], 'template.yaml': []}
     for family, path in (('automation', 'mixed_automations.yaml'), ('script', 'mixed_scripts.yaml'),
                          ('template', 'template.yaml')):
         identities = sorted(original['source_specs'][family])
-        if identities != sorted(observed['source_specs'][family]):
+        mapped = {identity: script_renames.get(identity, identity) if family == 'script' else identity for identity in identities}
+        if len(set(mapped.values())) != len(identities) or sorted(mapped.values()) != sorted(observed['source_specs'][family]):
             raise ValueError('consumer identity membership changed')
         for identity in identities:
             name = family + ':' + identity
-            if name not in original['observed_consumers'] or name not in observed['observed_consumers']:
+            observed_name = family + ':' + mapped[identity]
+            if name not in original['observed_consumers'] or observed_name not in observed['observed_consumers']:
                 raise ValueError('consumer behavior not independently observed')
             if (family == 'template' and original['bindings'][family][identity]['entity_id']
                     != observed['bindings'][family][identity]['entity_id']):
@@ -476,7 +479,7 @@ def _dashboard_census(hass, root, config, errors):
     return routes, sorted(yaml_roots)
 
 
-async def _stimulus(hass, producer, bindings):
+async def _stimulus(hass, producer, bindings, script_service="mixed_source"):
     """Two real source events and two actual service calls; restore source."""
     events = {'automation': [], 'script': []}
     removes = [hass.bus.async_listen('mixed_yaml_' + name + '_result',
@@ -490,7 +493,7 @@ async def _stimulus(hass, producer, bindings):
             producer._attr_native_value = value
             producer.async_write_ha_state()
             await asyncio.wait_for(hass.async_block_till_done(), 20)
-            await asyncio.wait_for(hass.services.async_call('script', 'mixed_source', {}, blocking=True), 20)
+            await asyncio.wait_for(hass.services.async_call('script', script_service, {}, blocking=True), 20)
             await asyncio.wait_for(hass.async_block_till_done(), 20)
             templates = {name: hass.states.get(row['entity_id']).state
                          for name, row in bindings['template'].items()}
@@ -505,14 +508,15 @@ async def _stimulus(hass, producer, bindings):
     return samples
 
 
-def _observed_consumers(bindings, samples):
+def _observed_consumers(bindings, samples, script_service="mixed_source", selected_script="mixed_source"):
     """Require both discriminating fixture stimuli and their expected outcomes."""
     if tuple(sample.get('source') for sample in samples) != STIMULUS_VALUES:
         return []
     observed = []
     if len(bindings['automation']) == 1 and all(sample['automation'] == [str(sample['source'])] for sample in samples):
         observed.extend('automation:' + name for name in bindings['automation'])
-    if len(bindings['script']) == 1 and 'mixed_source' in bindings['script'] and all(sample['script'] == [str(sample['source'])] for sample in samples):
+    expected_scripts = {selected_script, script_service}
+    if set(bindings['script']) == expected_scripts and all(sample['script'] == [str(sample['source'])] for sample in samples):
         observed.extend('script:' + name for name in bindings['script'])
     for name in bindings['template']:
         if name.startswith('sensor:'):
@@ -617,7 +621,7 @@ def _entry_census(hass, errors):
     return sorted(entries, key=lambda entry: entry['id'])
 
 
-async def collect_native(hass, root, producer, mapping):
+async def collect_native(hass, root, producer, mapping, *, script_service="mixed_source", selected_script="mixed_source"):
     """Independently enumerate actual fixture sources, owners and behavior."""
     from homeassistant.config import async_hass_config_yaml
 
@@ -750,8 +754,8 @@ async def collect_native(hass, root, producer, mapping):
         elif ('{{' in content or '{%' in content or 'custom:' in content.lower()
               or re.search(r'\\(?:u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|x[0-9a-fA-F]{2})', content)):
             errors.append((rel, 'dynamic_outside_source_unverified'))
-    samples = await _stimulus(hass, producer, bindings)
-    observed_consumers = _observed_consumers(bindings, samples)
+    samples = await _stimulus(hass, producer, bindings, script_service)
+    observed_consumers = _observed_consumers(bindings, samples, script_service, selected_script)
     final_bindings, final_tokens = _runtime_bindings(hass, errors)
     if final_bindings != bindings or final_tokens != initial_tokens:
         errors.append(('runtime', 'bindings_changed_during_census'))

@@ -18,7 +18,7 @@ import test_native_template_yaml_server as server
 
 
 @contextmanager
-def native_diagnostics(module):
+def native_diagnostics(module, *, sink=None):
     """Observe sanitized product failures/positions without replacing a seam."""
     failures, positions, graph_diffs, source_issues, duration_frames = [], [], [], [], []
     tool = next(i for i in range(6) if sys.monitoring.get_tool(i) is None)
@@ -70,7 +70,20 @@ def native_diagnostics(module):
     def returned(code, offset, value):
         row = {'owner': code.co_qualname}
         if type(value).__name__ == 'RegistryEvidence':
-            row.update(position=value.position, reason=value.reason)
+            row.update(position=value.position, reason=value.reason,
+                       identity=value.identity, runtime=value.runtime,
+                       durability=value.durability, recorder_metadata=value.recorder_metadata,
+                       complete_history=value.complete_history)
+            if value.position == 'unknown' and value.reason == 'scoped_evidence_incomplete':
+                frame = sys._getframe(1).f_back
+                if frame is not None and frame.f_code.co_name == 'inspect':
+                    bridge, change = frame.f_locals.get('self'), frame.f_locals.get('change')
+                    if bridge is not None and change is not None and change.kind == 'entity':
+                        row['states'] = {}
+                        for entity_id in (change.before['entity_id'], change.after['entity_id']):
+                            state = bridge.io.hass.states.get(entity_id)
+                            row['states'][entity_id] = (None if state is None else
+                                {'state': state.state, 'attributes': dict(state.attributes)})
         else:
             row['position'] = getattr(value, 'value', type(value).__name__)
         positions.append(row)
@@ -92,6 +105,9 @@ def native_diagnostics(module):
         sys.monitoring.register_callback(tool, sys.monitoring.events.RAISE, None)
         sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, None)
         sys.monitoring.free_tool_id(tool)
+        if sink is not None:
+            sink['native_failures'] = list(failures)
+            sink['native_positions'] = list(positions)
         print('MIXED_NATIVE_FAILURES', json.dumps(failures))
         print('MIXED_NATIVE_POSITIONS', json.dumps(positions))
         if graph_diffs:

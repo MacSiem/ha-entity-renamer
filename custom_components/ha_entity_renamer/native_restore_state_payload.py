@@ -223,7 +223,7 @@ def _native_tree(value, api):
         kind = type(item)
         if kind in (dict, readonly):
             for key, child in item.items():
-                _require(type(key) is str, 'payload_nonstring_key')
+                _require(isinstance(key, str), 'payload_nonstring_key')
                 visit(key, depth + 1)
                 visit(child, depth + 1)
         elif kind in (list, tuple, set):
@@ -241,7 +241,7 @@ def _native_tree(value, api):
     visit(value, 0)
 
 
-def _capture(stored, api):
+def _capture(stored, api, *, powercalc_extra=None):
     _, _, State, json_bytes, _, StoredState, _, ExtraStoredData, _ = api
     _require(type(stored) is StoredState and type(stored.state) is State,
              'native_stored_state_type')
@@ -257,6 +257,12 @@ def _capture(stored, api):
         native_class = None if module is None else vars(module).get(class_name)
         if isinstance(native_class, type) and issubclass(native_class, ExtraStoredData):
             known.add(native_class)
+    if powercalc_extra is not None:
+        module = sys.modules.get('custom_components.powercalc.sensors.energy')
+        _require(module is not None and powercalc_extra is vars(module).get('VirtualEnergyExtraStoredData')
+                 and isinstance(powercalc_extra, type) and issubclass(powercalc_extra, ExtraStoredData),
+                 'powercalc_extra_data_unqualified')
+        known.add(powercalc_extra)
     _require(stored.extra_data is None or type(stored.extra_data) in known,
              'native_extra_data_type')
     _require(stored.extra_data is None or bool(stored.extra_data),
@@ -332,7 +338,8 @@ class PreparedIntegrationPayload:
         keys = {'core_version', 'entry_id', 'helper_uuid', 'entity_id',
                 'full_state_text', 'last_valid_state_text', 'before_sha256'}
         _require(type(capture) is dict and set(capture) == keys
-                 and all(type(v) is str and bool(v) for v in capture.values()),
+                 and (capture['entry_id'] is None or type(capture['entry_id']) is str and bool(capture['entry_id']))
+                 and all(type(v) is str and bool(v) for k, v in capture.items() if k != 'entry_id'),
                  'integration_capture_schema')
         _require(capture['core_version'] == self.core_version
                  and capture['entity_id'] == before['state']['entity_id']
@@ -405,6 +412,59 @@ def prepare_integration_payload(stored, target_entity_id, *, witness):
     materialize_integration_payload(result)
     witness.check_live(stored=stored)
     return result
+
+
+def prepare_integration_snapshot_payload(stored, target_entity_id, *, entity):
+    """Build detached exact native data from a removed IntegrationSensor.
+
+    This is a data codec, not permission to unload, persist or set up. Its
+    caller must prove native removal and CAS the actual post-unload source and
+    target under the same directional intent before using the payload.
+    """
+    from decimal import Decimal
+    from homeassistant.components.integration.sensor import IntegrationSensor
+    from homeassistant.components.sensor import SensorExtraStoredData
+    _require(type(target_entity_id) is str and target_entity_id.startswith('sensor.')
+             and isinstance(entity, IntegrationSensor) and entity.registry_entry is not None
+             and type(entity._state) is Decimal and entity._state.is_finite()
+             and type(entity._last_valid_state) is Decimal and entity._last_valid_state.is_finite(),
+             'integration_snapshot_actual_entity_required')
+    api = _native()
+    module = sys.modules.get('custom_components.powercalc.sensors.energy')
+    vendor_entity = None if module is None else vars(module).get('VirtualEnergySensor')
+    vendor_extra = None if module is None else vars(module).get('VirtualEnergyExtraStoredData')
+    _require(isinstance(vendor_entity, type) and type(entity) is vendor_entity
+             and isinstance(vendor_extra, type) and type(stored.extra_data) is vendor_extra,
+             'powercalc_extra_data_unqualified')
+    before = _capture(stored, api, powercalc_extra=vendor_extra)
+    entry = entity.registry_entry
+    _require(before['state']['entity_id'] == entity.entity_id == entry.entity_id
+             and type(entry.id) is str and bool(entry.id)
+             and (entry.config_entry_id is None or type(entry.config_entry_id) is str),
+             'integration_snapshot_identity_changed')
+    extra = before['extra_data']
+    _require(type(extra) is dict and set(extra) == {'native_value', 'native_unit_of_measurement',
+                                                   'source_entity', 'last_valid_state'},
+             'integration_snapshot_stored_state_changed')
+    prior = SensorExtraStoredData.from_dict(extra)
+    _require(prior is not None and type(prior.native_value) is Decimal
+             and type(entity.native_value) is Decimal
+             and prior.native_value.as_tuple() == entity.native_value.as_tuple()
+             and extra['last_valid_state'] == (str(entity._last_valid_state)
+                                                if entity._last_valid_state is not None else None)
+             and extra['source_entity'] == entity._source_entity
+             and prior.native_unit_of_measurement == entity.native_unit_of_measurement,
+             'integration_snapshot_stored_state_changed')
+    raw = _canonical(before)
+    capture = {'core_version': api[0], 'entry_id': entry.config_entry_id, 'helper_uuid': entry.id,
+               'entity_id': entity.entity_id, 'full_state_text': str(entity._state),
+               'last_valid_state_text': str(entity._last_valid_state),
+               'before_sha256': hashlib.sha256(raw).hexdigest()}
+    after = _parse(raw)
+    after['state']['entity_id'] = target_entity_id
+    after['extra_data']['native_value'] = capture['full_state_text']
+    after['extra_data']['last_valid_state'] = capture['last_valid_state_text']
+    return PreparedIntegrationPayload(api[0], raw, _canonical(after), _canonical(capture))
 
 
 def serialize_integration_payload(payload):

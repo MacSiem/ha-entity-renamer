@@ -7,9 +7,9 @@ import os
 import stat
 
 from .dashboard_plan import plan_dashboard
-from .lovelace_native import PreparedDashboard
+from .lovelace_native import PreparedDashboard, revision
 from .native_registry import PreparedRegistryChange
-from .native_registry_receipts import RegistryIntent
+from .native_registry_receipts import RegistryIntent, _exact_json_equal, _freeze_json
 from .transaction import Refused
 from .yaml_plan import Limits, _Reader
 
@@ -38,7 +38,7 @@ def validate_prepared(chain, change):
             _need(old not in mapping and new not in mapping.values(), 'registry_mapping_ambiguous')
             mapping[old] = new
     planned = plan_dashboard(change.before.config, mapping)
-    _need(bool(planned.changes) and not planned.markers and planned.value == change.after,
+    _need(bool(planned.changes) and not planned.markers and revision(planned.value) == revision(change.after),
           'semantic_mapping_mismatch')
     path = '.storage/' + change.before.dashboard.key
     original = next((row for row in chain.original_receipt.source_files if row[0] == path), None)
@@ -136,12 +136,12 @@ def fold_receipt(chain, states, sources, intent, receipt):
           and type(after) is dict and set(after) == {'revision', 'physical'}
           and before['revision'] == old_rev and after['revision'] == new_rev
           and _physical(before['physical']) == sources.get(path)
-          and receipt.get('result') == chain._summary(states), 'binding')
+          and _exact_json_equal(receipt.get('result'), _freeze_json(chain._summary(states))), 'binding')
     old, new = _physical(before['physical']), _physical(after['physical'])
     _need((old[1], old[3], old[4], old[5]) == (new[1], new[3], new[4], new[5]), 'metadata_changed')
     result = dict(sources)
     result[path] = new
-    _need(receipt.get('input_result') == result, 'source_graph_mismatch')
+    _need(_exact_json_equal(receipt.get('input_result'), _freeze_json(result)), 'source_graph_mismatch')
     return result
 
 

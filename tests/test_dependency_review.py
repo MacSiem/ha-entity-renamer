@@ -43,7 +43,7 @@ class DependencyReviewTests(unittest.TestCase):
         with self.assertRaises(Refused):
             dependency_files(composition)
 
-    def _own_script_composition(self):
+    def _own_script_composition(self, controlled=False):
         from custom_components.ha_entity_renamer.native_script_program_composition import ScriptTemplateStateComposition
         from custom_components.ha_entity_renamer.yaml_source_ledger import extract_source_ledger
         temporary = tempfile.TemporaryDirectory()
@@ -61,7 +61,11 @@ class DependencyReviewTests(unittest.TestCase):
         self.assertTrue(plan.ready, plan.issues)
         original = {row.path: (root / row.path).read_bytes() for row in plan.files}
         ledger = extract_source_ledger(plan, original)
-        composition = object.__new__(ScriptTemplateStateComposition)
+        if controlled:
+            from custom_components.ha_entity_renamer.controlled_script_composition import ControlledScriptComposition
+            composition = object.__new__(ControlledScriptComposition)
+        else:
+            composition = object.__new__(ScriptTemplateStateComposition)
         object.__setattr__(composition, 'mapping', tuple(mapping.items()))
         object.__setattr__(composition, 'yaml_plan', plan)
         object.__setattr__(composition, 'evidence', SimpleNamespace(ledger=ledger))
@@ -78,8 +82,35 @@ class DependencyReviewTests(unittest.TestCase):
             {'before': 'script.worker', 'after': 'script.new_worker', 'occurrences': 1}])
         self.assertNotIn('alias', json.dumps(list(rows.values())))
 
+    def test_controlled_script_key_review_exposes_verified_definition(self):
+        composition, _ = self._own_script_composition(controlled=True)
+        rows = {row['path']: row for row in dependency_files(composition)}
+        self.assertEqual(rows['scripts.yaml']['references'], [
+            {'before': 'script.worker', 'after': 'script.new_worker', 'occurrences': 1},
+            {'kind': 'script_key', 'before': 'worker', 'after': 'new_worker', 'occurrences': 1}])
+        self.assertNotIn('alias', json.dumps(list(rows.values())))
+
+    def test_powercalc_script_key_review_requires_typed_script_program(self):
+        from custom_components.ha_entity_renamer.controlled_powercalc_composition import ControlledPowercalcComposition
+        from custom_components.ha_entity_renamer.dependent_config_program import DependentConfigProgram
+        script, _ = self._own_script_composition(controlled=True)
+        composition = object.__new__(ControlledPowercalcComposition)
+        for field in ('mapping', 'yaml_plan', 'evidence'):
+            object.__setattr__(composition, field, getattr(script, field))
+        object.__setattr__(composition, 'dependent_config_program', object.__new__(DependentConfigProgram))
+        rows = {row['path']: row for row in dependency_files(composition)}
+        self.assertIn({'kind': 'script_key', 'before': 'worker', 'after': 'new_worker', 'occurrences': 1},
+                      rows['scripts.yaml']['references'])
+        object.__setattr__(composition, 'dependent_config_program', None)
+        with self.assertRaises(Refused):
+            dependency_files(composition)
+
     def test_equal_unowned_scalar_edit_refuses_full_review(self):
-        composition, originals = self._own_script_composition()
+        self._assert_equal_unowned_scalar_refused(controlled=False)
+        self._assert_equal_unowned_scalar_refused(controlled=True)
+
+    def _assert_equal_unowned_scalar_refused(self, controlled):
+        composition, originals = self._own_script_composition(controlled=controlled)
         plan = composition.yaml_plan
         patch = next(row for row in plan.patches if row.path == 'scripts.yaml')
         raw = originals['scripts.yaml']
@@ -96,6 +127,21 @@ class DependencyReviewTests(unittest.TestCase):
             forged if row is patch else row for row in plan.patches)))
         with self.assertRaises(Refused):
             dependency_files(composition)
+
+    def test_discovery_reuses_owned_script_planner_and_detects_source_change(self):
+        from custom_components.ha_entity_renamer.discovery import _scan_yaml
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'configuration.yaml').write_text('script: !include scripts.yaml\n')
+            path = root / 'scripts.yaml'
+            path.write_text('worker:\n  sequence:\n  - action: script.worker\n')
+            mapping = {'script.worker': 'script.new_worker'}
+            expected = plan_yaml(root, mapping, owned_script_services=('script.worker',))
+            self.assertTrue(expected.ready, expected.issues)
+            self.assertEqual(_scan_yaml(root, mapping, (), ('script.worker',)), expected)
+            self.assertNotEqual(_scan_yaml(root, mapping, (), ()), expected)
+            path.write_text(path.read_text() + '# foreign edit\n')
+            self.assertNotEqual(_scan_yaml(root, mapping, (), ('script.worker',)), expected)
 
     def test_script_key_without_typed_owned_composition_refuses(self):
         composition, _ = self._own_script_composition()

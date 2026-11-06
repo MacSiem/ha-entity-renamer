@@ -74,6 +74,64 @@ class NativeNameObserver:
                     'name_native_object_registry_mismatch')
         return entity, state, entry, active
 
+    def verify_readd_device(self, change):
+        """Refuse an ID move if native re-add cannot preserve its device row."""
+        from homeassistant.helpers import device_registry as dr, entity_registry as er
+        from .helper_observers import require
+        row = er.async_get(self.hass).async_get(change.before['entity_id'])
+        if row is None:
+            row = er.async_get(self.hass).async_get(change.after['entity_id'])
+        require(row is not None and row.id == change.identity, 'readd_entity_missing')
+        if row.device_id is None:
+            return
+        entity = self._object(row)
+        if entity is None and row.disabled_by is not None:
+            return
+        require(entity is not None, 'readd_device_runtime_missing')
+        platform = entity.platform
+        entry = getattr(platform, 'config_entry', None)
+        info = entity.device_info
+        require(entry is not None and entry.entry_id == row.config_entry_id
+                and type(info) is dict, 'readd_device_info_missing')
+        allowed = {'identifiers', 'connections', 'name', 'manufacturer', 'model',
+                   'model_id', 'hw_version', 'sw_version', 'serial_number',
+                   'configuration_url', 'entry_type'}
+        require(set(info) <= allowed, 'readd_device_info_unsupported')
+        identifiers, connections = info.get('identifiers', set()), info.get('connections', set())
+        require(type(identifiers) is set and type(connections) is set
+                and bool(identifiers or connections), 'readd_device_identity_missing')
+        registry = dr.async_get(self.hass)
+        device = registry.async_get(row.device_id)
+        found = registry.async_get_device(identifiers=identifiers, connections=connections)
+        require(device is not None and found is device
+                and identifiers <= device.identifiers and connections <= device.connections
+                and entry.entry_id in device.config_entries,
+                'readd_device_identity_changed')
+        for key in set(info) - {'identifiers', 'connections'}:
+            require(hasattr(device, key) and getattr(device, key) == info[key],
+                    'readd_device_metadata_changed')
+
+    def _device_subscription(self, entity, row):
+        """Prove Core 2026 will deliver this device's name update to this entity."""
+        from functools import partial
+        from homeassistant.core import HassJob
+        from homeassistant.helpers import event
+        from homeassistant.helpers.entity import Entity
+        from .helper_observers import require
+        remove = getattr(entity, '_unsub_device_updates', None)
+        require(type(remove) is partial and remove.func is event._remove_listener
+                and len(remove.args) == 5, 'name_device_subscription_missing')
+        hass, tracker, keys, job, callbacks = remove.args
+        target = getattr(job, 'target', None)
+        data = self.hass.data.get(event._KEYED_TRACK_DEVICE_REGISTRY_UPDATED.key)
+        require(hass is self.hass and tracker is event._KEYED_TRACK_DEVICE_REGISTRY_UPDATED
+                and keys == (row.device_id,) and type(job) is HassJob
+                and getattr(target, '__self__', None) is entity
+                and getattr(target, '__func__', None) is Entity._async_device_registry_updated
+                and data is not None and data.callbacks is callbacks
+                and sum(item is job for item in callbacks.get(row.device_id, ())) == 1,
+                'name_device_subscription_unverified')
+
     def capture(self, change):
         version = self._version()
         rows = self._rows(change)
@@ -85,7 +143,9 @@ class NativeNameObserver:
         devices = self.io.document('device')
         device_ids = {row.device_id for row in rows if row.device_id is not None}
         for row in rows:
-            _, state, entry, active = self._sample(row)
+            entity, state, entry, active = self._sample(row)
+            if change.kind == 'device' and active and version in ('2026.10.2', '2026.10.4'):
+                self._device_subscription(entity, row)
             native = next(item for item in document['entities'] if item['id'] == row.id)
             baseline[row.id] = {'row': native, 'identity': list(registry_identity(row)),
                                 'entry': entry, 'active': active,
@@ -135,7 +195,18 @@ class NativeNameObserver:
                     and list(registry_identity(row)) == saved['identity'],
                     'name_entity_identity_or_preferences_changed')
             entity, state, entry, active = self._sample(row)
-            require(entry == saved['entry'] and active is saved['active'], 'name_lifecycle_or_preferences_changed')
+            expected_entry = saved['entry']
+            if expected_documents is not None and expected_entry is not None:
+                # This full image is reconstructed from ORIGINAL and completed
+                # receipts, never from the live ConfigEntry being checked.
+                from .native_config_transition import _projection
+                from .native_registry import revision
+                entries = expected_documents['core.config_entries']['data']['entries']
+                matched = [item for item in entries if item.get('entry_id') == row.config_entry_id]
+                require(len(matched) == 1, 'name_accepted_entry_missing')
+                expected_entry = {'snapshot_revision': revision(_projection(matched[0])),
+                                  'state': saved['entry']['state']}
+            require(entry == expected_entry and active is saved['active'], 'name_lifecycle_or_preferences_changed')
             if not active:
                 require((state.state if state is not None else None) == saved['inactive_state']
                         and ({k: v for k, v in state.attributes.items() if k != 'friendly_name'}
@@ -147,6 +218,8 @@ class NativeNameObserver:
                     require(state.attributes.get('friendly_name') == (friendly if friendly else None),
                             'name_inactive_friendly_name_stale')
                 continue
+            if change.kind == 'device' and version in ('2026.10.2', '2026.10.4'):
+                self._device_subscription(entity, row)
             if row.device_id and entity.has_entity_name:
                 require(entity.device_entry is dr.async_get(self.hass).async_get(row.device_id),
                         'name_native_device_binding_stale')

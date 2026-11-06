@@ -5,6 +5,7 @@ A report is scoped evidence, never proof of complete historical continuity.
 """
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
@@ -255,9 +256,10 @@ class NativeRegistryIO:
                 kwargs["new_entity_id"] = target["entity_id"]
             if source.get('unique_id') != target.get('unique_id'):
                 from .native_own_script_service_move import NativeOwnScriptServiceMove
+                from .controlled_script_cutover import ControlledScriptCutover
                 from .native_registry_transition import _native_script_unique_move
                 capability = getattr(self, '_script_service_capability', None)
-                if (type(capability) is not NativeOwnScriptServiceMove
+                if (type(capability) not in (NativeOwnScriptServiceMove, ControlledScriptCutover)
                         or not _native_script_unique_move(prepared.before, prepared.after)):
                     raise RegistryConflict('native_unique_change_capability_required')
                 capability.authorize_registry(self, prepared, target)
@@ -274,7 +276,7 @@ class NativeRegistryIO:
                     and _native_script_suggested_move(prepared.before, prepared.after)):
                 from homeassistant.const import __version__
                 if (__version__ not in ('2026.10.2', '2026.10.4')
-                        or type(getattr(self, '_script_service_capability', None)) is not NativeOwnScriptServiceMove):
+                        or type(getattr(self, '_script_service_capability', None)) not in (NativeOwnScriptServiceMove, ControlledScriptCutover)):
                     raise RegistryConflict('native_suggested_change_capability_required')
                 kwargs['suggested_object_id'] = target['suggested_object_id']
                 updated = registry._async_update_entity(source['entity_id'], **kwargs)
@@ -282,8 +284,9 @@ class NativeRegistryIO:
                 from .native_registry_transition import _powercalc_group_suggested_move
                 if _powercalc_group_suggested_move(prepared.before, prepared.after):
                     from .powercalc_group_own_id import PowercalcGroupOwnID
+                    from .controlled_powercalc_registry import ControlledPowercalcRegistryNode
                     capability = getattr(self, '_powercalc_group_capability', None)
-                    if type(capability) is not PowercalcGroupOwnID:
+                    if type(capability) not in (PowercalcGroupOwnID, ControlledPowercalcRegistryNode):
                         raise RegistryConflict('powercalc_group_suggested_capability_required')
                     capability.authorize_suggested(self, prepared, target)
                     kwargs['suggested_object_id'] = target['suggested_object_id']
@@ -346,8 +349,9 @@ class NativeRegistryBridge:
     """
 
     def __init__(self, io, recorder, runtime_probe=None, *, history_guard=None,
-                 native_images=None):
+                 native_images=None, automation_transition=None):
         self.io = io
+        self.automation_transition = automation_transition
         self.recorder = recorder
         # Optional trusted immutable chain expectations allow preceding OWN
         # related registry steps; never derive this callback from current IO.
@@ -374,6 +378,19 @@ class NativeRegistryBridge:
         node = self._mutation_node
         if node is not None:
             from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
+            if (type(node) is NativeTemplateStateRegistryEffect and node.change == change
+                    and node.target == expected['entity_id'] and node.script_cutover is not None):
+                from .controlled_script_cutover import ControlledScriptCutover
+                cutover = node.script_cutover
+                if (type(cutover) is ControlledScriptCutover and cutover.node is node
+                        and cutover.phase == 'added' and cutover.mutation is not None
+                        and cutover.mutation.identity == change.identity
+                        and cutover.root.chain.active is node.intent
+                        and json.loads(cutover.mutation.after_json) == actual
+                        and cutover.target_entity.registry_entry is self.io.registries['entity'].async_get(node.target)):
+                    cutover._scope()
+                    cutover._foreign()
+                    return True
             if (type(node) is NativeTemplateStateRegistryEffect and node.change == change
                     and node.target == expected['entity_id'] and node.script_service_move is not None):
                 node.script_service_move.check_moved()
@@ -404,6 +421,9 @@ class NativeRegistryBridge:
         if not self._matches(change, _row(document, change.kind, change.identity), expected):
             raise RegistryConflict("registry_revision_changed")
         if change.kind == "entity":
+            if change.mapping and expected.get('device_id') is not None:
+                from .native_name_observers import NativeNameObserver
+                NativeNameObserver(self.io).verify_readd_device(change)
             destination = change.after if expected == change.before else change.before
             if destination["entity_id"] != expected["entity_id"]:
                 if any(row.get("entity_id") == destination["entity_id"]
@@ -546,7 +566,13 @@ class NativeRegistryBridge:
             except BaseException:
                 from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
                 if type(node) is NativeTemplateStateRegistryEffect:
-                    node.abort_before_attempt()
+                    cutover = getattr(node, 'script_cutover', None)
+                    if cutover is None or cutover.phase == 'captured':
+                        node.abort_before_attempt()
+                elif type(node).__module__ == __package__ + '.controlled_powercalc_registry':
+                    from .controlled_powercalc_registry import ControlledPowercalcRegistryNode
+                    if type(node) is ControlledPowercalcRegistryNode:
+                        node.abort_before_attempt()
                 elif type(node).__module__ == __package__ + '.powercalc_group_own_id':
                     from .powercalc_group_own_id import PowercalcGroupOwnID
                     if type(node) is PowercalcGroupOwnID:
@@ -556,46 +582,86 @@ class NativeRegistryBridge:
                     if type(node) is PowercalcSourceTransition:
                         node.abort_before_attempt()
                 raise
-        # No await between fresh authorization/revision and one native mutation.
-        if node is None:
-            stamp = self.io.mutate(change, target)
-        else:
-            from .native_helper_placeholder_effect import OwnHelperPlaceholder
-            from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
-            accepted = (OwnHelperPlaceholder, NativeTemplateStateRegistryEffect)
-            if type(node).__module__ == __package__ + '.powercalc_group_own_id':
-                from .powercalc_group_own_id import PowercalcGroupOwnID
-                accepted += (PowercalcGroupOwnID,)
-            if type(node).__module__ == __package__ + '.powercalc_source_transition':
-                from .powercalc_source_transition import PowercalcSourceTransition
-                accepted += (PowercalcSourceTransition,)
-            if (type(node) not in accepted or node.io is not self.io
-                    or node.change != change or node.source != source['entity_id']
-                    or node.target != target['entity_id']):
-                raise RegistryConflict('own_helper_effect_binding_mismatch')
+        readd = None
+        transition = self.automation_transition
+        if (transition is not None and change.kind == 'entity' and change.mapping
+                and change.before.get('platform') == 'automation'):
             try:
-                stamp = node.mutate()
+                # Follows the durable intent/final source fence without an await.
+                readd = transition.begin_registry_readd(source['entity_id'],
+                    target['entity_id'], change.identity)
             except BaseException:
-                if type(node) is not OwnHelperPlaceholder:
-                    await node.finish_failed_attempt()
+                from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
+                if type(node) is NativeTemplateStateRegistryEffect:
+                    node.abort_before_attempt()
                 raise
-            if type(node) is not OwnHelperPlaceholder:
-                self._mutation_node = node
-                try:
-                    await node.finish_native()
-                except BaseException:
-                    self._mutation_node = None
-                    raise
         try:
-            await self.io.settle(change)
-            self._fresh(change, target, guard)
-            await self.io.flush(change.kind)
-            self._fresh(change, target, guard)
-            evidence = await self.inspect(change)
-            self._fresh(change, target, guard)
-            if evidence.position != ("after" if expected == "before" else "before"):
-                raise RegistryConflict("effect_uncertain:" + evidence.reason)
-            return stamp
+            # No await between fresh authorization/revision and one native mutation.
+            if node is None:
+                stamp = self.io.mutate(change, target)
+            else:
+                from .native_helper_placeholder_effect import OwnHelperPlaceholder
+                from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
+                accepted = (OwnHelperPlaceholder, NativeTemplateStateRegistryEffect)
+                if type(node).__module__ == __package__ + '.controlled_powercalc_registry':
+                    from .controlled_powercalc_registry import ControlledPowercalcRegistryNode
+                    accepted += (ControlledPowercalcRegistryNode,)
+                if type(node).__module__ == __package__ + '.powercalc_group_own_id':
+                    from .powercalc_group_own_id import PowercalcGroupOwnID
+                    accepted += (PowercalcGroupOwnID,)
+                if type(node).__module__ == __package__ + '.powercalc_source_transition':
+                    from .powercalc_source_transition import PowercalcSourceTransition
+                    accepted += (PowercalcSourceTransition,)
+                if (type(node) not in accepted or node.io is not self.io
+                        or node.change != change or node.source != source['entity_id']
+                        or node.target != target['entity_id']):
+                    raise RegistryConflict('own_helper_effect_binding_mismatch')
+                try:
+                    stamp = node.mutate()
+                except BaseException:
+                    if type(node) is not OwnHelperPlaceholder:
+                        await node.finish_failed_attempt()
+                    raise
+                if type(node) is not OwnHelperPlaceholder:
+                    self._mutation_node = node
+                    try:
+                        await node.finish_native()
+                    except BaseException:
+                        self._mutation_node = None
+                        raise
+            try:
+                await self.io.settle(change)
+                if readd is not None:
+                    await transition.finish_registry_readd(readd)
+                    readd = None
+                self._fresh(change, target, guard)
+                await self.io.flush(change.kind)
+                self._fresh(change, target, guard)
+                evidence = await self.inspect(change)
+                self._fresh(change, target, guard)
+                if evidence.position != ("after" if expected == "before" else "before"):
+                    raise RegistryConflict("effect_uncertain:" + evidence.reason)
+                return stamp
+            finally:
+                self._mutation_node = None
+        except BaseException:
+            if readd is not None:
+                # A cancelled/failed request must not restore initial_state
+                # while Core's already-scheduled re-add is still in flight.
+                drain = asyncio.create_task(self.io.settle(change))
+                while not drain.done():
+                    try:
+                        await asyncio.shield(drain)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if drain.done() and not drain.cancelled() and drain.exception() is None:
+                    try:
+                        await transition.finish_registry_readd(readd)
+                    except BaseException:
+                        pass  # Preserve the original uncertain effect/failure.
+            raise
         finally:
             self._mutation_node = None
 

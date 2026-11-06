@@ -15,7 +15,9 @@ class FrozenReviewTests(unittest.TestCase):
                   'entity_id': 'sensor.old', 'name': None}
         after = {**before, 'entity_id': 'sensor.new'}
         change = PreparedRegistryChange('entity', 'uuid', json.dumps(before), json.dumps(after))
-        return SimpleNamespace(record=SimpleNamespace(phases=phases), registry_changes=(change,),
+        plan = SimpleNamespace(required_scopes=('registry', 'yaml'), covered_scopes=('registry', 'yaml'),
+                               verification_adapters=('registry', 'yaml'), steps=())
+        return SimpleNamespace(record=SimpleNamespace(phases=phases, plan=plan), registry_changes=(change,),
             receipt=SimpleNamespace(changed_domains=('template',), proposed_files=('template.yaml',)),
             composition=object(), evidence=SimpleNamespace(template_sources=SimpleNamespace(
                 ledger=SimpleNamespace(definitions=(SimpleNamespace(domain='template.sensor'),)))))
@@ -34,6 +36,32 @@ class FrozenReviewTests(unittest.TestCase):
         for phase in ('pending', 'intent', 'undone'):
             with self.subTest(phase=phase), self.assertRaises(Refused):
                 _yaml_frozen_review(self.session(('verified', phase)))
+
+    def test_controlled_powercalc_summary_reports_owned_script_and_automation(self):
+        from custom_components.ha_entity_renamer.controlled_powercalc_composition import ControlledPowercalcComposition
+        from custom_components.ha_entity_renamer.dependent_config_program import DependentConfigProgram
+        from custom_components.ha_entity_renamer.recovery_controller import _yaml_summary
+        before = {'id': 'script-uuid', 'platform': 'script', 'unique_id': 'old',
+                  'previous_unique_id': None, 'entity_id': 'script.old', 'name': None}
+        after = {**before, 'unique_id': 'new', 'previous_unique_id': 'old', 'entity_id': 'script.new'}
+        change = PreparedRegistryChange('entity', 'script-uuid', json.dumps(before), json.dumps(after))
+        composition = object.__new__(ControlledPowercalcComposition)
+        program = object.__new__(DependentConfigProgram)
+        object.__setattr__(composition, 'dependent_config_program', program)
+        fence = SimpleNamespace(domain='script', change=change)
+        rows = (SimpleNamespace(domain='automation', native_key='auto', entity_id='automation.auto', disposition='loaded'),
+                SimpleNamespace(domain='script', native_key='new', entity_id='script.new', disposition='loaded'))
+        phases = SimpleNamespace(check=lambda: None, mask=frozenset({'script.old'}),
+                                root=SimpleNamespace(own_dependent_fence=fence), sample=(rows,))
+        session = SimpleNamespace(registry_changes=(change,), record=SimpleNamespace(phases=('verified',)),
+            composition=composition, consumers=SimpleNamespace(phases=phases),
+            evidence=SimpleNamespace(template_sources=SimpleNamespace(ledger=SimpleNamespace(definitions=()))))
+        def program_rows(_, active):
+            return (('automation', [('auto', 'changed' if active else 'before')]),
+                    ('script', [('new', 'changed')] if active else [('old', 'before')]))
+        with patch.object(DependentConfigProgram, 'rows', program_rows):
+            result = _yaml_summary(session)
+        self.assertEqual(result['dependent_changes'], {'automation': ['automation.auto'], 'script': ['script.new']})
 
 
 class RestoreIntentTests(unittest.IsolatedAsyncioTestCase):
