@@ -112,6 +112,32 @@ class PowercalcRuntimeNativeTests(unittest.IsolatedAsyncioTestCase):
         await hass.async_block_till_done()
         await self._flush_documents(initialize=True)
 
+    async def test_core11_runtime_inventory_fixed_group_and_foreign_change(self):
+        from homeassistant.const import __version__
+        if __version__ != '2026.11.0':
+            self.skipTest('Core 11 / Powercalc 1.27 pair only')
+        first = subject.capture_powercalc_runtime(self.f.hass, guard=self.guard)
+        body = json.loads(first.payload_json)
+        self.assertEqual(body['vendor_version'], 'v1.27.0')
+        self.assertEqual(first.status, 'UNKNOWN')
+        self.assertTrue(any(row['type'].endswith('.GroupedPowerSensor')
+                            and row['active_platforms'] for row in body['objects']))
+        subject.assert_powercalc_runtime_current(self.f.hass, first, guard=self.guard)
+        group = next(entity for platform in
+            __import__('homeassistant.helpers.entity_platform', fromlist=['async_get_platforms'])
+                .async_get_platforms(self.f.hass, 'powercalc')
+            for entity in platform.entities.values()
+            if type(entity).__name__ == 'GroupedPowerSensor')
+        old = set(group._entities)
+        try:
+            group._entities.add('sensor.foreign_member')
+            with self.assertRaises(ValueError):
+                subject.assert_powercalc_runtime_current(self.f.hass, first, guard=self.guard)
+        finally:
+            group._entities.clear()
+            group._entities.update(old)
+        subject.assert_powercalc_runtime_current(self.f.hass, first, guard=self.guard)
+
     async def test_core11_official_vendor_pair_and_source_witness(self):
         from homeassistant.const import __version__
         if __version__ != '2026.11.0':
