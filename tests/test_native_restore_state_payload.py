@@ -47,12 +47,32 @@ class PureCodecTests(unittest.TestCase):
     def test_both_pins_roundtrip_detached_frozen_bytes(self):
         for pin in codec.PINS:
             before = sample()
+            if pin == '2026.11.0':
+                before['entity_registry_id'] = 'actual-uuid'
             payload = prepared(before, pin)
             before['extra_data']['nested']['later'] = 1
             self.assertEqual(codec.deserialize(codec.serialize(payload)), payload)
             self.assertNotIn(b'later', payload.before_json)
             with self.assertRaises(FrozenInstanceError):
                 payload.core_version = 'bad'
+
+    def test_core11_requires_exact_uuid_field_and_rejects_foreign_change(self):
+        row = sample()
+        with self.assertRaises(codec.PayloadRejected):
+            prepared(row, '2026.11.0')
+        row['entity_registry_id'] = 'actual-uuid'
+        payload = prepared(row, '2026.11.0')
+        self.assertEqual(codec.deserialize(codec.serialize(payload)), payload)
+        null_row = deepcopy(row)
+        null_row['entity_registry_id'] = None
+        self.assertNotEqual(prepared(null_row, '2026.11.0').before_digest, payload.before_digest)
+        with self.assertRaises(codec.PayloadRejected):
+            prepared(row, '2026.10.4')
+        changed = deepcopy(row)
+        changed['state']['entity_id'] = 'sensor.new'
+        changed['entity_registry_id'] = 'foreign-uuid'
+        with self.assertRaises(codec.PayloadRejected):
+            codec.PreparedPayload('2026.11.0', codec._canonical(row), codec._canonical(changed))
 
     def test_empty_extra_and_null_are_distinct(self):
         rows = []
@@ -184,6 +204,18 @@ class NativeTypeTests(unittest.TestCase):
                 self.assertEqual(clone.extra_data.as_dict(), extra)
             clone.state.attributes['nested'][0]['empty']['changed'] = True
             self.assertEqual(source_attrs['nested'][0]['empty'], {})
+
+    def test_core11_native_clone_keeps_registry_uuid(self):
+        from homeassistant.const import __version__
+        from homeassistant.helpers.restore_state import StoredState
+        if __version__ != '2026.11.0':
+            self.skipTest('Core 11 registry identity only')
+        source = self.make_native(None)
+        source = StoredState(source.state, source.extra_data, source.last_seen, 'registry-uuid')
+        payload = codec.prepare_payload(source, 'sensor.new')
+        clone = codec.materialize(payload)
+        self.assertEqual(clone.entity_registry_id, 'registry-uuid')
+        self.assertEqual(json.loads(payload.after_json)['entity_registry_id'], 'registry-uuid')
 
     def test_native_rejects_unknown_objects_instead_of_calling_as_dict_or_repr(self):
         class Unknown:

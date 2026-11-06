@@ -60,6 +60,7 @@ class EscrowIO:
         require(self.lease.owns_entry(self.entry), 'entry_outside_owned_scope')
         hass, data, store = self.hass, self.data, self.store
         require(__version__ in codec.PINS, 'ha_version_unsupported')
+        require(__version__ != '2026.11.0', 'core11_restore_escrow_unqualified')
         require(type(data) is RestoreStateData and hass.data.get(DATA_RESTORE_STATE) is data
                 and data.hass is hass and data.store is store and type(store) is Store
                 and store.hass is hass, 'native_data_store_identity')

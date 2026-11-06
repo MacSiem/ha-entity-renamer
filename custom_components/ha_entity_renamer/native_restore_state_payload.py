@@ -15,7 +15,7 @@ import math
 import re
 import sys
 
-PINS = ('2025.6.0', '2026.10.2', '2026.10.4')
+PINS = ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0')
 MAX_BYTES = 1024 * 1024
 MAX_DEPTH = 32
 MAX_NODES = 32768
@@ -102,8 +102,12 @@ def _timestamp(value):
 
 
 def _shape(payload):
-    _require(type(payload) is dict and set(payload) ==
-             {'state', 'extra_data', 'last_seen'}, 'stored_state_schema')
+    _require(type(payload) is dict and set(payload) in (
+             {'state', 'extra_data', 'last_seen'},
+             {'state', 'extra_data', 'last_seen', 'entity_registry_id'}), 'stored_state_schema')
+    if 'entity_registry_id' in payload:
+        value = payload['entity_registry_id']
+        _require(value is None or type(value) is str and bool(value), 'stored_registry_id_schema')
     state = payload['state']
     _require(type(state) is dict and set(state) == {
         'entity_id', 'state', 'attributes', 'context',
@@ -123,6 +127,12 @@ def _shape(payload):
     for key in ('last_changed', 'last_updated', 'last_reported'):
         _timestamp(state[key])
     _timestamp(payload['last_seen'])
+
+
+def _shape_for_version(payload, version):
+    _shape(payload)
+    _require(('entity_registry_id' in payload) is (version == '2026.11.0'),
+             'stored_state_version_schema')
 
 
 def assert_only_entity_id_changed(before, after, old_id, new_id):
@@ -149,8 +159,8 @@ class PreparedPayload:
         _require(type(self.core_version) is str and self.core_version in PINS,
                  'ha_version_unsupported')
         before, after = _parse(self.before_json), _parse(self.after_json)
-        _shape(before)
-        _shape(after)
+        _shape_for_version(before, self.core_version)
+        _shape_for_version(after, self.core_version)
         _require(self.before_json == _canonical(before) and
                  self.after_json == _canonical(after), 'payload_not_canonical')
         assert_only_entity_id_changed(before, after, before['state']['entity_id'],
@@ -234,7 +244,7 @@ def _native_tree(value, api):
         elif isinstance(item, str):
             # Native JSON encodes the underlying string; never call __str__.
             _tree(str.__str__(item))
-        elif kind is datetime or (api[0] in ('2026.10.2', '2026.10.4') and kind in (date, time)):
+        elif kind is datetime or (api[0] in ('2026.10.2', '2026.10.4', '2026.11.0') and kind in (date, time)):
             pass
         else:
             _tree(item)  # exact JSON scalar types only; unknown class refused
@@ -275,9 +285,11 @@ def _capture(stored, api, *, powercalc_extra=None):
     # stdlib JSONEncoder, which cannot consume State.json_fragment on these pins.
     raw = {'state': stored.state.json_fragment, 'extra_data': extra,
            'last_seen': stored.last_seen}
+    if api[0] == '2026.11.0':
+        raw['entity_registry_id'] = stored.entity_registry_id
     _require(type(stored.last_seen) is datetime, 'native_last_seen_type')
     result = _parse(json_bytes(raw))
-    _shape(result)
+    _shape_for_version(result, api[0])
     return result
 
 
@@ -310,7 +322,8 @@ def materialize(payload):
                          context=Context(id=context['id'], user_id=context['user_id'],
                                          parent_id=context['parent_id']))
     extra = None if row['extra_data'] is None else RestoredExtraData(row['extra_data'])
-    clone = StoredState(native_state, extra, _timestamp(row['last_seen']))
+    args = (native_state, extra, _timestamp(row['last_seen']))
+    clone = StoredState(*args, row['entity_registry_id']) if version == '2026.11.0' else StoredState(*args)
     _require(_canonical(_capture(clone, api)) == payload.after_json,
              'native_clone_not_exact')
     return clone
@@ -330,8 +343,8 @@ class PreparedIntegrationPayload:
         _require(self.core_version in PINS, 'ha_version_unsupported')
         before, after, capture = (_parse(raw) for raw in
             (self.before_json, self.after_json, self.capture_json))
-        _shape(before)
-        _shape(after)
+        _shape_for_version(before, self.core_version)
+        _shape_for_version(after, self.core_version)
         _require(all(raw == _canonical(value) for raw, value in (
             (self.before_json, before), (self.after_json, after),
             (self.capture_json, capture))), 'payload_not_canonical')
@@ -345,6 +358,9 @@ class PreparedIntegrationPayload:
                  and capture['entity_id'] == before['state']['entity_id']
                  and capture['before_sha256'] == self.before_digest,
                  'integration_capture_binding')
+        if self.core_version == '2026.11.0':
+            _require(before['entity_registry_id'] == capture['helper_uuid'],
+                     'integration_registry_uuid_changed')
         for key in ('full_state_text', 'last_valid_state_text'):
             try:
                 value = Decimal(capture[key])
@@ -510,7 +526,8 @@ def materialize_integration_payload(payload):
         last_reported=_timestamp(state['last_reported']),
         context=Context(id=context['id'], user_id=context['user_id'],
                         parent_id=context['parent_id'])),
-        RestoredExtraData(row['extra_data']), _timestamp(row['last_seen']))
+        RestoredExtraData(row['extra_data']), _timestamp(row['last_seen']),
+        *([row['entity_registry_id']] if version == '2026.11.0' else []))
     _require(_canonical(_capture(clone, api)) == payload.after_json, 'native_clone_not_exact')
     parsed = IntegrationSensorExtraStoredData.from_dict(clone.extra_data.as_dict())
     _require(type(parsed) is IntegrationSensorExtraStoredData
