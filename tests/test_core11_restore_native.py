@@ -1,5 +1,7 @@
 """Observe Core 11 RestoreState UUID indexing in a private native HA fixture."""
 import json
+import importlib
+from decimal import Decimal
 import unittest
 from datetime import datetime, timezone
 
@@ -10,6 +12,25 @@ import test_native_input_baseline as fixture
 class Core11RestoreNativeTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = fixture.NativeBaselineTests.asyncSetUp
     asyncTearDown = fixture.NativeBaselineTests.asyncTearDown
+
+    async def test_exact_group_payload_preserves_uuid_and_full_total(self):
+        from homeassistant.const import __version__
+        if __version__ != '2026.11.0':
+            self.skipTest('Core 11 RestoreState only')
+        from homeassistant.components.sensor import SensorExtraStoredData
+        from homeassistant.core import State
+        from homeassistant.helpers.restore_state import StoredState
+        module = importlib.import_module(fixture.PACKAGE + '.powercalc_group_restore')
+        state = State('sensor.original', '1.23', {'unit_of_measurement': 'kWh'})
+        source = StoredState(state, SensorExtraStoredData(Decimal('1.23'), 'kWh'),
+                             datetime.now(timezone.utc), self.row.id)
+        payload = module.prepare(source, 'sensor.renamed', full_total='1.234',
+                                 precision=2, unit='kWh')
+        clone = module.materialize(payload)
+        self.assertEqual(clone.entity_registry_id, self.row.id)
+        self.assertEqual(clone.state.entity_id, 'sensor.renamed')
+        self.assertEqual(clone.extra_data.as_dict()['native_value']['decimal_str'], '1.234')
+        self.assertEqual(source.state.entity_id, 'sensor.original')
 
     async def test_real_load_distinguishes_legacy_null_and_uuid_and_native_move(self):
         from homeassistant.const import __version__

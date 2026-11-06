@@ -93,7 +93,7 @@ class NativeLovelace:
         from homeassistant.components.lovelace.const import LOVELACE_DATA
         from homeassistant.components.lovelace.dashboard import LovelaceStorage
         from homeassistant.const import __version__
-        if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4'):
+        if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0'):
             raise PersistenceError('unsupported_lovelace_runtime')
         self.hass = hass
         self._data_key = LOVELACE_DATA

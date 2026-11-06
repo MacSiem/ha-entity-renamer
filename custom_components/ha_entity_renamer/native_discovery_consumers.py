@@ -251,7 +251,7 @@ def _energy_schema(value, version):
         return
     from homeassistant.components.energy.data import DEVICE_CONSUMPTION_SCHEMA, ENERGY_SOURCE_SCHEMA
     keys = {'energy_sources', 'device_consumption'}
-    if version in ('2026.10.2', '2026.10.4'):
+    if version in ('2026.10.2', '2026.10.4', '2026.11.0'):
         keys.add('device_consumption_water')
     if type(value) is not dict or set(value) != keys or any(type(v) is not list for v in value.values()):
         raise PersistenceError('consumer_energy_schema')
