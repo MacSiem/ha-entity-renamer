@@ -50,7 +50,7 @@ class FrontendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(h.resources.rows[0],{'id':'old','type':'module','url':CARD_PATH+'?v=5.0.0.dev0'})
         self.assertEqual(h.resources.rows[1],rows[1])
     async def test_ambiguous_and_unrecognized_copy_refuse_without_edits(self):
-        for rows in ([{'id':'a','url':CARD_PATH},{'id':'b','url':'/hacsfiles/ha-entity-renamer/ha-entity-renamer.js'}], [{'id':'f','url':'/local/elsewhere/ha-entity-renamer.js'}]):
+        for rows in ([{'id':'a','url':CARD_PATH},{'id':'b','url':'/hacsfiles/ha-entity-renamer/ha-entity-renamer.js'}], [{'id':'f','url':'/local/elsewhere/ha-entity-renamer.js'}], [{'id':'remote','url':'https://example.invalid/ha-entity-renamer.js'}]):
             h=FakeHass(rows)
             with self.assertRaisesRegex(ValueError,'ambiguous'):await async_register_frontend(h)
             self.assertEqual(h.resources.rows,rows)

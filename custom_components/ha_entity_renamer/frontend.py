@@ -45,8 +45,9 @@ async def async_register_frontend(hass):
         await resources.async_load()
     rows = list(resources.async_items())
     relevant = [r for r in rows if _path(r.get('url')) in LEGACY_PATHS | {CARD_PATH}]
-    foreign = [r for r in rows if _path(r.get('url')).rsplit('/', 1)[-1] == CARD_NAME
-               and _path(r.get('url')) not in LEGACY_PATHS | {CARD_PATH}]
+    foreign = [r for r in rows if isinstance(r.get('url'), str)
+               and urlsplit(r['url']).path.rsplit('/', 1)[-1] == CARD_NAME
+               and _path(r['url']) not in LEGACY_PATHS | {CARD_PATH}]
     if foreign or len(relevant) > 1:
         raise ValueError('ambiguous_card_resources_manual_resolution_required')
     url = f'{CARD_PATH}?v={VERSION}'
@@ -74,4 +75,7 @@ async def async_unregister_frontend(hass):
     """Remove only ephemeral extra JS; preserve authored storage resources."""
     from homeassistant.components import frontend
     if url := hass.data.pop(DATA_EXTRA, None):
-        frontend.remove_extra_js_url(hass, url)
+        try:
+            frontend.remove_extra_js_url(hass, url)
+        except KeyError:
+            pass
