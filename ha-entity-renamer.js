@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v4.6.1 (2026-10-29) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v5.0.0.dev0 legacy compatibility (unreleased bridge) — single-tool standalone repo */
 (function() {
 'use strict';
 
@@ -1288,7 +1288,7 @@ const _FAMILY_CONTROL_CSS = `
 :host label:has(input[type=checkbox]) { min-height:44px !important;min-width:44px;display:flex;align-items:center;gap:8px;cursor:pointer; }
 :host input[type=checkbox] { width:18px;height:18px;flex:none; }
 :host button:focus-visible,:host summary:focus-visible,:host a:focus-visible,:host input:focus-visible,:host select:focus-visible,:host textarea:focus-visible,:host [role=button]:focus-visible {
-  outline:2px solid #fff !important;outline-offset:2px;box-shadow:0 0 0 5px #111827;
+  outline:3px solid var(--primary-color,#1769aa) !important;outline-offset:2px;
 }
 .intro-banner { padding-right:64px !important; }
 .ht-tab-picker { min-width:0;display:flex;flex-direction:column;gap:6px;padding:8px;margin:0 0 8px; }
@@ -1367,8 +1367,6 @@ function _restoreListViewport(card, saved) {
   }
 }
 
-// In-memory, connection-scoped read handoff; no review or consent crosses cards.
-const _recoveryCardScopes = new WeakMap();
 const _RENAMER_TABS = ['devices', 'automatic', 'queue', 'log'];
 function _configuredTabs(config) {
   const tabs = Array.isArray(config?.tabs) ? _RENAMER_TABS.filter(tab => config.tabs.includes(tab)) : _RENAMER_TABS;
@@ -1392,12 +1390,44 @@ class HAEntityRenamer extends HTMLElement {
     if (signature !== this._navigationConfig) this._activeTab = _defaultTab(next);
     this._navigationConfig = signature;
     this._config = next;
-    if (this._hass) { this._registerRecoveryCard(); this.render(); }
+    if (this._hass) this.render();
   }
   _visibleTabs() {
     const configured = _configuredTabs(this._config);
     // Internal transaction flows may need Queue or Log even on a restricted card.
     return _RENAMER_TABS.filter(tab => configured.includes(tab) || tab === this._activeTab);
+  }
+  _bridgeNoticePreference() {
+    const id = this._hass?.user?.id;
+    if (typeof id !== 'string' || !id.trim()) return null;
+    const key = 'ha-entity-renamer-migration-notice-v1:' + encodeURIComponent(JSON.stringify([location.origin, id]));
+    if (!this._bridgeNotice || this._bridgeNotice.key !== key) {
+      let dismissed = false;
+      try { dismissed = localStorage.getItem(key) === '1'; } catch (_) {}
+      this._bridgeNotice = {key, dismissed};
+    }
+    return this._bridgeNotice;
+  }
+  _renderBridgeNotice() {
+    const state = this._bridgeNoticePreference();
+    if (!state) return '';
+    const pl = this._lang === 'pl';
+    if (state.dismissed) return `<button type="button" class="btn btn-outline bridge-reopen" id="bridgeNoticeOpen">${pl ? 'Informacja o migracji' : 'Migration information'}</button>`;
+    return `<section class="bridge-notice" role="region" aria-labelledby="bridgeNoticeTitle">
+      <h2 id="bridgeNoticeTitle">${pl ? 'Informacja o przyszłej migracji' : 'Information about a future migration'}</h2>
+      <p>${pl ? 'Entity Renamer jest dostępny jako jeden pakiet Integration (karta i backend). Ta starsza karta nadal działa; aby korzystać z nowych funkcji, zainstaluj i skonfiguruj integrację według przewodnika migracji.' : 'Entity Renamer is available as one Integration package (card and backend). This legacy card continues to work; install and configure the integration using the migration guide to use the new features.'}</p>
+      <p>${pl ? 'Przed przyszłą migracją wykonaj pełną kopię zapasową Home Assistant i przeczytaj przewodnik. Nowa aktualizacja w HACS może wymagać jednorazowej migracji.' : 'Before the future migration, make a full Home Assistant backup and read the guide. A new HACS update may require a one-time migration.'}</p>
+      <a href="https://github.com/MacSiem/ha-entity-renamer/blob/main/MIGRATION.md" target="_blank" rel="noopener noreferrer">${pl ? 'Przewodnik migracji' : 'Migration guide'}</a>
+      <button type="button" class="btn btn-outline" id="bridgeNoticeDismiss">${pl ? 'Zamknij informację' : 'Dismiss information'}</button>
+    </section>`;
+  }
+  _setBridgeNoticeDismissed(dismissed) {
+    const state = this._bridgeNoticePreference();
+    if (!state) return;
+    state.dismissed = dismissed;
+    try { localStorage.setItem(state.key, dismissed ? '1' : '0'); } catch (_) {}
+    this.render();
+    this.shadowRoot.getElementById(dismissed ? 'bridgeNoticeOpen' : 'bridgeNoticeDismiss')?.focus({preventScroll:true});
   }
   _helpPreference() {
     const account = this._hass?.user?.id || null;
@@ -1465,8 +1495,6 @@ class HAEntityRenamer extends HTMLElement {
     this._confirmDialogOpen = false;
     this._confirmation = null;
     this._entityEditor = null;
-    this._migration = null; // Retained review; consumed intents are never replayed.
-    this._recoveryInventory = null;
     this._applyOperation = null;
     this._readEpoch = 0;
     this._authorityEpoch = 0;
@@ -1529,21 +1557,6 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _cancelRenameAuthority() {
-    if (this._migration) {
-      const m = this._migration;
-      clearTimeout(m.pollTimer);
-      // Consent expires on every authority fence. Retain attempted identity only
-      // for same-account status/inspect, never to revive apply consent.
-      if (m.lifecycleEntry && (m.inspecting || m.lifecycleEntry.pending?.kind === 'inspect' || m.lifecycleEntry.inspectionObserved))
-        m.lifecycleEntry.inspectionInterrupted = true;
-      this._migration = m.attempted ? {owner: m.owner, operation_id: m.operation_id,
-        fingerprint: m.fingerprint, review: m.review, identities: m.identities, attempted: true,
-        recoveredIdentity: m.recoveredIdentity, restoreAttempted: m.restoreAttempted, restoreRevoked: true,
-        lifecycleEntry: m.lifecycleEntry,
-        inspectionIssue: (m.inspecting || m.lifecycleEntry?.inspectionInterrupted) ? 'interrupted' : m.inspectionIssue,
-        stage: 'unknown', invalidated: true, busy: false} : null;
-    }
-    this._recoveryInventory = null;
     this._clearQueueUndo();
     if (this._loading && !this._applyOperation) this._registryRefreshPending = true;
     this._legacyReviewLog = [];
@@ -1672,92 +1685,7 @@ class HAEntityRenamer extends HTMLElement {
     // HA may detach/reparent a card while its initial registry read is pending.
     // Retry only reads; a cancelled rename or export never resumes here.
     if (this._hass && !this._applyOperation && (this._loading || (!this._entities.length && !this._devices.length))) this._registryRefreshPending = true;
-    this._registerRecoveryCard();
     this._resumePermittedRegistryRead();
-  }
-
-  _unregisterRecoveryCard(orphan = false) {
-    const scope = this._recoveryCardScope;
-    if (!scope) return;
-    scope.cards.delete(this);
-    for (const entry of scope.entries) if (entry.owner === this) {
-      if (orphan) {
-        if (entry.pending?.kind === 'inspect' || entry.inspectionObserved) entry.inspectionInterrupted = true;
-        entry.owner = null;
-      } else scope.entries.delete(entry);
-    }
-    this._recoveryCardScope = null;
-    this._offerRecoveryCards(scope);
-  }
-
-  _registerRecoveryCard() {
-    const hass = this._hass, connection = hass?.connection;
-    let key;
-    try { key = JSON.stringify([hass?.user?.id, this._config || {}]); } catch (_) { key = null; }
-    if (!this.isConnected || hass?.user?.is_admin !== true || !hass.user.id || !connection || !key) {
-      this._unregisterRecoveryCard(); return;
-    }
-    let scopes = _recoveryCardScopes.get(connection);
-    if (!scopes) _recoveryCardScopes.set(connection, scopes = new Map());
-    let scope = scopes.get(key);
-    if (!scope) scopes.set(key, scope = {cards: new Set(), entries: new Set()});
-    if (this._recoveryCardScope !== scope) {
-      this._unregisterRecoveryCard(); this._recoveryCardScope = scope; scope.cards.add(this);
-    }
-    this._offerRecoveryCards(scope);
-  }
-
-  _offerRecoveryCards(scope) {
-    const entries = [...scope.entries].filter(entry => !entry.owner);
-    const cards = [...scope.cards].filter(card => card._renameAuthorityAvailable()
-      && (!card._migration || card._migration.invalidated));
-    // Multiple possible operations or cards require the existing inventory choice.
-    if (entries.length !== 1 || cards.length !== 1) return;
-    const entry = entries[0], card = cards[0];
-    entry.owner = card;
-    const m = {owner: entry.actor, operation_id: entry.operation_id, fingerprint: entry.fingerprint,
-      attempted: true, recoveredIdentity: true, restoreRevoked: true, stage: 'unknown',
-      epoch: card._authorityEpoch, session: card._readSession(), invalidated: false,
-      observation: 1, busy: !!entry.pending, inspecting: entry.pending?.kind === 'inspect',
-      inspectionIssue: entry.inspectionInterrupted ? 'interrupted' : null, lifecycleEntry: entry};
-    card._migration = m; card.render();
-    void card._refreshMigrationProgress(m, card._hass);
-  }
-
-  _trackRecoveryOperation(m) {
-    const scope = this._recoveryCardScope;
-    if (!scope || !m?.attempted) return null;
-    if (m.lifecycleEntry && scope.entries.has(m.lifecycleEntry)) return m.lifecycleEntry;
-    const entry = {owner: this, actor: m.owner, operation_id: m.operation_id,
-      fingerprint: m.fingerprint, pending: null, scope};
-    scope.entries.add(entry); m.lifecycleEntry = entry; return entry;
-  }
-
-  _startRecoveryRead(m, kind) {
-    const entry = this._trackRecoveryOperation(m);
-    if (!entry) return null;
-    const token = {kind}; entry.pending = token;
-    if (kind === 'inspect') { entry.inspectionInterrupted = false; entry.inspectionObserved = false; }
-    return {entry, token, original: m, origin: this};
-  }
-
-  _endRecoveryRead(read) {
-    if (!read || read.entry.pending !== read.token) return;
-    const entry = read.entry; entry.pending = null;
-    if (read.token.kind === 'inspect') {
-      if (!read.origin._migrationCurrent(read.original)) entry.inspectionInterrupted = true;
-      else entry.inspectionObserved = true;
-    }
-    // Observers see completion, never the old response or consent.
-    for (const card of new Set([...entry.scope.cards, ...(entry.watchers || [])])) {
-      const m = card._migration;
-      if (m && m !== read.original && m.lifecycleEntry === entry) {
-        if (read.token.kind === 'inspect' && entry.inspectionInterrupted) m.inspectionIssue = 'interrupted';
-        m.inspecting = false; m.busy = false; clearTimeout(m.pollTimer); m.pollTimer = null;
-        if (card._migrationCurrent(m)) card.render();
-      }
-    }
-    entry.watchers?.clear();
   }
 
   _invalidateRenameExport() {
@@ -1777,38 +1705,9 @@ class HAEntityRenamer extends HTMLElement {
       this._exportEventCleanups.push(() => target.removeEventListener(event, handler));
     };
     listen(window, 'offline', () => { this._exportBrowserOnline = false; this._cancelRenameAuthority(); this.render(); });
-    listen(window, 'online', () => { this._exportBrowserOnline = navigator.onLine === true; this._restoreRenameAvailability(); });
-    listen(connection, 'ready', () => { this._exportConnectionOnline = true; this._restoreRenameAvailability(); });
+    listen(window, 'online', () => { this._exportBrowserOnline = navigator.onLine === true; this._invalidateRenameExport(); this._resumePermittedRegistryRead(); });
+    listen(connection, 'ready', () => { this._exportConnectionOnline = true; this._invalidateRenameExport(); this._resumePermittedRegistryRead(); });
     listen(connection, 'disconnected', () => { this._exportConnectionOnline = false; this._cancelRenameAuthority(); this.render(); });
-  }
-
-  _rebindRecoveryObservation() {
-    const m = this._migration, entry = m?.lifecycleEntry;
-    if (!m?.invalidated || !entry || entry.actor !== this._hass?.user?.id || !this._renameAuthorityAvailable()) return;
-    // Rebind observation only. Results and consent from the prior epoch stay revoked.
-    m.epoch = this._authorityEpoch; m.session = this._readSession(); m.invalidated = false;
-    m.observation = (m.observation || 0) + 1;
-    m.busy = !!entry.pending; m.inspecting = entry.pending?.kind === 'inspect';
-    if (entry.inspectionInterrupted) m.inspectionIssue = 'interrupted';
-    if (m.busy) {
-      // A changed connection is a new scope, but its predecessor must drain.
-      if (this._recoveryCardScope !== entry.scope) (entry.watchers ||= new Set()).add(this);
-      void this._refreshMigrationProgress(m, this._hass);
-    }
-  }
-
-  _restoreRenameAvailability() {
-    this._invalidateRenameExport();
-    // A handoff may have been waiting for this connection to become available.
-    this._registerRecoveryCard();
-    this._rebindRecoveryObservation();
-    if (this._migration?.attempted) this.render();
-    else {
-      // Update the authority-dependent control without replacing unrelated drafts.
-      const button = this.shadowRoot.getElementById('findMigrationRecovery');
-      if (button) button.disabled = !!this._recoveryInventory?.busy || !this._renameAuthorityAvailable();
-    }
-    this._resumePermittedRegistryRead();
   }
 
   _renameExportContext() {
@@ -1924,23 +1823,6 @@ class HAEntityRenamer extends HTMLElement {
     return entry && JSON.stringify([entry.id, entry.platform, entry.unique_id, entry.device_id]);
   }
 
-  _migrationEntityIdentityMatches(row, identity, change, side) {
-    let expected;
-    try { expected = JSON.parse(identity); } catch (_) { return false; }
-    if (!Array.isArray(expected) || expected.length !== 4 || !expected[0]
-        || row.id !== expected[0] || row.platform !== expected[1]
-        || (row.device_id ?? null) !== (expected[3] ?? null)) return false;
-    // YAML Script own-ID changes its native unique_id with the service key.
-    const ids = change.fields?.entity_id;
-    if (side === 'after' && expected[1] === 'script'
-        && typeof ids?.before === 'string' && typeof ids?.after === 'string'
-        && ids.before.startsWith('script.') && ids.after.startsWith('script.')
-        && expected[2] === ids.before.slice('script.'.length)) {
-      return row.unique_id === ids.after.slice('script.'.length);
-    }
-    return row.unique_id === expected[2];
-  }
-
   set hass(hass) {
     const previousFormatKey = this._displayFormatKey || this._formatUi.key;
     const previousLanguage = this._lang;
@@ -1948,23 +1830,6 @@ class HAEntityRenamer extends HTMLElement {
     const previousSession = this._lastSession || this._readSession();
     const nextSession = this._readSession(hass);
     const sessionChanged = this._hass && !this._sameReadSession(previousSession, nextSession);
-    const suspended = this._suspendedRecoveryEntry;
-    if (suspended && (nextSession.connection !== suspended.connection
-        || (nextSession.userId && nextSession.userId !== suspended.entry.actor)
-        || nextSession.admin === false)) {
-      if (!suspended.entry.owner) suspended.entry.scope.entries.delete(suspended.entry);
-      this._suspendedRecoveryEntry = null;
-    }
-    // A temporarily missing user/role is not a new actor. Hide and revoke all
-    // authority now, retaining only a same-connection identity handoff.
-    const unresolved = sessionChanged && previousSession.admin === true && previousSession.userId
-      && previousSession.connection === nextSession.connection
-      && (!nextSession.userId || nextSession.userId === previousSession.userId)
-      && nextSession.admin !== false && (!nextSession.userId || nextSession.admin !== true);
-    if (unresolved && this._migration?.attempted && this._migration.lifecycleEntry) {
-      this._suspendedRecoveryEntry = {connection: previousSession.connection, entry: this._migration.lifecycleEntry};
-      this._unregisterRecoveryCard(true);
-    }
     this._lastSession = nextSession;
     if (sessionChanged) {
       this._cancelRenameAuthority();
@@ -1980,7 +1845,6 @@ class HAEntityRenamer extends HTMLElement {
       // A connection replacement alone cancels consent; account/role changes
       // additionally remove every retained private projection from this UI.
       if (previousSession.userId !== nextSession.userId || previousSession.admin !== nextSession.admin) {
-        this._migration = null;
         this._entities = []; this._devices = []; this._deviceEntities = {};
         this._renameQueue = []; this._deviceRenameQueue = {};
         this._renameLog = []; this._historyScope = null;
@@ -2007,8 +1871,6 @@ class HAEntityRenamer extends HTMLElement {
     if (first || (sessionChanged && (previousSession.userId !== nextSession.userId || previousSession.admin !== nextSession.admin))) this._loadHistoryFromStorage();
     this._bindRenameExportEvents();
     if (sessionChanged) this._invalidateRenameExport();
-    this._registerRecoveryCard();
-    this._rebindRecoveryObservation();
     if (hass?.language) this._lang = hass.language.startsWith('pl') ? 'pl' : 'en';
     const displayFormatKey = this._formatUi.key;
     this._displayFormatKey = displayFormatKey;
@@ -2145,7 +2007,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _queueAutomaticIds(deviceId = null, oldId = null) {
-    if (this._loading || this._migration) return;
+    if (this._loading) return;
     const queued = new Set(this._renameQueue.map(row => row.oldId));
     for (const row of this._visibleAutomaticRows()) {
       if (row.conflict || queued.has(row.oldId)) continue;
@@ -2161,7 +2023,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
 
-  _getDeviceName(d) { return d.unassigned ? (this._lang === 'pl' ? 'Bez urządzenia' : 'No device') : d.name_by_user || d.name || d.id; }
+  _getDeviceName(d) { return d.name_by_user || d.name || d.id; }
 
   get _listUi() {
     const language = this._hass?.language || this._lang;
@@ -2199,16 +2061,14 @@ class HAEntityRenamer extends HTMLElement {
   _deviceRows(device, filter=this._listFilters.devices) {
     const query = this._searchQuery.trim().toLocaleLowerCase(this._hass?.language || this._lang);
     const matchesDevice = this._getDeviceName(device).toLocaleLowerCase(this._hass?.language || this._lang).includes(query);
-    return (device.unassigned ? this._entities.filter(entity => !entity.device_id) : this._deviceEntities[device.id] || []).filter(entity =>
+    return (this._deviceEntities[device.id] || []).filter(entity =>
       (matchesDevice || [entity.entity_id,entity.name,entity.original_name].some(value=>String(value||'').toLocaleLowerCase(this._hass?.language || this._lang).includes(query))) &&
       (filter === 'new' && this._listUi.isNew(device.created_at) || this._entityMatches(entity,filter))
     ).sort((a,b)=>this._listUi.compare(a.entity_id,b.entity_id));
   }
 
   _getFilteredDevices() {
-    const groups = [...this._devices];
-    if (this._entities.some(entity => !entity.device_id)) groups.push({id: '__renamer_unassigned__', unassigned: true});
-    return groups.filter(device=>this._deviceRows(device).length).sort((a,b)=>this._compareDevices(a,b));
+    return this._devices.filter(device=>this._deviceRows(device).length).sort((a,b)=>this._compareDevices(a,b));
   }
 
   _visibleAutomaticRows(filter=this._listFilters.automatic) {
@@ -2240,8 +2100,7 @@ class HAEntityRenamer extends HTMLElement {
     const pl=this._lang==='pl',scope=automatic?'automatic':'devices';
     const keys=['all','available','queued','conflicts','new'];
     const labels=pl?['Wszystkie','Do dodania','W kolejce','Konflikty','Nowe']:['All','To queue','In queue','Conflicts','New'];
-    const count=filter=>automatic?this._visibleAutomaticRows(filter).length:
-      [...this._devices,{id:'__renamer_unassigned__',unassigned:true}].reduce((n,d)=>n+this._deviceRows(d,filter).length,0);
+    const count=filter=>automatic?this._visibleAutomaticRows(filter).length:this._devices.reduce((n,d)=>n+this._deviceRows(d,filter).length,0);
     return `<div class="list-toolbar"><input type="search" id="${automatic?'automaticSearch':'searchInput'}" aria-label="${_esc(this._t.searchPlaceholder)}" placeholder="🔍 ${_esc(this._t.searchPlaceholder)}" value="${_esc(automatic?this._automaticSearch:this._searchQuery)}">
       <label>${pl?'Sortowanie':'Sort'} <select id="listSort">${[['name',pl?'Nazwa A–Z':'Name A–Z'],['reverse',pl?'Nazwa Z–A':'Name Z–A'],['newest',pl?'Najnowsze':'Newest']].map(([key,label])=>`<option value="${key}" ${this._listSort===key?'selected':''}>${label}</option>`).join('')}</select></label></div>
       <div class="list-chips" role="group" aria-label="${pl?'Filtry encji':'Entity filters'}">${keys.map((key,i)=>`<button type="button" class="btn btn-sm btn-outline" data-list-filter="${key}" data-list-scope="${scope}" aria-pressed="${this._listFilters[scope]===key}">${labels[i]} (${count(key)})</button>`).join('')}</div>
@@ -2273,7 +2132,7 @@ class HAEntityRenamer extends HTMLElement {
 
   _undoQueueRemoval() {
     const undo = this._queueUndo;
-    if ((this._loading || this._migration) || !undo) return;
+    if (this._loading || !undo) return;
     if (Date.now() < undo.until) {
       if (undo.kind==='batch') {
         const existing = new Set(this._renameQueue.map(row => row.oldId));
@@ -2292,7 +2151,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _removeDeviceFromQueue(id) {
-    if((this._loading || this._migration) || !Object.hasOwn(this._deviceRenameQueue,id)) return;
+    if(this._loading || !Object.hasOwn(this._deviceRenameQueue,id)) return;
     this._rememberQueueRemoval({kind:'device',row:{oldId:id,newId:this._deviceRenameQueue[id]},index:Object.keys(this._deviceRenameQueue).indexOf(id)});
     delete this._deviceRenameQueue[id];
     this._confirmation=null;this._confirmDialogOpen=false;this._lastApplyResult=null;this._impactResults=null;
@@ -2342,7 +2201,7 @@ class HAEntityRenamer extends HTMLElement {
 
 
   _addToQueue(oldId, newId, newName, source='manual') {
-    if (this._loading || this._migration) return;
+    if (this._loading) return;
     // Allow adding if EITHER entity_id changed OR friendly_name/alias changed
     if (oldId === newId && !newName) return;
     this._confirmDialogOpen = false;
@@ -2358,7 +2217,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _removeFromQueue(oldId) {
-    if (this._loading || this._migration) return;
+    if (this._loading) return;
     this._confirmDialogOpen = false;
     this._confirmation = null;
     this._lastApplyResult = null;
@@ -2372,7 +2231,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _clearQueue() {
-    if (this._loading || this._migration) return;
+    if (this._loading) return;
     this._areaPrefixEpoch = (this._areaPrefixEpoch || 0) + 1;
     if (this._renameQueue.length || Object.keys(this._deviceRenameQueue).length) {
       this._rememberQueueRemoval({kind:'batch',entities:[...this._renameQueue],devices:{...this._deviceRenameQueue},row:{oldId:this._lang==='pl'?'Cała kolejka':'Entire queue'}});
@@ -2387,7 +2246,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   async _addAreaPrefix() {
-    if ((this._loading || this._migration) || this._areaPrefixPending || !this._selectedDevice || ![true,false].includes(this._hass?.user?.is_admin)) return;
+    if (this._loading || this._areaPrefixPending || !this._selectedDevice || ![true,false].includes(this._hass?.user?.is_admin)) return;
     const { hass, current } = this._captureRead();
     const deviceId = this._selectedDevice;
     const areaEpoch = this._areaPrefixEpoch || 0;
@@ -2430,7 +2289,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _addPrefixRename() {
-    if (this._loading || this._migration) return;
+    if (this._loading) return;
     if (!this._prefixOld || !this._prefixNew || this._prefixOld === this._prefixNew) return;
     const ents = this._deviceEntities[this._selectedDevice] || [];
     for (const ent of ents) {
@@ -2448,7 +2307,7 @@ class HAEntityRenamer extends HTMLElement {
 
   async _analyzeImpact() {
     if (![true, false].includes(this._hass?.user?.is_admin)) return;
-    if ((this._loading || this._migration) || !this._renameQueue.length) return;
+    if (this._loading || !this._renameQueue.length) return;
     this._areaPrefixEpoch = (this._areaPrefixEpoch || 0) + 1;
     const { hass, current } = this._captureRead();
     const queue = this._renameQueue.map(row => ({ ...row }));
@@ -2596,48 +2455,6 @@ class HAEntityRenamer extends HTMLElement {
     return confirmed;
   }
 
-  _recordMigrationHistory(m, outcome) {
-    // Only the currently authenticated owner may create or revise their log.
-    // The operation ID and reviewed row position make repeated inspection idempotent.
-    if (!this._migrationCurrent(m) || !m.review || !this._historyKey()) return;
-    const entries = m.review.changes;
-    const now = new Date().toISOString();
-    entries.forEach((change, index) => {
-      let entry = this._renameLog.find(row => row?.operationId === m.operation_id
-        && row?.operationFingerprint === m.fingerprint && row?.operationIndex === index);
-      if (!entry && outcome !== 'attempted') return;
-      if (!entry) {
-        const device = typeof change.device_id === 'string';
-        const oldId = device ? '📱 ' + change.device_id.substring(0, 8) + '...'
-          : change.fields.entity_id?.before || change.entity_id;
-        const newId = device ? '📱 ' + (change.fields.name_by_user?.after || '')
-          : change.fields.entity_id?.after || change.entity_id;
-        const dashboardSource = m.review.dependencies.coverage?.find(row => row.source === 'dashboard');
-        const dashboardRows = Array.isArray(m.review.dependencies.dashboards)
-          ? m.review.dependencies.dashboards.filter(row => row.references?.some(ref => ref.before === oldId))
-          : [];
-        const dashboardCoverage = dashboardSource?.status === 'COMPLETE' && !dashboardSource.blockers?.length
-          ? 'complete' : dashboardRows.length ? 'partial' : 'unavailable';
-        const impact = {dashboardCoverage};
-        if (dashboardRows.length || dashboardCoverage === 'complete') {
-          impact.dashboards = dashboardRows.map(row => row.route
-            || this._migrationText('Default dashboard', 'Domyślny pulpit'));
-        }
-        entry = {operationId: m.operation_id, operationFingerprint: m.fingerprint, operationIndex: index, oldId, newId,
-          operationKind: device ? 'device' : 'entity', status: 'error',
-          writePhase: 'attempted', attemptedAt: now, impact};
-        this._renameLog.unshift(entry);
-      }
-      if (outcome === 'applied' && entry.writePhase !== 'readback_confirmed') {
-        entry.status = 'ok'; entry.writePhase = 'readback_confirmed';
-        entry.verification = 'independent_registry_list_exact_fields'; entry.completedAt = now;
-      } else if (outcome === 'refused' && entry.writePhase !== 'readback_confirmed') {
-        entry.status = 'error'; entry.writePhase = 'not_started'; entry.completedAt = now;
-      }
-    });
-    this._saveHistoryToStorage();
-  }
-
   async _applyEntityRename(rename, hass = this._hass) {
     const update = { type: 'config/entity_registry/update', entity_id: rename.oldId };
     if (rename.newId && rename.newId !== rename.oldId) update.new_entity_id = rename.newId;
@@ -2682,7 +2499,6 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _showRenameConfirmation() {
-    if (this._migration) return;
     this._clearQueueUndo();
     if (!this._renameAuthorityAvailable()) {
       this._confirmDialogOpen = false;
@@ -2706,8 +2522,6 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _cancelRenameConfirmation() {
-    if (this._migration?.attempted) return;
-    this._migration = null;
     this._confirmation = null;
     this._confirmDialogOpen = false;
     this.render();
@@ -2715,7 +2529,6 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   async _executeRenames(confirmed = false) {
-    if (this._migration) return; // Never fall back from migration to registry-only.
     if (this._loading || this._applyOperation) return;
     if (!this._renameQueue.length && !Object.keys(this._deviceRenameQueue).length) return;
     if (!this._renameAuthorityAvailable()) {
@@ -2728,11 +2541,243 @@ class HAEntityRenamer extends HTMLElement {
       this._showRenameConfirmation();
       return;
     }
-    await this._prepareMigration();
+    const confirmation = this._confirmation;
+    if (!confirmation || confirmation.epoch !== this._authorityEpoch || !this._sameReadSession(confirmation.session, this._readSession())) return;
+    const hass = this._hass;
+    const queue = confirmation.entities;
+    const devices = confirmation.devices;
+    const operation = { session: confirmation.session, epoch: confirmation.epoch, cancelled: false,
+      scope: this._historyKey(hass), log: this._renameLog };
+    this._applyOperation = operation;
+    const isCurrent = () => !operation.cancelled && this._applyOperation === operation
+      && operation.epoch === this._authorityEpoch && this._renameAuthorityAvailable()
+      && this._sameReadSession(operation.session, this._readSession());
+    this._confirmation = null;
+    this._confirmDialogOpen = false;
+    this._lastApplyResult = null;
+    this._loading = true;
+    this._message = { type: 'info', text: this._t.analyzing2 };
+    this.render();
+    try {
+      let automaticFailures = await this._revalidateAutomaticQueue(queue, hass, isCurrent);
+      if (!isCurrent()) return;
+
+      // Auto-run impact analysis before execution using search/related
+      let impact = {};
+      try {
+        const searchResults = await this._loadRelatedResults(queue.filter(row => !automaticFailures.has(row.oldId)), hass, isCurrent);
+        if (!isCurrent()) return;
+        for (const { oldId, result } of searchResults) {
+          const hits = { automations: [], scripts: [], dashboards: [], scenes: [] };
+          if (result.automation) {
+            for (const aId of result.automation) {
+              const st = hass.states[aId];
+              hits.automations.push(st ? st.attributes.friendly_name : aId.replace('automation.', ''));
+            }
+          }
+          if (result.script) {
+            for (const sId of result.script) {
+              const st = hass.states[sId];
+              hits.scripts.push(st ? st.attributes.friendly_name : sId.replace('script.', ''));
+            }
+          }
+          if (result.scene) {
+            for (const scId of result.scene) {
+              const st = hass.states[scId];
+              hits.scenes.push(st ? st.attributes.friendly_name : scId.replace('scene.', ''));
+            }
+          }
+          impact[oldId] = hits;
+        }
+        // Also scan dashboards
+        const lovelaceConfig = await this._loadLovelaceConfigs(hass);
+        if (!isCurrent()) return;
+        const dashboardText = lovelaceConfig.map(dash => ({ title: dash.title || dash.url_path || 'default', text: JSON.stringify(dash.config || {}) }));
+        for (const rename of queue) {
+          if (!impact[rename.oldId]) continue;
+          impact[rename.oldId].dashboardCoverage = lovelaceConfig.dashboardCoverage || 'unknown';
+          for (const dash of dashboardText) {
+            if (dash.text.includes(rename.oldId)) {
+              impact[rename.oldId].dashboards.push(dash.title);
+            }
+          }
+        }
+      } catch(e) {
+        if (!isCurrent()) return;
+        this._loading = false;
+        this._applyOperation = null;
+        this._message = { type: 'error', text: 'Impact lookup failed; no changes applied: ' + this._formatError(e) };
+        this.render();
+        return;
+      }
+
+      automaticFailures = await this._revalidateAutomaticQueue(queue, hass, isCurrent);
+      if (!isCurrent()) return;
+      const results = [];
+      const historyBefore = new Set(this._renameLog);
+      const completedEntries = [];
+      const deviceResults = [];
+      const ts = new Date().toLocaleTimeString();
+
+      // 1. Rename devices first
+      for (const [devId, newName] of Object.entries(devices)) {
+        let writePhase = 'not_started';
+        try {
+          if (!isCurrent()) throw new Error('Account, role or connection changed; remaining changes cancelled');
+          writePhase = 'attempted';
+          const pendingEntry = {time: ts, oldId: '📱 ' + devId.substring(0, 8) + '...', newId: '📱 ' + newName,
+            status: 'ok', impact: null, operationKind: 'device', writePhase, attemptedAt: new Date().toISOString()};
+          operation.log.unshift(pendingEntry);
+          this._saveHistoryToStorage(operation.scope, operation.log);
+          await hass.callWS({ type: 'config/device_registry/update', device_id: devId, name_by_user: newName });
+          if (!isCurrent()) return;
+          operation.log.shift();
+          writePhase = 'acknowledged';
+          deviceResults.push({ devId, newName, status: 'ok' });
+          operation.log.unshift({ time: ts, oldId: '📱 ' + devId.substring(0, 8) + '...', newId: '📱 ' + newName, status: 'ok', impact: null, operationKind: 'device', writePhase, completedAt: new Date().toISOString() });
+          completedEntries.push({entry: operation.log[0], deviceId: devId, name: newName});
+        } catch (e) {
+          if (!isCurrent()) return;
+          if (writePhase === 'attempted') operation.log.shift();
+          const error = this._formatError(e);
+          deviceResults.push({ devId, newName, status: 'error', error });
+          operation.log.unshift({ time: ts, oldId: '📱 device', newId: '📱 ' + newName, status: 'error', error, impact: null, operationKind: 'device', writePhase, completedAt: new Date().toISOString() });
+        }
+        this._saveHistoryToStorage(operation.scope, operation.log);
+      }
+
+      // 2. Rename entities (entity_id + optional friendly name)
+      for (const rename of queue) {
+        const expectedIdentity = rename.sourceIdentity || this._sourceIdentity(rename.entity || this._entities.find(row => row.entity_id === rename.oldId));
+        const imp = impact[rename.oldId] || { automations: [], scripts: [], dashboards: [] };
+        let writePhase = 'not_started';
+        try {
+          if (automaticFailures.has(rename.oldId)) throw new Error(automaticFailures.get(rename.oldId));
+          if (!isCurrent()) throw new Error('Account, role or connection changed; remaining changes cancelled');
+          if (rename.automatic) {
+            const latest = await this._revalidateAutomaticQueue([rename], hass, isCurrent);
+            if (!isCurrent()) return;
+            if (latest.has(rename.oldId)) throw new Error(latest.get(rename.oldId));
+          } else if (rename.sourceIdentity) {
+            const current = await hass.callWS({ type: 'config/entity_registry/list' });
+            if (!isCurrent()) return;
+            if (this._sourceIdentity(current.find(entry => entry.entity_id === rename.oldId)) !== rename.sourceIdentity) {
+              throw new Error('Source entity changed since queueing');
+            }
+          }
+          if (!isCurrent()) throw new Error('Account, role or connection changed; remaining changes cancelled');
+          writePhase = 'attempted';
+          const pendingEntry = {time: ts, oldId: rename.oldId, newId: rename.newId || rename.oldId,
+            targetEntityId: rename.newId || rename.oldId, status: 'ok', impact: imp,
+            operationKind: 'entity', writePhase, attemptedAt: new Date().toISOString()};
+          operation.log.unshift(pendingEntry);
+          this._saveHistoryToStorage(operation.scope, operation.log);
+          await this._applyEntityRename(rename, hass);
+          if (!isCurrent()) return;
+          operation.log.shift();
+          writePhase = 'acknowledged';
+          results.push({ ...rename, status: 'ok' });
+          operation.log.unshift({
+            time: ts,
+            oldId: rename.oldId,
+            newId: (rename.newId !== rename.oldId ? rename.newId : rename.oldId) + (rename.newName ? ' (' + rename.newName + ')' : ''),
+            status: 'ok',
+            impact: imp,
+            targetEntityId: rename.newId || rename.oldId, operationKind: 'entity', writePhase, completedAt: new Date().toISOString(),
+          });
+          completedEntries.push({entry: operation.log[0], entityId: rename.newId || rename.oldId, identity: expectedIdentity, name: rename.newName || null});
+        } catch (e) {
+          if (!isCurrent()) return;
+          if (writePhase === 'attempted') operation.log.shift();
+          const error = this._formatError(e);
+          results.push({ ...rename, status: 'error', error });
+          operation.log.unshift({ time: ts, oldId: rename.oldId, newId: rename.newId, status: 'error', error, impact: imp, operationKind: 'entity', writePhase, completedAt: new Date().toISOString() });
+        }
+        this._saveHistoryToStorage(operation.scope, operation.log);
+      }
+
+      if (!isCurrent()) return;
+      const ok = results.filter(r => r.status === 'ok').length;
+      const fail = results.filter(r => r.status === 'error').length;
+      const devOk = deviceResults.filter(r => r.status === 'ok').length;
+      const devFail = deviceResults.filter(r => r.status === 'error').length;
+      const devCount = deviceResults.length;
+      const totalImpact = results.filter(row => row.status === 'ok' && row.newId !== row.oldId).reduce((count, row) => {
+        const hits = impact[row.oldId];
+        return count + (hits ? hits.automations.length + hits.scripts.length + hits.dashboards.length + (hits.scenes || []).length : 0);
+      }, 0);
+
+      let msg = this._t.renameSuccess.replace('{ok}', ok);
+      msg = msg.replace('{devCount}', devOk ? ', ' + devOk + ' ' + (this._lang === 'pl' ? 'urządzeń' : 'devices') : '');
+      msg = msg.replace('{fail}', fail + devFail > 0 ? `, ${fail + devFail} ${this._lang === 'pl' ? 'błędów' : 'errors'}` : '');
+      msg = msg.replace('{impact}', totalImpact > 0 ? ` ⚠️ ${totalImpact} ${this._lang === 'pl' ? 'miejsc wymaga sprawdzenia (szczegóły w historii)' : 'places require review (details in history)'}` : '');
+
+      const deviceFailures = deviceResults.filter(r => r.status === 'error').map(r => ({
+        oldId: 'device ' + r.devId,
+        newId: r.newName,
+        error: r.error,
+      }));
+      const entityFailures = results.filter(r => r.status === 'error').map(r => ({
+        oldId: r.oldId,
+        newId: r.newId,
+        error: r.error,
+      }));
+      this._lastApplyResult = {
+        ok: ok + devOk,
+        total: results.length + deviceResults.length,
+        failures: [...entityFailures, ...deviceFailures],
+      };
+      this._message = {
+        type: fail + devFail > 0 ? 'warning' : 'success',
+        text: msg,
+      };
+      this._renameQueue = results.filter(row => row.status === 'error').map(({status, error, ...row}) => row);
+      this._deviceRenameQueue = Object.fromEntries(deviceResults.filter(row => row.status === 'error').map(row => [row.devId, row.newName]));
+      this._impactResults = null;
+      this._loading = false;
+      this._activeTab = 'log';
+      this._message = {type:'warning',outcome:'unconfirmed',text:this._lang === 'pl' ? 'Sprawdzam wyniki zmian w rejestrze.' : 'Verifying registry change outcomes.'};
+      this._saveHistoryToStorage();
+      const refreshed = await this._loadData();
+      if (!isCurrent()) return;
+      if (!operation.cancelled && refreshed && this._sameReadSession(operation.session, refreshed.session)
+        && this._sameReadSession(operation.session, this._readSession()) && this._renameExportContext().connected) {
+        if (this._confirmRenameReadback(completedEntries, refreshed)) this._saveHistoryToStorage();
+      }
+      const observed = renameReports.snapshot(this._renameLog.filter(row => !historyBefore.has(row)), true).rows;
+      const applied = observed.filter(row => row.status === 'applied').length;
+      const unconfirmed = observed.filter(row => row.status === 'unknown').length;
+      const rejected = observed.filter(row => row.status === 'failed').length;
+      const outcome = unconfirmed > 0 ? (applied > 0 || rejected > 0 ? 'partial' : 'unconfirmed')
+        : rejected > 0 ? (applied > 0 ? 'partial' : 'error') : applied > 0 ? 'success' : 'no_data';
+      this._lastApplyResult.ok = applied;
+      this._lastApplyResult.unknown = unconfirmed;
+      this._lastApplyResult.rejectedBeforeWrite = rejected;
+      const reviewCount = observed.filter(row => row.status === 'applied' && row.kind === 'entity' && row.old !== row.new)
+        .reduce((count,row) => count + Object.values(row.references).filter(value => typeof value === 'number').reduce((a,b) => a+b,0),0);
+      const pl = this._lang === 'pl';
+      let summary = pl ? `Potwierdzone zmiany: ${applied}. Niepotwierdzone: ${unconfirmed}. Odrzucone przed zapisem: ${rejected}.`
+        : `Confirmed changes: ${applied}. Unconfirmed: ${unconfirmed}. Rejected before write: ${rejected}.`;
+      if (unconfirmed > 0) summary += pl ? ' Sprawdź rejestr i historię przed kolejną zmianą.' : ' Review the registry and history before another change.';
+      if (reviewCount > 0) summary += pl ? ` ${reviewCount} zapisanych odwołań wymaga ręcznego sprawdzenia.` : ` ${reviewCount} recorded references require manual review.`;
+      this._message = {type:outcome === 'success' ? 'success' : outcome === 'error' ? 'error' : 'warning',outcome,text:summary};
+      this.render();
+    } finally {
+      if (this._applyOperation === operation) {
+        const current = isCurrent();
+        this._applyOperation = null;
+        this._loading = false;
+        if (!current) { this._lastApplyResult = null; this._message = null; }
+        this.render();
+        this._resumePermittedRegistryRead();
+      }
+    }
   }
+
 
   render() {
     if (!this._hass) return;
+    const bridgeFocus = this.shadowRoot.activeElement?.id;
     createUiV3({language:this._lang}).applyTheme(this);
     const listViewport = _rememberListViewport(this);
     const openAutomaticDevices = new Set(Array.from(this.shadowRoot.querySelectorAll('[data-auto-group][open]'), group => group.dataset.autoGroup));
@@ -2898,10 +2943,6 @@ class HAEntityRenamer extends HTMLElement {
       .apply-result {
         background: var(--bento-success-light, rgba(16,185,129,0.08));
         border-color: var(--bento-success, #10B981);
-      }
-      .apply-result.migration-pending {
-        background: var(--bento-warning-light, rgba(245,158,11,0.08));
-        border-color: var(--bento-warning, #F59E0B);
       }
       .apply-result.has-failures {
         background: var(--bento-warning-light, rgba(245,158,11,0.08));
@@ -3088,7 +3129,7 @@ class HAEntityRenamer extends HTMLElement {
         :host .list-chips button { flex:0 0 auto;white-space:nowrap !important; }
         .card { max-width:1200px;margin-inline:auto;font-size:14px;line-height:1.5; }
         .device-name,.entity-name,.btn,.list-toolbar input,.list-toolbar select,.prefix-section h3,.prefix-row input { font-size:14px; }
-        .registry-id { display:inline-block;max-width:100%;min-width:0;vertical-align:bottom;white-space:normal;word-break:normal;overflow-wrap:anywhere;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
+        .registry-id { display:inline-block;max-width:100%;min-width:0;overflow-x:auto;vertical-align:bottom;white-space:normal;word-break:normal;overflow-wrap:normal;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .stat-card .num,.stat-card .label { display:block; }
         .stats-row .stat-card { min-width:0; }
         @container (max-width:500px) {
@@ -3111,24 +3152,17 @@ class HAEntityRenamer extends HTMLElement {
         .rename-target code { flex:1; }
         .automatic-target code { min-width:0;flex:1; }
         .confirm-dialog code { min-width:0;max-width:100%; }
-        .confirm-dialog [tabindex="0"]:focus-visible { outline:3px solid var(--primary-color,#1769aa);outline-offset:2px; }
 
         :host .btn-primary { background:var(--_hat-primary-fill);color:var(--_hat-on-primary); }
         :host input[type=checkbox] { accent-color:var(--_hat-primary-fill); }
-        :host .btn:disabled { opacity:1;background:transparent;color:var(--bento-text,var(--primary-text-color));border:1px dashed var(--bento-border,var(--divider-color));box-shadow:none;cursor:not-allowed; }
-        :host .tabs .tab-button.active { color:var(--bento-text,var(--primary-text-color)) !important; }
+        :host .btn-primary:disabled { opacity:1;background:var(--_hat-chip);color:var(--_hat-text-2);box-shadow:none; }
 
-        /* Semantic labels carry status; theme text keeps them readable on both backgrounds. */
-        .rename-preview-old,.rename-preview-new,.apply-result-error,.queue-table .old,.queue-table .new,
-        .impact-badge.automation,.impact-badge.script,.impact-badge.scene,.log-ok,.log-err,.log-error-detail {
-          color:var(--bento-text,var(--primary-text-color));
-        }
-        .rename-confirm-counts span,.new-badge,.list-chips button[aria-pressed="true"],.msg.info,.msg.success,.msg.error,.msg.warning {
-          color:var(--bento-text,var(--primary-text-color));
-        }
-        button:focus-visible,summary:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[role=button]:focus-visible {
-          outline:2px solid #fff !important;outline-offset:2px;box-shadow:0 0 0 5px #111827 !important;
-        }
+        .bridge-notice { margin:8px 0 12px;padding:12px;border:1px solid var(--bento-border,var(--divider-color));border-radius:8px;background:var(--bento-bg,var(--primary-background-color));color:var(--bento-text,var(--primary-text-color));font-size:14px; }
+        .bridge-notice h2 { margin:0 0 8px;font-size:14px; }
+        .bridge-notice p { margin:8px 0; }
+        .bridge-notice a { color:inherit;text-decoration:underline; }
+        .bridge-notice .btn { margin-inline-start:8px; }
+        .bridge-reopen { margin:4px 0 8px; }
         .renamer-help { margin:8px 0 12px;font-size:14px; }
         .renamer-help summary { cursor:pointer;min-height:44px;align-content:center; }
         .renamer-help summary:focus-visible { outline:3px solid var(--primary-color);outline-offset:2px; }
@@ -3139,15 +3173,15 @@ class HAEntityRenamer extends HTMLElement {
         .device-header { min-height:44px;min-width:44px; }
         .prefix-row input,.device-detail input { min-width:44px;max-width:100%; }
         </style>
-    <div class="card" ${this._writeWarning ? 'inert' : ''}>
+    <div class="card">
       <h1>📱️ ${_esc(typeof this._config?.title === 'string' && this._config.title.trim() ? this._config.title : t.deviceEntityRenamer)}</h1>
       <div class="subtitle">${this._registryCount(this._devices.length,'device')} • ${this._registryCount(this._entities.length,'entity')}
         </div>
 
+      ${this._renderBridgeNotice()}
       ${this._renderHelp()}
       ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${this._message.outcome ? createUiV3({language:this._lang}).statusHtml(this._message.outcome) : ''} ${_esc(this._message.text || '')}</div>` : ''}
       ${this._renderApplyResult()}
-      ${this._renderRecoveryInventory()}
       ${this._confirmDialogOpen ? this._renderRenameConfirmation() : ''}
       ${this._renderEntityEditor()}
 
@@ -3162,15 +3196,11 @@ class HAEntityRenamer extends HTMLElement {
       ${this._activeTab!=='queue' && queueCount ? `<div class="queue-bar"><span>${t.inQueue}: ${queueCount}</span><button type="button" class="btn btn-primary" id="openQueue">${this._lang==='pl'?'Przejdź do kolejki →':'Go to queue →'}</button></div>`:''}
       ${this._queueUndo && Date.now()<this._queueUndo.until ? `<div class="queue-undo" role="status"><span>${this._lang==='pl'?'Usunięto z kolejki:':'Removed from queue:'} ${_esc(this._queueUndo.row.oldId)}</span><button type="button" class="btn btn-outline" id="undoQueueRemoval">${this._lang==='pl'?'Cofnij':'Undo'}</button></div>`:''}
     </div>
-    <div ${this._writeWarning ? 'inert' : ''}>${this._hass?.user?.is_admin && this._config?.show_support !== false && !_localSupportDismissed() ? _LOCAL_DONATE_HTML : ''}</div>
-    ${this._writeWarning ? this._renderWriteWarning() : ''}`;
+    ${this._hass?.user?.is_admin && this._config?.show_support !== false && !_localSupportDismissed() ? _LOCAL_DONATE_HTML : ''}`;
 
     this._bindHelp();
     _bindLocalSupportDismiss(this.shadowRoot);
     this._attachEvents();
-    if (this._migration) {
-      this.shadowRoot.querySelectorAll('#applyPrefix,#executeRenames,#clearQueue,#analyzeImpact,#undoQueueRemoval,#applyDeviceName,#addAreaPrefix,#queueAllAutomatic,#queueEntityEdit,[data-auto-entity],[data-auto-device],[data-add-single],[data-remove-queue],[data-remove-dev-queue]').forEach(button => { button.disabled = true; });
-    }
     for (const group of this.shadowRoot.querySelectorAll('[data-auto-group]')) group.open = openAutomaticDevices.has(group.dataset.autoGroup);
     this._syncListExpansion();
     _restoreFamilyDrafts(this,familyDrafts);
@@ -3178,12 +3208,13 @@ class HAEntityRenamer extends HTMLElement {
     if (this._familyNavWidth > 0) this._syncHelpWidth(this._familyNavWidth);
     _restoreFamilyRowFocus(this,familyRowFocus);
     _restoreListViewport(this,listViewport);
+    if (bridgeFocus === 'bridgeNoticeOpen' || bridgeFocus === 'bridgeNoticeDismiss') this.shadowRoot.getElementById(bridgeFocus)?.focus({preventScroll:true});
   }
 
 
 
   _showEntityEditor(oldId) {
-    if ((this._loading || this._migration) || this._hass?.user?.is_admin !== true) return;
+    if (this._loading || this._hass?.user?.is_admin !== true) return;
     const entity = this._entities.find(e => e.entity_id === oldId);
     if (!entity) return;
     const objectId = oldId.split('.')[1] || '';
@@ -3215,593 +3246,51 @@ class HAEntityRenamer extends HTMLElement {
     // render() calls this whenever _confirmDialogOpen is true (Apply Changes).
     // It was never implemented, so the call threw "is not a function" and
     // blanked the card — same regression class as _renderApplyResult below.
-    if (this._migration) return this._renderMigrationReview();
     const t = this._t;
-    const queue = this._confirmation?.entities || this._renameQueue || [];
+    const queue = this._renameQueue || [];
     const idChanges = queue.filter(r => (r.newId && r.newId !== r.oldId) || r.newName);
-    const devEntries = Object.entries(this._confirmation?.devices || this._deviceRenameQueue || {});
+    const devEntries = Object.entries(this._deviceRenameQueue || {});
     const MAX = 8;
+    const shown = idChanges.slice(0, MAX);
+    const more = idChanges.length - shown.length;
     const rowStyle = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--bento-border,#e5e7eb);font-size:12.5px';
     const codeStyle = 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--bento-bg-2,#f3f4f6);padding:2px 6px;border-radius:6px';
     const sub = 'color:var(--bento-text-secondary,#6b7280)';
-    const entityRow = r => `
+    const rows = shown.map(r => `
         <div style="${rowStyle}">
           <code style="${codeStyle}">${_entityIdHtml(r.oldId)}</code>
-          <span class="rename-target"><span style="opacity:.6">&rarr;</span><code style="${codeStyle}">${_entityIdHtml(r.newId || r.oldId)}</code></span>
+          <span class="rename-target"><span style="opacity:.6">&rarr;</span><code style="${codeStyle}">${_entityIdHtml(r.newId)}</code></span>
           ${r.newName ? `<span style="${sub}">"${_esc(r.newName)}"</span>` : ''}
-        </div>`;
-    const deviceRow = ([id, name]) => `
-        <div style="${rowStyle}"><span>&#128295;</span><span>${_esc(this._getDeviceName(this._devices.find(d => d.id === id) || { id }))} → ${_esc(String(name))}</span></div>`;
+        </div>`).join('');
+    const devRows = devEntries.slice(0, MAX).map(([id, name]) => `
+        <div style="${rowStyle}"><span>&#128295;</span><span>${_esc(this._getDeviceName(this._devices.find(d => d.id === id) || { id }))} → ${_esc(String(name))}</span></div>`).join('');
     const fill = (s, n) => _esc(String(s || '').replace('{count}', n));
-    const reviewRows = (items, row) => {
-      const first = items.slice(0, MAX).map(row).join('');
-      if (items.length <= MAX) return first;
-      const label = this._lang === 'pl'
-        ? `Pokaż pozostałe zmiany (${items.length - MAX})`
-        : `Review remaining changes (${items.length - MAX})`;
-      return first + `<details class="rename-review-more"><summary style="cursor:pointer;min-height:44px;display:flex;align-items:center">${_esc(label)}</summary>${items.slice(MAX).map(row).join('')}</details>`;
-    };
     return `
       <div class="confirm-dialog" role="dialog" aria-labelledby="renameConfirmTitle" style="border:1px solid var(--bento-primary,#3B82F6);border-radius:var(--bento-radius-md,14px);background:var(--bento-card,#fff);padding:16px 18px;margin:12px 0;box-shadow:var(--bento-shadow-md)">
         <div id="renameConfirmTitle" style="font-weight:700;font-size:14px;margin-bottom:6px">&#9888;&#65039; ${_esc(t.confirmRenameTitle)}</div>
         <div style="font-size:12.5px;${sub};margin-bottom:10px">${_esc(t.confirmRenameBody)}</div>
         <div style="font-size:12.5px;font-weight:600;margin-bottom:4px">${fill(t.confirmRenameCount, idChanges.length)}</div>
-        ${idChanges.length ? reviewRows(idChanges, entityRow) : `<div style="font-size:12.5px;${sub}">${_esc(t.confirmNoEntityChanges)}</div>`}
-        ${devEntries.length ? `<div style="font-size:12.5px;font-weight:600;margin:10px 0 4px">${fill(t.confirmDeviceCount, devEntries.length)}</div>${reviewRows(devEntries, deviceRow)}` : ''}
-        <p style="font-size:12px;${sub}">${this._lang === 'pl' ? 'Przygotuj przegląd zmian i wykrytych zależności.' : 'Prepare a review of changes and detected dependencies.'}</p>
+        ${idChanges.length ? rows : `<div style="font-size:12.5px;${sub}">${_esc(t.confirmNoEntityChanges)}</div>`}
+        ${more > 0 ? `<div style="font-size:12px;opacity:.7;padding-top:6px">${fill(t.confirmMore, more)}</div>` : ''}
+        ${devEntries.length ? `<div style="font-size:12.5px;font-weight:600;margin:10px 0 4px">${fill(t.confirmDeviceCount, devEntries.length)}</div>${devRows}` : ''}
+        <fieldset style="margin:12px 0;padding:10px;border:1px solid var(--bento-border,#e5e7eb);border-radius:8px">
+          <legend>${this._lang === 'pl' ? 'Automatyczna aktualizacja zależności' : 'Automatic dependency updates'}</legend>
+          ${[['template','Szablony','Templates'],['powercalc','Powercalc','Powercalc'],['automation','Automatyzacje','Automations'],['script','Skrypty','Scripts'],['config_entries','Integracje','Integrations']].map(([family,pl,en]) => `<label style="display:block;margin:6px 0;color:var(--bento-text-secondary,#6b7280)"><input type="checkbox" disabled data-coming-soon="${family}"> ${this._lang === 'pl' ? pl : en} — Coming soon</label>`).join('')}
+          <p style="font-size:12px;${sub};margin:8px 0 0">${this._lang === 'pl' ? 'Zostaną wykonane tylko powyższe zmiany nazw i ID. Aktualizacja zależności nie jest jeszcze dostępna.' : 'Only the name and ID changes listed above will be applied. Dependency updates are not available yet.'}</p>
+        </fieldset>
         <div class="rename-confirm-actions">
           <button id="cancelRenameDialog" class="btn btn-outline">${_esc(t.cancel)}</button>
-          <button type="button" id="prepareMigration" class="btn btn-primary">${this._lang === 'pl' ? 'Przygotuj przegląd' : 'Prepare review'}</button>
+          <button id="confirmRenameApply" class="btn btn-danger">${_esc(t.rename)}</button>
         </div>
       </div>`;
   }
 
-  _migrationText(en, pl) { return this._lang === 'pl' ? pl : en; }
-
-  _requestWriteWarning(kind) {
-    if (this._writeWarning) return;
-    this._writeWarning = kind;
-    this.render();
-    this.shadowRoot.getElementById('cancelWriteWarning')?.focus();
-  }
-
-  _cancelWriteWarning() {
-    const kind = this._writeWarning;
-    this._writeWarning = null;
-    this.render();
-    this.shadowRoot.getElementById(({registry: 'confirmRenameApply', migration: 'applyMigration', restore: 'restoreMigration'})[kind])?.focus();
-  }
-
-  _continueWriteWarning() {
-    const kind = this._writeWarning;
-    if (!kind) return;
-    this._writeWarning = null;
-    this.render();
-    if (kind === 'registry') void this._executeRenames(true);
-    else if (kind === 'migration') void this._applyMigration();
-    else if (kind === 'restore') void this._restoreMigration();
-  }
-
-  _renderWriteWarning() {
-    return `<div class="write-warning-backdrop" style="position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:16px">
-      <section role="dialog" aria-modal="true" aria-labelledby="writeWarningTitle" aria-describedby="writeWarningBody" style="background:var(--card-background-color,#fff);color:var(--primary-text-color,#111);border-radius:14px;padding:20px;max-width:36rem;max-height:90vh;overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.4)">
-        <h2 id="writeWarningTitle">${this._migrationText('Before continuing', 'Przed kontynuacją')}</h2>
-        <div id="writeWarningBody"><p>${this._migrationText('We recommend making a full Home Assistant backup before continuing.', 'Zalecamy wykonanie pełnej kopii zapasowej Home Assistant przed kontynuacją.')}</p>
-        <p>${this._migrationText('This tool has been tested on multiple versions and installations with different data, but cannot guarantee coverage of every configuration. Please report problems on', 'Narzędzie testowano na wielu wersjach i instalacjach z różnymi danymi, ale nie można zagwarantować obsługi każdej konfiguracji. Zgłoś problem na')} <a href="https://github.com/MacSiem/ha-entity-renamer/issues/new" target="_blank" rel="noopener noreferrer">GitHub</a>.</p>
-        <p>${this._migrationText('A required integration reload may interrupt running automations and scripts.', 'Wymagane przeładowanie integracji może przerwać trwające automatyzacje i skrypty.')}</p></div>
-        <button type="button" class="btn btn-outline" id="cancelWriteWarning">${this._migrationText('Cancel', 'Anuluj')}</button>
-        <button type="button" class="btn btn-danger" id="continueWriteWarning">${this._migrationText('Continue', 'Kontynuuj')}</button>
-      </section></div>`;
-  }
-
-  async _findMigrationRecovery() {
-    if (this._migration || this._recoveryInventory?.busy || !this._renameAuthorityAvailable()) return;
-    const epoch = this._authorityEpoch, session = this._readSession(), hass = this._hass;
-    const inventory = {busy: true}; this._recoveryInventory = inventory; this.render();
-    try {
-      const result = await this._migrationRequest(hass, {type: 'ha_entity_renamer/status'});
-      if (this._recoveryInventory !== inventory || this._migration || epoch !== this._authorityEpoch
-          || !this._sameReadSession(session, this._readSession()) || !this._renameAuthorityAvailable()) return;
-      if (!Array.isArray(result?.operations)) throw new Error('invalid_inventory');
-      inventory.entries = result.operations.filter(row => row
-        && /^[A-Za-z0-9_-]{1,80}$/.test(row.operation_id || '')
-        && /^[0-9a-f]{64}$/.test(row.fingerprint || '') && typeof row.status === 'string');
-    } catch (_) { if (this._recoveryInventory === inventory) inventory.failed = true; }
-    finally {
-      if (this._recoveryInventory === inventory && epoch === this._authorityEpoch) {
-        inventory.busy = false; this.render();
-      }
-    }
-  }
-
-  _selectMigrationRecovery(index) {
-    const row = this._recoveryInventory?.entries?.[index];
-    if (!row || this._migration || !this._renameAuthorityAvailable()) return;
-    this._confirmation = null; this._confirmDialogOpen = false; this._entityEditor = null;
-    this._migration = {owner: this._hass.user.id, operation_id: row.operation_id,
-      fingerprint: row.fingerprint, attempted: true, recoveredIdentity: true,
-      restoreRevoked: true, stage: 'unknown', invalidated: true, busy: false,
-      journal: JSON.parse(JSON.stringify(row))};
-    const scope = this._recoveryCardScope;
-    const matches = [...(scope?.entries || [])].filter(entry => entry.operation_id === row.operation_id
-      && entry.fingerprint === row.fingerprint && entry.actor === this._hass.user.id);
-    if (matches.length === 1) {
-      const entry = matches[0], m = this._migration;
-      m.lifecycleEntry = entry; m.epoch = this._authorityEpoch; m.session = this._readSession();
-      m.invalidated = false; m.observation = 1; m.busy = !!entry.pending; m.inspecting = entry.pending?.kind === 'inspect';
-      m.inspectionIssue = entry.inspectionInterrupted ? 'interrupted' : null;
-      if (!entry.owner) entry.owner = this;
-      if (entry.pending) void this._refreshMigrationProgress(m, this._hass);
-    } else this._trackRecoveryOperation(this._migration);
-    this._recoveryInventory = null; this.render();
-  }
-
-  _renderRecoveryInventory() {
-    if (this._migration || this._hass?.user?.is_admin !== true) return '';
-    const inventory = this._recoveryInventory;
-    return `<section aria-label="${this._migrationText('Find previous operations', 'Znajdź poprzednie operacje')}">
-      <button type="button" class="btn btn-outline" id="findMigrationRecovery" ${inventory?.busy || !this._renameAuthorityAvailable() ? 'disabled' : ''}>${this._migrationText('Find previous operations', 'Znajdź poprzednie operacje')}</button>
-      ${inventory?.busy ? `<p role="status">${this._migrationText('Reading server inventory…', 'Odczytywanie listy serwera…')}</p>` : ''}
-      ${inventory?.failed ? `<p role="status">${this._migrationText('Server inventory unavailable.', 'Lista serwera jest niedostępna.')}</p>` : ''}
-      ${inventory?.entries ? `<p>${this._migrationText('Select an operation to inspect. Inventory does not prove success or permit a restore.', 'Wybierz operację do inspekcji. Lista nie potwierdza sukcesu ani prawa do wycofania.')}</p>${inventory.entries.map((row,index) => `<button type="button" class="btn btn-outline" data-recovery-index="${index}">${_esc(row.operation_id)} — ${_esc(row.status)}</button>`).join('')}` : ''}
-    </section>`;
-  }
-
-  _migrationCurrent(m) {
-    return this._migration === m && !m.invalidated && m.epoch === this._authorityEpoch
-      && this._sameReadSession(m.session, this._readSession()) && this._renameAuthorityAvailable();
-  }
-
-  _migrationRequest(hass, message) {
-    // HA owns connection failure handling. A long native operation must not be
-    // mistaken for a transport failure or retried due to a client deadline.
-    try { return Promise.resolve(hass.callWS(message)); }
-    catch (error) { return Promise.reject(error); }
-  }
-
-  async _refreshMigrationProgress(m = this._migration, hass = this._hass) {
-    if (!m?.attempted || !this._migrationCurrent(m)) return;
-    const observation = m.observation;
-    if (m.progressObservation && m.progressObservation.observation === observation) return;
-    clearTimeout(m.pollTimer); m.pollTimer = null;
-    const progress = {observation}; m.progressObservation = progress;
-    try {
-      const status = await this._migrationRequest(hass, {type: 'ha_entity_renamer/status'});
-      if (!this._migrationCurrent(m) || m.observation !== observation) return;
-      const rows = status?.operations;
-      m.journal = (Array.isArray(rows) ? rows.find(row => row?.operation_id === m.operation_id
-        && row?.fingerprint === m.fingerprint) : null) || null;
-    } catch (_) {
-      // Do not present an older snapshot as the current observation.
-      if (this._migrationCurrent(m) && m.observation === observation) m.journal = null;
-    } finally {
-      if (m.progressObservation === progress) m.progressObservation = null;
-      if (this._migrationCurrent(m) && m.observation === observation) {
-        const journal = this.shadowRoot.getElementById('migrationJournal');
-        if (m.busy) { if (journal) journal.innerHTML = this._renderMigrationProgress(m); }
-        else this.render();
-        if (m.applying || m.restoring || m.inspecting) m.pollTimer = setTimeout(() => this._refreshMigrationProgress(m, hass), 2000);
-      }
-    }
-  }
-
-  _validMigrationReview(result) {
-    const validChange = change => change && typeof (change.entity_id || change.device_id) === 'string'
-        && change.fields && typeof change.fields === 'object' && !Array.isArray(change.fields)
-        && Object.keys(change.fields).length > 0 && Object.entries(change.fields).every(([key, field]) =>
-          (change.device_id ? ['name_by_user'] : ['entity_id', 'name']).includes(key)
-          && field && ['before', 'after'].every(side => field[side] === null || typeof field[side] === 'string'));
-    return !(!result || !/^[A-Za-z0-9_-]{1,80}$/.test(result.operation_id || '')
-        || !/^[0-9a-f]{64}$/.test(result.fingerprint || '')
-        || !Array.isArray(result.changes) || !result.changes.length || !result.changes.every(validChange)
-        || !result.dependencies || !Array.isArray(result.dependencies.domains)
-        || !result.dependencies.domains.every(domain => typeof domain === 'string')
-        || (result.dependencies.coverage !== undefined &&
-          (!Array.isArray(result.dependencies.coverage) || result.dependencies.coverage.length > 1000
-            || !result.dependencies.coverage.every(row => row && ['source', 'status', 'reason'].every(k =>
-              typeof row[k] === 'string' && row[k].length <= 255)
-              && ['COMPLETE', 'UNKNOWN', 'DENIED'].includes(row.status)
-              && Array.isArray(row.blockers) && row.blockers.length <= 100
-              && row.blockers.every(value => typeof value === 'string' && value.length <= 255))))
-        || (result.dependencies.domains.includes('dashboard') &&
-          (!Array.isArray(result.dependencies.dashboards) || !result.dependencies.dashboards.length))
-        || (result.dependencies.dashboards !== undefined &&
-          (!Array.isArray(result.dependencies.dashboards)
-            || !result.dependencies.dashboards.every(row => row
-              && (row.route === null || typeof row.route === 'string' && row.route.length > 0)
-              && Array.isArray(row.references) && row.references.length > 0
-              && row.references.every(ref => ref && typeof ref.before === 'string'
-                && typeof ref.after === 'string' && Number.isSafeInteger(ref.occurrences)
-                && ref.occurrences > 0))))
-        || !Number.isSafeInteger(result.dependencies.yaml_file_count)
-        || !Number.isSafeInteger(result.dependencies.template_consumer_count)
-        || result.dependencies.yaml_file_count < 0 || result.dependencies.template_consumer_count < 0
-        || (result.dependencies.config_entries !== undefined
-          && (!Array.isArray(result.dependencies.config_entries)
-            || !result.dependencies.config_entries.every(entry => entry
-              && (entry.kind === undefined || entry.kind === 'powercalc')
-              && ['entity_id', 'before', 'after'].every(key => typeof entry[key] === 'string' && entry[key].length > 0))))
-        || !Array.isArray(result.dependencies.files)
-        || result.dependencies.files.length !== result.dependencies.yaml_file_count
-        || new Set(result.dependencies.files.map(file => file?.path)).size !== result.dependencies.files.length
-        || !result.dependencies.files.every(file => file && typeof file.path === 'string'
-          && Number.isSafeInteger(file.edit_count) && file.edit_count > 0
-          && Array.isArray(file.references) && file.references.length > 0
-          && file.references.every(ref => ref && typeof ref.before === 'string' && typeof ref.after === 'string'
-            && (ref.kind === undefined || ref.kind === 'script_key'
-                && /^[a-z0-9_]+$/.test(ref.before) && /^[a-z0-9_]+$/.test(ref.after))
-            && Number.isSafeInteger(ref.occurrences) && ref.occurrences > 0)));
-  }
-
-  async _prepareMigration() {
-    const c = this._confirmation;
-    if (this._migration || this._loading || !this._renameAuthorityAvailable() || !c
-      || c.epoch !== this._authorityEpoch || !this._sameReadSession(c.session, this._readSession())) return;
-    this._clearQueueUndo();
-    this._areaPrefixEpoch = (this._areaPrefixEpoch || 0) + 1;
-    const m = {owner: this._hass.user.id, epoch: c.epoch, session: c.session,
-      stage: 'preparing', busy: true, attempted: false};
-    this._migration = m;
-    const hass = this._hass;
-    this.render();
-    this.shadowRoot.getElementById('cancelRenameDialog')?.focus();
-    try {
-      const current = () => this._migrationCurrent(m);
-      const automaticFailures = await this._revalidateAutomaticQueue(c.entities, hass, current);
-      if (!current()) return;
-      if (automaticFailures.size) throw new Error('stale_automatic_selection');
-      if (c.entities.some(row => row.sourceIdentity)) {
-        const rows = await hass.callWS({type: 'config/entity_registry/list'});
-        if (!current()) return;
-        if (!Array.isArray(rows) || c.entities.some(row => row.sourceIdentity
-          && this._sourceIdentity(rows.find(entry => entry.entity_id === row.oldId)) !== row.sourceIdentity)) {
-          throw new Error('stale_source_identity');
-        }
-      }
-      const result = await this._migrationRequest(hass, {
-        type: 'ha_entity_renamer/prepare',
-        entities: c.entities.map(r => ({entity_id: r.oldId,
-          ...(r.newId && r.newId !== r.oldId ? {new_entity_id: r.newId} : {}),
-          ...(r.newName ? {name: r.newName} : {})})),
-        devices: Object.entries(c.devices).map(([device_id, name_by_user]) => ({device_id, name_by_user})),
-      });
-      if (!this._migrationCurrent(m)) return;
-      if (!this._validMigrationReview(result)) throw new Error('invalid_review');
-      // A source may be replaced while server prepare is pending. Bind the
-      // reviewed operation to the selection the user actually confirmed.
-      if (c.entities.some(row => row.sourceIdentity)) {
-        const rows = await hass.callWS({type: 'config/entity_registry/list'});
-        if (!current()) return;
-        if (!Array.isArray(rows) || c.entities.some(row => row.sourceIdentity
-          && this._sourceIdentity(rows.find(entry => entry.entity_id === row.oldId)) !== row.sourceIdentity)) {
-          throw new Error('stale_source_identity');
-        }
-      }
-      // Full detached public projection; never construct or send a client Plan.
-      m.review = JSON.parse(JSON.stringify({changes: result.changes, dependencies: result.dependencies}));
-      m.identities = m.review.changes.map(change => change.device_id ? change.device_id
-        : this._sourceIdentity(this._entities.find(row => row.entity_id === change.entity_id)));
-      m.operation_id = result.operation_id; m.fingerprint = result.fingerprint;
-      m.stage = 'review';
-    } catch (error) {
-      if (!this._migrationCurrent(m)) return;
-      m.refusalCode = ['unsupported_template_reference', 'unsupported_template_family', 'unsupported_powercalc_scope', 'unsupported_automation_scope', 'unsupported_config_entry', 'unsupported_script_state_trigger'].includes(error?.code) ? error.code : null;
-      if (m.refusalCode === 'unsupported_config_entry') {
-        try {
-          const parsed = JSON.parse(error.message);
-          if (Array.isArray(parsed.sources) && parsed.sources.length <= 100 && parsed.sources.every(row =>
-              row && ['domain', 'entry_id'].every(key => typeof row[key] === 'string' && row[key].length <= 255)
-              && ['references', 'reasons'].every(key => Array.isArray(row[key]) && row[key].length <= 100
-                && row[key].every(value => typeof value === 'string' && value.length <= 255)))) m.refusalDetails = parsed.sources;
-        } catch (_) { /* Refuse without exposing malformed server data. */ }
-      }
-      if (m.refusalCode === 'unsupported_script_state_trigger') {
-        try {
-          const parsed = JSON.parse(error.message);
-          if (/^automation\.[a-z0-9_]+$/.test(parsed.automation) && /^script\.[a-z0-9_]+$/.test(parsed.script))
-            m.scriptTriggerDetails = parsed;
-        } catch (_) { /* Keep the refusal when details cannot be validated. */ }
-      }
-      m.stage = 'refused'; // Cancel explicitly; no registry-only fallback.
-    } finally {
-      if (this._migrationCurrent(m)) {
-        m.busy = false; this.render();
-        this.shadowRoot.getElementById('cancelRenameDialog')?.focus();
-      }
-    }
-  }
-
-  async _applyMigration() {
-    const m = this._migration;
-    if (!m || m.stage !== 'review' || m.busy || m.attempted || !this._migrationCurrent(m)) return;
-    // Consume locally before the first await, including transport failures.
-    m.attempted = true; m.stage = 'applying'; m.busy = true; m.applying = true;
-    this._recordMigrationHistory(m, 'attempted');
-    const lifecycleRead = this._startRecoveryRead(m, 'apply');
-    this._confirmation = null; this._confirmDialogOpen = false;
-    const hass = this._hass;
-    this.render();
-    void this._refreshMigrationProgress(m, hass);
-    try {
-      const result = await this._migrationRequest(hass, {type: 'ha_entity_renamer/apply',
-        operation_id: m.operation_id, fingerprint: m.fingerprint});
-      if (!this._migrationCurrent(m)) return;
-      if (result?.operation_id === m.operation_id && result?.fingerprint === m.fingerprint) m.applyState = result.state;
-    } catch (_) {
-      // Missing ACK remains UNKNOWN, even a refusal after review consumption.
-    } finally {
-      this._endRecoveryRead(lifecycleRead);
-      m.applying = false; clearTimeout(m.pollTimer);
-      if (this._migrationCurrent(m)) { m.stage = 'unknown'; m.busy = false; await this._inspectMigration(); }
-    }
-  }
-
-  _canRestoreMigration(m = this._migration) {
-    return !!m && m.attempted && !m.busy && !m.restoreAttempted && !m.restoreRevoked && !!m.review
-      && this._migrationCurrent(m)
-      && ((m.stage === 'applied' && m.inspection?.state === 'applied')
-        || (m.stage === 'unknown' && m.inspection?.state === 'recoverable_complete'
-          && m.registryMatches && m.journal?.status === 'unknown'
-          && m.journal?.direction === 'forward'))
-      && m.inspection?.operation_id === m.operation_id && m.inspection?.fingerprint === m.fingerprint
-      && m.inspection?.eligible === true && m.inspection?.restore_attempt_available === true;
-  }
-
-  _reviewMigrationRestore() {
-    const m = this._migration;
-    if (!this._canRestoreMigration(m)) return;
-    m.restoreConsent = true;
-    this.render();
-    this.shadowRoot.getElementById('cancelMigrationRestore')?.focus();
-  }
-
-  _cancelMigrationRestore() {
-    const m = this._migration;
-    if (!m?.restoreConsent || m.restoreAttempted) return;
-    m.restoreConsent = false;
-    this.render();
-    this.shadowRoot.getElementById('reviewMigrationRestore')?.focus();
-  }
-
-  async _restoreMigration() {
-    const m = this._migration;
-    if (!m?.restoreConsent || !this._canRestoreMigration(m)) return;
-    // Consume before IO. Neither failed transport nor inspection can revive consent.
-    m.restoreConsent = false; m.restoreAttempted = true; m.restoreAcknowledged = false;
-    m.stage = 'restoring'; m.busy = true; m.restoring = true; m.registryMatches = false;
-    const lifecycleRead = this._startRecoveryRead(m, 'restore');
-    const hass = this._hass;
-    this.render();
-    void this._refreshMigrationProgress(m, hass);
-    try {
-      const result = await this._migrationRequest(hass, {type: 'ha_entity_renamer/recovery/restore',
-        operation_id: m.operation_id, fingerprint: m.fingerprint});
-      if (!this._migrationCurrent(m)) return;
-      m.restoreAcknowledged = result?.operation_id === m.operation_id
-        && result?.fingerprint === m.fingerprint && result?.state === 'rolled_back';
-    } catch (_) {
-      // A missing ACK or refusal remains UNKNOWN. Never replay or use registry writes.
-    } finally {
-      this._endRecoveryRead(lifecycleRead);
-      m.restoring = false; clearTimeout(m.pollTimer);
-      if (this._migrationCurrent(m)) {
-        m.stage = 'unknown'; m.busy = false;
-        // These reads begin only after the restore response, independently of its ACK.
-        await this._inspectMigration();
-      }
-    }
-  }
-
-  async _inspectMigration() {
-    const m = this._migration;
-    if (!m?.attempted || m.busy || m.lifecycleEntry?.pending || m.owner !== this._hass?.user?.id || !this._renameAuthorityAvailable()) return;
-    const read = this._startRecoveryRead(m, 'inspect');
-    try { return await this._runMigrationInspection(m); }
-    catch (_) {
-      if (this._migrationCurrent(m)) {
-        m.inspectionIssue = 'unavailable'; m.inspection = null; m.registryRead = false; m.registryMatches = false;
-        m.stage = 'unknown'; m.busy = false; m.inspecting = false; clearTimeout(m.pollTimer); m.pollTimer = null; this.render();
-      }
-    } finally { this._endRecoveryRead(read); }
-  }
-
-  async _runMigrationInspection(m) {
-    m.restoreConsent = false;
-    // Rebind read authority only. This cannot revive apply or restore consent.
-    m.epoch = this._authorityEpoch; m.session = this._readSession(); m.invalidated = false;
-    m.observation = (m.observation || 0) + 1;
-    m.busy = true; m.inspecting = true; m.inspection = null; m.inspectionIssue = null;
-    m.registryRead = false; m.registryMatches = false; this.render();
-    const hass = this._hass;
-    // Status is independently readable while inspection waits for the operation lock.
-    void this._refreshMigrationProgress(m, hass);
-    const [inspectionResult] = await Promise.allSettled([
-      this._migrationRequest(hass, {type: 'ha_entity_renamer/recovery/inspect', operation_id: m.operation_id, fingerprint: m.fingerprint}),
-    ]);
-    if (!this._migrationCurrent(m)) return;
-    // Registry verification must be newer than the inspection, not concurrent with it.
-    const results = await Promise.allSettled([
-      this._migrationRequest(hass, {type: 'config/entity_registry/list'}),
-      this._migrationRequest(hass, {type: 'config/device_registry/list'}),
-    ]);
-    if (!this._migrationCurrent(m)) return;
-    const value = i => results[i].status === 'fulfilled' ? results[i].value : null;
-    const inspection = inspectionResult.status === 'fulfilled' ? inspectionResult.value : null;
-    m.inspection = inspection?.operation_id === m.operation_id && inspection?.fingerprint === m.fingerprint ? inspection : null;
-    if (!m.inspection) m.inspectionIssue = 'unavailable';
-    if ((m.recoveredIdentity || m.restoreAttempted) && m.inspection
-        && ((m.inspection.eligible === true && ['applied', 'recoverable_complete'].includes(m.inspection.state))
-          || (m.inspection.state === 'rolled_back' && m.inspection.reason === 'restored_verified'))) {
-      const frozen = m.inspection.frozen_review;
-      const projection = frozen && {...frozen, operation_id: m.operation_id, fingerprint: m.fingerprint};
-      if (this._validMigrationReview(projection) && Array.isArray(frozen.identities)
-          && frozen.identities.length === frozen.changes.length
-          && frozen.identities.every((identity, i) => frozen.changes[i].device_id
-            ? typeof identity === 'string' && identity === frozen.changes[i].device_id
-            : Array.isArray(identity) && identity.length === 4 && identity.every(value => value === null || typeof value === 'string'))) {
-        m.review = JSON.parse(JSON.stringify({changes: frozen.changes, dependencies: frozen.dependencies}));
-        m.identities = frozen.identities.map(identity => Array.isArray(identity) ? JSON.stringify(identity) : identity);
-        if (m.inspection.state === 'rolled_back') m.restoreAttempted = true;
-        else if (m.recoveredIdentity && !m.restoreAttempted && m.inspection.restore_attempt_available === true)
-          m.restoreRevoked = false; // New explicit confirmation is still required.
-      }
-    }
-    // Fresh reads refresh the projection; they do not prove dependencies.
-    const entities = value(0), devices = value(1);
-    m.registryRead = Array.isArray(entities) && Array.isArray(devices);
-    if (!m.registryRead && !m.inspectionIssue) m.inspectionIssue = 'registry';
-    m.registryMatches = false;
-    if (m.registryRead) {
-      this._entities = entities; this._devices = devices;
-      this._deviceEntities = Object.create(null);
-      for (const row of entities) {
-        if (row.device_id) (this._deviceEntities[row.device_id] ||= []).push(row);
-      }
-      m.registryMatches = !!m.review && m.review.changes.every((change, index) => {
-        const side = m.restoreAttempted ? 'before' : 'after';
-        const rows = change.device_id ? devices.filter(r => r.id === change.device_id)
-          : entities.filter(r => r.entity_id === (change.fields.entity_id?.[side] || change.entity_id));
-        const row = rows.length === 1 ? rows[0] : null;
-        return row && (change.device_id ? row.id === m.identities?.[index]
-          : entities.filter(item => item.id === row.id).length === 1
-            && !!m.identities?.[index] && this._migrationEntityIdentityMatches(row, m.identities[index], change, side))
-          && Object.entries(change.fields).every(([key, field]) => (row[key] ?? null) === field[side]);
-      });
-    }
-    m.stage = m.inspection?.state === 'refused' && m.inspection?.reason === 'prewrite_refused' ? 'refused'
-      : m.restoreAttempted ? ((m.restoreAcknowledged || (m.inspection?.state === 'rolled_back'
-        && m.inspection?.reason === 'restored_verified')) && m.registryMatches ? 'restored' : 'unknown')
-      : m.inspection?.state === 'applied' && m.registryMatches ? 'applied' : 'unknown';
-    if (!m.restoreAttempted && m.stage === 'applied') this._recordMigrationHistory(m, 'applied');
-    else if (!m.restoreAttempted && m.stage === 'refused') this._recordMigrationHistory(m, 'refused');
-    m.inspecting = false; clearTimeout(m.pollTimer); m.pollTimer = null;
-    m.busy = false; this.render();
-  }
-
-  _finishMigration() {
-    const m = this._migration;
-    if (!m || m.busy || !['applied', 'restored', 'refused'].includes(m.stage) || m.restoreConsent || !this._migrationCurrent(m)) return;
-    if (!m.recoveredIdentity && m.stage !== 'refused') { this._renameQueue = []; this._deviceRenameQueue = {}; this._impactResults = null; }
-    if (m.lifecycleEntry) this._recoveryCardScope?.entries.delete(m.lifecycleEntry);
-    this._migration = null; this.render();
-  }
-
-  _renderMigrationReview(inverse = false) {
-    const m = this._migration;
-    if (!m || (m.attempted && !inverse)) return '';
-    const review = inverse ? {
-      changes: m.review.changes.map(change => ({...change, entity_id: change.device_id ? change.entity_id : (change.fields.entity_id?.after || change.entity_id), fields: Object.fromEntries(
-        Object.entries(change.fields).map(([key, field]) => [key, {before: field.after, after: field.before}]))})),
-      dependencies: {...m.review.dependencies, files: m.review.dependencies.files.map(file => ({...file,
-        references: file.references.map(ref => ({...ref, before: ref.after, after: ref.before}))})),
-        dashboards: (m.review.dependencies.dashboards || []).map(row => ({...row,
-          references: row.references.map(ref => ({...ref, before: ref.after, after: ref.before}))})),
-        config_entries: (m.review.dependencies.config_entries || []).map(entry => ({...entry, before: entry.after, after: entry.before}))},
-    } : m.review;
-    const title = inverse ? this._migrationText('Restore this operation', 'Wycofaj tę operację') : this._migrationText('Dependency update plan', 'Plan aktualizacji zależności');
-    const body = inverse ? this._migrationText('Confirm only the inverse changes below for this current operation. Other operations are excluded.', 'Potwierdź wyłącznie poniższe zmiany odwrotne bieżącej operacji. Inne operacje są wykluczone.') : m.stage === 'preparing' ? this._migrationText('Preparing server review…', 'Przygotowywanie przeglądu na serwerze…')
-      : m.stage === 'refused' && m.refusalCode === 'unsupported_script_state_trigger' ? this._migrationText('An enabled automation monitors this script’s state. This dependency cannot yet be migrated safely. Nothing was applied.', 'Włączona automatyzacja obserwuje stan tego skryptu. Tej zależności nie można jeszcze bezpiecznie przenieść. Niczego nie zastosowano.')
-      : m.stage === 'refused' && m.refusalCode === 'unsupported_automation_scope' ? this._migrationText('Automation state or configuration could not be safely verified. Nothing was applied.', 'Nie można bezpiecznie sprawdzić stanu lub konfiguracji automatyzacji. Niczego nie zastosowano.')
-      : m.stage === 'refused' && m.refusalCode === 'unsupported_config_entry' ? this._migrationText('A configuration entry has a reference or dynamic expression that cannot be safely migrated. Nothing was applied.', 'Wpis konfiguracji zawiera odwołanie lub wyrażenie dynamiczne, którego nie można bezpiecznie przenieść. Niczego nie zastosowano.')
-      : m.stage === 'refused' && m.refusalCode === 'unsupported_powercalc_scope' ? this._migrationText('Powercalc is loaded and its dependencies cannot be verified for this plan. Nothing was applied.', 'Powercalc jest załadowany i nie można sprawdzić jego zależności dla tego planu. Niczego nie zastosowano.')
-      : m.stage === 'refused' && m.refusalCode === 'unsupported_template_reference' ? this._migrationText('A Template reference could not be safely interpreted. Nothing was applied.', 'Nie można bezpiecznie rozpoznać odwołania Template. Niczego nie zastosowano.')
-      : m.stage === 'refused' && m.refusalCode === 'unsupported_template_family' ? this._migrationText('An affected Template form is not supported. Nothing was applied.', 'Dotknięta postać Template nie jest obsługiwana. Niczego nie zastosowano.')
-      : m.stage === 'refused' ? this._migrationText('The selection was refused or could not be verified. Nothing was applied. Cancel to review your queue. No registry-only fallback was performed.', 'Zakres został odrzucony lub nie udało się go zweryfikować. Niczego nie zastosowano. Anuluj, aby wrócić do kolejki. Nie wykonano zastępczego zapisu samego rejestru.')
-      : this._migrationText('Review every server change and the admitted dependency scope. Coverage of all dependency families is not confirmed.', 'Sprawdź wszystkie zmiany serwera i przyjęty zakres zależności. Pokrycie wszystkich rodzin zależności nie jest potwierdzone.');
-    const fieldName = key => ({entity_id: 'Entity ID', name: this._migrationText('Entity name', 'Nazwa encji'), name_by_user: this._migrationText('Device name', 'Nazwa urządzenia')}[key] || key);
-    const valueText = value => value === null ? this._migrationText('(default)', '(domyślna)') : value;
-    const rows = review?.changes.flatMap(change => Object.entries(change.fields).map(([key, field]) =>
-      `<tr><td>${_esc(change.entity_id || change.device_id)}</td><td>${_esc(fieldName(key))}</td><td>${_esc(valueText(field.before))}</td><td>${_esc(valueText(field.after))}</td></tr>`)).join('') || '';
-    const domains = review?.dependencies.domains.map(domain => ({template: 'Template', automation: this._migrationText('Automations', 'Automatyzacje'), script: this._migrationText('Scripts', 'Skrypty'), dashboard: this._migrationText('Dashboards', 'Pulpity')}[domain] || domain)).join(', ');
-    const coverageSource = source => ({external: this._migrationText('External consumers', 'Odbiorcy zewnętrzni'),
-      yaml_sources: this._migrationText('YAML and includes', 'YAML i pliki dołączane'),
-      config_entries: this._migrationText('Integration configuration entries', 'Wpisy konfiguracji integracji'),
-      automation: this._migrationText('Automations', 'Automatyzacje'), script: this._migrationText('Scripts', 'Skrypty'),
-      dashboard: this._migrationText('Dashboards', 'Pulpity'), energy: this._migrationText('Energy', 'Energia')}[source] || source);
-    const coverageReason = row => row.reason === 'integration_code_not_enumerated'
-      ? this._migrationText('Custom integration code was not inspected.', 'Kod integracji niestandardowej nie został sprawdzony.')
-      : row.reason === 'dynamic_reference_unverified' ? this._migrationText('A dynamic or unsupported field could not be resolved.', 'Nie można ustalić zawartości pola dynamicznego lub nieobsługiwanego.')
-      : row.source === 'external' ? this._migrationText('External consumers were not enumerated.', 'Odbiorcy zewnętrzni nie zostali zinwentaryzowani.')
-      : row.status === 'DENIED' ? this._migrationText('Access was denied.', 'Odmówiono dostępu.')
-      : this._migrationText('Coverage is incomplete or unverified.', 'Zakres jest niepełny lub niesprawdzony.');
-    return `<section class="confirm-dialog" role="dialog" aria-labelledby="migrationReviewTitle" aria-busy="${m.busy}">
-      <h2 id="migrationReviewTitle">${title}</h2><p role="status">${body}</p>
-      ${review ? `<h3 id="migrationChangesTitle">${this._migrationText('Server changes', 'Zmiany serwera')}</h3>
-        <div role="region" tabindex="0" aria-labelledby="migrationChangesTitle" style="max-width:100%;overflow:auto"><table class="queue-table"><thead><tr><th scope="col">${this._migrationText('Target', 'Cel')}</th><th scope="col">${this._migrationText('Field', 'Pole')}</th><th scope="col">${this._migrationText('Before', 'Przed')}</th><th scope="col">${this._migrationText('After', 'Po')}</th></tr></thead><tbody>${rows}</tbody></table></div>
-        <h3>${this._migrationText('Dependencies', 'Zależności')}</h3><p>${_esc(domains || this._migrationText('None admitted', 'Brak przyjętych'))}</p>
-        <p>${this._migrationText('YAML files', 'Pliki YAML')}: ${review.dependencies.yaml_file_count}. ${this._migrationText('Template consumers', 'Odbiorcy Template')}: ${review.dependencies.template_consumer_count}.</p>
-        ${(review.dependencies.config_entries || []).map(entry => `<p>${entry.kind === 'powercalc' ? this._migrationText('Powercalc group', 'Grupa Powercalc') : this._migrationText('Template entry', 'Wpis Template')}: <code>${_esc(entry.entity_id)}</code> — <code>${_esc(entry.before)}</code> → <code>${_esc(entry.after)}</code></p>`).join('')}
-        ${(review.dependencies.dashboards || []).map(row => `<details open><summary>${this._migrationText('Dashboard', 'Pulpit')}: <code>${_esc(row.route ?? this._migrationText('Default', 'Domyślny'))}</code></summary><ul>${row.references.map(ref => `<li><code>${_entityIdHtml(ref.before)}</code> → <code>${_entityIdHtml(ref.after)}</code> (${ref.occurrences} ${this._migrationText('references', 'odwołań')})</li>`).join('')}</ul></details>`).join('')}
-        ${review.dependencies.files.map(file => `<details open><summary><code>${_esc(file.path)}</code> — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li>${ref.kind === 'script_key' ? this._migrationText('Script key', 'Klucz skryptu') + ': ' : ''}<code>${_entityIdHtml(ref.before)}</code> → <code>${_entityIdHtml(ref.after)}</code> (${ref.occurrences} ${ref.kind === 'script_key' ? this._migrationText('definition', 'definicja') : this._migrationText('references', 'odwołań')})</li>`).join('')}</ul></details>`).join('')}
-        ${(review.dependencies.coverage || []).length ? `<h3>${this._migrationText('Scan limitations', 'Ograniczenia skanowania')}</h3><p>${this._migrationText('These sources are not fully verified. Their presence does not by itself prove a dependency.', 'Te źródła nie zostały w pełni sprawdzone. Sama ich obecność nie dowodzi zależności.')}</p><ul>${review.dependencies.coverage.map(row => `<li><code>${_esc(coverageSource(row.source))}</code> — ${_esc(coverageReason(row))}</li>`).join('')}</ul>` : ''}` : ''}
-      ${m.stage === 'refused' && m.scriptTriggerDetails ? `<p>${this._migrationText('Automation', 'Automatyzacja')}: <code>${_esc(m.scriptTriggerDetails.automation)}</code>; ${this._migrationText('Script', 'Skrypt')}: <code>${_esc(m.scriptTriggerDetails.script)}</code></p>` : ''}
-      ${m.stage === 'refused' && m.refusalDetails ? `<ul>${m.refusalDetails.map(row => `<li>${this._migrationText('Configuration entry', 'Wpis konfiguracji')}: <code>${_esc(row.domain)}</code> / <code>${_esc(row.entry_id)}</code> — ${this._migrationText('unsupported or dynamic reference', 'nieobsługiwane lub dynamiczne odwołanie')}${row.references.length ? `; ${this._migrationText('references', 'odwołania')}: ${row.references.map(value => `<code>${_entityIdHtml(value)}</code>`).join(', ')}` : ''}</li>`).join('')}</ul>` : ''}
-      <button type="button" class="btn btn-outline" id="${inverse ? 'cancelMigrationRestore' : 'cancelRenameDialog'}">${_esc(this._t.cancel)}</button>
-      ${inverse ? `<button type="button" class="btn btn-danger" id="restoreMigration">${this._migrationText('Restore this scope once', 'Wycofaj ten zakres jeden raz')}</button>` : ''}
-      ${!inverse && m.stage === 'review' ? `<button type="button" class="btn btn-danger" id="applyMigration">${this._migrationText('Apply this plan once', 'Zastosuj ten plan jeden raz')}</button>` : ''}
-    </section>`;
-  }
-
-  _renderMigrationProgress(m) {
-    const observation = this._migrationText('Journal entry not returned or read unavailable; inspection and registry results above are separate.', 'Nie zwrócono wpisu dziennika lub jego odczyt jest niedostępny; wyniki inspekcji i rejestru powyżej są osobne.');
-    const progress = m.journal?.progress;
-    // Persisted step observations do not establish the final verifier result.
-    const states = {
-      prepared: this._migrationText('Prepared', 'Przygotowano'),
-      refused: this._migrationText('Refused before write', 'Odmowa przed zapisem'),
-      applying: this._migrationText('Applying', 'Wykonywanie'),
-      applied: this._migrationText('Applied', 'Zastosowano'),
-      unknown: this._migrationText('Unknown', 'Nieustalony'),
-      ready: this._migrationText('Ready for recovery', 'Gotowość do odzyskania'),
-      rollback_ready: this._migrationText('Ready for rollback', 'Gotowość do wycofania'),
-      rolling_back: this._migrationText('Rolling back', 'Wycofywanie'),
-      rolled_back: this._migrationText('Rolled back', 'Wycofano'),
-    };
-    const phases = {
-      pending: this._migrationText('waiting', 'oczekuje'),
-      intent: this._migrationText('write intent recorded; outcome not yet verified', 'zapisano zamiar zapisu; wynik jeszcze niezweryfikowany'),
-      verified: this._migrationText('step verified', 'krok zweryfikowany'),
-      undo_intent: this._migrationText('restore intent recorded; outcome not yet verified', 'zapisano zamiar wycofania; wynik jeszcze niezweryfikowany'),
-      undone: this._migrationText('step undone', 'krok wycofany'),
-    };
-    const state = m.journal?.status;
-    return `      <h3>${this._migrationText('Journal progress', 'Postęp dziennika')}</h3>
-      <p>${state ? `${this._migrationText('State', 'Stan')}: ${_esc(`${states[state] || state} (${state})`)}.` : _esc(observation)}</p>
-      ${progress ? `<p>${this._migrationText('Verified steps', 'Zweryfikowane kroki')}: ${_esc(String(progress.verified_steps))} / ${_esc(String(progress.total_steps))}. ${this._migrationText('Undone steps', 'Wycofane kroki')}: ${_esc(String(progress.undone_steps))}.</p>
-      <p>${this._migrationText('Verified step count does not confirm the final outcome; final verification and inspection are separate.', 'Liczba zweryfikowanych kroków nie potwierdza końcowego wyniku; końcowa weryfikacja i inspekcja są osobne.')}</p>` : ''}
-      <ul>${(Array.isArray(m.journal?.phases) ? m.journal.phases : []).map(row => `<li>${_esc(String(row.adapter))}: ${_esc(phases[row.phase] || String(row.phase))} (${_esc(String(row.phase))})</li>`).join('')}</ul>`;
-  }
-
   _renderApplyResult() {
-    const m = this._migration;
-    if (!m?.attempted || m.owner !== this._hass?.user?.id || this._hass?.user?.is_admin !== true) return '';
-    if (m.restoreConsent) return this._renderMigrationReview(true);
-    const observation = this._migrationText('unavailable', 'niedostępny');
-    const restoreGuidance = m.restoreAttempted
-      ? this._migrationText('A restore was already attempted. Inspect the outcome; do not repeat the write.', 'Podjęto już próbę wycofania. Sprawdź wynik; nie powtarzaj zapisu.')
-      : this._canRestoreMigration(m)
-        ? this._migrationText('Fresh inspection allows review of this operation’s restore scope. Review and confirm it separately before any restore.', 'Świeża inspekcja pozwala sprawdzić zakres wycofania tej operacji. Przed wycofaniem osobno sprawdź i potwierdź zakres.')
-        : this._migrationText('Restore is unavailable until a fresh inspection permits it. Check status and inspect; do not repeat the write.', 'Wycofanie jest niedostępne, dopóki świeża inspekcja go nie dopuści. Sprawdź stan i inspekcję; nie powtarzaj zapisu.');
-    return `<section class="apply-result ${['applied', 'restored'].includes(m.stage) && !m.busy ? '' : 'migration-pending'}" aria-labelledby="migrationResultTitle" aria-busy="${m.busy}">
-      <h2 id="migrationResultTitle">${this._migrationText('Dependency operation', 'Operacja zależności')}</h2>
-      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan… This may take several minutes. Do not repeat the operation.', 'Wykonywanie zatwierdzonego planu… Może to potrwać kilka minut. Nie powtarzaj operacji.') : m.stage === 'restoring' ? this._migrationText('Restoring the confirmed scope… This may take several minutes. Do not repeat the operation.', 'Wycofywanie potwierdzonego zakresu… Może to potrwać kilka minut. Nie powtarzaj operacji.') : m.busy ? this._migrationText('Checking current status, inspection and registry… This may take several minutes. Do not repeat the operation.', 'Sprawdzanie bieżącego stanu, inspekcji i rejestru… Może to potrwać kilka minut. Nie powtarzaj operacji.') : m.stage === 'refused' ? this._migrationText('The server confirmed refusal before applying any changes.', 'Serwer potwierdził odmowę przed zastosowaniem zmian.') : m.stage === 'restored' ? this._migrationText('Restored scope confirmed; original registry fields independently verified.', 'Wycofanie zakresu potwierdzone; oryginalne pola rejestru niezależnie zweryfikowane.') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : m.inspectionIssue === 'interrupted' ? (m.lifecycleEntry?.pending?.kind === 'inspect' ? this._migrationText('The previous inspection is still in progress after the card or authority changed. Its result cannot be used; wait for it to finish before checking again.', 'Poprzednia inspekcja nadal trwa po zmianie karty lub uprawnień. Jej wynik nie może zostać użyty; poczekaj na zakończenie przed ponownym sprawdzeniem.') : this._migrationText('A previous inspection result cannot be used after the card or authority changed. The outcome remains unconfirmed. Check status and inspect again.', 'Wynik poprzedniej inspekcji nie może zostać użyty po zmianie karty lub uprawnień. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.')) : m.inspectionIssue === 'unavailable' ? this._migrationText('Inspection failed or returned a mismatched response. The outcome remains unconfirmed. Check status and inspect again.', 'Inspekcja nie powiodła się lub zwróciła niedopasowaną odpowiedź. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.') : m.inspectionIssue === 'registry' ? this._migrationText('Inspection returned, but a fresh registry read failed. The outcome remains unconfirmed. Check status and inspect again.', 'Inspekcja zwróciła wynik, ale świeży odczyt rejestru nie powiódł się. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.') : m.recoveredIdentity && !m.inspection ? this._migrationText('Previous operation selected. Check status and inspect; do not repeat the write.', 'Wybrano poprzednią operację. Sprawdź stan i inspekcję; nie powtarzaj zapisu.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
-      <p>${this._migrationText('Full dependency coverage is unconfirmed. Restore covers only this current operation.', 'Pełne pokrycie zależności jest niepotwierdzone. Wycofanie obejmuje tylko bieżącą operację.')}</p>
-      ${m.recoveredIdentity ? `<p>${this._migrationText('A previous operation is available for fresh inspection. Apply consent was not retained; do not repeat the write.', 'Poprzednia operacja jest dostępna do świeżej inspekcji. Zgoda na zastosowanie nie została zachowana; nie powtarzaj zapisu.')}</p>` : ''}
-      <code>${_esc(m.operation_id)}</code>
-      <p>${this._migrationText('Apply observation', 'Obserwacja zapisu')}: ${_esc(m.applyState || (m.busy || (m.recoveredIdentity && !m.inspection) ? observation : 'UNKNOWN'))}. ${this._migrationText('Inspection', 'Inspekcja')}: ${_esc(m.inspection?.state || observation)}.</p>
-      <p>${this._migrationText('Registry read', 'Odczyt rejestru')}: ${m.registryRead ? this._migrationText('received', 'otrzymany') : observation}. ${this._migrationText('Requested fields match', 'Zgodność żądanych pól')}: ${m.registryMatches ? this._migrationText('yes', 'tak') : this._migrationText('unconfirmed', 'niepotwierdzona')}.</p>
-      ${m.recoveredIdentity && m.review ? `<details><summary>${this._migrationText('Admitted original review (read-only)', 'Dopuszczony oryginalny przegląd (tylko odczyt)')}</summary>
-        <ul>${m.review.changes.flatMap(change => Object.entries(change.fields).map(([field, value]) => `<li>${_esc(change.entity_id || change.device_id)} — ${_esc(field)}: ${_esc(value.before ?? '(default)')} → ${_esc(value.after ?? '(default)')}</li>`)).join('')}</ul>
-        <p>${this._migrationText('Dependencies', 'Zależności')}: ${_esc(m.review.dependencies.domains.join(', '))}. ${this._migrationText('Template consumers', 'Odbiorcy Template')}: ${m.review.dependencies.template_consumer_count}.</p>
-        ${(m.review.dependencies.config_entries || []).map(entry => `<p>${entry.kind === 'powercalc' ? this._migrationText('Powercalc group', 'Grupa Powercalc') : this._migrationText('Template entry', 'Wpis Template')}: <code>${_esc(entry.entity_id)}</code> — <code>${_esc(entry.before)}</code> → <code>${_esc(entry.after)}</code></p>`).join('')}
-        ${m.review.dependencies.files.map(file => `<details><summary>${_esc(file.path)} — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li>${_esc(ref.before)} → ${_esc(ref.after)} (${ref.occurrences})</li>`).join('')}</ul></details>`).join('')}
-      </details>` : ''}
-      <div id="migrationJournal" aria-live="polite">${this._renderMigrationProgress(m)}</div>
-      ${!m.busy && m.stage !== 'restored' ? `<p>${restoreGuidance}</p>` : ''}
-      <button type="button" class="btn btn-outline" id="inspectMigration" ${m.busy || !this._renameAuthorityAvailable() ? 'disabled' : ''}>${this._migrationText('Check status and inspect', 'Sprawdź stan i inspekcję')}</button>
-      <button type="button" class="btn btn-outline" id="reviewMigrationRestore" ${this._canRestoreMigration(m) ? '' : 'disabled'}>${this._migrationText('Review restore scope', 'Sprawdź zakres wycofania')}</button>
-      ${['applied', 'restored', 'refused'].includes(m.stage) ? `<button type="button" class="btn btn-primary" id="finishMigration">${m.recoveredIdentity ? this._migrationText('Finish operation', 'Zakończ operację') : m.stage === 'refused' ? this._migrationText('Finish and review queue', 'Zakończ i sprawdź kolejkę') : m.stage === 'restored' ? this._migrationText('Finish and clear restored queue', 'Zakończ i wyczyść wycofaną kolejkę') : this._migrationText('Finish and clear applied queue', 'Zakończ i wyczyść zastosowaną kolejkę')}</button>` : ''}
-    </section>`;
+    // Stub: render() referenced this._renderApplyResult() but the method was
+    // never implemented, so it threw "is not a function" and blanked the whole
+    // card (regression since v4.2.0). Apply/rename feedback is surfaced via
+    // this._message above, so an empty string is the correct no-op here.
+    return '';
   }
 
   _renderAutomaticTab() {
@@ -3863,7 +3352,7 @@ class HAEntityRenamer extends HTMLElement {
               <button type="button" class="device-header" data-device-id="${_esc(d.id)}" role="button" tabindex="0" aria-expanded="${isExpanded}" aria-label="${_esc((this._lang === 'pl' ? 'Szczegóły urządzenia: ' : 'Device details: ') + this._getDeviceName(d))}">
                 <span class="device-expand ${isExpanded ? 'open' : ''}">▶</span>
                 <span class="device-name">${_esc(this._getDeviceName(d))}</span>${this._newBadge(d.created_at)}
-                <span class="device-meta">${this._registryCount(ents.length,'entity')} · ${(d.unassigned ? this._entities.filter(e=>!e.device_id) : this._deviceEntities[d.id]||[]).filter(e=>this._renameQueue.some(r=>r.oldId===e.entity_id)).length} ${t.inQueue.toLowerCase()}</span>
+                <span class="device-meta">${this._registryCount(ents.length,'entity')} · ${(this._deviceEntities[d.id]||[]).filter(e=>this._renameQueue.some(r=>r.oldId===e.entity_id)).length} ${t.inQueue.toLowerCase()}</span>
               </button>
               ${isExpanded ? `
               <div class="entity-list">
@@ -3882,7 +3371,7 @@ class HAEntityRenamer extends HTMLElement {
                   </div>`;
                 }).join('')}
               </div>
-              ${isSelected && !d.unassigned ? `
+              ${isSelected ? `
               <div class="prefix-section">
                 <h3>📱 ${t.newDeviceName}</h3>
                 <div class="prefix-row" style="margin-bottom:12px">
@@ -3975,7 +3464,7 @@ class HAEntityRenamer extends HTMLElement {
             <span class="${resultState === 'success' ? 'log-ok' : resultState === 'error' ? 'log-err' : ''}">
               ${ui.statusHtml(resultState)} ${_entityIdHtml(l.oldId)} → ${_entityIdHtml(l.newId)}
             </span>
-            ${l.error ? `<br><small class="log-error-detail">${_esc(l.error)}</small>` : ''}
+            ${l.error ? `<br><small style="color:#FCA5A5">${_esc(l.error)}</small>` : ''}
             ${this._dashboardCoverageHtml(imp)}
             ${hasImpact ? `<div style="margin-top:4px;padding-left:24px;">
               <span style="font-size:12px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
@@ -3992,6 +3481,8 @@ class HAEntityRenamer extends HTMLElement {
   _attachEvents() {
     const root = this.shadowRoot;
     const t = this._t;
+    root.getElementById('bridgeNoticeDismiss')?.addEventListener('click', () => this._setBridgeNoticeDismissed(true));
+    root.getElementById('bridgeNoticeOpen')?.addEventListener('click', () => this._setBridgeNoticeDismissed(false));
     root.getElementById('exportRenameLog')?.addEventListener('click', e => this._openRenameExport(e.currentTarget));
     root.getElementById('reviewLegacyHistory')?.addEventListener('click', () => this._reviewLegacyHistory());
 
@@ -4066,7 +3557,7 @@ class HAEntityRenamer extends HTMLElement {
     const applyDeviceName = root.getElementById('applyDeviceName');
     if (applyDeviceName) {
       applyDeviceName.addEventListener('click', () => {
-        if (this._loading || this._migration) return;
+        if (this._loading) return;
         const devId = applyDeviceName.dataset.deviceId;
         const newName = (root.getElementById('deviceName') || {}).value || '';
         if (newName) {
@@ -4091,7 +3582,7 @@ class HAEntityRenamer extends HTMLElement {
     if (editor) {
       editor.addEventListener('submit', e => {
         e.preventDefault();
-        if (this._loading || this._migration || !this._entityEditor) return;
+        if (this._loading || !this._entityEditor) return;
         const { oldId, objectId, currentName } = this._entityEditor;
         const newObjectId = root.getElementById('entityEditObjectId').value || objectId;
         const name = root.getElementById('entityEditName').value;
@@ -4145,24 +3636,6 @@ class HAEntityRenamer extends HTMLElement {
     const analyzeImpact = root.getElementById('analyzeImpact');
     if (analyzeImpact) analyzeImpact.addEventListener('click', () => this._analyzeImpact());
 
-    for (const [id, method] of [['prepareMigration', '_prepareMigration'], ['inspectMigration', '_inspectMigration'], ['finishMigration', '_finishMigration'], ['reviewMigrationRestore', '_reviewMigrationRestore'], ['cancelMigrationRestore', '_cancelMigrationRestore']]) {
-      root.getElementById(id)?.addEventListener('click', () => this[method]());
-    }
-    root.getElementById('applyMigration')?.addEventListener('click', () => this._requestWriteWarning('migration'));
-    root.getElementById('restoreMigration')?.addEventListener('click', () => this._requestWriteWarning('restore'));
-    root.getElementById('cancelWriteWarning')?.addEventListener('click', () => this._cancelWriteWarning());
-    root.getElementById('continueWriteWarning')?.addEventListener('click', () => this._continueWriteWarning());
-    root.querySelector('.write-warning-backdrop [role="dialog"]')?.addEventListener('keydown', e => {
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this._cancelWriteWarning(); }
-      else if (e.key === 'Tab') {
-        e.preventDefault(); e.stopPropagation();
-        const controls = Array.from(e.currentTarget.querySelectorAll('a[href], button:not(:disabled)'));
-        const current = controls.indexOf(root.activeElement);
-        const next = current < 0 ? (e.shiftKey ? controls.length - 1 : 0)
-          : (current + (e.shiftKey ? -1 : 1) + controls.length) % controls.length;
-        controls[next]?.focus();
-      }
-    });
     const cancelRenameDialog = root.getElementById('cancelRenameDialog');
     if (cancelRenameDialog) {
       cancelRenameDialog.addEventListener('click', () => this._cancelRenameConfirmation());
@@ -4171,25 +3644,20 @@ class HAEntityRenamer extends HTMLElement {
     root.querySelector('.confirm-dialog')?.addEventListener('keydown', e => {
       if (e.key === 'Escape') {
         e.preventDefault(); e.stopPropagation();
-        if (this._migration?.restoreConsent) this._cancelMigrationRestore();
-        else this._cancelRenameConfirmation();
+        this._cancelRenameConfirmation();
       } else if (e.key === 'Tab') {
         e.preventDefault();
-        const controls = Array.from(e.currentTarget.querySelectorAll('summary, button:not(:disabled), [tabindex="0"]'));
-        const current = controls.indexOf(root.activeElement);
-        const next = current < 0 ? (e.shiftKey ? controls.length - 1 : 0)
-          : (current + (e.shiftKey ? -1 : 1) + controls.length) % controls.length;
-        controls[next]?.focus();
+        const cancel = root.getElementById('cancelRenameDialog');
+        const apply = root.getElementById('confirmRenameApply');
+        (root.activeElement === cancel ? apply : cancel)?.focus();
       }
     });
-
-    root.getElementById('findMigrationRecovery')?.addEventListener('click', () => this._findMigrationRecovery());
-    root.querySelectorAll('[data-recovery-index]').forEach(button => button.addEventListener('click', () => this._selectMigrationRecovery(Number(button.dataset.recoveryIndex))));
 
     const confirmRenameApply = root.getElementById('confirmRenameApply');
     if (confirmRenameApply) {
       confirmRenameApply.addEventListener('click', () => {
-        this._requestWriteWarning('registry');
+        this._confirmDialogOpen = false;
+        this._executeRenames(true);
       });
     }
 
@@ -4200,7 +3668,6 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   disconnectedCallback() {
-    this._unregisterRecoveryCard(true);
     this._cancelRenameAuthority();
     _disconnectFamilyNavigation(this);this._familyNavWidth=null;
     this._exportDialog?.cancel();
@@ -4236,7 +3703,6 @@ class HaEntityRenamerEditor extends HTMLElement {
   }
   set hass(hass) {
     this._hass = hass;
-    this.classList.toggle('bento-dark', hass?.themes?.darkMode === true);
     this._updateTitleLabel();
     this._syncOptions();
   }
@@ -4298,14 +3764,13 @@ class HaEntityRenamerEditor extends HTMLElement {
     }
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display:block; padding:16px; color-scheme:light; }
-        :host(.bento-dark) { color-scheme:dark; }
+        :host { display:block; padding:16px; }
         h3 { margin:0 0 16px; font-size:15px; font-weight:600; color:var(--bento-text, var(--primary-text-color,#1e293b)); }
         label { display:flex;align-items:center;gap:8px;font-size:14px; }
         fieldset { margin:12px 0;border:1px solid var(--divider-color);border-radius:8px; }
         select { display:block;width:100%;min-height:44px;font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:8px; }
         input { box-sizing:border-box;min-height:44px;min-width:44px;max-width:100%;transition:border-color .2s; }
-            input:focus-visible,select:focus-visible { outline:2px solid #fff;outline-offset:2px;box-shadow:0 0 0 5px #111827; }
+            input:focus-visible { outline:3px solid var(--primary-color,#1769aa);outline-offset:2px; }
         input:focus { border-color:var(--bento-primary, var(--primary-color,#3b82f6)); }
       </style>
       <h3>Entity Renamer</h3>

@@ -567,6 +567,11 @@ async def async_setup_entry(hass, entry):
         preparations, journal = await async_reclaim_reviews(hass, guard=lambda: None)
     except Exception as error:
         raise ConfigEntryNotReady('Migration recovery data could not be verified') from error
+    try:
+        from .frontend import async_register_frontend
+        await async_register_frontend(hass)
+    except Exception as error:
+        raise ConfigEntryNotReady(f'Card resource setup failed: {error}') from error
     runtime = Runtime(entry.entry_id, journal, preparations)
     entry.runtime_data = runtime
     if not hass.data.get(DATA_WEBSOCKETS):
@@ -589,5 +594,7 @@ async def async_unload_entry(hass, entry):
             del hass.data[DATA_RUNTIME]
     finally:
         runtime.unloading = False
-    # Private preparations/journal survive reload/removal for explicit recovery.
+    from .frontend import async_unregister_frontend
+    await async_unregister_frontend(hass)
+    # Private preparations/journal and authored resources survive for recovery.
     return True
