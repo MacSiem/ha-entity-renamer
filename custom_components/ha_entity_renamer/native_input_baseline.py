@@ -33,7 +33,8 @@ MAX_RECEIPT_BYTES = 8 * 1024 * 1024
 MAX_ENCODED_BYTES = 2 * MAX_TOTAL_BYTES + MAX_RECEIPT_BYTES
 _KEYS = ('core.entity_registry', 'core.device_registry', 'core.config_entries')
 _SCHEMAS = {'2025.6.0': ((1, 17), (1, 9), (1, 5)),
-            '2026.10.2': ((1, 23), (3, 4), (1, 5)), '2026.10.4': ((1, 23), (3, 4), (1, 5))}
+            '2026.10.2': ((1, 23), (3, 4), (1, 5)), '2026.10.4': ((1, 23), (3, 4), (1, 5)),
+            '2026.11.0': ((1, 24), (3, 4), (1, 5))}
 _RECEIPT_FIELDS = frozenset(f.name for f in fields(ValidationReceipt))
 _LEGACY_RECEIPT_FIELDS = _RECEIPT_FIELDS - {'checker_repairs_snapshot'}
 
@@ -244,11 +245,11 @@ def _schema(data, key, version):
         _fail('native_input_schema_invalid')
     if key == _KEYS[0]:
         lists = ('entities', 'deleted_entities')
-        expected = set(lists) | ({'settings'} if version in ('2026.10.2', '2026.10.4') else set())
-        if version in ('2026.10.2', '2026.10.4') and type(data.get('settings')) is not dict:
+        expected = set(lists) | ({'settings'} if version in ('2026.10.2', '2026.10.4', '2026.11.0') else set())
+        if version in ('2026.10.2', '2026.10.4', '2026.11.0') and type(data.get('settings')) is not dict:
             _fail('native_input_schema_invalid')
     elif key == _KEYS[1]:
-        lists = (('devices', 'child_devices', 'deleted_devices') if version in ('2026.10.2', '2026.10.4')
+        lists = (('devices', 'child_devices', 'deleted_devices') if version in ('2026.10.2', '2026.10.4', '2026.11.0')
                  else ('devices', 'deleted_devices'))
         expected = set(lists)
     else:
@@ -440,6 +441,8 @@ class _Managers:
         if any(type(manager) is not cls for manager, cls in zip(self.managers, classes, strict=True)):
             _fail('native_input_manager_unsupported')
         self.stores = tuple(manager._store for manager in self.managers)
+        self.store_io = tuple(store._io for store in self.stores) if self.version == '2026.11.0' else ()
+        self.store_io_managers = tuple(io._manager for io in self.store_io)
         if any(type(store) is not cls for store, cls in zip(self.stores, store_classes, strict=True)):
             _fail('native_input_store_unsupported')
         self._initial_native_images = self._native_images()
@@ -457,16 +460,28 @@ class _Managers:
                      self.hass.config_entries), self.managers, strict=True))):
             _fail('native_input_manager_changed')
         documents = []
-        for key, manager, store, schema in zip(_KEYS, self.managers, self.stores,
-                                              _SCHEMAS[self.version], strict=True):
+        for index, (key, manager, store, schema) in enumerate(zip(
+                _KEYS, self.managers, self.stores, _SCHEMAS[self.version], strict=True)):
+            if self.version == '2026.11.0':
+                from homeassistant.helpers.storage import STORAGE_MANAGER, _FileStoreIO, _StoreManager
+                io = store._io
+                if (type(io) is not _FileStoreIO or io is not self.store_io[index]
+                        or type(io._manager) is not _StoreManager
+                        or io._manager is not self.store_io_managers[index]
+                        or self.hass.data.get(STORAGE_MANAGER) is not io._manager
+                        or io._hass is not self.hass or io._key != key
+                        or Path(io.path) != Path(store.path)):
+                    _fail('native_input_store_io_changed')
+            else:
+                io = store
             if (manager._store is not store or store.hass is not self.hass
                     or store.key != key or (type(store.version), type(store.minor_version)) != (int, int)
                     or (store.version, store.minor_version) != schema
                     or Path(store.path) != Path(self.receipt.config_root) / '.storage' / key
                     or store._read_only or getattr(store, '_load_empty', False)
-                    or store._encoder is not None or store._private
-                    or store._atomic_writes is not (key != _KEYS[2])
-                    or self.version in ('2026.10.2', '2026.10.4') and (
+                    or store._encoder is not None or io._private
+                    or io._atomic_writes is not (key != _KEYS[2])
+                    or self.version in ('2026.10.2', '2026.10.4', '2026.11.0') and (
                         store._serialize_in_event_loop is not (key == _KEYS[2])
                         or store._max_readable_version != schema[0])):
                 _fail('native_input_store_changed')
@@ -474,7 +489,7 @@ class _Managers:
                     or store._delay_handle is not None or store._unsub_final_write_listener is not None
                     or store._load_future is not None):
                 _fail('native_input_native_write_pending')
-            if self.version in ('2026.10.2', '2026.10.4'):
+            if self.version in ('2026.10.2', '2026.10.4', '2026.11.0'):
                 if key == _KEYS[1] and not manager._loaded_event.is_set():
                     _fail('native_input_manager_not_loaded')
                 if key == _KEYS[2] and not manager._initialized.is_set():

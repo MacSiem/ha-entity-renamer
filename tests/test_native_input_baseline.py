@@ -718,5 +718,25 @@ class Core104BaselineFileTests(BaselineFileTests):
     version = '2026.10.4'
 
 
+class Core110BaselineFileTests(BaselineFileTests):
+    """Core 11 uses entity registry 1.24 and retains full native rows."""
+
+    version = '2026.11.0'
+
+    def test_entity_compat_name_preserved_and_schema_bound(self):
+        self.documents[0]['entities'][0]['compat_name'] = 'Kept old name'
+        (self.root / '.storage/core.entity_registry').write_bytes(
+            envelope(KEYS[0], self.documents[0], self.version))
+        self.receipt = receipt_for(self.root, self.version)
+        captured = self.capture()
+        reopened = baseline.decode_baseline(baseline.encode_baseline(captured))
+        self.assertEqual(reopened, captured)
+        entity = json.loads(next(row.raw for row in reopened.files if row.key == KEYS[0]))
+        self.assertEqual(entity['data']['entities'][0]['compat_name'], 'Kept old name')
+        stale = envelope(KEYS[0], self.documents[0], '2026.10.4')
+        with self.assertRaises(baseline.NativeInputBaselineError):
+            baseline._envelope(stale, KEYS[0], self.version)
+
+
 if __name__ == '__main__':
     unittest.main()
