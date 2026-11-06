@@ -233,6 +233,39 @@ def _baseline_stamp(value):
     return value.format, hashlib.sha256(value.receipt_json).digest(), tuple(rows)
 
 
+def _retained_powercalc_preparation_fence(server, reference):
+    """Bind one already authenticated controlled ORIGINAL to this session."""
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    from .native_template_state_composition import retain_state_composition
+    from .native_template_state_yaml import _receipt_values
+    from .native_registry_receipts import _exact_json_equal, _freeze_json
+
+    chain, plan, preparations = server.chain, server.plan, server.preparations
+    composition, receipt, baseline = server.composition, server.receipt, chain.baseline
+    if type(composition) is not ControlledPowercalcComposition:
+        return None
+    _need(chain.plan is plan and chain.preparations is preparations
+          and chain.original_receipt is receipt and chain._powercalc_preparations_unchanged(),
+          'original_binding_changed')
+    payload = preparations.resolve(*reference[:2])
+    _need(canonical_digest(payload) == reference[1] and baseline.receipt == receipt,
+          'original_binding_changed')
+    wire, check_composition = retain_state_composition(composition, baseline)
+    _need(_exact_json_equal(wire, _freeze_json(payload.get('composition'))),
+          'composition_changed')
+    frozen_receipt = _freeze_json(_receipt_values(receipt))
+
+    def check():
+        _need(server.chain is chain and server.plan is plan and server.preparations is preparations
+              and server.receipt is receipt and server.composition is composition
+              and type(plan.native_inputs) is tuple and plan.native_inputs == reference
+              and chain._powercalc_preparations_unchanged()
+              and _exact_json_equal(_receipt_values(receipt), frozen_receipt),
+              'original_binding_changed')
+        check_composition(server.composition)
+    return check
+
+
 class NativeTemplateYAMLServer:
     """Task-local session; all effect capabilities are constructed on the server."""
 
@@ -468,8 +501,9 @@ class NativeTemplateYAMLServer:
             _need(self.chain.baseline.receipt == self.receipt
                   and self._composition_current(payload.get('composition')),
                   'composition_changed')
-        self._preparation_current = preparation_current
-        preparation_current()
+        retained = _retained_powercalc_preparation_fence(self, reference)
+        self._preparation_current = retained if retained is not None else preparation_current
+        self._preparation_current()
         self.observation_state = self.chain.reconstruct_inputs()
         self.observer = self._new_observer()
         self.observer.assert_change(self.change)
@@ -879,6 +913,9 @@ class NativeTemplateYAMLServer:
                   and writer.reconstruct_inputs().same_evidence(state), 'head_changed')
             writer.writable = True
             obj.chain = writer
+            retained = _retained_powercalc_preparation_fence(obj, obj.plan.native_inputs)
+            if retained is not None:
+                obj._preparation_current = retained
             obj.observer.chain = writer
             if dashboard_plan:
                 obj.dashboard_phase.chain = writer
@@ -984,6 +1021,9 @@ class NativeTemplateYAMLServer:
                   and writer.reconstruct_inputs().same_evidence(state), 'head_changed')
             writer.writable = True
             obj.chain = writer
+            retained = _retained_powercalc_preparation_fence(obj, obj.plan.native_inputs)
+            if retained is not None:
+                obj._preparation_current = retained
             obj.observer.chain = writer
             if dashboard_plan:
                 obj.dashboard_phase.chain = writer

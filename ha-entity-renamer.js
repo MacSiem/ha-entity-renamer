@@ -1288,7 +1288,7 @@ const _FAMILY_CONTROL_CSS = `
 :host label:has(input[type=checkbox]) { min-height:44px !important;min-width:44px;display:flex;align-items:center;gap:8px;cursor:pointer; }
 :host input[type=checkbox] { width:18px;height:18px;flex:none; }
 :host button:focus-visible,:host summary:focus-visible,:host a:focus-visible,:host input:focus-visible,:host select:focus-visible,:host textarea:focus-visible,:host [role=button]:focus-visible {
-  outline:3px solid var(--primary-color,#1769aa) !important;outline-offset:2px;
+  outline:2px solid #fff !important;outline-offset:2px;box-shadow:0 0 0 5px #111827;
 }
 .intro-banner { padding-right:64px !important; }
 .ht-tab-picker { min-width:0;display:flex;flex-direction:column;gap:6px;padding:8px;margin:0 0 8px; }
@@ -3088,7 +3088,7 @@ class HAEntityRenamer extends HTMLElement {
         :host .list-chips button { flex:0 0 auto;white-space:nowrap !important; }
         .card { max-width:1200px;margin-inline:auto;font-size:14px;line-height:1.5; }
         .device-name,.entity-name,.btn,.list-toolbar input,.list-toolbar select,.prefix-section h3,.prefix-row input { font-size:14px; }
-        .registry-id { display:inline-block;max-width:100%;min-width:0;overflow-x:auto;vertical-align:bottom;white-space:normal;word-break:normal;overflow-wrap:normal;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
+        .registry-id { display:inline-block;max-width:100%;min-width:0;vertical-align:bottom;white-space:normal;word-break:normal;overflow-wrap:anywhere;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .stat-card .num,.stat-card .label { display:block; }
         .stats-row .stat-card { min-width:0; }
         @container (max-width:500px) {
@@ -3115,8 +3115,20 @@ class HAEntityRenamer extends HTMLElement {
 
         :host .btn-primary { background:var(--_hat-primary-fill);color:var(--_hat-on-primary); }
         :host input[type=checkbox] { accent-color:var(--_hat-primary-fill); }
-        :host .btn-primary:disabled { opacity:1;background:var(--_hat-chip);color:var(--_hat-text-2);box-shadow:none; }
+        :host .btn:disabled { opacity:1;background:transparent;color:var(--bento-text,var(--primary-text-color));border:1px dashed var(--bento-border,var(--divider-color));box-shadow:none;cursor:not-allowed; }
+        :host .tabs .tab-button.active { color:var(--bento-text,var(--primary-text-color)) !important; }
 
+        /* Semantic labels carry status; theme text keeps them readable on both backgrounds. */
+        .rename-preview-old,.rename-preview-new,.apply-result-error,.queue-table .old,.queue-table .new,
+        .impact-badge.automation,.impact-badge.script,.impact-badge.scene,.log-ok,.log-err,.log-error-detail {
+          color:var(--bento-text,var(--primary-text-color));
+        }
+        .rename-confirm-counts span,.new-badge,.list-chips button[aria-pressed="true"],.msg.info,.msg.success,.msg.error,.msg.warning {
+          color:var(--bento-text,var(--primary-text-color));
+        }
+        button:focus-visible,summary:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[role=button]:focus-visible {
+          outline:2px solid #fff !important;outline-offset:2px;box-shadow:0 0 0 5px #111827 !important;
+        }
         .renamer-help { margin:8px 0 12px;font-size:14px; }
         .renamer-help summary { cursor:pointer;min-height:44px;align-content:center; }
         .renamer-help summary:focus-visible { outline:3px solid var(--primary-color);outline-offset:2px; }
@@ -3731,7 +3743,7 @@ class HAEntityRenamer extends HTMLElement {
   }
 
   _renderMigrationProgress(m) {
-    const observation = this._migrationText('unavailable', 'niedostępny');
+    const observation = this._migrationText('Journal entry not returned or read unavailable; inspection and registry results above are separate.', 'Nie zwrócono wpisu dziennika lub jego odczyt jest niedostępny; wyniki inspekcji i rejestru powyżej są osobne.');
     const progress = m.journal?.progress;
     // Persisted step observations do not establish the final verifier result.
     const states = {
@@ -3754,7 +3766,7 @@ class HAEntityRenamer extends HTMLElement {
     };
     const state = m.journal?.status;
     return `      <h3>${this._migrationText('Journal progress', 'Postęp dziennika')}</h3>
-      <p>${this._migrationText('State', 'Stan')}: ${_esc(state ? `${states[state] || state} (${state})` : observation)}.</p>
+      <p>${state ? `${this._migrationText('State', 'Stan')}: ${_esc(`${states[state] || state} (${state})`)}.` : _esc(observation)}</p>
       ${progress ? `<p>${this._migrationText('Verified steps', 'Zweryfikowane kroki')}: ${_esc(String(progress.verified_steps))} / ${_esc(String(progress.total_steps))}. ${this._migrationText('Undone steps', 'Wycofane kroki')}: ${_esc(String(progress.undone_steps))}.</p>
       <p>${this._migrationText('Verified step count does not confirm the final outcome; final verification and inspection are separate.', 'Liczba zweryfikowanych kroków nie potwierdza końcowego wyniku; końcowa weryfikacja i inspekcja są osobne.')}</p>` : ''}
       <ul>${(Array.isArray(m.journal?.phases) ? m.journal.phases : []).map(row => `<li>${_esc(String(row.adapter))}: ${_esc(phases[row.phase] || String(row.phase))} (${_esc(String(row.phase))})</li>`).join('')}</ul>`;
@@ -3772,7 +3784,7 @@ class HAEntityRenamer extends HTMLElement {
         : this._migrationText('Restore is unavailable until a fresh inspection permits it. Check status and inspect; do not repeat the write.', 'Wycofanie jest niedostępne, dopóki świeża inspekcja go nie dopuści. Sprawdź stan i inspekcję; nie powtarzaj zapisu.');
     return `<section class="apply-result ${['applied', 'restored'].includes(m.stage) && !m.busy ? '' : 'migration-pending'}" aria-labelledby="migrationResultTitle" aria-busy="${m.busy}">
       <h2 id="migrationResultTitle">${this._migrationText('Dependency operation', 'Operacja zależności')}</h2>
-      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan…', 'Wykonywanie zatwierdzonego planu…') : m.stage === 'restoring' ? this._migrationText('Restoring the confirmed scope…', 'Wycofywanie potwierdzonego zakresu…') : m.busy ? this._migrationText('Checking current status, inspection and registry…', 'Sprawdzanie bieżącego stanu, inspekcji i rejestru…') : m.stage === 'refused' ? this._migrationText('The server confirmed refusal before applying any changes.', 'Serwer potwierdził odmowę przed zastosowaniem zmian.') : m.stage === 'restored' ? this._migrationText('Restored scope confirmed; original registry fields independently verified.', 'Wycofanie zakresu potwierdzone; oryginalne pola rejestru niezależnie zweryfikowane.') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : m.inspectionIssue === 'interrupted' ? (m.lifecycleEntry?.pending?.kind === 'inspect' ? this._migrationText('The previous inspection is still in progress after the card or authority changed. Its result cannot be used; wait for it to finish before checking again.', 'Poprzednia inspekcja nadal trwa po zmianie karty lub uprawnień. Jej wynik nie może zostać użyty; poczekaj na zakończenie przed ponownym sprawdzeniem.') : this._migrationText('A previous inspection result cannot be used after the card or authority changed. The outcome remains unconfirmed. Check status and inspect again.', 'Wynik poprzedniej inspekcji nie może zostać użyty po zmianie karty lub uprawnień. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.')) : m.inspectionIssue === 'unavailable' ? this._migrationText('Inspection failed or returned a mismatched response. The outcome remains unconfirmed. Check status and inspect again.', 'Inspekcja nie powiodła się lub zwróciła niedopasowaną odpowiedź. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.') : m.inspectionIssue === 'registry' ? this._migrationText('Inspection returned, but a fresh registry read failed. The outcome remains unconfirmed. Check status and inspect again.', 'Inspekcja zwróciła wynik, ale świeży odczyt rejestru nie powiódł się. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.') : m.recoveredIdentity && !m.inspection ? this._migrationText('Previous operation selected. Check status and inspect; do not repeat the write.', 'Wybrano poprzednią operację. Sprawdź stan i inspekcję; nie powtarzaj zapisu.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
+      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan… This may take several minutes. Do not repeat the operation.', 'Wykonywanie zatwierdzonego planu… Może to potrwać kilka minut. Nie powtarzaj operacji.') : m.stage === 'restoring' ? this._migrationText('Restoring the confirmed scope… This may take several minutes. Do not repeat the operation.', 'Wycofywanie potwierdzonego zakresu… Może to potrwać kilka minut. Nie powtarzaj operacji.') : m.busy ? this._migrationText('Checking current status, inspection and registry… This may take several minutes. Do not repeat the operation.', 'Sprawdzanie bieżącego stanu, inspekcji i rejestru… Może to potrwać kilka minut. Nie powtarzaj operacji.') : m.stage === 'refused' ? this._migrationText('The server confirmed refusal before applying any changes.', 'Serwer potwierdził odmowę przed zastosowaniem zmian.') : m.stage === 'restored' ? this._migrationText('Restored scope confirmed; original registry fields independently verified.', 'Wycofanie zakresu potwierdzone; oryginalne pola rejestru niezależnie zweryfikowane.') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : m.inspectionIssue === 'interrupted' ? (m.lifecycleEntry?.pending?.kind === 'inspect' ? this._migrationText('The previous inspection is still in progress after the card or authority changed. Its result cannot be used; wait for it to finish before checking again.', 'Poprzednia inspekcja nadal trwa po zmianie karty lub uprawnień. Jej wynik nie może zostać użyty; poczekaj na zakończenie przed ponownym sprawdzeniem.') : this._migrationText('A previous inspection result cannot be used after the card or authority changed. The outcome remains unconfirmed. Check status and inspect again.', 'Wynik poprzedniej inspekcji nie może zostać użyty po zmianie karty lub uprawnień. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.')) : m.inspectionIssue === 'unavailable' ? this._migrationText('Inspection failed or returned a mismatched response. The outcome remains unconfirmed. Check status and inspect again.', 'Inspekcja nie powiodła się lub zwróciła niedopasowaną odpowiedź. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.') : m.inspectionIssue === 'registry' ? this._migrationText('Inspection returned, but a fresh registry read failed. The outcome remains unconfirmed. Check status and inspect again.', 'Inspekcja zwróciła wynik, ale świeży odczyt rejestru nie powiódł się. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.') : m.recoveredIdentity && !m.inspection ? this._migrationText('Previous operation selected. Check status and inspect; do not repeat the write.', 'Wybrano poprzednią operację. Sprawdź stan i inspekcję; nie powtarzaj zapisu.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
       <p>${this._migrationText('Full dependency coverage is unconfirmed. Restore covers only this current operation.', 'Pełne pokrycie zależności jest niepotwierdzone. Wycofanie obejmuje tylko bieżącą operację.')}</p>
       ${m.recoveredIdentity ? `<p>${this._migrationText('A previous operation is available for fresh inspection. Apply consent was not retained; do not repeat the write.', 'Poprzednia operacja jest dostępna do świeżej inspekcji. Zgoda na zastosowanie nie została zachowana; nie powtarzaj zapisu.')}</p>` : ''}
       <code>${_esc(m.operation_id)}</code>
@@ -3963,7 +3975,7 @@ class HAEntityRenamer extends HTMLElement {
             <span class="${resultState === 'success' ? 'log-ok' : resultState === 'error' ? 'log-err' : ''}">
               ${ui.statusHtml(resultState)} ${_entityIdHtml(l.oldId)} → ${_entityIdHtml(l.newId)}
             </span>
-            ${l.error ? `<br><small style="color:#FCA5A5">${_esc(l.error)}</small>` : ''}
+            ${l.error ? `<br><small class="log-error-detail">${_esc(l.error)}</small>` : ''}
             ${this._dashboardCoverageHtml(imp)}
             ${hasImpact ? `<div style="margin-top:4px;padding-left:24px;">
               <span style="font-size:12px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
@@ -4224,6 +4236,7 @@ class HaEntityRenamerEditor extends HTMLElement {
   }
   set hass(hass) {
     this._hass = hass;
+    this.classList.toggle('bento-dark', hass?.themes?.darkMode === true);
     this._updateTitleLabel();
     this._syncOptions();
   }
@@ -4285,13 +4298,14 @@ class HaEntityRenamerEditor extends HTMLElement {
     }
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display:block; padding:16px; }
+        :host { display:block; padding:16px; color-scheme:light; }
+        :host(.bento-dark) { color-scheme:dark; }
         h3 { margin:0 0 16px; font-size:15px; font-weight:600; color:var(--bento-text, var(--primary-text-color,#1e293b)); }
         label { display:flex;align-items:center;gap:8px;font-size:14px; }
         fieldset { margin:12px 0;border:1px solid var(--divider-color);border-radius:8px; }
         select { display:block;width:100%;min-height:44px;font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:8px; }
         input { box-sizing:border-box;min-height:44px;min-width:44px;max-width:100%;transition:border-color .2s; }
-            input:focus-visible { outline:3px solid var(--primary-color,#1769aa);outline-offset:2px; }
+            input:focus-visible,select:focus-visible { outline:2px solid #fff;outline-offset:2px;box-shadow:0 0 0 5px #111827; }
         input:focus { border-color:var(--bento-primary, var(--primary-color,#3b82f6)); }
       </style>
       <h3>Entity Renamer</h3>

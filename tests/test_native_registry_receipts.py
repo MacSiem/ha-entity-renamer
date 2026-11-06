@@ -165,6 +165,54 @@ async def reopened(f):
 
 
 class RegistryReceiptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cached_events_require_exact_unchanged_authenticated_tree(self):
+        from unittest.mock import patch
+        f = await fixture()
+        chain, store = f['chain'], f['chain'].store
+        key = 'rr-' + 'a' * 64
+        await store.create(key, {'unrelated': {'sample': [-0.0, True, 1]}})
+        chain._reconstruct()  # Authenticate the new generation first.
+        with patch.object(chain, '_cache_key', side_effect=AssertionError('unneeded digest')):
+            chain._reconstruct()  # Full exact comparison, no rehash on a hit.
+
+        original = deepcopy(store.rows[key])
+        for value in (0.0, False, 1.0):
+            store.rows[key] = deepcopy(original)
+            if type(value) is float and value == 0:
+                store.rows[key]['payload']['unrelated']['sample'][0] = value
+            elif type(value) is bool:
+                store.rows[key]['payload']['unrelated']['sample'][1] = value
+            else:
+                store.rows[key]['payload']['unrelated']['sample'][2] = value
+            with self.assertRaisesRegex(receipts.RegistryReceiptError, 'event_digest_mismatch'):
+                chain._reconstruct()
+        store.rows[key] = original
+        chain._reconstruct()
+        # Reordering the event store must not use the old generation shortcut.
+        store.rows = dict(reversed(list(store.rows.items())))
+        with patch.object(chain, '_cache_key', wraps=chain._cache_key) as digest:
+            chain._reconstruct()
+            self.assertGreater(digest.call_count, 0)
+        # Newly inserted malformed events remain rejected, never hidden by cache.
+        store.rows['rr-' + 'b' * 64] = {'digest': '0' * 64, 'payload': {'foreign': True}}
+        with self.assertRaisesRegex(receipts.RegistryReceiptError, 'event_digest_mismatch'):
+            chain._reconstruct()
+
+    async def test_large_event_tree_uses_original_digest_validation(self):
+        from unittest.mock import patch
+        f = await fixture()
+        chain, store = f['chain'], f['chain'].store
+        with patch.object(receipts, '_MAX_CACHED_EVENT_NODES', 1):
+            chain._cache = None
+            chain._reconstruct()
+            self.assertIsNone(chain._cache_rows_check)
+            with patch.object(chain, '_cache_key', wraps=chain._cache_key) as digest:
+                chain._reconstruct()
+                self.assertGreater(digest.call_count, 0)
+            store.rows[chain.root_id]['payload']['schema'] = -0.0
+            with self.assertRaises(receipts.RegistryReceiptError):
+                chain._reconstruct()
+
     async def test_input_comparison_preserves_evidence_without_detached_copies(self):
         from unittest.mock import patch
         f = await fixture(padding=25)

@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 
 KEYS = ('core.entity_registry', 'core.device_registry', 'core.config_entries')
 MAX_EVENTS = 4096  # 584 forward + reverse steps: 2337 events, including root.
+_MAX_CACHED_EVENT_NODES = 32768  # Large chains retain the original hash path.
 
 
 def _is_powercalc_yaml(change):
@@ -124,6 +125,26 @@ def _exact_json_equal(value, evidence):
         elif current != original:
             return False
     return True
+
+
+def _bounded_event_snapshot(rows):
+    """Bound cache overhead; oversized valid chains use the original path."""
+    pending = [rows]
+    count = 0
+    while pending:
+        value = pending.pop()
+        count += 1
+        if count > _MAX_CACHED_EVENT_NODES:
+            return None
+        if type(value) is dict:
+            if len(pending) + len(value) > _MAX_CACHED_EVENT_NODES - count:
+                return None
+            pending.extend(value.values())
+        elif type(value) in (list, tuple):
+            if len(pending) + len(value) > _MAX_CACHED_EVENT_NODES - count:
+                return None
+            pending.extend(value)
+    return _freeze_json(rows)
 
 
 def _event_id(value):
@@ -368,6 +389,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         self.writable = False
         self.active = None
         self._cache = None  # Derived only from acknowledged immutable durable refs.
+        self._cache_rows_check = None
         self._cold_projection = None  # Read-only qualified metadata until inverse admission.
         self._effective_cold = None
         self._setup_history = []
@@ -713,7 +735,26 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                      for key, row in self.store.rows.items())
 
     def _remember(self, result):
-        self._cache = (self._cache_key(), result)
+        # Authenticate each event once for this exact cache generation.  The
+        # retained tree is detached and compared in full (including JSON types
+        # and signed zero) on every reuse; it contains no live HA observations.
+        frozen = _bounded_event_snapshot(self.store.rows)
+        keys = tuple(self.store.rows)
+        token = self._cache_key()
+        if (any(expected != actual for _, expected, actual in token)
+                or tuple(self.store.rows) != keys
+                or (frozen is not None and not _exact_json_equal(self.store.rows, frozen))):
+            _fail('event_digest_mismatch')
+        cache = (token, result)
+        self._cache = cache
+        if frozen is None:
+            self._cache_rows_check = None
+        else:
+            def unchanged(candidate):
+                self.store._ready()
+                return (candidate is cache and tuple(self.store.rows) == keys
+                        and _exact_json_equal(self.store.rows, frozen))
+            self._cache_rows_check = unchanged
         return result
 
     def install_cold_projection(self, projection):
@@ -731,6 +772,9 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         # Even a cached reconstruction must resolve the ORIGINAL preparations.
         for index in range(len(self.plan.steps)):
             self._original_change(index)
+        if (self._cache is not None and self._cache_rows_check is not None
+                and self._cache_rows_check(self._cache)):
+            return self._cache[1]
         token = self._cache_key()
         for _, expected_digest, actual_digest in token:
             if expected_digest != actual_digest:

@@ -46,3 +46,13 @@ test('visual options preserve unknown fields, focused title and synchronous echo
   assert.equal(root.querySelector('#cf_title'),title);assert.equal(root.activeElement,title);assert.equal(title.selectionStart,2);
  }finally{dom.window.close();}
 });
+
+
+test('editor follows HA theme changes for native controls',()=>{
+ const {dom}=fixture();try {
+  const editor=dom.window.document.createElement('ha-entity-renamer-editor');
+  editor.setConfig({type:'custom:ha-entity-renamer'});dom.window.document.body.append(editor);
+  editor.hass={language:'en',themes:{darkMode:true}};assert.equal(editor.classList.contains('bento-dark'),true);
+  editor.hass={language:'en',themes:{darkMode:false}};assert.equal(editor.classList.contains('bento-dark'),false);
+ }finally{dom.window.close();}
+});

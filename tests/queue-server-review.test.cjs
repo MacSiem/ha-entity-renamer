@@ -243,6 +243,8 @@ test('pending apply reads journal progress without timing out or repeating the w
   f.handlers['ha_entity_renamer/apply']=()=>pending.promise;
   const first=f.card._applyMigration();await tick();
   assert.equal(f.card._migration.stage,'applying');
+  assert.match(f.card.shadowRoot.textContent,/This may take several minutes. Do not repeat the operation/);
+  assert.doesNotMatch(f.card.shadowRoot.textContent,/Partial or unknown outcome/);
   assert.match(f.card.shadowRoot.textContent,/Verified steps: 1 \/ 2/);
   assert.equal(f.requests.filter(m=>m.type==='ha_entity_renamer/status').length,1);
   await f.card._applyMigration();assert.equal(writes(f).length,1);
@@ -1085,4 +1087,15 @@ test('script own-ID forward cannot verify the old unique key after a rename',asy
  f.handlers['ha_entity_renamer/apply']=()=>{f.entries[0].entity_id='script.new_key';return {operation_id:'review_qa',fingerprint,state:'applied'};};
  await f.card._applyMigration();assert.equal(f.card._migration.registryMatches,false);assert.equal(f.card._migration.stage,'unknown');
  assert.equal(f.card._renameLog[0].writePhase,'attempted');
+});
+
+
+test('confirmed inspection and unavailable journal remain distinct in both languages', async t => {
+  const f=await fixture(t);
+  for (const lang of ['en','pl']) {
+    f.card._lang=lang;
+    const text=f.card._renderMigrationProgress({journal:null});
+    assert.match(text, lang==='pl' ? /Nie zwrócono wpisu dziennika lub jego odczyt jest niedostępny; wyniki inspekcji i rejestru powyżej są osobne/ : /Journal entry not returned or read unavailable; inspection and registry results above are separate/);
+    assert.doesNotMatch(text,/State: unavailable|Stan: niedostępny/);
+  }
 });

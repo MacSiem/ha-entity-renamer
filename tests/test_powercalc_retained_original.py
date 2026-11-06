@@ -65,3 +65,73 @@ class RetainedPowercalcOriginalTests(unittest.TestCase):
             with self.assertRaises(Exception): retained_powercalc_original(chain)
             with self.assertRaises(Refused):
                 assert_state_yaml_composition(chain, object.__new__(PreparedMixedPowercalcYAML))
+
+    def test_session_fence_rejects_original_or_session_replacement(self):
+        from custom_components.ha_entity_renamer.native_template_yaml_server import (
+            _retained_powercalc_preparation_fence)
+
+        def case():
+            chain, composition = self.make_chain()
+            chain.baseline.receipt = chain.original_receipt
+            chain.original_receipt.value = ('receipt', -0.0, True)
+            chain.preparations.plans['original']['payload']['composition'] = {'number': -0.0}
+            chain._powercalc_preparation_snapshot = tuple(
+                (key, _freeze_json(value)) for key, value in chain.preparations.plans.items())
+            server = SimpleNamespace(chain=chain, plan=chain.plan, preparations=chain.preparations,
+                                     composition=composition, receipt=chain.original_receipt)
+            return server
+
+        def retain(composition, baseline):
+            stamp = baseline.stamp
+            original = composition.energy_original_physical
+            def check(candidate):
+                if (candidate is not composition or baseline.stamp != stamp
+                        or composition.energy_original_physical != original):
+                    raise Refused('retained changed')
+            return {'number': -0.0}, check
+
+        with patch('custom_components.ha_entity_renamer.native_template_yaml_server.canonical_digest',
+                   return_value='digest'), \
+             patch('custom_components.ha_entity_renamer.native_template_state_composition.retain_state_composition',
+                   side_effect=retain), \
+             patch('custom_components.ha_entity_renamer.native_template_state_yaml._receipt_values',
+                   lambda x: x.value):
+            for variant in ('payload_zero', 'payload_type', 'receipt_zero', 'baseline',
+                            'composition', 'composition_field', 'plan', 'chain', 'store'):
+                server = case()
+                check = _retained_powercalc_preparation_fence(server, server.plan.native_inputs)
+                check()
+                if variant == 'payload_zero':
+                    server.preparations.plans['original']['payload']['composition']['number'] = 0.0
+                elif variant == 'payload_type':
+                    server.preparations.plans['original']['payload']['nested'][1] = 1
+                elif variant == 'receipt_zero':
+                    server.receipt.value = ('receipt', 0.0, True)
+                elif variant == 'baseline':
+                    server.chain.baseline.stamp = ('changed', 1)
+                elif variant == 'composition':
+                    server.composition = object.__new__(ControlledPowercalcComposition)
+                elif variant == 'composition_field':
+                    object.__setattr__(server.composition, 'energy_original_physical', ('changed',))
+                elif variant == 'plan':
+                    server.plan = SimpleNamespace(native_inputs=server.plan.native_inputs)
+                elif variant == 'chain':
+                    server.chain = SimpleNamespace()
+                else:
+                    server.preparations = SimpleNamespace()
+                with self.assertRaises(Exception, msg=variant):
+                    check()
+
+            server = case()
+            old_check = _retained_powercalc_preparation_fence(server, server.plan.native_inputs)
+            old_chain = server.chain
+            new_chain = SimpleNamespace(**old_chain.__dict__)
+            new_chain._powercalc_preparations_unchanged = MethodType(
+                RegistryReceiptChain._powercalc_preparations_unchanged, new_chain)
+            server.chain = new_chain
+            with self.assertRaises(Exception):
+                old_check()
+            # The native admission replaces readonly with a freshly verified
+            # writer. Its new session fence must bind to that writer explicitly.
+            new_check = _retained_powercalc_preparation_fence(server, server.plan.native_inputs)
+            new_check()
