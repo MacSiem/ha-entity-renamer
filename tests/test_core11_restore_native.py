@@ -40,6 +40,45 @@ class Core11RestoreNativeTests(unittest.IsolatedAsyncioTestCase):
             module.owned_slot(data, source, target, self.row.id, required=True)
         self.assertEqual(stored.state.entity_id, source)
 
+    async def test_native_dump_receipt_binds_full_physical_payload(self):
+        import asyncio
+        from pathlib import Path
+        from homeassistant.core import State
+        from homeassistant.helpers.restore_state import RestoreStateData, StoredState
+        receipt_module = importlib.import_module(fixture.PACKAGE + '.native_restore_dump_receipt')
+        io = importlib.import_module(fixture.PACKAGE + '.native_restore_state_escrow_io')
+        data = RestoreStateData(self.hass)
+        now = datetime.now(timezone.utc)
+        owned = StoredState(State(self.row.entity_id, '1'), None, now, self.row.id)
+        foreign = StoredState(State(self.other.entity_id, 'old'), None, now, self.other.id)
+        data.last_states_by_entity_registry_id[self.row.id] = owned
+        data.last_states_by_entity_registry_id[self.other.id] = foreign
+        await data.async_dump_states()
+        old_disk = Path(data.store.path).read_bytes()
+        data.last_states_by_entity_registry_id[self.other.id] = StoredState(
+            State(self.other.entity_id, 'new'), None, now, self.other.id)
+        with receipt_module.DumpReceipt(data.store) as receipt:
+            receipt.task = asyncio.current_task()
+            await data.async_dump_states()
+            actual = Path(data.store.path).read_bytes()
+            self.assertNotEqual(old_disk, actual)
+            receipt.verify(actual)
+            io.EscrowIO._read(data.store.path, (self.row.entity_id,), self.row.id, receipt)
+            document = json.loads(actual)
+            for row in document['data']:
+                if row['state']['entity_id'] == self.other.entity_id:
+                    row['state']['state'] = 'tampered'
+            tampered = json.dumps(document).encode()
+            with self.assertRaisesRegex(ValueError, 'physical_readback_mismatch'):
+                receipt.verify(tampered)
+            Path(data.store.path).write_bytes(tampered)
+            with self.assertRaisesRegex(ValueError, 'physical_readback_mismatch'):
+                io.EscrowIO._read(data.store.path, (self.row.entity_id,), self.row.id, receipt)
+        with receipt_module.DumpReceipt(data.store) as receipt:
+            receipt.task = asyncio.current_task()
+            with self.assertRaisesRegex(ValueError, 'physical_readback_mismatch'):
+                receipt.verify(actual)
+
     async def test_exact_group_payload_preserves_uuid_and_full_total(self):
         from homeassistant.const import __version__
         if __version__ != '2026.11.0':

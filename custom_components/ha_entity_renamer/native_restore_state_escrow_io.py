@@ -129,15 +129,18 @@ class EscrowIO:
         self._memory(expected)
 
     @staticmethod
-    def _read(path, ids, owned_uuid=None):
+    def _read(path, ids, owned_uuid=None, receipt=None):
         # Never Store.async_load: pending _data/preload can conceal disk failure.
         import json
         try:
             with Path(path).open('rb') as stream:
                 raw = stream.read(64 * 1024 * 1024 + 1)
         except FileNotFoundError:
+            require(receipt is None, 'restore_save_physical_readback_missing')
             return {key: ABSENT for key in ids}
         require(len(raw) <= 64 * 1024 * 1024, 'store_file_size')
+        if receipt is not None:
+            receipt.verify(raw)
         doc = json.loads(raw, object_pairs_hook=codec._pairs,
                          parse_constant=lambda _: (_ for _ in ()).throw(EscrowRejected('nonfinite')))
         require(type(doc) is dict and set(doc) == {'version','minor_version','key','data'}
@@ -167,7 +170,7 @@ class EscrowIO:
                 result[key] = codec._canonical(row)
         return result
 
-    async def _raw(self, memory, disk, *, inactive=True):
+    async def _raw(self, memory, disk, *, inactive=True, receipt=None):
         from homeassistant.const import __version__
         owned_uuid = None
         if __version__ == '2026.11.0':
@@ -180,8 +183,7 @@ class EscrowIO:
         # Await acquiring lock and await executor both get fresh checks.
         async with self.write_lock:
             self._boundary(memory, inactive=inactive)
-            args = ((self.store.path, tuple(memory), owned_uuid) if owned_uuid is not None
-                    else (self.store.path, tuple(memory)))
+            args = (self.store.path, tuple(memory), owned_uuid, receipt)
             actual = await self.hass.async_add_executor_job(self._read, *args)
             self._boundary(memory, inactive=inactive)
             require(actual == disk, 'raw_disk_preimage_or_postimage_mismatch')
@@ -239,9 +241,12 @@ class EscrowIO:
             witness._written(self, clone)
         post = {source: ABSENT if uuid_mode else payload.before_json, target: payload.after_json}
         self._boundary(post, inactive=True)
-        await self.data.async_dump_states()  # NEVER while holding store._write_lock
-        self._boundary(post, inactive=True)
-        actual = await self._raw(post, post)
+        from .native_restore_dump_receipt import DumpReceipt
+        with DumpReceipt(self.store) as receipt:
+            receipt.task = asyncio.current_task()
+            await self.data.async_dump_states()  # NEVER while holding store._write_lock
+            self._boundary(post, inactive=True)
+            actual = await self._raw(post, post, receipt=receipt)
         if integration:
             witness.check_live(lease=self.lease, data=self.data)
         return Readback(payload.before_json if uuid_mode else actual[source], actual[target])
@@ -280,9 +285,12 @@ class EscrowIO:
             del self.data.last_states[source]
             post = {source: ABSENT, target: expected_target}
             self._boundary(post, inactive=True)
-            await self.data.async_dump_states()
-            self._boundary(post, inactive=True)
-            actual = await self._raw(post, post)
+            from .native_restore_dump_receipt import DumpReceipt
+            with DumpReceipt(self.store) as receipt:
+                receipt.task = asyncio.current_task()
+                await self.data.async_dump_states()
+                self._boundary(post, inactive=True)
+                actual = await self._raw(post, post, receipt=receipt)
             return Readback(actual[source], actual[target])
         finally:
             self.guard = original_guard
@@ -323,10 +331,13 @@ class EscrowIO:
         witness._written(self, clone)
         post = {entity_id: payload.after_json}
         self._boundary(post, inactive=True)
-        await self.data.async_dump_states()
-        self._boundary(post, inactive=True)
-        witness.check_live(lease=self.lease, data=self.data)
-        actual = await self._raw(post, post)
+        from .native_restore_dump_receipt import DumpReceipt
+        with DumpReceipt(self.store) as receipt:
+            receipt.task = asyncio.current_task()
+            await self.data.async_dump_states()
+            self._boundary(post, inactive=True)
+            witness.check_live(lease=self.lease, data=self.data)
+            actual = await self._raw(post, post, receipt=receipt)
         witness.check_live(lease=self.lease, data=self.data)
         return IntegrationReadback(payload.before_json, actual[entity_id])
 

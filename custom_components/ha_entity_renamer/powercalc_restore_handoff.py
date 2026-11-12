@@ -230,11 +230,15 @@ async def async_handoff_group_restore(lifecycle, group_id):
         frame = sys._getframe(1)
         if frame.f_locals.get('self') is data:
             returns.append(asyncio.current_task())
+    from .native_restore_dump_receipt import DumpReceipt
+    save_receipt = DumpReceipt(data.store)
+    save_receipt.__enter__()
     try:
         sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, started)
         sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, returned)
         sys.monitoring.set_local_events(tool, code, sys.monitoring.events.PY_START | sys.monitoring.events.PY_RETURN)
         task = asyncio.create_task(data.async_dump_states())
+        save_receipt.task = task
         cancelled = False
         while not task.done():
             try:
@@ -257,6 +261,7 @@ async def async_handoff_group_restore(lifecycle, group_id):
         try:
             actual, actual_identity = await _drained(lease.hass.async_add_executor_job, readback.capture)
             lifecycle.check()
+            save_receipt.verify(actual)
             _need(readback.root_sig[:3] == lifecycle.composition.previous.root_identity
                   and readback.storage_sig[:3] == lifecycle.composition.previous.storage_identity
                   and _rows(actual, (move.before, move.after), owned_uuid=group_uuid if uuid_mode else None) ==
@@ -270,6 +275,7 @@ async def async_handoff_group_restore(lifecycle, group_id):
             readback.close()
         unchanged(refs, *proof)
     finally:
+        save_receipt.__exit__(None, None, None)
         sys.monitoring.set_local_events(tool, code, 0)
         sys.monitoring.register_callback(tool, sys.monitoring.events.PY_START, None)
         sys.monitoring.register_callback(tool, sys.monitoring.events.PY_RETURN, None)
