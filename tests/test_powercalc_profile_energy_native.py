@@ -286,3 +286,128 @@ class PowercalcProfileEnergyNativeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             path.write_bytes(raw)
         self.assertEqual(len(calls), 2)
+
+
+@unittest.skipUnless(fixtures.HAS_HA, 'requires actual pinned HA')
+class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
+    namespace_source_bytes = b'# ORIGINAL mixed Powercalc native fixture namespace\n'
+    asyncSetUp = existing.PowercalcRuntimeNativeTests.asyncSetUp
+    _flush_documents = existing.PowercalcRuntimeNativeTests._flush_documents
+    guard = existing.PowercalcRuntimeNativeTests.guard
+    prepare = PowercalcProfileEnergyNativeTests.prepare
+    bind = PowercalcProfileEnergyNativeTests.bind
+
+    async def _setup_real_vendor(self):
+        from homeassistant.config import async_hass_config_yaml
+        from homeassistant.config_entries import ConfigEntry
+        from homeassistant.helpers.entity_component import EntityComponent
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        from homeassistant.setup import async_setup_component
+        hass = self.f.hass
+        self.assertEqual(self.f.version, '2026.11.0')
+        self.assertTrue(await async_setup_component(hass, 'network', {}))
+        self.sources = [ProfileLight(name) for name in ('Graph fixed', 'Graph linear',
+                         'Graph model', 'Graph entry')]
+        component = EntityComponent(logging.getLogger(__name__), 'light', hass, timedelta(seconds=60))
+        await component.async_add_entities(self.sources)
+        fixed, linear, model, gui = [source.entity_id for source in self.sources]
+        self.yaml_source = model
+        self.profile_root = stage_public_profiles(self.f.root, os.environ['POWERCALC_PROFILE_DIR'])
+        self.config = f"""powercalc:
+  discovery:
+    enabled: false
+  disable_library_download: true
+  enable_analytics: false
+  create_energy_sensors: true
+  create_standby_group: false
+  create_cost_sensors: false
+  create_utility_meters: false
+  energy_sensor_unit_prefix: k
+  energy_integration_method: left
+  energy_sensor_precision: 6
+  group_power_update_interval: 0
+  group_energy_update_interval: 0
+  sensors:
+    - create_group: First graph group
+      unique_id: graph-first
+      entities:
+        - entity_id: {fixed}
+          unique_id: graph-fixed
+          create_energy_sensor: true
+          fixed:
+            power: 5
+        - entity_id: {model}
+          unique_id: graph-model
+          manufacturer: signify
+          model: LWA001
+          custom_model_directory: powercalc/profiles/signify/LWA001
+          create_energy_sensor: true
+    - create_group: Second graph group
+      unique_id: graph-second
+      entities:
+        - entity_id: {fixed}
+        - entity_id: {linear}
+          unique_id: graph-linear
+          create_energy_sensor: true
+          linear:
+            min_power: 2
+            max_power: 12
+"""
+        (self.f.root / 'configuration.yaml').write_text(self.config)
+        self.assertTrue(await async_setup_component(hass, 'powercalc', await async_hass_config_yaml(hass)))
+        await hass.async_block_till_done()
+        from custom_components.powercalc.config_flow import PowercalcConfigFlow
+        self.entry = ConfigEntry(domain='powercalc', title='Graph entry', unique_id='graph-entry',
+            data={'name': 'Graph entry', 'entity_id': gui, 'sensor_type': 'virtual_power',
+                  'create_energy_sensor': True, 'fixed': {'power': 7}},
+            options={}, discovery_keys=MappingProxyType({}), source='user',
+            version=PowercalcConfigFlow.VERSION, minor_version=PowercalcConfigFlow.MINOR_VERSION,
+            subentries_data=[], pref_disable_polling=True)
+        await hass.config_entries.async_add(self.entry)
+        await hass.async_block_till_done()
+        self.assertEqual(self.entry.state.value, 'loaded')
+        self.entities = {entity.unique_id: entity for platform in async_get_platforms(hass, 'powercalc')
+                         for entity in platform.entities.values()}
+
+    async def test_mixed_yaml_group_graph_reopens_and_refuses_drift(self):
+        from dataclasses import replace
+        original = importlib.import_module(fixtures.PACKAGE + '.yaml_source_binding')
+        codec = importlib.import_module(fixtures.PACKAGE + '.powercalc_composition')
+        before = await self.prepare()
+        expected = {'graph-first', 'graph-second', 'graph-fixed', 'graph-linear',
+                    'graph-model', 'graph-entry'}
+        expected |= {uid + '_energy' for uid in expected}
+        self.assertEqual(set(self.entities), expected)
+        rows = {uid: next(row for row in before.rows if row.entity_id == entity.entity_id)
+                for uid, entity in self.entities.items()}
+        self.assertEqual({uid for uid, row in rows.items() if row.source_verified}, expected, rows)
+        self.assertEqual(rows['graph-entry'].origin, 'entry:' + self.entry.entry_id)
+        self.assertEqual(rows['graph-fixed'].origin, 'yaml:graph-fixed')
+        for uid, row in rows.items():
+            self.assertEqual(row.registry_id, self.entities[uid].registry_entry.id)
+            self.assertTrue(row.runtime_identities)
+        for group, members in [('graph-first', ('graph-fixed', 'graph-model')),
+                               ('graph-second', ('graph-fixed', 'graph-linear'))]:
+            for suffix in ('', '_energy'):
+                self.assertEqual(rows[group + suffix].origin, 'yaml:' + group)
+                self.assertEqual(rows[group + suffix].edges,
+                    tuple(sorted((rows[member + suffix].entity_id, rows[group + suffix].entity_id, 1)
+                                 for member in members)))
+        self.assertFalse(before.migration_ready)
+
+        encoded = codec._typed(self.evidence, original.OriginalSourceEvidence, encode=True)
+        self.evidence = codec._typed(json.loads(json.dumps(encoded)),
+                                     original.OriginalSourceEvidence, encode=False)
+        self.assertEqual(await self.bind(), before)
+
+        second_group = self.entities['graph-second']
+        second_group._entities = {self.entities['graph-linear'].entity_id}
+        with self.assertRaises(ValueError):
+            await self.bind()
+        second_group._entities.add(self.entities['graph-fixed'].entity_id)
+
+        (self.f.root / 'configuration.yaml').write_text(
+            self.config.replace('model: LWA001', 'model: unknown-model')
+                       .replace('          custom_model_directory: powercalc/profiles/signify/LWA001\n', ''))
+        with self.assertRaises(ValueError):
+            await self.prepare()
