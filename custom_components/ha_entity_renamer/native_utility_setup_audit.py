@@ -400,6 +400,18 @@ def _installed_native():
         cls = getattr(module, class_name)
         method = getattr(cls, method_name)
         code = getattr(method, '__code__', None)
+        if version == '2026.11.0' and name in ('writer', 'get_or_create'):
+            wrappers = [c for c in compiled['core.py']
+                        if c.co_qualname == 'verify_event_loop_thread.<locals>.decorator.<locals>.wrapper']
+            _need(len(wrappers) == 1 and code == wrappers[0], 'native_loop_wrapper')
+            inner = getattr(method, '__wrapped__', None)
+            closure = dict(zip(code.co_freevars, (cell.cell_contents for cell in method.__closure__), strict=True))
+            _need(closure.get('func') is inner and closure.get('what') == (
+                'entity_registry.async_update_entity' if name == 'writer'
+                else 'entity_registry.async_get_or_create'), 'native_loop_wrapper_binding')
+            codes['loop_wrapper'] = code
+            method = inner
+            code = getattr(method, '__code__', None)
         expected = [c for c in compiled[relative]
                     if c.co_qualname == class_name + '.' + method_name]
         _need(len(expected) == 1 and code == expected[0]
@@ -597,6 +609,14 @@ class NativeUtilitySetupAudit:
             found = [name for name, code in self._codes.items() if code is frame.f_code]
             _need(len(found) == 1, 'unknown_caller')
             name = found[0]
+            if name == 'loop_wrapper':
+                wrapped = frame.f_locals.get('func')
+                _need(getattr(wrapped, '__code__', None) in
+                      (self._codes['writer'], self._codes['get_or_create'])
+                      and frame.f_locals.get('args', (None,))[0] is self._registry,
+                      'foreign_loop_wrapper')
+                frame = frame.f_back
+                continue
             path.append(name)
             local = frame.f_locals
             self._keepalive.append(frame)
