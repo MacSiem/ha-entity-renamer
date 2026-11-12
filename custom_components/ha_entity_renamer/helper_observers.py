@@ -22,6 +22,7 @@ from .helper_plan import plan_helper, snapshot_equal
 # Exact installed-source audit only: no semver range or inferred compatibility.
 _HELPER_SCHEMA_VERSIONS = {
     '2025.6.0': {'threshold': (1, 1), 'min_max': (1, 1), 'group': (1, 1)},
+    '2026.11.0': {'threshold': (1, 2), 'min_max': (1, 1), 'group': (1, 1)},
     '2026.10.2': {'threshold': (1, 2), 'min_max': (1, 1), 'group': (1, 1)}, '2026.10.4': {'threshold': (1, 2), 'min_max': (1, 1), 'group': (1, 1)},
 }
 

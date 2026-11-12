@@ -26,6 +26,10 @@ from .utility_meter_observers import (
 )
 
 _EXTRA = {
+    '2026.11.0': {
+        'helpers/event.py': '35a453cdc015a58ce9e49f2dec4da042babd261930a758eac97a7c2138ba0960',
+        'helpers/start.py': '4b4ef61b0d4eb407a86e8c02ec01af0cf6a5998233b1d1ab2f96a40475abd941',
+    },
     '2026.10.2': {
         'helpers/event.py': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
         'helpers/start.py': '75110df1b5adb7912417cd23e77cfaae5c949c1e89eb188bb5a6b2b1e5eb0bcc',
