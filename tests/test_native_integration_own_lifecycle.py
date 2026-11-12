@@ -115,6 +115,19 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
         hn = importlib.import_module(PACKAGE + '.helper_native')
         self.before = hn.read_entry(hass, self.entry.entry_id)
         await self._configure_own_probe(hass, self.f.root)
+        from homeassistant.const import __version__
+        if __version__ == '2026.11.0':
+            from homeassistant.components.script.entity import ScriptEntity
+            from homeassistant.helpers.entity_component import DATA_INSTANCES
+            from unittest.mock import patch
+            observer = importlib.import_module(PACKAGE + '.yaml_runtime_observer').NativeYAMLRuntimeReadback(hass)
+            script_entity, = hass.data[DATA_INSTANCES]['script'].entities
+            with patch.object(script_entity.script, '_unloaded', True):
+                with self.assertRaisesRegex(ValueError, 'native_script_not_settled'):
+                    observer._projection('script')
+            with patch.object(ScriptEntity, '_service_handler', lambda *args: None):
+                with self.assertRaises(ValueError):
+                    observer._projection('script')
         await self._flush_documents(initialize=True)
         yp = importlib.import_module(PACKAGE + '.yaml_plan')
         proposal = yp.plan_yaml(self.f.root, {self.old_helper: self.target})
@@ -495,6 +508,7 @@ class NativeIntegrationOwnLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         await self.emit('123456.792')
                         await self.emit('123456.793')
                         self.assertGreater(entity._state, before_progress)
+                        await self._assert_script(hass.states.get(self.target).state)
 
             ledger = sorted((row['payload'] for row in chain.store.rows.values()
                 if row['payload'].get('chain') == chain.root_id

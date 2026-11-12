@@ -303,7 +303,14 @@ class NativeYAMLRuntimeReadback:
             identities.append((entity.entity_id, id(entity)))
             if domain == 'script':
                 if __version__ == '2026.11.0':
+                    import homeassistant
                     from homeassistant.components.script.entity import ScriptEntity
+                    from .native_unload_code_proof import prove_methods
+                    prove_methods(Path(homeassistant.__file__).resolve().parent,
+                        {'components/script/entity.py':
+                         '4cd2fe7bb68299e00d5d22c1f4284c52e490a9cf88f3a7f66670ac766c795d6a'},
+                        ((ScriptEntity, '_service_handler'),
+                         (ScriptEntity, 'async_change_listener')))
                 else:
                     from homeassistant.components.script import ScriptEntity
                 if type(entity) is not ScriptEntity:
