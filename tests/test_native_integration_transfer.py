@@ -107,7 +107,11 @@ class NativeIntegrationTransferTests(unittest.IsolatedAsyncioTestCase):
             witness = await collector.async_unload(lease)
             capture = witness.capture
             data = hass.data[DATA_RESTORE_STATE]
-            stored = data.last_states[self.helper_id]
+            from homeassistant.const import __version__
+            states = (data.last_states_by_entity_registry_id if __version__ == '2026.11.0'
+                      else data.last_states)
+            key = self.uuid if __version__ == '2026.11.0' else self.helper_id
+            stored = states[key]
             self.assertIs(stored.extra_data, collector._extra)
             # Native dump serializes its own actual payload, including rounded
             # value / zero-loss. No fixture writes any restore state.
@@ -129,7 +133,7 @@ class NativeIntegrationTransferTests(unittest.IsolatedAsyncioTestCase):
             disk = io.EscrowIO._read(data.store.path, (self.helper_id,))
             result = await writer.integration_transfer(payload, witness=witness, disk_preimage=disk)
             self.assertEqual((result.before, result.after), (payload.before_json, payload.after_json))
-            self.assertIsNot(data.last_states[self.helper_id], stored)
+            self.assertIsNot(states[key], stored)
             self.assertEqual(io.EscrowIO._read(data.store.path, (self.helper_id,)),
                              {self.helper_id: payload.after_json})
             # Payload bytes alone, even valid roundtrip, confer no live authority.
