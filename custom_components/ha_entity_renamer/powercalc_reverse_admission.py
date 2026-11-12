@@ -186,8 +186,9 @@ class PowercalcReverseAdmission:
                     else:
                         if uuid_mode:
                             disk = _rows(raw, (move.before, move.after), owned_uuid=expected_group.registry_id)
-                            _need(disk[move.before] is None and disk[move.after] is not None,
-                                  'foreign_restore_alias')
+                            _need(disk[move.before] is None
+                                  and disk[move.after] == current_restore_bytes,
+                                  'fresh_uuid_restore_disk_mismatch')
                         else:
                             _need(_rows(raw, (move.before,))[move.before] == expected_restore,
                                   'retained_restore_disk_changed')

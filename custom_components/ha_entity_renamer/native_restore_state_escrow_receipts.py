@@ -202,6 +202,12 @@ def _parse_root(store, context, root_ref, *, depth=0):
                     == prior_binding[field], 'forward_operation_binding')
         _need(expected_target is None or expected_target == old.before_json,
               'retained_target_not_owned')
+        # Require a fresh, independently read physical baseline to agree with
+        # the post-unload native capture. Counters may change since forward;
+        # its old physical bytes are deliberately not used as a baseline.
+        if uuid_mode:
+            _need(_row_bytes(disk[source], source) == payload.before_json,
+                  'fresh_uuid_disk_capture_mismatch')
         # payload.before is fresh B1 from the reverse native unload, never A0/S0.
     return root, payload, life
 
