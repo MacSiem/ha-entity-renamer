@@ -79,6 +79,42 @@ class Core11RestoreNativeTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, 'physical_readback_mismatch'):
                 receipt.verify(actual)
 
+    async def test_physical_uuid_legacy_null_and_foreign_collisions(self):
+        from pathlib import Path
+        from homeassistant.const import __version__
+        from homeassistant.core import State
+        from homeassistant.helpers.json import json_bytes
+        from homeassistant.helpers.restore_state import StoredState
+        if __version__ != '2026.11.0':
+            self.skipTest('Core 11 RestoreState only')
+        io = importlib.import_module(fixture.PACKAGE + '.native_restore_state_escrow_io')
+        path = Path(self.hass.config.path('uuid-physical-test.json'))
+        source, target = self.row.entity_id, 'sensor.renamed_owned'
+        now = datetime.now(timezone.utc)
+        owned = json.loads(json_bytes(StoredState(State(source, '5'), None, now, self.row.id).as_dict()))
+        def read(rows):
+            path.write_text(json.dumps({'version': 1, 'minor_version': 1,
+                                        'key': 'core.restore_state', 'data': rows}))
+            return io.EscrowIO._read(path, (source, target), self.row.id)
+        self.assertIsNotNone(read([owned])[source])
+        null = dict(owned, entity_registry_id=None)
+        with self.assertRaisesRegex(io.EscrowRejected, 'raw_foreign_entity'):
+            read([null])
+        legacy = dict(owned)
+        del legacy['entity_registry_id']
+        self.assertIsNotNone(read([legacy])[source])  # migration input, not UUID ownership
+        foreign = dict(owned, entity_registry_id=self.other.id)
+        with self.assertRaisesRegex(io.EscrowRejected, 'raw_foreign_entity'):
+            read([foreign])
+        collision = dict(owned)
+        collision['state'] = dict(owned['state'], entity_id='sensor.other_owned')
+        with self.assertRaisesRegex(io.EscrowRejected, 'raw_foreign_uuid'):
+            read([collision])
+        with self.assertRaisesRegex(io.EscrowRejected, 'raw_duplicate_uuid'):
+            second = dict(owned)
+            second['state'] = dict(owned['state'], entity_id=target)
+            read([owned, second])
+
     async def test_exact_group_payload_preserves_uuid_and_full_total(self):
         from homeassistant.const import __version__
         if __version__ != '2026.11.0':

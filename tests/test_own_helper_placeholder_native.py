@@ -384,6 +384,21 @@ class OwnHelperPlaceholderNativeTests(unittest.IsolatedAsyncioTestCase):
                 (self.target, self.old_helper))
             token = await escrow.begin(disk_preimage=disk,
                 forward_receipt=forward_escrow_receipt)
+            if life.receipt.version == '2026.11.0':
+                # Reconstruct a tampered physical baseline with an otherwise
+                # authentic graph: same UUID does not authenticate its payload.
+                from copy import deepcopy
+                receipt_api = modules['native_restore_state_escrow_receipts']
+                altered = deepcopy(escrow.root)
+                altered['disk_preimage'][self.target]['state']['state'] = 'foreign'
+                view = rr.RegistryReceiptStore(None, escrow.store.preparations)
+                view.rows = deepcopy(escrow.store.rows)
+                key = escrow.root_reference[0]
+                digest = rr._digest(altered)
+                view.rows[key] = {'digest': digest, 'payload': altered}
+                with self.assertRaisesRegex(receipt_api.RestoreEscrowError,
+                                            'fresh_uuid_disk_capture_mismatch'):
+                    receipt_api._parse_root(view, escrow._context(), [key, digest])
             await escrow.execute(token)
             escrow.require_completed(token)
             await journal.save(tx.Record(life.operation_id, life.plan,
