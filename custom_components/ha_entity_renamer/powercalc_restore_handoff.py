@@ -175,7 +175,7 @@ async def async_handoff_group_restore(lifecycle, group_id):
     finally:
         pinned.close()
     free = [index for index in range(6) if sys.monitoring.get_tool(index) is None]
-    _need(free, 'dump_observer_unavailable')
+    _need(len(free) >= 2, 'dump_observer_unavailable')
     label = 'restore_reverse' if reverse else 'restore_forward'
     key = _event_id([lifecycle.root_reference[0], label, group_id, 'intent'])
     intent = {'kind': 'powercalc_group_restore_reverse_intent' if reverse else 'powercalc_group_restore_intent', 'schema': 2 if uuid_mode else 1,
@@ -203,7 +203,7 @@ async def async_handoff_group_restore(lifecycle, group_id):
         pinned.close()
     clone = materialize(payload)
     lifecycle.check()
-    _need(sys.monitoring.get_tool(free[0]) is None and _idle(data)
+    _need(all(sys.monitoring.get_tool(index) is None for index in free[:2]) and _idle(data)
           and source_current() and target_current(),
           'final_preimage_changed')
     if uuid_mode:
