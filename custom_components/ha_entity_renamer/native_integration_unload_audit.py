@@ -246,6 +246,8 @@ class NativeIntegrationUnloadAudit:
             'components/sensor/__init__.py', 'helpers/restore_state.py',
             'helpers/entity.py', 'config_entries.py', 'helpers/entity_platform.py',
             'helpers/entity_registry.py', 'core.py')}
+        if self.version == '2026.11.0':
+            self.pins['components/sensor/entity.py'] = _SOURCES[self.version]['components/sensor/entity.py']
         self.pins['components/integration/sensor.py'] = _INTEGRATION[self.version]
         self.pins['components/integration/__init__.py'] = _INIT[self.version]
         self.refs = ((IntegrationSensor, 'extra_restore_state_data'),
@@ -479,6 +481,8 @@ def integration_own_unload_doc(data):
     pins = {path: _SOURCES[doc['core']][path] for path in (
         'components/sensor/__init__.py', 'helpers/restore_state.py', 'helpers/entity.py',
         'config_entries.py', 'helpers/entity_platform.py', 'helpers/entity_registry.py', 'core.py')}
+    if doc['core'] == '2026.11.0':
+        pins['components/sensor/entity.py'] = _SOURCES[doc['core']]['components/sensor/entity.py']
     pins['components/integration/sensor.py'] = _INTEGRATION[doc['core']]
     pins['components/integration/__init__.py'] = _INIT[doc['core']]
     _need(doc['source_pins'] == pins, 'own_unload_pins')
