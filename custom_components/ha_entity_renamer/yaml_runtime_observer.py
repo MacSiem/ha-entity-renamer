@@ -302,11 +302,14 @@ class NativeYAMLRuntimeReadback:
                     raise ValueError('native_entity_missing')
             identities.append((entity.entity_id, id(entity)))
             if domain == 'script':
-                from homeassistant.components.script import ScriptEntity
+                if __version__ == '2026.11.0':
+                    from homeassistant.components.script.entity import ScriptEntity
+                else:
+                    from homeassistant.components.script import ScriptEntity
                 if type(entity) is not ScriptEntity:
                     raise ValueError('native_script_type')
                 script = entity.script
-                if ((script._unloaded if __version__ in ('2026.10.2', '2026.10.4') else False) or not script.enabled
+                if ((script._unloaded if __version__ in ('2026.10.2', '2026.10.4', '2026.11.0') else False) or not script.enabled
                         or script._hass is not self.hass or script.domain != domain
                         or entity._blueprint_inputs is not None
                         or not self.hass.services.has_service('script', entity.unique_id)
@@ -373,11 +376,13 @@ class NativeYAMLRuntimeReadback:
     def _sample(self, change):
         from homeassistant.const import __version__
         receipt = change.receipt
-        if (__version__ not in ('2025.6.0', '2026.10.2', '2026.10.4') or __version__ != receipt.version
+        if (__version__ not in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0') or __version__ != receipt.version
                 or str(Path(self.hass.config.config_dir).resolve()) != receipt.config_root):
             return Position.UNKNOWN, ()
         expected = {row[0]: row[1:] for row in receipt.runtime_expected}
         domains = receipt.changed_domains
+        if __version__ == '2026.11.0' and domains != ('script',):
+            return Position.UNKNOWN, ()
         if not domains or set(expected) != set(domains) or _pending_native_work(self.hass, domains):
             return Position.UNKNOWN, ()
         before, after, tokens = True, True, []
