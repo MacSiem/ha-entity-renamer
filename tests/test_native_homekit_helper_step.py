@@ -61,6 +61,10 @@ class HomeKitHelperNativeTests(unittest.IsolatedAsyncioTestCase):
             native_adapter=receipt_adapter.create_adapter(owner, lambda ref:None, binding, lease)
             self.assertIs(native_adapter.activation_lease, lease)
             self.assertIs(native_adapter.helper.hass, hass)
+            self.assertTrue(await native_adapter.full_verify_rollback(None))
+            refused=importlib.import_module(fixture.PACKAGE+'.transaction').Refused
+            with self.assertRaises(refused):
+                await native_adapter.full_verify(None)
         finally:
             lease.release()
             observer.bind_activation_lease(None)
