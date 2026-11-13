@@ -172,5 +172,33 @@ class UtilityYAMLRegistryAdapter:
     async def compensate(self, step, guard):
         return await self._effect(step, guard, reverse=True)
 
-    async def verify(self, plan): return await self.inner.verify(plan)
-    async def verify_rollback(self, plan): return await self.inner.verify_rollback(plan)
+    async def _verify(self, plan, direction):
+        try:
+            if await (self.inner.verify(plan) if direction == 'forward'
+                      else self.inner.verify_rollback(plan)) is not True:
+                return False
+            required = {row.old for row in self.handoff.rows}
+            observed = set()
+            for step in plan.steps:
+                if step.adapter != 'registry':
+                    continue
+                mapping = self._mapping(step, False)
+                for source, target in mapping.items():
+                    if source not in required:
+                        continue
+                    _need(source not in observed and self.handoff.mapping.get(source) == target,
+                          'terminal_population')
+                    intent, receipt = self._refs(step, direction)
+                    self._receipt_valid(step, direction, intent, receipt)
+                    observed.add(source)
+            _need(observed == required, 'terminal_population')
+            self.guard()
+            return True
+        except Exception:
+            return False
+
+    async def verify(self, plan):
+        return await self._verify(plan, 'forward')
+
+    async def verify_rollback(self, plan):
+        return await self._verify(plan, 'rollback')

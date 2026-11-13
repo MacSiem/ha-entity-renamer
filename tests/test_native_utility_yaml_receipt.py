@@ -44,6 +44,7 @@ class ReceiptTests(unittest.IsolatedAsyncioTestCase):
                               entity_id='sensor.meter', before=('sensor.meter', '12', {}, None, 'kWh'), info={})
         handoff = object.__new__(UtilityYAMLHandoff)
         handoff.rows = (row,)
+        handoff.mapping = {'sensor.old':'sensor.new'}
         async def detach(old, *, guard, record_intent):
             await record_intent((row,))
             self.assertEqual(len(prep.plans), 1)
@@ -125,3 +126,23 @@ class CoordinatorReceiptTests(ReceiptTests):
         self.assertEqual(result.status, 'unknown')
         self.assertEqual((await coordinator.apply(plan, plan.fingerprint, 'operation')).status, 'unknown')
         self.assertEqual(events, ['detach', 'registry'])
+
+    async def test_terminal_verification_refuses_changed_consumer(self):
+        from custom_components.ha_entity_renamer.transaction import Coordinator
+        adapter, step, prep, events = self.setup_case()
+        plan = adapter.context.record.plan
+        journal = Journal()
+        calls = []
+        def verify(*args):
+            calls.append(args)
+            if len(calls) > 1:
+                raise Refused('consumer changed before terminal verification')
+            return True
+        adapter._receipt_valid = verify
+        coordinator = Coordinator({'registry':adapter}, journal, lambda: None,
+                                  required_scopes=('registry',))
+        with patch('custom_components.ha_entity_renamer.native_utility_yaml_receipt._static',
+                   lambda row: row.before):
+            result = await coordinator.apply(plan, plan.fingerprint, 'operation')
+        self.assertEqual(result.status, 'unknown')
+        self.assertEqual(events, ['detach', 'registry', 'attach'])
