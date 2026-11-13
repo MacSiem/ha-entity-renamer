@@ -167,15 +167,21 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
                     foreign_events.append(event)
             remove_foreign = hass.bus.async_listen('state_changed', foreign_observer)
             self.addCleanup(remove_foreign)
-        def fire_foreign():
-            foreign_emission_windows.append(reload_active)
-            hass.states.async_set(foreign_signal, 'during_reload')
+            @callback
+            def inject_foreign(event):
+                state = event.data.get('new_state')
+                if (reload_active and not foreign_emission_windows
+                        and event.data.get('entity_id') == mapping[leaf]
+                        and state is not None and state.state == 'unknown'):
+                    foreign_emission_windows.append(reload_active)
+                    hass.states.async_set(foreign_signal, 'during_reload')
+            remove_inject = hass.bus.async_listen('state_changed', inject_foreign)
+            self.addCleanup(remove_inject)
         def state_start(code, offset):
             nonlocal reload_active
             local = sys._getframe(1).f_locals
             if code is reload_code and use_leaf:
                 reload_active = True
-                hass.loop.call_soon(fire_foreign)
             if code is action_code:
                 ev = local['event']
                 delay_events.append(('ingress', ev.data.get('entity_id'), str(ev.data.get('old_state')),
