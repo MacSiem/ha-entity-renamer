@@ -232,6 +232,10 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 ordinary_id = ordinary_entity.entity_id
                 platform = ordinary_entity.platform
                 await platform.async_remove_entity(ordinary_id)
+                if browser_ui:
+                    self.f.entity.async_update_entity(ordinary_id, name='Synthetic original name')
+                    ordinary_device = self.f.device.async_update_device(
+                        ordinary_device.id, name_by_user='Synthetic original device')
                 platform.config_entry = ordinary_entry
                 ordinary_entity = OrdinarySensor()
                 await platform.async_add_entities([ordinary_entity])
@@ -242,6 +246,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertIs(ordinary_entity.device_entry, self.f.device.async_get(ordinary_device.id))
                 ordinary_name_before = ordinary.name
                 device_name_before = ordinary_device.name_by_user
+                if browser_ui:
+                    mapping[ordinary_id] = 'sensor.p4_ordinary_measurement'
                 # Native YAML consumers span both selected producers. They are
                 # loaded through HA before ORIGINAL is captured and checked
                 # independently after forward and inverse.
@@ -270,12 +276,46 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                         if domain == 'automation' and hasattr(self, 'boot_automation'):
                             continue  # Registered before the one actual startup.
                         stream.write('\n' + domain + ': !include ' + path.name + '\n')
+                    if browser_ui:
+                        stream.write('\nhomekit:\n  name: P4 Synthetic Bridge\n  port: 21198\n'
+                            '  ip_address: 192.0.2.1\n  advertise_ip: 192.0.2.1\n'
+                            '  filter:\n    include_entities:\n      - ' + sources[0] + '\n'
+                            'utility_meter:\n  p4_meter:\n    source: ' + ordinary_id +
+                            '\n    cycle: daily\n')
                 config = await async_hass_config_yaml(hass)
                 for domain in programs:
                     if domain in hass.config.components:
                         await hass.services.async_call(domain, 'reload', {}, blocking=True)
                     else:
                         self.assertTrue(await async_setup_component(hass, domain, config), domain)
+                if browser_ui:
+                    for domain in ('utility_meter', 'homekit'):
+                        if domain == 'utility_meter' and domain in hass.config.components:
+                            from homeassistant.components.utility_meter import async_setup, CONFIG_SCHEMA, DATA_UTILITY
+                            self.assertFalse(hass.data[DATA_UTILITY])
+                            self.assertTrue(await async_setup(hass, CONFIG_SCHEMA(config)))
+                        else:
+                            self.assertTrue(await async_setup_component(hass, domain, config), domain)
+                    await hass.async_block_till_done()
+                    await hass.services.async_call('homekit', 'reload', {}, blocking=True)
+                    await hass.async_block_till_done()
+                    external_config_before = (self.f.root / 'configuration.yaml').read_bytes()
+                    bridge_entry = next(e for e in hass.config_entries.async_entries('homekit')
+                                        if e.data['name'] == 'P4 Synthetic Bridge')
+                    from custom_components.ha_entity_renamer.native_homekit_filter import _bridge_identity
+                    bridge_identity = _bridge_identity(bridge_entry)
+                    def aid(entity_id):
+                        matches = [key for key, value in bridge_entry.runtime_data.homekit.bridge.accessories.items()
+                                   if getattr(value, 'entity_id', None) == entity_id]
+                        self.assertEqual(len(matches), 1)
+                        return matches[0]
+                    original_aid = aid(sources[0])
+                    def utility_meter():
+                        rows = [entity for platform in async_get_platforms(hass, 'utility_meter')
+                                for entity in platform.entities.values()
+                                if getattr(entity, '_parent_meter', None) == 'p4_meter']
+                        self.assertEqual(len(rows), 1)
+                        return rows[0]
                 await hass.async_block_till_done()
                 if hasattr(self, 'boot_automation'):
                     self.assertEqual(len(self.boot_actions), 1, 'automation reload must not synthesize a boot')
@@ -341,8 +381,11 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     request_id += 1
                     await socket.send_json({'id': request_id, 'type': 'ha_entity_renamer/' + command, **payload})
                     return await socket.receive_json(timeout=2400)
-                selected = [{'entity_id': old, 'new_entity_id': new} for old, new in mapping.items()]
-                selected.append({'entity_id': ordinary_id, 'name': 'Synthetic ordinary name'})
+                selected = [{'entity_id': old, 'new_entity_id': new,
+                             **({'name': 'Synthetic ordinary name'} if browser_ui and old == ordinary_id else {})}
+                            for old, new in mapping.items()]
+                if not browser_ui:
+                    selected.append({'entity_id': ordinary_id, 'name': 'Synthetic ordinary name'})
                 devices = [{'device_id': ordinary_device.id, 'name_by_user': 'Synthetic ordinary device'}]
                 denied = await request(user, 'prepare', entities=selected, devices=devices)
                 self.assertFalse(denied['success'])
@@ -355,12 +398,13 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     for old, new in mapping.items():
                         entity = self.f.entity.async_get(old)
                         self.assertIsNotNone(entity)
-                        entities.append({'old': old, 'new': new, 'device': entity.device_id})
-                    entities.append({'old': ordinary_id, 'new': ordinary_id,
-                                     'name': 'Synthetic ordinary name', 'device': ordinary.device_id})
+                        entities.append({'old': old, 'new': new, 'device': entity.device_id,
+                                         **({'name': 'Synthetic ordinary name'} if old == ordinary_id else {})})
                     browser_request = {'label': 'multi-ui', 'port': hass.http.server_port,
                                        'entities': entities, 'device': ordinary_device.id,
-                                       'device_name': 'Synthetic ordinary device'}
+                                       'device_name': 'Synthetic ordinary device',
+                                       'original_device_name': device_name_before,
+                                       'ordinary_original_name': ordinary_name_before}
                     async def ui_wait(label):
                         path = directory / (label + '.json')
                         for _ in range(24000):
@@ -374,6 +418,10 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                         (directory / (label + '.go')).write_text('go')
             await pulse()
             await baseline()
+            if browser_ui:
+                meter = utility_meter()
+                self.assertIsNotNone(meter._next_reset)
+                meter_before = (meter.entity_id, meter.native_value, meter._next_reset)
             if public:
                 # Independent physical oracle for every native registry row,
                 # including foreign IDs, device associations, units and labels.
@@ -474,7 +522,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             save()
             self.assertEqual(result['state'], 'applied')
             if public:
-                self.assertEqual(self.f.entity.async_get(ordinary_id).name, 'Synthetic ordinary name')
+                self.assertEqual(self.f.entity.async_get(mapping.get(ordinary_id, ordinary_id)).name,
+                                 'Synthetic ordinary name')
                 self.assertEqual(self.f.device.async_get(ordinary_device.id).name_by_user,
                                  'Synthetic ordinary device')
                 for domain, path in files.items():
@@ -491,13 +540,20 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(registry_rows('entity'), expected_entities)
                 self.assertEqual(registry_rows('device'), expected_devices)
                 await verify_history()
+                if browser_ui:
+                    meter = utility_meter()
+                    self.assertEqual((meter.entity_id, meter.native_value, meter._next_reset), meter_before)
+                    self.assertEqual(meter._sensor_source_id, mapping[ordinary_id])
+                    self.assertIsNotNone(meter._collecting)
+                    self.assertEqual((_bridge_identity(bridge_entry), aid(mapping[sources[0]])),
+                                     (bridge_identity, original_aid))
                 if hasattr(self, 'boot_automation'):
                     self.assertEqual(len(self.boot_actions), 1, 'forward reload must not synthesize a boot')
             verify_seam(0, mapping)
             verify_ids(mapping)
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, expected_entries)
             for old, new in mapping.items():
-                if old not in sources:
+                if old in names.values() and old not in sources:
                     self.assertNotIn(old, self.package.read_text())
                     self.assertIn(new, self.package.read_text())
             verify_foreign()
@@ -514,7 +570,11 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 inspected = await runtime.recovery_inspect(hass, op, fingerprint, guard=guard, refresh=refresh)
             evidence['inspect'] = inspected
             save()
-            self.assertTrue(inspected['eligible'], inspected)
+            if browser_ui:
+                self.assertEqual(inspected['state'], 'applied', inspected)
+                self.assertFalse(inspected['eligible'], inspected)
+            else:
+                self.assertTrue(inspected['eligible'], inspected)
             if browser_ui:
                 ui_continue('restore')
                 result = await ui_wait('restored')
@@ -526,7 +586,10 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 result = await runtime.recovery_restore(hass, op, fingerprint, guard=guard, refresh=refresh)
             evidence['restore'] = result
             save()
-            self.assertEqual(result['state'], 'rolled_back')
+            if browser_ui:
+                self.assertEqual((result['state'], result['kind']), ('applied', 'fresh_inverse'))
+            else:
+                self.assertEqual(result['state'], 'rolled_back')
             if public:
                 self.assertEqual(self.f.entity.async_get(ordinary_id).name, ordinary_name_before)
                 self.assertEqual(self.f.device.async_get(ordinary_device.id).name_by_user,
@@ -539,6 +602,14 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(registry_rows('entity'), original_entities)
                 self.assertEqual(registry_rows('device'), original_devices)
                 await verify_history()
+                if browser_ui:
+                    meter = utility_meter()
+                    self.assertEqual((meter.entity_id, meter.native_value, meter._next_reset), meter_before)
+                    self.assertEqual(meter._sensor_source_id, ordinary_id)
+                    self.assertIsNotNone(meter._collecting)
+                    self.assertEqual((_bridge_identity(bridge_entry), aid(sources[0])),
+                                     (bridge_identity, original_aid))
+                    self.assertEqual((self.f.root / 'configuration.yaml').read_bytes(), external_config_before)
                 if hasattr(self, 'boot_automation'):
                     self.assertEqual(len(self.boot_actions), 1, 'inverse reload must not synthesize a boot')
             verify_seam(1, {new: old for old, new in mapping.items()})

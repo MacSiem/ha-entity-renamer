@@ -30,7 +30,8 @@ const wait = async name => {
     const card = page.locator('ha-entity-renamer');
     await card.waitFor({state:'visible', timeout:30000});
     await page.waitForFunction(() => document.querySelector('home-assistant')?.hass?.user?.is_admin === true);
-    for (const row of request.entities) {
+    const queue = async (entities, deviceName) => {
+    for (const row of entities) {
       const device = row.device || '__renamer_unassigned__';
       const target = card.locator(`.device-header[data-device-id="${device}"]`);
       if (await target.getAttribute('aria-expanded') !== 'true') await target.click();
@@ -42,12 +43,14 @@ const wait = async name => {
     const deviceHeader = card.locator(`.device-header[data-device-id="${request.device}"]`);
     if (await deviceHeader.getAttribute('aria-expanded') === 'true') await deviceHeader.click();
     await deviceHeader.click();
-    await card.locator('#deviceName').fill(request.device_name);
+    await card.locator('#deviceName').fill(deviceName);
     await card.locator('#applyDeviceName').click();
     await card.locator('[data-tab="queue"]').click();
     await card.locator('#executeRenames').click();
     await card.locator('#prepareMigration').click();
     await card.locator('#applyMigration').waitFor({state:'visible', timeout:2400000});
+    };
+    await queue(request.entities, request.device_name);
     const reviewed = await card.evaluate(el => ({operation_id:el._migration.operation_id,
       fingerprint:el._migration.fingerprint, changes:el._migration.review.changes.length,
       domains:el._migration.review.dependencies.domains}));
@@ -72,19 +75,31 @@ const wait = async name => {
     await page.screenshot({path:dir + '/ui-applied.png'});
     write('applied', applied);
     await wait('restore');
-    await card.locator('#reviewMigrationRestore').click();
-    await card.locator('#restoreMigration').click();
+    // External HomeKit/Utility lifecycle requires a fresh reverse operation;
+    // it does not grant recovery rollback for the previous operation.
+    await card.locator('#finishMigration').click();
+    await card.locator('[data-tab="devices"]').click();
+    const reverse = request.entities.map(row => ({...row, old:row.new, new:row.old,
+      ...(row.name ? {name:request.ordinary_original_name} : {})}));
+    await queue(reverse, request.original_device_name);
+    const inverse = await card.evaluate(el => ({operation_id:el._migration.operation_id,
+      fingerprint:el._migration.fingerprint, changes:el._migration.review.changes.length}));
+    if (inverse.operation_id === reviewed.operation_id || inverse.changes !== request.entities.length + 1)
+      throw Error('fresh inverse review missing');
+    await card.locator('#applyMigration').click();
     await card.locator('#continueWriteWarning').click();
     await page.waitForFunction(() => {
       function find(root) { for (const el of root.querySelectorAll('*')) {
         if (el.localName === 'ha-entity-renamer') return el;
         const nested = el.shadowRoot && find(el.shadowRoot); if (nested) return nested;
       }}
-      const m=find(document)?._migration; return m && !m.busy && ['restored','unknown'].includes(m.stage);
+      const m=find(document)?._migration; return m && !m.busy && ['applied','unknown','refused'].includes(m.stage);
     }, null, {timeout:2400000});
-    const restored = await card.evaluate(el => ({state:el._migration.stage === 'restored' ? 'rolled_back' : 'UNKNOWN',
-      inspection:el._migration.inspection?.state, registry:el._migration.registryMatches}));
-    if (restored.state !== 'rolled_back' || restored.inspection !== 'rolled_back' || !restored.registry)
+    const restored = await card.evaluate(el => ({state:el._migration.stage, kind:'fresh_inverse',
+      inspection:el._migration.inspection?.state, registry:el._migration.registryMatches,
+      operation_id:el._migration.operation_id}));
+    if (restored.state !== 'applied' || restored.inspection !== 'applied' || !restored.registry
+        || restored.operation_id !== inverse.operation_id)
       throw Error('UI restore not independently confirmed');
     await page.screenshot({path:dir + '/ui-restored.png'});
     write('restored', restored);
