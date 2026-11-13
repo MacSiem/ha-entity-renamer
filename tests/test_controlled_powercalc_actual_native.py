@@ -4,6 +4,7 @@ from decimal import Decimal
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -69,6 +70,25 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         evidence = {}
         def save():
             out.write_text(json.dumps(evidence, sort_keys=True, default=str))
+
+        monitor = sys.monitoring
+        slot = next(i for i in range(6) if monitor.get_tool(i) is None)
+        monitor.use_tool_id(slot, 'controlled Powercalc leaf diagnosis')
+        def trace(code, offset, error):
+            path = Path(code.co_filename)
+            value = str(error)
+            if 'ha_entity_renamer' in path.parts and isinstance(error, (Refused, ValueError)) and len(value) < 160:
+                row = (path.name, code.co_name, value)
+                reasons = evidence.setdefault('reasons', [])
+                if row not in reasons:
+                    reasons.append(row)
+        monitor.register_callback(slot, monitor.events.RAISE, trace)
+        monitor.set_events(slot, monitor.events.RAISE)
+        def stop_monitor():
+            monitor.set_events(slot, 0)
+            monitor.register_callback(slot, monitor.events.RAISE, None)
+            monitor.free_tool_id(slot)
+        self.addCleanup(stop_monitor)
 
         def inventory():
             return {e.unique_id: e for p in async_get_platforms(hass, 'powercalc')
