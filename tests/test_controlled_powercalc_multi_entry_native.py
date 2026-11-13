@@ -14,6 +14,10 @@ from test_controlled_powercalc_actual_native import ControlledActualGraphTests
 
 
 class ControlledMultiEntryTests(ControlledActualGraphTests):
+    async def test_two_entries_public_websocket_one_review_forward_fresh_inverse(self):
+        self.use_public_transport = True
+        await self.test_two_entries_one_review_forward_fresh_inverse()
+
     async def test_two_entries_one_review_forward_fresh_inverse(self):
         from homeassistant.components.recorder import get_instance
         from homeassistant.components.recorder.tasks import StatisticsTask
@@ -185,6 +189,37 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
 
         try:
             native_dummy_mdns(hass)
+            public = getattr(self, 'use_public_transport', False)
+            if public:
+                from aiohttp import ClientSession
+                from datetime import timedelta
+                from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_USER
+                client = ClientSession()
+                self.addAsyncCleanup(client.close)
+                async def connect(label, group):
+                    user = await hass.auth.async_create_user(label, group_ids=[group])
+                    token = await hass.auth.async_create_refresh_token(user,
+                        client_id='https://renamer.invalid/multi-queue', access_token_expiration=timedelta(hours=5))
+                    access = hass.auth.async_create_access_token(token, remote_ip='127.0.0.1')
+                    socket = await client.ws_connect('http://127.0.0.1:' + str(hass.http.server_port) + '/api/websocket')
+                    self.addAsyncCleanup(socket.close)
+                    self.assertEqual((await socket.receive_json(timeout=10))['type'], 'auth_required')
+                    await socket.send_json({'type': 'auth', 'access_token': access})
+                    self.assertEqual((await socket.receive_json(timeout=10))['type'], 'auth_ok')
+                    return socket
+                admin = await connect('Synthetic multi administrator', GROUP_ID_ADMIN)
+                user = await connect('Synthetic multi nonadministrator', GROUP_ID_USER)
+                await hass.auth._store._store.async_save(hass.auth._store._data_to_save())
+                request_id = 0
+                async def request(socket, command, **payload):
+                    nonlocal request_id
+                    request_id += 1
+                    await socket.send_json({'id': request_id, 'type': 'ha_entity_renamer/' + command, **payload})
+                    return await socket.receive_json(timeout=2400)
+                selected = [{'entity_id': old, 'new_entity_id': new} for old, new in mapping.items()]
+                denied = await request(user, 'prepare', entities=selected)
+                self.assertFalse(denied['success'])
+                evidence['nonadmin_denied'] = denied.get('error', {}).get('code')
             await pulse()
             await baseline()
             history = NativeRecorderGuard(hass)
@@ -203,7 +238,12 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 foreign_power._standby_power = standby
             self.assertEqual(self.package.read_bytes(), original_package)
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, before_entries)
-            review = await runtime.native_yaml_prepare(hass, mapping, actor_id=actor, guard=guard, refresh=refresh)
+            if public:
+                reply = await request(admin, 'prepare', entities=selected)
+                self.assertTrue(reply.get('success'), reply)
+                review = reply['result']
+            else:
+                review = await runtime.native_yaml_prepare(hass, mapping, actor_id=actor, guard=guard, refresh=refresh)
             evidence['review'] = review
             save()
             op, fingerprint = review['operation_id'], review['fingerprint']
@@ -216,7 +256,12 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     self.assertTrue(all(g.entity_id not in mapping for g in bound.composition.previous.groups))
                 finally:
                     bound.close()
-            result = await runtime.native_yaml_apply(hass, op, fingerprint, actor_id=actor, guard=guard, refresh=refresh)
+            if public:
+                reply = await request(admin, 'apply', operation_id=op, fingerprint=fingerprint)
+                self.assertTrue(reply.get('success'), reply)
+                result = reply['result']
+            else:
+                result = await runtime.native_yaml_apply(hass, op, fingerprint, actor_id=actor, guard=guard, refresh=refresh)
             evidence['apply'] = result
             save()
             self.assertEqual(result['state'], 'applied')
@@ -233,11 +278,21 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             self.assertTrue(all(Decimal(counter_values(inventory())[uid][0]) > Decimal(initial[uid][0])
                                 for uid in ('fixture-group-a_energy', 'fixture-group-b_energy')))
             await baseline()
-            inspected = await runtime.recovery_inspect(hass, op, fingerprint, guard=guard, refresh=refresh)
+            if public:
+                reply = await request(admin, 'recovery/inspect', operation_id=op, fingerprint=fingerprint)
+                self.assertTrue(reply.get('success'), reply)
+                inspected = reply['result']
+            else:
+                inspected = await runtime.recovery_inspect(hass, op, fingerprint, guard=guard, refresh=refresh)
             evidence['inspect'] = inspected
             save()
             self.assertTrue(inspected['eligible'], inspected)
-            result = await runtime.recovery_restore(hass, op, fingerprint, guard=guard, refresh=refresh)
+            if public:
+                reply = await request(admin, 'recovery/restore', operation_id=op, fingerprint=fingerprint)
+                self.assertTrue(reply.get('success'), reply)
+                result = reply['result']
+            else:
+                result = await runtime.recovery_restore(hass, op, fingerprint, guard=guard, refresh=refresh)
             evidence['restore'] = result
             save()
             self.assertEqual(result['state'], 'rolled_back')
@@ -257,4 +312,4 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
 
 def load_tests(loader, tests, pattern):
     import unittest
-    return unittest.TestSuite([ControlledMultiEntryTests('test_two_entries_one_review_forward_fresh_inverse')])
+    return unittest.TestSuite([ControlledMultiEntryTests('test_two_entries_public_websocket_one_review_forward_fresh_inverse')])
