@@ -1,4 +1,4 @@
-"""Read-only native name observation, HA 2025.6.0 and 2026.10.2/2026.10.4 only.
+"""Read-only native name observation for supported pinned HA versions.
 
 Capture under the coordinator lock before mutation. The serialized baseline is
 part of the immutable server preparation, allowing read-only crash recovery.
@@ -18,7 +18,8 @@ class NativeNameObserver:
 
     def _version(self):
         from homeassistant.const import __version__
-        require(__version__ in ('2025.6.0', '2026.10.2', '2026.10.4'), 'name_ha_version_unsupported')
+        require(__version__ in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'),
+                'name_ha_version_unsupported')
         return __version__
 
     def _rows(self, change):
@@ -144,7 +145,7 @@ class NativeNameObserver:
         device_ids = {row.device_id for row in rows if row.device_id is not None}
         for row in rows:
             entity, state, entry, active = self._sample(row)
-            if change.kind == 'device' and active and version in ('2026.10.2', '2026.10.4'):
+            if change.kind == 'device' and active and version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
                 self._device_subscription(entity, row)
             native = next(item for item in document['entities'] if item['id'] == row.id)
             baseline[row.id] = {'row': native, 'identity': list(registry_identity(row)),
@@ -214,11 +215,11 @@ class NativeNameObserver:
                         'name_inactive_state_or_attributes_changed')
                 if state is not None:
                     friendly = (er.async_get_legacy_friendly_name(self.hass, row)
-                                if version in ('2026.10.2', '2026.10.4') else row.name or row.original_name)
+                                if version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1') else row.name or row.original_name)
                     require(state.attributes.get('friendly_name') == (friendly if friendly else None),
                             'name_inactive_friendly_name_stale')
                 continue
-            if change.kind == 'device' and version in ('2026.10.2', '2026.10.4'):
+            if change.kind == 'device' and version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
                 self._device_subscription(entity, row)
             if row.device_id and entity.has_entity_name:
                 require(entity.device_entry is dr.async_get(self.hass).async_get(row.device_id),
@@ -226,7 +227,7 @@ class NativeNameObserver:
             original = entity.name
             if original is UNDEFINED:
                 original = None
-            if version in ('2026.10.2', '2026.10.4'):
+            if version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
                 friendly = er.async_get_legacy_friendly_name(self.hass, row, original_name=original)
                 expected_friendly = friendly if friendly else None
             else:

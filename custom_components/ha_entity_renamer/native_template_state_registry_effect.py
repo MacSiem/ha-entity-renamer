@@ -95,10 +95,13 @@ class NativeTemplateStateRegistryEffect:
         from .native_registry_transition import _native_script_unique_move
         script_unique_move = _native_script_unique_move(change.before, change.after)
         from .native_template_yaml_server import _controlled_reload
-        named_automation = (_controlled_reload(root.composition)
-                            and change.before.get('platform') == 'automation'
-                            and bool(change.runtime_before_json))
-        excluded = ('entity_id', 'modified_at', 'name') if named_automation else ('entity_id', 'modified_at')
+        from homeassistant.const import __version__
+        named_entity = (bool(change.runtime_before_json)
+                        and change.before.get('name') != change.after.get('name')
+                        and (_controlled_reload(root.composition)
+                             and change.before.get('platform') == 'automation'
+                             or __version__ in ('2026.11.0', '2026.11.1')))
+        excluded = ('entity_id', 'modified_at', 'name') if named_entity else ('entity_id', 'modified_at')
         pure = (script_unique_move or
                 {key: value for key, value in change.before.items() if key not in excluded}
                 == {key: value for key, value in change.after.items() if key not in excluded})

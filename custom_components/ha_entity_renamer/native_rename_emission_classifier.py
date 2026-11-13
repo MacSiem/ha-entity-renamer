@@ -326,19 +326,19 @@ class NativeRenameEmissions:
         _need(change.kind == 'entity' and change.mapping and type(target) is dict
               and target in (change.before, change.after), 'rename_required')
         before, after = change.before, change.after
+        from homeassistant.const import __version__
         from .native_registry_transition import _native_script_unique_move
         script_unique_move = _native_script_unique_move(before, after)
-        named_automation = (before.get('platform') == 'automation'
-                            and bool(change.runtime_before_json)
-                            and before.get('name') != after.get('name'))
-        excluded = ('entity_id', 'modified_at', 'name') if named_automation else ('entity_id', 'modified_at')
+        named_entity = (bool(change.runtime_before_json) and before.get('name') != after.get('name')
+                        and (before.get('platform') == 'automation'
+                             or __version__ in ('2026.11.0', '2026.11.1')))
+        excluded = ('entity_id', 'modified_at', 'name') if named_entity else ('entity_id', 'modified_at')
         _need(script_unique_move or
               {k: v for k, v in before.items() if k not in excluded}
               == {k: v for k, v in after.items() if k not in excluded},
               'pure_rename_required')
         import homeassistant
         from homeassistant import const
-        from homeassistant.const import __version__
         from homeassistant.core import Event, EventBus, HomeAssistant, State, StateMachine
         from homeassistant.helpers import entity_platform, event as event_helper
         from homeassistant.helpers.entity import Entity
@@ -368,7 +368,7 @@ class NativeRenameEmissions:
         self.source_unique_id = source.get('unique_id') if script_unique_move else None
         self.source_original_name = source.get('original_name') if self.script_default_name_move else None
         self.script_registry_name_move = self.script_default_name_move and before.get('name') != after.get('name')
-        self.registry_name_move = self.script_registry_name_move or named_automation
+        self.registry_name_move = self.script_registry_name_move or named_entity
         self.source_registry_name = source.get('name') if self.registry_name_move else None
         self.source_id, self.target_id = source['entity_id'], target['entity_id']
         self.hass, self.bus, self.loop = io.hass, io.hass.bus, io.hass.loop
