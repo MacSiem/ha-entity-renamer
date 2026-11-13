@@ -12,8 +12,11 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         await self._exercise(use_leaf=True)
 
     async def test_input_forward_inverse(self):
+        await self._exercise(use_leaf=False)
+
+    async def _exercise(self, *, use_leaf):
         try:
-            await self._exercise(use_leaf=False)
+            await self._exercise_inner(use_leaf=use_leaf)
         finally:
             import os, shutil
             from pathlib import Path
@@ -28,7 +31,7 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
                         shutil.copyfile(item, target_path)
                         target_path.chmod(0o600)
 
-    async def _exercise(self, *, use_leaf):
+    async def _exercise_inner(self, *, use_leaf):
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.helpers.entity_platform import async_get_platforms
         from homeassistant.setup import async_setup_component
@@ -42,7 +45,7 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         mapping = {old_source: 'light.p2_sample_source', leaf: 'sensor.p2_sample_power'}
         target = leaf if use_leaf else old_source
         foreign_signal = 'sensor.p2_foreign_signal'
-        if not use_leaf:
+        if use_leaf:
             hass.states.async_set(foreign_signal, 'before')
         path, config = root / 'p2_template.yaml', root / 'configuration.yaml'
         config.write_text(config.read_text() + '\ntemplate: !include p2_template.yaml\n')
@@ -52,8 +55,8 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
                      "{% set ns.total = ns.total + 1 %}"
                      "{% endif %}{% endfor %}{{ ns.total }}",
             'attributes': {'copy': "{{ states('" + target + "') }}", **({
-                'power': "{{ states('" + leaf + "') }}",
-                'foreign': "{{ states('" + foreign_signal + "') }}"} if not use_leaf else {})}}],
+                **({'power': "{{ states('" + leaf + "') }}"} if not use_leaf else {}),
+                **({'foreign': "{{ states('" + foreign_signal + "') }}"} if use_leaf else {})})}}],
             'binary_sensor': [{'name': 'P2 delayed', 'unique_id': 'p2_delay',
                 'availability': "{{ states('" + target + "') != 'unavailable' }}",
                 'state': "{{ states('" + target + "') in ['on', '10', '10.0', '10.00'] }}", 'delay_on': '00:30:00'}],
@@ -155,7 +158,7 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         self.assertIn('custom_components/powercalc', reload_code.co_filename)
         reload_active = False
         foreign_events = []
-        if not use_leaf:
+        if use_leaf:
             from homeassistant.core import callback
             @callback
             def foreign_observer(event):
@@ -164,12 +167,11 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
             remove_foreign = hass.bus.async_listen('state_changed', foreign_observer)
             self.addCleanup(remove_foreign)
         def fire_foreign():
-            if reload_active:
-                hass.states.async_set(foreign_signal, 'during_reload')
+            hass.states.async_set(foreign_signal, 'during_reload')
         def state_start(code, offset):
             nonlocal reload_active
             local = sys._getframe(1).f_locals
-            if code is reload_code and not use_leaf:
+            if code is reload_code and use_leaf:
                 reload_active = True
                 hass.loop.call_soon(fire_foreign)
             if code is action_code:
@@ -189,7 +191,7 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         monitor.register_callback(slot, monitor.events.PY_RETURN, reload_return)
         monitor.set_local_events(slot, StateBinarySensorEntity._update_state.__code__, monitor.events.PY_START)
         monitor.set_local_events(slot, action_code, monitor.events.PY_START)
-        if not use_leaf:
+        if use_leaf:
             monitor.set_local_events(slot, reload_code, monitor.events.PY_START | monitor.events.PY_RETURN)
         monitor.set_events(slot, monitor.events.RAISE)
         try:
@@ -201,14 +203,14 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
             monitor.set_events(slot, 0)
             monitor.set_local_events(slot, StateBinarySensorEntity._update_state.__code__, 0)
             monitor.set_local_events(slot, action_code, 0)
-            if not use_leaf:
+            if use_leaf:
                 monitor.set_local_events(slot, reload_code, 0)
             monitor.register_callback(slot, monitor.events.PY_START, None)
             monitor.register_callback(slot, monitor.events.PY_RETURN, None)
             monitor.register_callback(slot, monitor.events.RAISE, None)
             monitor.free_tool_id(slot)
         self.assertEqual(result['state'], 'applied')
-        if not use_leaf:
+        if use_leaf:
             self.assertEqual(len(foreign_events), 1)
             self.assertTrue(foreign_events[0][0], 'foreign state must occur inside vendor reload')
             self.assertEqual(foreign_events[0][1].state, 'during_reload')
@@ -223,15 +225,20 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         for e, state in zip((sensor, binary, switch), before[:3], strict=True):
             current = hass.states.get(e.entity_id)
             attributes = dict(state.attributes)
-            if e is sensor and not use_leaf:
+            if e is sensor and use_leaf:
                 attributes['foreign'] = 'during_reload'
             self.assertEqual((current.state, dict(current.attributes)), (state.state, attributes))
         self.assertIs(hass.states.get(foreign.entity_id), before[3])
         await switch.async_turn_on()
         await switch.async_turn_off()
         self.assertEqual(events, [[target], [mapping[target]], [mapping[target]]])
-        result = await runtime.recovery_restore(hass, op, fingerprint, guard=lambda: True, refresh=refresh)
-        self.assertEqual(result['state'], 'rolled_back')
+        inverse = {new: old for old, new in mapping.items()}
+        review_inverse = await runtime.native_yaml_prepare(hass, inverse, actor_id='p2-fixture',
+            guard=lambda: True, refresh=refresh)
+        self.assertNotEqual(review_inverse['operation_id'], op)
+        result = await runtime.native_yaml_apply(hass, review_inverse['operation_id'], review_inverse['fingerprint'],
+            actor_id='p2-fixture', guard=lambda: True, refresh=refresh)
+        self.assertEqual(result['state'], 'applied')
         self.assertEqual(path.read_bytes(), initial)
         self.assertIs(binary._delay_cancel, token)
         self.assertEqual(token.__self__.when(), deadline)
