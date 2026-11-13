@@ -22,6 +22,7 @@ from .prepared import encode_change, decode_change
 from .native_script_program_composition import ScriptTemplateStateComposition
 from .native_automation_program_composition import AutomationTemplateStateComposition
 from .controlled_powercalc_composition import ControlledPowercalcComposition
+from .native_utility_yaml_wiring import registry_adapter as _utility_registry_adapter
 
 
 def _need(value, reason):
@@ -856,7 +857,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             from .transaction import Coordinator
             registry.full_verify = lambda _: self._full(False)
             registry.full_verify_rollback = lambda _: self._full(True)
-            adapters = {'registry': registry}
+            adapters = {'registry': _utility_registry_adapter(self, registry, resolver, controlled)}
             if hasattr(self, 'dashboard_phase'):
                 from .dashboard_transaction import ReceiptedDashboardAdapter
                 adapters['dashboard'] = ReceiptedDashboardAdapter(
@@ -878,7 +879,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             full_verify=lambda _: self._full(False), full_verify_rollback=lambda _: self._full(True),
             **({'handoff': handoff} if controlled else {}))
         admission = {} if record_admission is None else {'record_admission': record_admission}
-        adapters = {'registry': registry, 'yaml': yaml}
+        adapters = {'registry': _utility_registry_adapter(self, registry, resolver, controlled), 'yaml': yaml}
         if (type(self.composition) is ControlledReloadEntryComposition
                 or type(self.composition) is ControlledScriptComposition and 'helpers' in self.plan.required_scopes):
             from .controlled_template_entry_adapter import create_adapter
