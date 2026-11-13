@@ -75,8 +75,28 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         review = await runtime.native_yaml_prepare(hass, mapping, actor_id='p2-fixture',
             guard=lambda: True, refresh=refresh)
         op, fingerprint = review['operation_id'], review['fingerprint']
-        result = await runtime.native_yaml_apply(hass, op, fingerprint, actor_id='p2-fixture',
-            guard=lambda: True, refresh=refresh)
+        import sys
+        from pathlib import Path
+        monitor = sys.monitoring
+        slot = next(i for i in range(6) if monitor.get_tool(i) is None)
+        monitor.use_tool_id(slot, 'P2 native diagnostics')
+        reasons = []
+        def trace(code, offset, error):
+            if 'ha_entity_renamer' in Path(code.co_filename).parts and isinstance(error, (ValueError, AttributeError, KeyError)) and len(str(error)) < 180:
+                row = (Path(code.co_filename).name, code.co_name, str(error))
+                if row not in reasons:
+                    reasons.append(row)
+        monitor.register_callback(slot, monitor.events.RAISE, trace)
+        monitor.set_events(slot, monitor.events.RAISE)
+        try:
+            result = await runtime.native_yaml_apply(hass, op, fingerprint, actor_id='p2-fixture',
+                guard=lambda: True, refresh=refresh)
+        except Exception as error:
+            self.fail(f'{error}: {reasons[-25:]}')
+        finally:
+            monitor.set_events(slot, 0)
+            monitor.register_callback(slot, monitor.events.RAISE, None)
+            monitor.free_tool_id(slot)
         self.assertEqual(result['state'], 'applied')
         self.assertIs(binary._delay_cancel, token)
         self.assertEqual(token.__self__.when(), deadline)

@@ -12,11 +12,13 @@ from .native_script_config_transport import (NativeScriptConfigTransport,
 class SwitchActionTransfer:
     @classmethod
     def capture(cls, hass, pairs, entities):
+        obj = cls()
+        obj.hass, obj.rows, obj.phase = hass, [], 'captured'
+        if not pairs:
+            return obj
         from homeassistant.components.template.switch import StateSwitchEntity
         from homeassistant.helpers.script import Script
         from .yaml_validation_worker import _normal
-        obj = cls()
-        obj.hass, obj.rows, obj.phase = hass, [], 'captured'
         seen = set()
         for entity, images in pairs:
             _need(type(entity) is StateSwitchEntity and entity in entities
