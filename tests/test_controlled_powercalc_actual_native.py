@@ -140,7 +140,9 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         await entity('automation', 'controlled_yaml_off').async_turn_off()
 
         async def flush():
+            from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
             await hass.data['powercalc_group_storage'].persist_states()
+            await hass.data[DATA_RESTORE_STATE].async_dump_states()
             await self._flush_documents()
             await get_instance(hass).async_block_till_done()
 
@@ -186,6 +188,13 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             save()
 
         native_dummy_mdns(hass)
+        for light in self.sources:
+            await light.async_turn_on(brightness=255)
+        await hass.async_block_till_done()
+        await asyncio.sleep(2)
+        for light in self.sources:
+            await light.async_turn_off()
+        await hass.async_block_till_done()
         await signal('baseline', {})
         await flush()
         history = NativeRecorderGuard(hass)
