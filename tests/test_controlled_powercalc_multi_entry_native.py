@@ -203,8 +203,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 from datetime import timedelta
                 from types import MappingProxyType
                 from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_USER
-                from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
-                from homeassistant.const import UnitOfEnergy
+                from homeassistant.components.sensor import SensorEntity
                 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
                 from homeassistant.helpers.entity_component import DATA_INSTANCES
                 from homeassistant.setup import async_setup_component
@@ -216,19 +215,6 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     _attr_should_poll = False
                     _attr_device_info = {'identifiers': {('synthetic-multi-queue', 'ordinary-device')},
                                          'name': 'Synthetic ordinary device'}
-                class EnergySourceA(OrdinarySensor):
-                    _attr_unique_id = 'synthetic-multi-energy-source-a'
-                    _attr_name = 'Energy source A'
-                    _attr_device_info = {'identifiers': {('synthetic-multi-queue', 'energy-device-a')},
-                                         'name': 'Synthetic energy device A'}
-                    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-                    _attr_device_class = SensorDeviceClass.ENERGY
-                    _attr_state_class = SensorStateClass.TOTAL_INCREASING
-                class EnergySourceB(EnergySourceA):
-                    _attr_unique_id = 'synthetic-multi-energy-source-b'
-                    _attr_name = 'Energy source B'
-                    _attr_device_info = {'identifiers': {('synthetic-multi-queue', 'energy-device-b')},
-                                         'name': 'Synthetic energy device B'}
                 ordinary_entry = ConfigEntry(domain='threshold', title='Synthetic ordinary owner',
                     data={}, options={'name': 'Synthetic ordinary helper',
                                       'entity_id': self.sources[0].entity_id,
@@ -254,9 +240,6 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 platform.config_entry = ordinary_entry
                 ordinary_entity = OrdinarySensor()
                 await platform.async_add_entities([ordinary_entity])
-                if browser_ui:
-                    energy_sources = (EnergySourceA(), EnergySourceB())
-                    await platform.async_add_entities(list(energy_sources))
                 await hass.async_block_till_done()
                 ordinary = self.f.entity.async_get(ordinary_id)
                 self.assertIsNotNone(ordinary)
@@ -269,18 +252,18 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     from homeassistant.components.energy.data import async_get_manager, ENERGY_SOURCE_SCHEMA
                     energy = await async_get_manager(hass)
                     preferences = energy.default_preferences()
-                    preferences['energy_sources'] = probatio.Schema(ENERGY_SOURCE_SCHEMA)([
-                        {'type': 'grid', 'stat_energy_from': source.entity_id, 'stat_energy_to': None,
-                         'stat_cost': None, 'entity_energy_price': None, 'number_energy_price': 0.75,
-                         'cost_adjustment_day': 0.0} for source in energy_sources])
                     energy_ids = [names['fixture-meter-10_energy'], names['fixture-meter-11_energy']]
+                    preferences['energy_sources'] = probatio.Schema(ENERGY_SOURCE_SCHEMA)([
+                        {'type': 'grid', 'stat_energy_from': source_id, 'stat_energy_to': None,
+                         'stat_cost': None, 'entity_energy_price': None, 'number_energy_price': 0.75,
+                         'cost_adjustment_day': 0.0} for source_id in energy_ids])
                     preferences['device_consumption'] = [{'stat_consumption': name} for name in energy_ids]
                     await energy.async_update(preferences)
                     await energy._store.async_save(energy.data)
                     self.assertTrue(await async_setup_component(hass, 'energy', {}))
                     await hass.async_block_till_done()
                     cost_index = hass.data['energy']['cost_sensors']
-                    cost_ids = [cost_index[source.entity_id] for source in energy_sources]
+                    cost_ids = [cost_index[source_id] for source_id in energy_ids]
                     self.assertEqual(len(set(cost_ids)), 2)
                     from homeassistant.components.energy.sensor import EnergyCostSensor
                     costs = {entity.entity_id: entity for platform in async_get_platforms(hass, 'energy')
@@ -466,27 +449,22 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     def ui_continue(label):
                         (directory / (label + '.go')).write_text('go')
             await pulse()
-            if browser_ui:
-                # Supply real numeric samples after Utility subscribes, so the
-                # retained value and native reset deadline have actual inputs.
-                for value in (2, 3):
-                    for source in energy_sources:
-                        source._attr_native_value = value
-                        source.async_write_ha_state()
-                    await hass.async_block_till_done()
             await baseline()
             if browser_ui:
-                meter_before = {name: (meter.entity_id, meter.native_value, meter._next_reset)
-                                for name, meter in utility_meters().items()}
-                self.assertTrue(all(value is not None and deadline is not None
-                                    for _, value, deadline in meter_before.values()))
-                cost_before = {}
-                for cost_id in cost_ids:
-                    state = hass.states.get(cost_id)
-                    self.assertIsNotNone(state)
-                    value = Decimal(state.state)
-                    self.assertTrue(value.is_finite())
-                    cost_before[cost_id] = (value, state.attributes.get('unit_of_measurement'))
+                def capture_costs(moves):
+                    meters = {name: (meter.entity_id, meter.native_value, meter._next_reset)
+                              for name, meter in utility_meters().items()}
+                    self.assertTrue(all(value is not None and deadline is not None
+                                        for _, value, deadline in meters.values()))
+                    values = {}
+                    for cost_id in cost_ids:
+                        state = hass.states.get(moves.get(cost_id, cost_id))
+                        self.assertIsNotNone(state)
+                        value = Decimal(state.state)
+                        self.assertTrue(value.is_finite())
+                        values[cost_id] = (value, state.attributes.get('unit_of_measurement'))
+                    return meters, values
+                meter_before, cost_before = capture_costs({})
             if public:
                 # Independent physical oracle for every native registry row,
                 # including foreign IDs, device associations, units and labels.
@@ -503,6 +481,9 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     row['entity_id'] = mapping.get(row['entity_id'], row['entity_id'])
                     if row['id'] == ordinary.id:
                         row['name'] = 'Synthetic ordinary name'
+                    if browser_ui and row['id'] in cost_uuids.values():
+                        index = next(i for i, cost_id in enumerate(cost_ids) if cost_uuids[cost_id] == row['id'])
+                        row['suggested_object_id'] = mapping[energy_ids[index]].split('.', 1)[1] + '_cost'
                 expected_devices = deepcopy(original_devices)
                 expected_devices[ordinary_device.id]['name_by_user'] = 'Synthetic ordinary device'
             history = NativeRecorderGuard(hass)
@@ -611,7 +592,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                         self.assertEqual(meter._sensor_source_id, mapping[cost_ids[index]])
                         self.assertIsNotNone(meter._collecting)
                         self.assertEqual(self.f.entity.async_get(mapping[cost_ids[index]]).id, cost_uuids[cost_ids[index]])
-                        self.assertEqual(hass.data['energy']['cost_sensors'][energy_sources[index].entity_id],
+                        self.assertEqual(hass.data['energy']['cost_sensors'][mapping[energy_ids[index]]],
                                          mapping[cost_ids[index]])
                         state = hass.states.get(mapping[cost_ids[index]])
                         self.assertIsNotNone(state)
@@ -634,6 +615,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             self.assertTrue(all(Decimal(counter_values(inventory())[uid][0]) > Decimal(initial[uid][0])
                                 for uid in ('fixture-group-a_energy', 'fixture-group-b_energy')))
             await baseline()
+            if browser_ui:
+                meter_before, cost_before = capture_costs(mapping)
             if public:
                 reply = await request(admin, 'recovery/inspect', operation_id=op, fingerprint=fingerprint)
                 self.assertTrue(reply.get('success'), reply)
@@ -681,7 +664,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                         self.assertEqual(meter._sensor_source_id, cost_ids[index])
                         self.assertIsNotNone(meter._collecting)
                         self.assertEqual(self.f.entity.async_get(cost_ids[index]).id, cost_uuids[cost_ids[index]])
-                        self.assertEqual(hass.data['energy']['cost_sensors'][energy_sources[index].entity_id], cost_ids[index])
+                        self.assertEqual(hass.data['energy']['cost_sensors'][energy_ids[index]], cost_ids[index])
                         state = hass.states.get(cost_ids[index])
                         self.assertIsNotNone(state)
                         self.assertEqual((Decimal(state.state), state.attributes.get('unit_of_measurement')),
