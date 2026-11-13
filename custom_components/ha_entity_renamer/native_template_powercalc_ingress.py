@@ -5,6 +5,7 @@ Other events continue through the original tracker immediately. A finite first
 value retires the transient event; without one it is delivered before exit.
 """
 from decimal import Decimal, InvalidOperation
+import asyncio
 import sys
 
 from .native_template_consumers import _bound, _need
@@ -24,6 +25,7 @@ class PowercalcTemplateIngress:
         obj.handoff, obj.hass, obj.rows = handoff, handoff.hass, []
         obj.pending, obj.ready, obj.error, obj.witnessed = {}, set(), None, {}
         obj.monitor_slot = None
+        obj.signal = asyncio.Event()
         mapping = dict(handoff.root.mapping)
         if handoff.direction == 'rollback':
             mapping = {new: old for old, new in mapping.items()}
@@ -111,6 +113,7 @@ class PowercalcTemplateIngress:
                                                 and before.attributes.get('restored') is True)
                                     if (before is None or restored) and after.state in ('unknown', 'unavailable') and key not in obj.ready:
                                         obj.pending[key] = (original, event, owner)
+                                        obj.signal.clear()
                                         return
                                     if key in obj.pending:
                                         try:
@@ -120,6 +123,8 @@ class PowercalcTemplateIngress:
                                         prior = obj.pending.pop(key)
                                         if finite and prior[2] is owner:
                                             obj.ready.add(key)
+                                            if not obj.pending:
+                                                obj.signal.set()
                                         else:
                                             prior[0](prior[1])
                             except Exception as error:
@@ -137,6 +142,19 @@ class PowercalcTemplateIngress:
             obj.close()
             raise
         return obj
+
+    async def settle(self):
+        # Vendor reload can return before its first calculated power value.
+        # Keep the original pending Event until that native write arrives.
+        while self.pending:
+            self.handoff._scope()
+            try:
+                await asyncio.wait_for(self.signal.wait(), timeout=30)
+            except TimeoutError:
+                _need(False, 'powercalc_template_first_value_timeout')
+            self.handoff._scope()
+            self.signal.clear()
+        _need(self.error is None, 'powercalc_template_ingress_callback_failed')
 
     def close(self):
         try:

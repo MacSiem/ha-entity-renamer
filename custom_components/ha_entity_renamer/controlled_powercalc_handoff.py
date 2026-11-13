@@ -908,6 +908,7 @@ class ControlledPowercalcHandoff:
         try:
             await self.hass.services.async_call('powercalc', 'reload', {}, blocking=True, context=service_context)
             await _settle_yaml_discovery(self.hass)
+            await template_ingress.settle()
             if self.entry_listeners is not None:
                 self.entry_listeners.verify_activated()
         finally:
