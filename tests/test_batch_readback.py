@@ -151,6 +151,39 @@ class BatchReadbackTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             compare(self.original, self.after, mappings=[(self.uuid, self.old, 'light.bad')])
 
+    def test_two_powercalc_entries_detect_omission_and_foreign_mutation(self):
+        """A shared consumer cannot hide an omitted second source or foreign edit."""
+        second = {'id': 'second', 'entity_id': 'sensor.other_source',
+                  'modified_at': '2026-01-01T00:00:00+00:00', 'unit': 'W'}
+        for root, moved in ((self.original, False), (self.after, True)):
+            doc = json.loads((root / '.storage/core.entity_registry').read_text())
+            doc['data']['entities'].append(dict(second, entity_id='sensor.other_target' if moved else second['entity_id']))
+            (root / '.storage/core.entity_registry').write_text(json.dumps(doc))
+            a, b = (('sensor.target', 'sensor.other_target') if moved else ('sensor.source', 'sensor.other_source'))
+            (root / 'includes/template.yaml').write_text(f'entities: [{a}, {b}]\n')
+            (root / '.storage/core.config_entries').write_text(json.dumps({'data': {'entries': [
+                {'entry_id': 'a', 'data': {'entity_id': a, '_power_entity': 'sensor.power_a', '_energy_entity': 'sensor.energy_a'}},
+                {'entry_id': 'b', 'data': {'entity_id': b, '_power_entity': 'sensor.power_b', '_energy_entity': 'sensor.energy_b'}},
+                {'entry_id': 'foreign', 'data': {'entity_id': 'light.foreign', 'flag': True}},
+            ]}}))
+        edits = [Edit(path, old.encode(), new.encode(), 1)
+                 for path in ('includes/template.yaml', '.storage/core.config_entries')
+                 for old, new in ((self.old, self.new), ('sensor.other_source', 'sensor.other_target'))]
+        args = {'mappings': [(self.uuid, self.old, self.new), ('second', 'sensor.other_source', 'sensor.other_target')],
+                'edits': edits}
+        self.assertEqual([], compare(self.original, self.after, **args)['findings'])
+        template = self.after / 'includes/template.yaml'
+        template.write_text('entities: [sensor.target, sensor.other_source]\n')
+        findings = compare(self.original, self.after, **args)['findings']
+        self.assertIn(('remaining_reference', ['includes/template.yaml']), findings)
+        template.write_text('entities: [sensor.target, sensor.other_target]\n')
+        path = self.after / '.storage/core.config_entries'
+        doc = json.loads(path.read_text())
+        doc['data']['entries'][2]['data']['flag'] = 1
+        path.write_text(json.dumps(doc))
+        self.assertIn(('unexpected_change', '.storage/core.config_entries'),
+                      compare(self.original, self.after, **args)['findings'])
+
     def test_native_timestamp_regression_detected(self):
         document = json.loads((self.after / '.storage/core.entity_registry').read_text())
         document['data']['entities'][0]['modified_at'] = '2025-12-31T23:59:59+00:00'

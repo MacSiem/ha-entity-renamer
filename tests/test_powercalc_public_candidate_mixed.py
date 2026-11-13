@@ -50,6 +50,22 @@ class MixedCandidateTests(unittest.TestCase):
         with self.assertRaises(Exception):
             build_candidate(self.original(), mapping, '2026.10.4')
 
+    def test_multi_source_candidate_requires_all_named_source_rows(self):
+        original = list(self.original())
+        document = json.loads(original[0][1])
+        document['data']['entities'].append({'id': 'b', 'entity_id': 'sensor.second',
+                                             'platform': 'demo', 'name': None})
+        original[0] = (original[0][0], json.dumps(document).encode())
+        mapping = {'sensor.producer': 'sensor.new_producer', 'sensor.second': 'sensor.new_second'}
+        candidate = build_candidate(tuple(original), mapping, '2026.10.4', mixed=True,
+                                    source_ids=('sensor.producer', 'sensor.second'))
+        rows = json.loads(candidate.documents[0][2])['data']['entities']
+        self.assertEqual({r['id']: r['entity_id'] for r in rows if r['id'] in ('a', 'b')},
+                         {'a': 'sensor.new_producer', 'b': 'sensor.new_second'})
+        for sources in ((), ('sensor.producer', 'sensor.producer'), ('sensor.producer', 'sensor.absent')):
+            with self.subTest(sources=sources), self.assertRaises(Exception):
+                build_candidate(tuple(original), mapping, '2026.10.4', mixed=True, source_ids=sources)
+
     def test_energy_preimage_compares_json_scalar_types(self):
         mapping = {'sensor.producer': 'sensor.new_producer', 'sensor.group': 'sensor.new_group'}
         raw = json.dumps({'key': 'energy', 'data': {'foreign': True}}).encode()

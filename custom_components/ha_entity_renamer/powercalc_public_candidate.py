@@ -19,7 +19,7 @@ def _need(value, reason):
         raise Refused('powercalc_public_candidate_' + reason)
 
 
-def build_candidate(original, mapping, version, energy=None, *, mixed=False, source_id=None, entity_names=None, device_names=None,
+def build_candidate(original, mapping, version, energy=None, *, mixed=False, source_id=None, source_ids=None, entity_names=None, device_names=None,
                     template_entry=None, owned_script=None):
     """Build full proposed documents from exact immutable bytes only."""
     _need(type(original) is tuple and len(original) == len(_KEYS)
@@ -39,9 +39,17 @@ def build_candidate(original, mapping, version, energy=None, *, mixed=False, sou
     _need(len(selected) == len(mapping) and len({row['entity_id'] for row in selected}) == len(mapping)
           and not any(row['entity_id'] in mapping.values() for row in rows), 'registry_scope')
     groups = [row for row in selected if row['platform'] == 'powercalc']
+    if source_ids is None:
+        chosen = {source_id} if mixed else None
+    else:
+        _need(mixed and source_id is None and type(source_ids) is tuple and bool(source_ids)
+              and all(type(value) is str for value in source_ids)
+              and len(set(source_ids)) == len(source_ids), 'owned_source_required')
+        chosen = set(source_ids)
     sources = [row for row in selected if row['platform'] not in ('powercalc', 'template', 'automation', 'script')
-               and (not mixed or row['entity_id'] == source_id)]
-    _need(len(sources) == 1 and (mixed or len(groups) == 1 and source_id is None),
+               and (not mixed or row['entity_id'] in chosen)]
+    _need((bool(sources) and {row['entity_id'] for row in sources} == chosen if mixed
+           else len(sources) == 1 and len(groups) == 1 and source_id is None),
           'owned_source_required')
     source = sources[0]
     entity_names = {} if entity_names is None else entity_names

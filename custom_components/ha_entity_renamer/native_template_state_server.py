@@ -133,7 +133,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         from .native_registry import NativeRegistryBridge, NativeRegistryIO
         from .native_input_baseline import async_capture_native_input_baseline
         mixed_powercalc = getattr(self, 'mixed_powercalc', False)
-        pc_candidate = pc_original = pc_source = pc_energy = None
+        pc_candidate = pc_original = pc_sources = pc_energy = None
         root = Path(self.hass.config.config_dir).resolve()
         if mixed_powercalc:
             from homeassistant.const import __version__
@@ -159,8 +159,10 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                        and type(source.get('entity_id')) is str and source['entity_id'] in selected
                        and selected[source['entity_id']].get('platform') not in
                            ('powercalc', 'template', 'automation', 'script')}
-            _need(len(sources) == 1, 'powercalc_source_unqualified')
-            pc_source = next(iter(sources))
+            _need(bool(sources), 'powercalc_source_unqualified')
+            pc_sources = tuple(sorted(sources))
+            _need(len(pc_sources) == 1 or __version__ in ('2026.11.0', '2026.11.1'),
+                  'powercalc_multi_source_version_unsupported')
             pc_original, energy_raw = await _drained(self.hass.async_add_executor_job,
                 lambda: _read_original(root, pc_energy is not None))
             self._scope()
@@ -243,7 +245,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         if mixed_powercalc:
             pc_candidate = build_candidate(pc_original, self.mapping, __version__,
                 None if pc_energy is None else (energy_raw, pc_energy), mixed=True,
-                source_id=pc_source, entity_names=self.entity_names, device_names=self.device_names,
+                source_ids=pc_sources, entity_names=self.entity_names, device_names=self.device_names,
                 template_entry=entry_change,
                 owned_script=None if not owned_script else (owned_script[0], inventory.default_name))
         yaml = await _drained(self.hass.async_add_executor_job,
@@ -390,6 +392,11 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             from .powercalc_source_binding import async_bind_powercalc_sources
             bound = await async_bind_powercalc_sources(self.hass, self.receipt, self.evidence,
                                                        self.powercalc_capture, guard=self._scope)
+            if len(pc_sources) > 1:
+                from .powercalc_multi_source import qualify_multi_entry_sources
+                qualify_multi_entry_sources(pc_sources, bound.rows,
+                    json.loads(next(row.raw for row in baseline.files
+                                    if row.key == 'core.entity_registry'))['data']['entities'])
             from .powercalc_previous_state_original import async_capture_powercalc_previous_original
             pc_previous = await async_capture_powercalc_previous_original(
                 self.hass, self.receipt, self.evidence, self.powercalc_capture, guard=self._scope,
