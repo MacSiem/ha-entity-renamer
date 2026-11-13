@@ -100,6 +100,8 @@ class PowercalcTemplateIngress:
                                         prior = obj.pending.pop(key, None)
                                         if prior is not None:
                                             prior[0](prior[1])
+                                            if not obj.pending:
+                                                obj.signal.set()
                                         original(event)
                                         return
                                     entry = obj.registry.async_get(name)
@@ -127,6 +129,8 @@ class PowercalcTemplateIngress:
                                                 obj.signal.set()
                                         else:
                                             prior[0](prior[1])
+                                            if not obj.pending:
+                                                obj.signal.set()
                             except Exception as error:
                                 # HA dispatch logs callback errors; retain the error for
                                 # the owning transaction and deliver this real event.
