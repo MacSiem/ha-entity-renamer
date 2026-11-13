@@ -70,6 +70,11 @@ def capture(hass, mapping):
     affected = False
     for entry in entries:
         row = read_entry(hass, entry.entry_id)
+        # First YAML import contains an ephemeral index which native reload
+        # removes. Qualify only already-normalized entries: otherwise the
+        # reload has a second, unplanned ConfigEntry data effect.
+        _need(row['identity']['source'] != 'import' or 'index' not in row['data'],
+              'import_index_not_normalized')
         proposed = deepcopy(row)
         result = plan_filter(row['options'], mapping)
         if result.changes:

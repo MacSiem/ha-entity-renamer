@@ -24,6 +24,10 @@ class HomeKitNativeReloadTests(unittest.IsolatedAsyncioTestCase):
         source.write_text(config('sensor.old'))
         self.assertTrue(await async_setup_component(hass, 'homekit', await async_hass_config_yaml(hass)))
         await hass.async_block_till_done()
+        # First native import adds temporary data.index; the native YAML
+        # reload removes it, matching the pre-existing target bridge shape.
+        await hass.services.async_call('homekit', 'reload', {}, blocking=True)
+        await hass.async_block_till_done()
         adapter = importlib.import_module(fixtures.PACKAGE + '.native_homekit_filter')
         mapping = {'sensor.old':'sensor.new'}
         async def settle(): await hass.async_block_till_done()
@@ -34,15 +38,8 @@ class HomeKitNativeReloadTests(unittest.IsolatedAsyncioTestCase):
             expected = config(new)
             source.write_text(expected)
             async def verify(): self.assertEqual(source.read_text(), expected)
-            try:
-                await adapter.reload_after_yaml(hass, captured, verify_source=verify,
-                    guard=guard, record_intent=intent, settle=settle)
-            except Exception:
-                from pprint import pformat
-                print('SYNTHETIC_EXPECTED', pformat(captured.expected))
-                print('SYNTHETIC_ACTUAL', pformat(tuple(adapter.read_entry(hass, row['identity']['entry_id'])
-                                                       for row in captured.entries)))
-                raise
+            await adapter.reload_after_yaml(hass, captured, verify_source=verify,
+                guard=guard, record_intent=intent, settle=settle)
             entry = hass.config_entries.async_entries('homekit')[0]
             native = entry.runtime_data.homekit
             self.assertFalse(native._filter.get_filter()(new))
