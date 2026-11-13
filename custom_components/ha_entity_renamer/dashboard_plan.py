@@ -172,7 +172,7 @@ def plan_dashboard(config, mapping):
                     if field not in {'entity_ids', 'floor_entity_ids', 'bound_entity',
                                      'source_entities', 'cluster_bindings'}:
                         block(q, 'unsupported_button_variable'); continue
-                    variable_refs(item, q)
+                    variable_refs(field, item, q)
             elif key == 'label' and kind == 'custom:button-card' and type(child) is str and child.startswith('[[['):
                 expressions.append((p, child))
             elif key in ACTIONS: action(child, p)
@@ -196,14 +196,25 @@ def plan_dashboard(config, mapping):
             elif key == 'cards' and kind == 'custom:button-card': sequence(child, p, 'card')
             elif key not in passive: block(p)
 
-    def variable_refs(value, path):
-        if type(value) is str:
+    def variable_refs(field, value, path):
+        if field == 'bound_entity':
             ref(value, path)
-        elif type(value) is list:
-            for i, item in enumerate(value): variable_refs(item, path + (i,))
-        elif type(value) is dict:
-            for key, item in value.items(): variable_refs(item, path + (key,))
-        else: block(path, 'unsupported_button_variable')
+        elif field in {'entity_ids', 'source_entities'}:
+            if type(value) is not list: block(path); return
+            ref(value, path, many=True)
+        elif field == 'floor_entity_ids':
+            if type(value) is not dict: block(path); return
+            for floor, entities in value.items():
+                if type(entities) is not list: block(path + (floor,)); continue
+                ref(entities, path + (floor,), many=True)
+        elif field == 'cluster_bindings':
+            if type(value) is not dict: block(path); return
+            for name, binding in value.items():
+                p = path + (name,)
+                if type(binding) is not dict: block(p); continue
+                for key, item in binding.items():
+                    if key == 'entity_id': ref(item, p + (key,))
+                    else: block(p + (key,), 'unsupported_button_variable')
 
     def node(value, path, role, statistic=False):
         if type(value) is str and role in {'row', 'badge', 'graph'}:
