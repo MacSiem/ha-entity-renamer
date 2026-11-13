@@ -63,6 +63,20 @@ class ControlledPowercalcPrefixTests(ControlledActualGraphTests):
         # Ensure fixture-generated state metadata is committed before the
         # reviewed history snapshot; late Recorder writes must still refuse.
         await self.module('recorder_guard').NativeRecorderGuard(hass).async_synchronize()
+        # Compile a completed native statistics period before the history seal.
+        from datetime import timedelta
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.tasks import StatisticsTask
+        from homeassistant.util import dt as dt_util
+        history = self.module('recorder_guard').NativeRecorderGuard(hass)
+        now = dt_util.utcnow()
+        period = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0) + timedelta(minutes=5)
+        await asyncio.sleep(max(0, (period - dt_util.utcnow()).total_seconds()))
+        get_instance(hass).queue_task(StatisticsTask(period, False))
+        await history.async_synchronize()
+        selected_series = {self.entities[f'fixture-meter-{i}_energy'].entity_id for i in (10, 11)}
+        metadata = await history.snapshot({entity_id: entity_id for entity_id in selected_series})
+        self.assertTrue(selected_series <= set(metadata['statistics']), metadata['statistics'])
         foreign_before = json.loads((self.f.root / '.storage/powercalc_group').read_bytes())['data'][
             'sensor.foreign_fixture_group']
         package = self.package.read_bytes()

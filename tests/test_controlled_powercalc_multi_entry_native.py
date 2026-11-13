@@ -68,6 +68,10 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             path = Path(code.co_filename)
             value = str(error)
             if 'ha_entity_renamer' in path.parts and isinstance(error, (Refused, ValueError)) and len(value) < 160:
+                if code.co_name == '_need' and value == 'template_yaml_server_history_identity_changed':
+                    from ordinary_history_diagnostic import history_from_frame
+                    evidence.setdefault('history_diffs', []).append(history_from_frame(sys._getframe(1)))
+                    save()
                 if code.co_name == '_need' and value == 'controlled_powercalc_handoff_setup_graph_unverified':
                     caller = sys._getframe(1).f_back
                     rows = caller.f_locals.get('first', ()) if caller else ()
@@ -456,12 +460,31 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                         (directory / (label + '.go')).write_text('go')
             await pulse()
             if browser_ui:
+                # Exercise real subscriptions before taking the Utility baseline.
+                await pulse()
                 for _ in range(200):
                     meters = utility_meters()
-                    if all(meter.native_value is not None and meter._next_reset is not None
+                    if all(meter.native_value is not None and Decimal(str(meter.native_value)) > 0
+                           and meter._next_reset is not None
                            for meter in meters.values()):
                         break
                     await asyncio.sleep(.05)
+                self.assertTrue(all(meter.native_value is not None and Decimal(str(meter.native_value)) > 0
+                                    for meter in utility_meters().values()))
+                from datetime import timedelta
+                from homeassistant.components.recorder.tasks import StatisticsTask
+                from homeassistant.util import dt as dt_util
+                from custom_components.ha_entity_renamer.recorder_guard import NativeRecorderGuard
+                history = NativeRecorderGuard(hass)
+                await history.async_synchronize()
+                now = dt_util.utcnow()
+                period = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0) + timedelta(minutes=5)
+                await asyncio.sleep(max(0, (period - dt_util.utcnow()).total_seconds()))
+                get_instance(hass).queue_task(StatisticsTask(period, False))
+                await history.async_synchronize()
+                series = set(energy_ids + cost_ids)
+                metadata = await history.snapshot({entity_id: entity_id for entity_id in series})
+                self.assertTrue(series <= set(metadata['statistics']), metadata['statistics'])
             await baseline()
             if browser_ui:
                 def capture_costs(moves):
@@ -478,6 +501,9 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                         values[cost_id] = (value, state.attributes.get('unit_of_measurement'))
                     return meters, values
                 meter_before, cost_before = capture_costs({})
+                evidence['utility_baseline'] = {name: str(row[1]) for name, row in meter_before.items()}
+                evidence['cost_baseline'] = {name: str(row[0]) for name, row in cost_before.items()}
+                save()
             if public:
                 # Independent physical oracle for every native registry row,
                 # including foreign IDs, device associations, units and labels.
@@ -705,6 +731,21 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                                 for uid in ('fixture-group-a_energy', 'fixture-group-b_energy')))
             native_dummy_mdns(hass)
         finally:
+            # Preserve coroutine locations before fixture teardown when UI
+            # reports an unresolved Energy effect; do not capture arguments.
+            task_locations = []
+            for task in asyncio.all_tasks():
+                chain, seen = [], set()
+                current = task.get_coro()
+                while current is not None and id(current) not in seen:
+                    seen.add(id(current))
+                    frame = getattr(current, 'cr_frame', None) or getattr(current, 'gi_frame', None)
+                    if frame is not None:
+                        chain.append([Path(frame.f_code.co_filename).name, frame.f_code.co_name, frame.f_lineno])
+                    current = getattr(current, 'cr_await', None) or getattr(current, 'gi_yieldfrom', None)
+                if any('energy' in file.lower() for file, _, _ in chain):
+                    task_locations.append(chain)
+            evidence['energy_task_locations'] = task_locations
             save()
             destination = os.environ.get('RENAMER_BATCH_EVIDENCE')
             if destination:

@@ -39,6 +39,14 @@ const wait = async name => {
       access_token:access, token_type:'Bearer', expires_in:18000, expires:Date.now()+17900000,
       hassUrl:origin, clientId:origin+'/'})), {access, origin});
     const page = await context.newPage();
+    const wsErrors = [];
+    page.on('websocket', socket => socket.on('framereceived', event => {
+      try {
+        const message = JSON.parse(event.payload);
+        if (message.type === 'result' && message.success === false)
+          wsErrors.push({id:message.id, error:message.error});
+      } catch (_) { /* Ignore non-JSON websocket frames. */ }
+    }));
     await page.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await page.goto(origin + '/p4-ui/0', {waitUntil:'domcontentloaded'});
     const card = page.locator('ha-entity-renamer');
@@ -87,9 +95,12 @@ const wait = async name => {
       const m=find(c)?._migration; return m && !m.busy && ['applied','unknown','refused'].includes(m.stage);
     }, null, {timeout:2400000});
     const applied = await card.evaluate(el => ({state:el._migration.stage, inspection:el._migration.inspection?.state,
-      registry:el._migration.registryMatches, progress:el._migration.journal?.progress || null}));
-    if (applied.state !== 'applied' || applied.inspection !== 'applied' || !applied.registry)
+      applyState:el._migration.applyState, registry:el._migration.registryMatches,
+      progress:el._migration.journal?.progress || null}));
+    if (applied.state !== 'applied' || applied.inspection !== 'applied' || !applied.registry) {
+      write('applied', {...applied, wsErrors, error:'UI apply not independently confirmed'});
       throw Error('UI apply not independently confirmed');
+    }
     await page.screenshot({path:dir + '/ui-applied.png'});
     fs.chmodSync(dir + '/ui-applied.png', 0o600);
     write('applied', applied);

@@ -20,6 +20,8 @@ backend_fixture = auth_fixture.backend_fixture
 @unittest.skipUnless(yaml_fixture.activation.fixture.fixtures.HAS_HA, 'actual pinned HA required')
 class NativePublicYAMLRecoveryTests(unittest.IsolatedAsyncioTestCase):
     with_yaml = True
+    # Frontend loads HA's own editor registrations; do not duplicate them.
+    native_frontend_config = True
     asyncSetUp = yaml_fixture.NativeTemplateYAMLServerTests.asyncSetUp
     _before_start = backend_fixture.NativeBackendLifecycleTests._before_start
     _loaded_backend = backend_fixture.NativeBackendLifecycleTests._loaded_backend

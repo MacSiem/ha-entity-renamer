@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -13,14 +14,29 @@ from test_controlled_powercalc_actual_native import ControlledActualGraphTests
 
 class ControlledPowercalcPartsTests(ControlledActualGraphTests):
     async def test_separate_parts_a_then_b_and_fresh_reverse(self):
+        from ordinary_history_diagnostic import history_from_frame
+        monitor = sys.monitoring
+        slot = next(i for i in range(6) if monitor.get_tool(i) is None)
+        monitor.use_tool_id(slot, 'parts history mismatch')
+        history_diffs = []
+        def trace(code, offset, error):
+            if code.co_name == '_need' and str(error) == 'template_yaml_server_history_identity_changed':
+                history_diffs.append(history_from_frame(sys._getframe(1)))
+        monitor.register_callback(slot, monitor.events.RAISE, trace)
+        monitor.set_events(slot, monitor.events.RAISE)
         try:
             await self._parts()
         finally:
+            monitor.set_events(slot, 0)
+            monitor.free_tool_id(slot)
             destination = os.environ.get('RENAMER_BATCH_EVIDENCE')
             storage = self.f.root / '.storage'
             if destination and storage.is_dir():
                 target = Path(destination) / 'parts-storage'
                 target.mkdir(mode=0o700, parents=True, exist_ok=True)
+                diagnostic = target / 'history-diffs.json'
+                diagnostic.write_text(json.dumps(history_diffs))
+                diagnostic.chmod(0o600)
                 for item in storage.iterdir():
                     if item.is_file() and 'ha_entity_renamer' in item.name:
                         copied = target / item.name
