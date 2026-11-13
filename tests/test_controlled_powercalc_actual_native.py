@@ -44,6 +44,12 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         from homeassistant.components.recorder.tasks import StatisticsTask
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.core import callback
+        from homeassistant.components.webhook import async_handle_webhook
+        from homeassistant.components.zha.helpers import get_zha_data
+        from homeassistant.helpers import event as native_event
+        from homeassistant.util.aiohttp import MockRequest
+        from homeassistant.util.async_ import get_scheduled_timer_handles
+        from zha.application.const import ZHA_EVENT
         from homeassistant.setup import async_setup_component
         from homeassistant.util import dt as dt_util
         from custom_components.ha_entity_renamer.recorder_guard import NativeRecorderGuard
@@ -57,6 +63,25 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         leaf = self.entities['fixture-meter-10'].entity_id
         mapping = {old_source: 'light.controlled_yaml_source', leaf: 'sensor.controlled_yaml_power'}
         script = 'controlled_yaml_read'
+        zha_device = self.f.device.async_get_or_create(
+            config_entry_id=self.backend_entry_id, identifiers={('zha', 'synthetic-button')})
+        ieee = '00:11:22:33:44:55:66:77'
+        zha_payload = {'device_ieee': ieee, 'command': 'synthetic_press', 'endpoint_id': 1}
+        # The native ZHA trigger supports its own persisted trigger-cache path
+        # when a coordinator is offline. The validator, attach and event
+        # predicates below are unmodified production implementations.
+        get_zha_data(hass).device_trigger_cache[zha_device.id] = (
+            ieee, {('remote_button_short_press', 'button'): {
+                'command': 'synthetic_press', 'endpoint_id': 1}})
+        action_triggers = {
+            'webhook': {'trigger': 'webhook', 'webhook_id': 'controlled-synthetic',
+                        'allowed_methods': ['POST'], 'local_only': True},
+            'conversation': {'trigger': 'conversation', 'command': ['Report synthetic meter']},
+            'sun': {'trigger': 'sun', 'event': 'sunrise'},
+            'time_pattern': {'trigger': 'time_pattern', 'hours': 17, 'minutes': 13, 'seconds': 19},
+            'device': {'trigger': 'device', 'domain': 'zha', 'device_id': zha_device.id,
+                       'type': 'remote_button_short_press', 'subtype': 'button'},
+        }
         files = {domain: root / f'{domain}.yaml' for domain in ('automation', 'script', 'template')}
         conf = root / 'configuration.yaml'
         conf.write_text(conf.read_text() + ''.join(f'{domain}: !include {path.name}\n'
@@ -101,6 +126,17 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
                 automation('controlled_yaml_action_only', [action('controlled_yaml_action_only_result')],
                            {'trigger': 'event', 'event_type': 'controlled_yaml_read_action'}),
 
+                *(automation('controlled_yaml_' + kind,
+                    [action('controlled_yaml_' + kind + '_result')], trigger)
+                    for kind, trigger in action_triggers.items()),
+                automation('controlled_yaml_keyed', [
+                    {'event': 'controlled_yaml_keyed_result', 'event_data': {
+                        'watts': '{{ states(selected) | float(-1) }}',
+                        'label': '{{ labels[trigger.entity_id] }}'}}],
+                    {'trigger': 'state', 'entity_id': leaf, 'to': ['10', '10.0', '10.00']})
+                    | {'variables': {'labels': {leaf: 'Plain label'},
+                                     'meters': {leaf: leaf},
+                                     'selected': '{{ meters.get(trigger.entity_id) }}'}},
                 automation('controlled_yaml_off', [action('controlled_yaml_off_result')]),
                 automation('controlled_yaml_foreign', [{'event': 'controlled_yaml_foreign_result'}],
                            {'trigger': 'time_pattern', 'minutes': '/5'})],
@@ -120,7 +156,7 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         for domain, path in files.items():
             path.write_text(yaml.safe_dump(programs[domain], sort_keys=False))
         config = await async_hass_config_yaml(hass)
-        for domain in ('template', 'script', 'automation'):
+        for domain in ('conversation', 'webhook', 'sun', 'template', 'script', 'automation'):
             if domain in hass.config.components:
                 await hass.services.async_call(domain, 'reload', {}, blocking=True)
             else:
@@ -176,11 +212,15 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             monitor.free_tool_id(slot)
         self.addCleanup(stop)
 
-        seen = {key: [] for key in ('on', 'off', 'script', 'argument', 'numeric', 'template', 'action_only')}
+        seen = {key: [] for key in ('on', 'off', 'script', 'argument', 'numeric',
+                                     'template', 'action_only', 'keyed', *action_triggers)}
+        labels = []
         for key, events in seen.items():
             @callback
             def collect(event, values=events):
                 values.append(float(event.data['watts']))
+                if 'label' in event.data:
+                    labels.append(event.data['label'])
             self.addCleanup(hass.bus.async_listen(f'controlled_yaml_{key}_result', collect))
 
         def entity(domain, key):
@@ -205,6 +245,46 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
                 await asyncio.sleep(.01)
             self.fail(f'native consumer stimulus did not settle: {detail()}')
 
+        async def signal_action_triggers():
+            # Feed a non-matching method, sentence and ZHA command first. The
+            # test drives the same native ingress used by the normal actors.
+            def request(method):
+                return MockRequest(b'{}', 'synthetic fixture', method=method, remote='127.0.0.1')
+            await async_handle_webhook(hass, 'controlled-synthetic', request('GET'))
+            await hass.services.async_call('conversation', 'process',
+                {'text': 'Report unrelated fixture', 'language': 'en'},
+                blocking=True, return_response=True)
+            hass.bus.async_fire(ZHA_EVENT, {**zha_payload, 'command': 'unrelated'})
+            await hass.async_block_till_done()
+            self.assertFalse(any(seen[key] for key in ('webhook', 'conversation', 'device')))
+            await async_handle_webhook(hass, 'controlled-synthetic', request('POST'))
+            await hass.services.async_call('conversation', 'process',
+                {'text': 'Report synthetic meter', 'language': 'en'},
+                blocking=True, return_response=True)
+            hass.bus.async_fire(ZHA_EVENT, zha_payload)
+            await hass.async_block_till_done()
+
+            # The synthetic clock advances only the two real native scheduled
+            # handles. Do not invoke Automation actions or trigger closures.
+            for kind, suffix in (('sun', 'handle_event'), ('time_pattern', '_pattern_time_change_listener')):
+                candidates = []
+                for handle in get_scheduled_timer_handles(hass.loop):
+                    tracker = handle._callback
+                    if (not handle.cancelled() and type(tracker) is native_event._TrackPointUTCTime
+                            and tracker.job.target.__qualname__.endswith(suffix)):
+                        if kind == 'time_pattern':
+                            owner = tracker.job.target.__self__
+                            if owner.job.name != 'track time change 17:13:19 local=True':
+                                continue
+                        candidates.append((handle, tracker.utc_point_in_time))
+                self.assertEqual(len(candidates), 1, (kind, candidates))
+                handle, when = candidates[0]
+                with (patch.object(native_event, 'time_tracker_utcnow', return_value=when),
+                      patch.object(native_event, 'time_tracker_timestamp', return_value=when.timestamp())):
+                    handle._run()
+                    handle.cancel()
+                await hass.async_block_till_done()
+
         async def signal(label, mapping):
             active_id, power_id = (mapping.get(key, key) for key in (old_source, leaf))
             for events in seen.values():
@@ -220,6 +300,7 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
                            and float(current()[2]) != 20, current)
             for events in seen.values():
                 events.clear()
+            labels.clear()
             await source.async_turn_on(brightness=255)
             await wait_for(lambda: len(seen['on']) == 1 and len(seen['script']) == 1
                            and current()[2] is not None and float(current()[2]) == 20,
@@ -229,8 +310,11 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             self.assertEqual(float(hass.states.get(sensor).state), watts * 2)
             hass.bus.async_fire('controlled_yaml_read_action')
             await wait_for(lambda: len(seen['action_only']) == 1, lambda: seen)
+            await signal_action_triggers()
             self.assertEqual(seen, {'on': [watts], 'off': [], 'script': [watts], 'argument': [watts],
-                                    'numeric': [watts], 'template': [watts], 'action_only': [watts]})
+                                    'numeric': [watts], 'template': [watts], 'action_only': [watts],
+                                    'keyed': [watts], **{key: [watts] for key in action_triggers}})
+            self.assertEqual(labels, ['Plain label'])
             await hass.services.async_call('script', script, {'power_ids': power_id}, blocking=True)
             self.assertEqual(seen['script'], [watts, watts])
             self.assertTrue(hass.states.is_state(active_id, 'on'))

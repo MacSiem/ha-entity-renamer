@@ -82,7 +82,7 @@ _TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?=([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![A-Za
 
 
 def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
-                     binding_report=None, output_reference=False, trigger_entities=(), alias_only=False):
+                     binding_report=None, output_reference=False, trigger_entities=(), alias_only=False, strict_trigger_keys=False):
     """Parse only: return exact replacements and review marker (code, detail) pairs.
 
     Jinja's parser has no columns. Feed its native lexer tokens through a parser
@@ -205,6 +205,11 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
         def escape(bound):
             charge(len(bound[1]))
             unsafe.update(bound[1])
+            if bound[0] == 'keys' and len(bound) > 2:
+                # An opaque consumer of the map also sees every value.
+                for _, member in bound[2]:
+                    charge(len(member[1]))
+                    unsafe.update(member[1])
 
         # A value is (shape, immutable origins); origin = (start, end, entity).
         def join_values(values):
@@ -238,6 +243,24 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                 alternatives.append(default)
             return join_values(alternatives) if alternatives else None
 
+        def trigger_key_lookup(container, selector, bindings):
+            # The native event supplies the renamed ID. Only a complete table
+            # with collision-checked keys and no alternate selector is safe.
+            if (not strict_trigger_keys or not trigger_entities or 'trigger' in bindings
+                    or not container or container[0] != 'keys'
+                    or not isinstance(selector, nodes.Getattr) or selector.attr != 'entity_id'
+                    or not isinstance(selector.node, nodes.Name) or selector.node.name != 'trigger'):
+                return None
+            keys = {origin[2] for origin in container[1]}
+            if not set(trigger_entities) <= keys:
+                return None
+            consume([('keys', tuple(origin for origin in container[1] if origin[2] in trigger_entities))])
+            fields = dict(container[2]) if len(container) > 2 else {}
+            selected = [fields.get(key) for key in trigger_entities]
+            if selected and all(item and item[0] == 'scalar' for item in selected):
+                return join_values(selected)
+            return ('metadata', ())
+
         def value(node, bindings):
             charge()
             if isinstance(node, nodes.Const) and type(node.value) is str:
@@ -259,6 +282,9 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                     if bound[0] == 'runtime_repeat_record':
                         return bound[2]
                 if isinstance(node, nodes.Getitem) and not isinstance(node.arg, nodes.Const):
+                    lookup = trigger_key_lookup(bound, node.arg, bindings)
+                    if lookup is not None:
+                        return lookup
                     index = value(node.arg, bindings)
                     if index:
                         escape(index)  # selection is metadata, not an entity sink
@@ -267,6 +293,10 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                     and node.node.attr == 'get' and 1 <= len(node.args) <= 2
                     and not (node.kwargs or node.dyn_args or node.dyn_kwargs)):
                 bound = value(node.node.node, bindings)
+                if len(node.args) == 1:
+                    lookup = trigger_key_lookup(bound, node.args[0], bindings)
+                    if lookup is not None:
+                        return lookup
                 if bound and bound[0] == 'record':
                     selector = node.args[0]
                     if isinstance(selector, nodes.Const) and type(selector.value) is not str:
@@ -394,7 +424,7 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
 
         def expression(node, bindings):
             charge()
-            if (isinstance(node, nodes.Test) and node.name in ('defined', 'undefined', 'list')
+            if (isinstance(node, nodes.Test) and node.name in ('defined', 'undefined', 'list', 'string')
                     and not (node.args or node.kwargs or node.dyn_args or node.dyn_kwargs)
                     and isinstance(node.node, nodes.Name)):
                 return  # This tests presence/type, independently of the ID.
@@ -625,7 +655,14 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                         # loop metadata uses conservatively as origin escapes.
                         local['loop'] = ('loop', bound[1])
                     else:
-                        expression(node.iter, bindings)
+                        collection = state_collection(node.iter, bindings)
+                        if (collection is not None and isinstance(node.target, nodes.Name)
+                                and not node.recursive):
+                            # Iterating native HA State objects needs no ID
+                            # rewrite; exact filters on the collection still do.
+                            consume(collection)
+                        else:
+                            expression(node.iter, bindings)
                         targets = [node.target] + list(node.target.find_all(nodes.Name))
                         for target in targets:
                             if isinstance(target, nodes.Name):
@@ -725,7 +762,8 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
         return original_text, [('unsupported_template', 'Native parser rejected template: ' + type(err).__name__)]
 
 
-def analyze_template_alias(text, bindings, *, max_nodes=10000, allow_literals=False, allow_records=False):
+def analyze_template_alias(text, bindings, *, max_nodes=10000, allow_literals=False, allow_records=False,
+                           trigger_entities=(), strict_trigger_keys=False, lookup_dependencies=None):
     """Prove a whole native-template scalar/list alias without rendering it.
 
     Only adapter-owned external origins can flow into a later YAML binding.
@@ -738,18 +776,21 @@ def analyze_template_alias(text, bindings, *, max_nodes=10000, allow_literals=Fa
         return None
     report = {}
     _, markers = _syntax_template(text, {}, max_nodes, initial_bindings=bindings,
-                                   binding_report=report, output_reference=True, alias_only=allow_records)
+                                   binding_report=report, output_reference=True, alias_only=allow_records,
+                                   trigger_entities=trigger_entities, strict_trigger_keys=strict_trigger_keys)
     bound = report.get('output_value')
     if (markers or report.get('unsafe') or not report.get('complete') or not bound
             or bound[0] not in (('scalar', 'list', 'record', 'record_list') if allow_records else ('scalar', 'list'))
             or not bound[1]
             or not allow_literals and any(origin[0] >= 0 for origin in bound[1])):
         return None
+    if lookup_dependencies is not None:
+        lookup_dependencies.update(report.get('used', set()) - set(bound[1]))
     return bound
 
 
 def analyze_template_bindings(text, mapping, bindings, *, max_nodes=10000,
-                              output_reference=False, trigger_entities=()):
+                              output_reference=False, trigger_entities=(), strict_trigger_keys=False):
     """Parse Jinja with adapter-owned origins, without evaluating any expression.
 
     Bindings use the existing (shape, origins) bounded dataflow representation.
@@ -758,6 +799,8 @@ def analyze_template_bindings(text, mapping, bindings, *, max_nodes=10000,
     unsafe consumer. The adapter owns source location and scope validation.
     """
     origins = {origin for bound in bindings.values() if bound for origin in bound[1]}
+    origins.update(origin for bound in bindings.values() if bound and bound[0] == 'keys'
+                   and len(bound) > 2 for _, field in bound[2] for origin in field[1])
     if any(origin[0] >= 0 for origin in origins):
         raise PlanError('external binding origins must have negative positions')
     if set(bindings) & {'states', 'is_state', 'state_attr', 'is_state_attr', 'expand'}:
@@ -767,7 +810,8 @@ def analyze_template_bindings(text, mapping, bindings, *, max_nodes=10000,
     report = {}
     value, markers = _syntax_template(
         text, mapping, max_nodes, initial_bindings=bindings,
-        binding_report=report, output_reference=output_reference, trigger_entities=trigger_entities)
+        binding_report=report, output_reference=output_reference, trigger_entities=trigger_entities,
+        strict_trigger_keys=strict_trigger_keys)
     used = report.get('used', set()) & origins
     unsafe = report.get('unsafe', set()) & origins
     if not report.get('complete') or markers:

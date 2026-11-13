@@ -335,6 +335,7 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
     template_outputs = set()
     work = 0
     trigger_entities = ()
+    strict_trigger_keys = False
     script_parameters = script_parameters or {}
     script_arguments = script_arguments or {}
 
@@ -353,7 +354,11 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                 if isinstance(key, ScalarNode) and key.tag == _STR}
 
     def origins(bindings):
-        return {origin for bound in bindings.values() if bound for origin in bound[1]}
+        result = {origin for bound in bindings.values() if bound for origin in bound[1]}
+        for bound in bindings.values():
+            if bound and bound[0] == 'keys' and len(bound) > 2:
+                result.update(origin for _, field in bound[2] for origin in field[1])
+        return result
 
     def join(environments):
         """May-values, including undefined/dynamic paths, with bounded provenance.
@@ -410,7 +415,16 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                 if len(set(projected)) != len(projected):
                     issue(node, 'entity_key_collision')
                     return None
-                return ('keys', tuple(sorted({o for key in keys for o in key[0][1]}))), [n for key in keys for n in key[1]]
+                key_nodes = [n for key in keys for n in key[1]]
+                value_fields, value_nodes = [], []
+                if strict_trigger_keys and set(trigger_entities) <= set(names):
+                    for key, child in node.value:
+                        if isinstance(child, ScalarNode) and child.tag == _STR and _ENTITY.fullmatch(child.value):
+                            part, leaves = static(child)
+                            value_fields.append((key.value, part))
+                            value_nodes.extend(leaves)
+                return ('keys', tuple(sorted({o for key in keys for o in key[0][1]})),
+                        tuple(value_fields)), key_nodes + value_nodes
             fields = pairs(node)
             if len(fields) != len(node.value):
                 return None
@@ -451,7 +465,8 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
             elif node.tag == _STR and any(t in node.value for t in ('{{', '{%', '{#')):
                 result, markers, consumed, escaped = analyze_template_bindings(
                     node.value, mapping, bindings, max_nodes=max_nodes,
-                    output_reference=field, trigger_entities=trigger_entities)
+                    output_reference=field, trigger_entities=trigger_entities,
+                    strict_trigger_keys=strict_trigger_keys)
                 used.update(consumed)
                 unsafe.update(escaped)
                 if any(code == 'unsupported_runtime_repeat' for code, _ in markers):
@@ -468,7 +483,7 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                     markers = [('unsupported_template_scope', 'Aliased template has differing lexical scopes')]
                 templates[id(node)] = (result, markers, (previous[2] if previous else 0) + 1,
                                        origins(bindings) | (previous[3] if previous else set()),
-                                       (bindings.copy(), field, trigger_entities))
+                                       (bindings.copy(), field, trigger_entities, strict_trigger_keys))
             return
         if isinstance(node, SequenceNode):
             for child in node.value:
@@ -485,7 +500,10 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
     def template_alias(node, bindings):
         if not (isinstance(node, ScalarNode) and node.tag == _STR and '{{' in node.value):
             return None
-        alias = analyze_template_alias(node.value, bindings, max_nodes=max_nodes, allow_records=True)
+        lookups = set()
+        alias = analyze_template_alias(node.value, bindings, max_nodes=max_nodes, allow_records=True,
+                                       trigger_entities=trigger_entities, strict_trigger_keys=strict_trigger_keys,
+                                       lookup_dependencies=lookups)
         if not alias:
             return None
         observed[id(node)] = observed.get(id(node), 0) + 1
@@ -496,6 +514,9 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
             issue(node, 'yaml_template_alias_scope_conflict')
         templates[id(node)] = (node.value, review, (previous[2] if previous else 0) + 1,
                                set(alias[1]) | (previous[3] if previous else set()), None)
+        used.update(lookups)
+        for origin in lookups:
+            record(origin, 'jinja_trigger_key_lookup')
         for origin in alias[1]:
             record(origin, 'yaml_template_alias')
         return alias
@@ -800,12 +821,13 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                 bindings.update(join([entry, bindings]))
 
     def scope(node, initial=None, automation=False):
-        nonlocal trigger_entities
+        nonlocal trigger_entities, strict_trigger_keys
         if not isinstance(node, MappingNode):
             return
         values = pairs(node)
         bindings = dict(initial or {})
         trigger_entities = ()
+        strict_trigger_keys = False
         if automation and not (set(values) & {'trigger_variables', 'use_blueprint'}):
             triggers = values.get('triggers', values.get('trigger'))
             if isinstance(triggers, SequenceNode):
@@ -819,6 +841,18 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                     if isinstance(entity, ScalarNode) and entity.tag == _STR
                     and _ENTITY.fullmatch(entity.value)
                 }))
+                # A lookup, unlike a comparison, must prove the whole selector
+                # universe, including all triggers and any runtime overrides.
+                strict_trigger_keys = bool(trigger_entities) and all(
+                    isinstance(item, MappingNode)
+                    and not any(key.tag == _STANDARD + 'merge' for key, _ in item.value)
+                    and isinstance(kind := pairs(item).get('trigger', pairs(item).get('platform')), ScalarNode)
+                    and kind.value in ('state', 'numeric_state') and 'variables' not in pairs(item)
+                    and bool(targets := pairs(item).get('entity_id'))
+                    and all(isinstance(entity, ScalarNode) and entity.tag == _STR
+                            and _ENTITY.fullmatch(entity.value) for entity in (
+                                targets.value if isinstance(targets, SequenceNode) else (targets,)))
+                    for item in triggers.value)
         if 'variables' in values:
             define(values['variables'], bindings)
         for key, child in node.value:
@@ -833,6 +867,7 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
             elif key.value != 'variables':
                 scan(child, bindings, key.value in _FIELDS)
         trigger_entities = ()
+        strict_trigger_keys = False
 
     def template_scope(node):
         """Only native state block variables; all siblings share their closure.
@@ -1243,10 +1278,11 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                 else:
                     raw_template = raw
                 if binding_template and binding_template[-1] is not None:
-                    bindings, field, trigger_entities = binding_template[-1]
+                    bindings, field, trigger_entities, strict_trigger_keys = binding_template[-1]
                     replacement, source_markers, _, _ = analyze_template_bindings(
                         raw_template, mapping, bindings, max_nodes=limits.max_nodes,
-                        output_reference=field, trigger_entities=trigger_entities)
+                        output_reference=field, trigger_entities=trigger_entities,
+                        strict_trigger_keys=strict_trigger_keys)
                 else:
                     source_plan = plan_references(raw_template, mapping, template_context)
                     replacement, source_markers = source_plan.value, source_plan.markers

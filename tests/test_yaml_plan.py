@@ -174,6 +174,67 @@ class YAMLPlannerTests(unittest.TestCase):
         self.assertFalse(self.plan().ready)
         self.assertEqual((self.root / 'automation.yaml').read_text(), caller)
 
+    def test_domain_states_loop_keeps_live_membership_and_renames_only_exact_filter(self):
+        source = """automation:
+- id: collection
+  triggers:
+    - trigger: template
+      value_template: >-
+        {% for item in states.sensor %}
+          {% if item.attributes.battery_level is defined and item.attributes.battery_level | int(0) < 10 %}
+            {{ true }}
+          {% endif %}
+        {% endfor %}
+  actions:
+    - event: report
+      event_data:
+        message: >-
+          {% for item in states.sensor | rejectattr('entity_id', 'eq', 'sensor.foo') %}
+            {{ item.name }} {{ item.state }}
+          {% endfor %}
+"""
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertEqual(plan.patches[0].proposed_bytes,
+                         source.replace("'sensor.foo'", "'sensor.new'").encode())
+        self.put('configuration.yaml', source.replace('item.name', 'states.sensor[arbitrary]'))
+        self.assertFalse(self.plan().ready)
+
+    def test_native_trigger_keyed_tables_preserve_labels_and_prove_entity_values(self):
+        source = """automation:
+- id: sample
+  triggers:
+    - trigger: state
+      entity_id: [sensor.foo, sensor.other]
+  variables:
+    messages: {sensor.foo: Friendly label, sensor.other: Other label}
+    meters: {sensor.foo: light.old, sensor.other: light.other}
+    selected: '{{ meters.get(trigger.entity_id) }}'
+  conditions: "{{ selected is string and is_state(selected, 'on') }}"
+  actions:
+    - event: report
+      event_data:
+        text: '{{ messages[trigger.entity_id] }}'
+    - action: light.turn_on
+      target:
+        entity_id: '{{ selected }}'
+"""
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertEqual(plan.patches[0].proposed_bytes,
+                         source.replace('sensor.foo', 'sensor.new')
+                               .replace('light.old', 'light.new').encode())
+        for unproven in (
+            source.replace('trigger.entity_id]', 'arbitrary]'),
+            source.replace('    - trigger: state', '    - trigger: event\n      event_type: example\n    - trigger: state'),
+            source.replace('[sensor.foo, sensor.other]', '[sensor.foo, sensor.new]'),
+            source.replace("text: '{{ messages[trigger.entity_id] }}'", "text: '{{ selected }}'"),
+        ):
+            self.put('configuration.yaml', unproven)
+            self.assertFalse(self.plan().ready)
+
     def test_records_repeat_and_closed_map_read(self):
         root = self.root
         (root/'configuration.yaml').write_text(
