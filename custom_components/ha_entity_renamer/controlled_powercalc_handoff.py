@@ -670,6 +670,15 @@ class ControlledPowercalcHandoff:
             targets[new] = target
         for name, rows in targets.items():
             live_states[name] = rows
+        # Core 11 uses UUID-based restore ownership. Once the detached target
+        # is built, remove only the exact source group moved in this intent;
+        # retaining it makes a separately prepared inverse look foreign.
+        from homeassistant.const import __version__
+        if __version__ in ('2026.11.0', '2026.11.1'):
+            for counter in group_counters:
+                if counter.entity_id != counter.target_id:
+                    _need(counter.entity_id not in targets, 'pss_source_is_another_target')
+                    del live_states[counter.entity_id]
         pss_after_memory = _snapshot(pss)
         _need(_pss_foreign_unchanged(prior, pss_after_memory, owned), 'foreign_pss_changed')
         # The payloads were built from actual post-unload native objects.
@@ -755,7 +764,7 @@ class ControlledPowercalcHandoff:
                         'full_total': payload.full_total, 'precision': payload.precision, 'unit': payload.unit}
             encoded.append({'uuid': uuid, 'before_id': old, 'after_id': new, 'kind': kind, 'payload': body})
         receipt = {'kind': 'controlled_powercalc_population_receipt',
-                   'schema': 2 if __version__ in ('2026.11.0', '2026.11.1') else 1,
+                   'schema': 3 if __version__ in ('2026.11.0', '2026.11.1') else 1,
                    'root': self.chain.root_id, 'operation_id': self.chain.operation_id,
                    'fingerprint': self.chain.plan.fingerprint, 'direction': direction,
                    'intent': list(self.intent), 'source_head': intent['source_head'],

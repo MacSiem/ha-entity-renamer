@@ -168,6 +168,7 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         group_index = hass.data['powercalc']['group_entities']
         self.assertNotIn(old_energy, group_index)
         self.assertEqual(group_index[new_energy].registry_entry.id, original_ids[old_energy])
+        self.assertNotIn(old_energy, hass.data['powercalc_group_storage'].states)
         for name, target, original in zip(names, targets, original_meters):
             check_meter(name, target, original)
         self.assertEqual((aid(new_light), bridge._bridge_identity(entry)), (original_aid, identity))
@@ -178,6 +179,7 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         await transition({new: old for old, new in mapping.items()})
         self.assertNotIn(new_energy, group_index)
         self.assertEqual(group_index[old_energy].registry_entry.id, original_ids[old_energy])
+        self.assertNotIn(new_energy, hass.data['powercalc_group_storage'].states)
         for name, source, original in zip(names, self.cost_sources, original_meters):
             check_meter(name, source, original)
         self.assertEqual((aid(old_light), bridge._bridge_identity(entry)), (original_aid, identity))
