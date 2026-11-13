@@ -82,7 +82,7 @@ _TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?=([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![A-Za
 
 
 def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
-                     binding_report=None, output_reference=False, trigger_entities=()):
+                     binding_report=None, output_reference=False, trigger_entities=(), alias_only=False):
     """Parse only: return exact replacements and review marker (code, detail) pairs.
 
     Jinja's parser has no columns. Feed its native lexer tokens through a parser
@@ -207,13 +207,36 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
             unsafe.update(bound[1])
 
         # A value is (shape, immutable origins); origin = (start, end, entity).
-        def property_value(bound, key):
-            if bound and bound[0] == 'record':
-                for name, item in bound[2]:
-                    charge()
-                    if name == key:
-                        return item
-            return None
+        def join_values(values):
+            values = [item for item in values if item[0] != 'missing']
+            shapes = {item[0] for item in values}
+            if len(shapes) != 1:
+                return None
+            shape, = shapes
+            origins = tuple(sorted({origin for item in values for origin in item[1]}))
+            charge(len(origins))
+            if shape != 'record':
+                return (shape, origins)
+            fields = [dict(item[2]) for item in values]
+            nonempty = [field for field in fields if field]
+            common = set.intersection(*(set(field) for field in nonempty)) if nonempty else set()
+            return ('record', origins, tuple((name, merged) for name in sorted(common)
+                if (merged := join_values([field[name] for field in nonempty])) is not None))
+
+        def property_value(bound, key, default=None):
+            if not bound or bound[0] != 'record':
+                return None
+            fields = dict(bound[2])
+            charge(len(fields))
+            if key is not None:
+                found = fields.get(key, default)
+                return None if found and found[0] == 'unknown' else found
+            # A runtime key may select any value in this finite map. Track only
+            # members with a common shape. Unproven values are never discarded.
+            alternatives = list(fields.values())
+            if default is not None:
+                alternatives.append(default)
+            return join_values(alternatives) if alternatives else None
 
         def value(node, bindings):
             charge()
@@ -230,17 +253,47 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                 attribute = (node.attr if isinstance(node, nodes.Getattr) else
                              node.arg.value if isinstance(node.arg, nodes.Const) else None)
                 bound = value(node.node, bindings)
-                if bound and bound[0] == 'runtime_repeat_item' and attribute == 'item':
-                    return ('scalar', bound[1])
+                if attribute == 'item' and bound:
+                    if bound[0] == 'runtime_repeat_item':
+                        return ('scalar', bound[1])
+                    if bound[0] == 'runtime_repeat_record':
+                        return bound[2]
+                if isinstance(node, nodes.Getitem) and not isinstance(node.arg, nodes.Const):
+                    index = value(node.arg, bindings)
+                    if index:
+                        escape(index)  # selection is metadata, not an entity sink
                 return property_value(bound, attribute)
             if (isinstance(node, nodes.Call) and isinstance(node.node, nodes.Getattr)
                     and node.node.attr == 'get' and 1 <= len(node.args) <= 2
-                    and isinstance(node.args[0], nodes.Const)
                     and not (node.kwargs or node.dyn_args or node.dyn_kwargs)):
                 bound = value(node.node.node, bindings)
                 if bound and bound[0] == 'record':
-                    return property_value(bound, node.args[0].value) or (
-                        value(node.args[1], bindings) if len(node.args) == 2 else None)
+                    selector = node.args[0]
+                    if isinstance(selector, nodes.Const) and type(selector.value) is not str:
+                        return None
+                    key = selector.value if isinstance(selector, nodes.Const) else None
+                    if key is None:
+                        expression(selector, bindings)
+                    fallback = node.args[1] if len(node.args) == 2 else None
+                    default = value(fallback, bindings) if fallback is not None else None
+                    if default is None and isinstance(fallback, nodes.Dict) and not fallback.items:
+                        default = ('record', (), ())
+                    elif default is None and isinstance(fallback, nodes.Const) and fallback.value in (None, ''):
+                        default = ('missing', ())
+                    if fallback is not None and default is None:
+                        expression(fallback, bindings)
+                        return None
+                    return property_value(bound, key, default)
+            if (isinstance(node, nodes.Filter) and node.name in ('select', 'reject')
+                    and len(node.args) in (2, 3) and isinstance(node.args[0], nodes.Const)
+                    and (node.args[0].value, len(node.args)) in (('is_state', 2), ('is_state_attr', 3))
+                    and not (node.kwargs or node.dyn_args or node.dyn_kwargs)):
+                bound = value(node.node, bindings)
+                if bound and bound[0] == 'list':
+                    consume([bound])
+                    for argument in node.args[1:]:
+                        expression(argument, bindings)
+                    return bound
             if (isinstance(node, nodes.Filter) and node.name == 'list'
                     and not (node.args or node.kwargs or node.dyn_args or node.dyn_kwargs)):
                 bound = value(node.node, bindings)
@@ -345,7 +398,16 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                     and not (node.args or node.kwargs or node.dyn_args or node.dyn_kwargs)
                     and isinstance(node.node, nodes.Name)):
                 return  # This tests presence/type, independently of the ID.
+            if (isinstance(node, nodes.Filter) and node.name in ('count', 'length')
+                    and not (node.args or node.kwargs or node.dyn_args or node.dyn_kwargs)):
+                bound = value(node.node, bindings)
+                if bound and bound[0] in ('list', 'record', 'record_list'):
+                    return
             if isinstance(node, nodes.Compare) and len(node.ops) == 1:
+                right = value(node.ops[0].expr, bindings)
+                if right and right[0] == 'record' and node.ops[0].op in ('in', 'notin'):
+                    expression(node.expr, bindings)
+                    return
                 operand = node.ops[0]
                 left, right = node.expr, operand.expr
                 if isinstance(left, nodes.Const):
@@ -384,6 +446,16 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                 bound = value(node, bindings)
                 if bound:
                     escape(bound)
+                    return
+                if isinstance(node, (nodes.Getattr, nodes.Getitem)):
+                    parent = value(node.node, bindings)
+                    if parent and parent[0] == 'record' and (isinstance(node, nodes.Getattr)
+                            or isinstance(node.arg, nodes.Const)):
+                        return
+                if (isinstance(node, nodes.Call) and isinstance(node.node, nodes.Getattr)
+                        and node.node.attr == 'get' and node.args and isinstance(node.args[0], nodes.Const)
+                        and (parent := value(node.node.node, bindings)) and parent[0] == 'record'
+                        and node.args[0].value in dict(parent[2])):
                     return
             if isinstance(node, nodes.Name):
                 bound = bindings.get(node.name)
@@ -496,7 +568,8 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                                    if not (isinstance(child, nodes.TemplateData)
                                            and not child.data.strip())]
                     bound = value(expressions[0], bindings) if len(expressions) == 1 else None
-                    if bound and bound[0] in ('scalar', 'list'):
+                    if bound and (bound[0] in ('scalar', 'list') or alias_only
+                                  and bound[0] in ('record', 'record_list')):
                         if binding_report is not None:
                             binding_report['output_value'] = bound
                         consume([bound])
@@ -652,7 +725,7 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
         return original_text, [('unsupported_template', 'Native parser rejected template: ' + type(err).__name__)]
 
 
-def analyze_template_alias(text, bindings, *, max_nodes=10000, allow_literals=False):
+def analyze_template_alias(text, bindings, *, max_nodes=10000, allow_literals=False, allow_records=False):
     """Prove a whole native-template scalar/list alias without rendering it.
 
     Only adapter-owned external origins can flow into a later YAML binding.
@@ -665,10 +738,11 @@ def analyze_template_alias(text, bindings, *, max_nodes=10000, allow_literals=Fa
         return None
     report = {}
     _, markers = _syntax_template(text, {}, max_nodes, initial_bindings=bindings,
-                                   binding_report=report, output_reference=True)
+                                   binding_report=report, output_reference=True, alias_only=allow_records)
     bound = report.get('output_value')
     if (markers or report.get('unsafe') or not report.get('complete') or not bound
-            or bound[0] not in ('scalar', 'list') or not bound[1]
+            or bound[0] not in (('scalar', 'list', 'record', 'record_list') if allow_records else ('scalar', 'list'))
+            or not bound[1]
             or not allow_literals and any(origin[0] >= 0 for origin in bound[1])):
         return None
     return bound

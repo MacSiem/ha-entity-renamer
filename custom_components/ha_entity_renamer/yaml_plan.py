@@ -377,10 +377,10 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                     for origin in bound[1]:
                         charge()
                         possible.add(origin)
-            if values[0] and values[0][0] == 'record' and all(value == values[0] for value in values):
+            if values[0] and values[0][0] in ('record', 'record_list') and all(value == values[0] for value in values):
                 result[name] = values[0]
                 continue
-            shape = next(iter(shapes)) if len(shapes) == 1 and 'record' not in shapes else 'unknown'
+            shape = next(iter(shapes)) if len(shapes) == 1 and not shapes & {'record', 'record_list'} else 'unknown'
             result[name] = (shape, tuple(sorted(possible))) if possible else None
         return result
 
@@ -393,6 +393,13 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
             parts = [static(child) for child in node.value]
             if parts and all(part and part[0][0] == 'scalar' for part in parts):
                 return ('list', tuple(sorted({o for part in parts for o in part[0][1]}))), [n for part in parts for n in part[1]]
+            if parts and all(part and part[0][0] == 'record' for part in parts):
+                names = set.intersection(*({name for name, _ in part[0][2]} for part in parts))
+                joined = join([dict(part[0][2]) for part in parts])
+                members = tuple((name, joined[name]) for name in sorted(names))
+                nodes = [n for part in parts for n in part[1]]
+                item = ('record', tuple(sorted({(-id(n), 0, n.value) for n in nodes})), members)
+                return ('record_list', item[1], item), nodes
         if isinstance(node, MappingNode) and node.tag == _STANDARD + 'map':
             # Only keys are exposed by direct map iteration. Values are labels/
             # metadata, never entity producers just because their spelling fits.
@@ -404,12 +411,17 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                     issue(node, 'entity_key_collision')
                     return None
                 return ('keys', tuple(sorted({o for key in keys for o in key[0][1]}))), [n for key in keys for n in key[1]]
+            fields = pairs(node)
+            if len(fields) != len(node.value):
+                return None
             parts, nodes = [], []
-            for name, child in pairs(node).items():
+            for name, child in fields.items():
                 part = static(child)
                 if part:
                     parts.append((name, part[0]))
                     nodes.extend(part[1])
+                else:
+                    parts.append((name, ('unknown', ())))
             if nodes:
                 return ('record', tuple(sorted({(-id(item), 0, item.value) for item in nodes})),
                         tuple(parts)), nodes
@@ -473,7 +485,7 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
     def template_alias(node, bindings):
         if not (isinstance(node, ScalarNode) and node.tag == _STR and '{{' in node.value):
             return None
-        alias = analyze_template_alias(node.value, bindings, max_nodes=max_nodes)
+        alias = analyze_template_alias(node.value, bindings, max_nodes=max_nodes, allow_records=True)
         if not alias:
             return None
         observed[id(node)] = observed.get(id(node), 0) + 1
@@ -509,19 +521,26 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                 for producer in nodes:
                     producers[id(producer)] = producers.get(id(producer), 0) + 1
                 bindings[key.value] = bound
-                if isinstance(child, MappingNode):
+                if isinstance(child, (MappingNode, SequenceNode)) and bound[0] in ('keys', 'record', 'record_list'):
                     producer_ids = {id(producer) for producer in nodes}
                     def scan_metadata(value):
                         charge()
                         if id(value) in producer_ids:
                             return
-                        if isinstance(value, MappingNode) and bound[0] == 'record':
-                            for _, nested in value.value:
+                        if isinstance(value, MappingNode) and bound[0] in ('record', 'record_list'):
+                            for key, nested in value.value:
+                                scan(key, bindings, reference_fields=False)
+                                scan_metadata(nested)
+                        elif isinstance(value, SequenceNode):
+                            for nested in value.value:
                                 scan_metadata(nested)
                         else:
                             scan(value, bindings, reference_fields=False)
-                    for _, metadata in child.value:
-                        scan_metadata(metadata)
+                    if bound[0] == 'keys':
+                        for _, metadata in child.value:
+                            scan_metadata(metadata)
+                    else:
+                        scan_metadata(child)
             else:
                 scan(child, bindings)
                 # Unknown reassignment must retain the old provenance: an HA
@@ -692,12 +711,16 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                 items = repeat_values.get('for_each')
                 item_part = static(items) if items is not None else None
                 item_bound = item_part[0] if item_part else (template_alias(items, entry) if items is not None else None)
-                known_items = item_bound is not None and item_bound[0] == 'list'
+                known_items = item_bound is not None and item_bound[0] in ('list', 'record_list')
                 if known_items and item_part:
                     for producer in item_part[1]:
                         producers[id(producer)] = producers.get(id(producer), 0) + 1
-                invariant['repeat'] = (('runtime_repeat_item', item_bound[1])
-                                       if known_items else ('runtime_repeat', ()))
+                if not known_items:
+                    invariant['repeat'] = ('runtime_repeat', ())
+                elif item_bound[0] == 'record_list':
+                    invariant['repeat'] = ('runtime_repeat_record', item_bound[1], item_bound[2])
+                else:
+                    invariant['repeat'] = ('runtime_repeat_item', item_bound[1])
                 for key, child in repeat.value:
                     scan(key, invariant)
                     if isinstance(key, ScalarNode) and (key.value == 'sequence'
@@ -761,13 +784,13 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                     else:
                         scan(child, environment, isinstance(key, ScalarNode) and key.value in _FIELDS)
             response = values.get('response_variable')
-            if isinstance(response, ScalarNode) and response.value in bindings:
+            if isinstance(response, ScalarNode) and bindings.get(response.value):
                 prior = bindings[response.value]
                 if prior:
                     unsafe.update(prior[1])
                 bindings[response.value] = ('unknown', prior[1]) if prior else None
                 issue(response, 'yaml_response_variable_rebinding_unsupported')
-            if ('wait_template' in values or 'wait_for_trigger' in values) and 'wait' in bindings:
+            if ('wait_template' in values or 'wait_for_trigger' in values) and bindings.get('wait'):
                 prior = bindings['wait']
                 if prior:
                     unsafe.update(prior[1])
@@ -1040,6 +1063,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                         for child in targets:
                             child_key = ('__utility_meter_entry__'
                                          if parent_key == 'utility_meter' and node.tag == '!include_dir_named'
+                                         else '' if parent_key == 'packages' and node.tag == '!include_dir_named'
                                          else parent_key)
                             visit(child, graph_depth + 1, field, child_key, lovelace, variable_definition, script_root)
                     elif node.tag == '!secret':
@@ -1051,7 +1075,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                         owned_service = (not variable_definition and parent_key in ('action', 'service')
                                          and node.value in owned_script_services)
                         candidates.setdefault(id(node), (node, []))[1].append(
-                            (field or owned_service))
+                            field or owned_service)
                         if (not variable_definition and parent_key in ('action', 'service')
                                 and node.value in stable_script_services):
                             stable_services[id(node)] = stable_services.get(id(node), 0) + 1
@@ -1208,33 +1232,49 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                 if not decoded_plan.changes:
                     continue  # Preserve unaffected bytes without re-serializing.
                 raw = text[token.start_mark.index:token.end_mark.index]
-                source_plan = plan_references(raw, mapping, template_context)
-                replacement, source_markers = source_plan.value, source_plan.markers
-                if binding_template and binding_template[-1] is not None and token.style in ('|', '>'):
+                # Let Jinja locate edits in the original YAML token. For quoted
+                # YAML, unescape only the quote syntax that Jinja needs to parse,
+                # then restore it while retaining the source's exact line wraps.
+                style = token.style
+                if style == "'":
+                    raw_template = raw[1:-1].replace("''", "'")
+                elif style == '"':
+                    raw_template = raw[1:-1].replace(r'\"', '"')
+                else:
+                    raw_template = raw
+                if binding_template and binding_template[-1] is not None:
                     bindings, field, trigger_entities = binding_template[-1]
                     replacement, source_markers, _, _ = analyze_template_bindings(
-                        raw, mapping, bindings, max_nodes=limits.max_nodes,
+                        raw_template, mapping, bindings, max_nodes=limits.max_nodes,
                         output_reference=field, trigger_entities=trigger_entities)
-                if source_markers and token.style not in ("'", '"'):
-                    issue(node, "template_requires_source_span_mapper")
-                    continue
-                if token.style == "'":
-                    # Literal newlines in single-quoted YAML are folded. JSON
-                    # escaping preserves the exact decoded template when its
-                    # original single-quoted scalar spans paragraphs.
-                    replacement = (json.dumps(decoded_plan.value, ensure_ascii=False)
-                                   if '\n' in decoded_plan.value or '\r' in decoded_plan.value
-                                   else "'" + decoded_plan.value.replace("'", "''") + "'")
-                elif token.style == '"':
-                    replacement = json.dumps(decoded_plan.value, ensure_ascii=False)
-                # Operate on the source token, preserving YAML quoting, block
-                # indentation and comments. Independent decoding must match
-                # the planned template exactly; escaped spellings fail closed.
-                try:
-                    decoded = yaml.compose(replacement, Loader=yaml.SafeLoader)
-                except yaml.YAMLError:
-                    decoded = None
-                if not isinstance(decoded, ScalarNode) or decoded.value != decoded_plan.value:
+                else:
+                    source_plan = plan_references(raw_template, mapping, template_context)
+                    replacement, source_markers = source_plan.value, source_plan.markers
+                if style == "'":
+                    replacement = "'" + replacement.replace("'", "''") + "'"
+                elif style == '"':
+                    replacement = '"' + replacement.replace('"', r'\"') + '"'
+                # Independently verify that source-token edits preserve the exact
+                # decoded rewrite. The encoded fallback is retained for legacy
+                # forward-only shapes whose source escapes cannot be recovered.
+                def decodes_to_plan(candidate):
+                    try:
+                        decoded = yaml.compose(candidate, Loader=yaml.SafeLoader)
+                    except yaml.YAMLError:
+                        return False
+                    return isinstance(decoded, ScalarNode) and decoded.value == decoded_plan.value
+
+                if source_markers or not decodes_to_plan(replacement):
+                    if style == "'":
+                        replacement = (json.dumps(decoded_plan.value, ensure_ascii=False)
+                                       if '\n' in decoded_plan.value or '\r' in decoded_plan.value
+                                       else "'" + decoded_plan.value.replace("'", "''") + "'")
+                    elif style == '"':
+                        replacement = json.dumps(decoded_plan.value, ensure_ascii=False)
+                    else:
+                        issue(node, "template_requires_source_span_mapper")
+                        continue
+                if not decodes_to_plan(replacement):
                     issue(node, "template_requires_source_span_mapper")
                     continue
                 if decoded_plan.changes and raw != replacement:
@@ -1328,7 +1368,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
         visit(root)
     from .yaml_script_parameters import prove_script_parameters
     parameters, arguments, argument_nodes = prove_script_parameters(
-        documents, mapping, _yaml_bindings, limits.max_nodes)
+        documents, _yaml_bindings, limits.max_nodes)
     for finish in pending:
         finish(parameters, arguments, argument_nodes)
     if owned_script_services and owned_definition_count != 1:

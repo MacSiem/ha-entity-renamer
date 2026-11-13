@@ -174,6 +174,63 @@ class YAMLPlannerTests(unittest.TestCase):
         self.assertFalse(self.plan().ready)
         self.assertEqual((self.root / 'automation.yaml').read_text(), caller)
 
+    def test_records_repeat_and_closed_map_read(self):
+        root = self.root
+        (root/'configuration.yaml').write_text(
+            'homeassistant:\n  packages: !include_dir_named packages\n')
+        (root/'packages').mkdir()
+        source = """script:
+  closed:
+    sequence:
+      - variables:
+          table:
+            a: {meters: [sensor.old], label: Plain}
+            b: {meters: [sensor.other], label: Other}
+          current: "{{ table.get(selection, {}) }}"
+          selected: "{{ current.meters | select('is_state', 'on') | list }}"
+      - repeat:
+          for_each:
+            - {entity: sensor.old, message: Plain}
+            - {entity: sensor.other, message: Other}
+          sequence:
+            - action: homeassistant.turn_on
+              target:
+                entity_id: "{{ repeat.item.entity }}"
+            - event: message
+              event_data:
+                label: "{{ repeat.item.message }}"
+      - action: homeassistant.turn_off
+        target:
+          entity_id: "{{ selected }}"
+"""
+        (root/'packages'/'example.yaml').write_text(source)
+        plan = plan_yaml(root, {'sensor.old':'sensor.new'})
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertEqual(plan.patches[0].proposed_bytes, source.replace('sensor.old','sensor.new').encode())
+        mixed_use = source.replace('repeat.item.message', 'repeat.item.entity')
+        (root/'packages'/'example.yaml').write_text(mixed_use)
+        plan = plan_yaml(root, {'sensor.old':'sensor.new'})
+        self.assertFalse(plan.ready)
+        self.assertTrue(any(issue.code == 'ambiguous_reference_context' for issue in plan.issues))
+
+    def test_quoted_template_byte_exact_forward_and_inverse(self):
+        source = """automation:
+- id: pulse
+  triggers:
+  - trigger: template
+    value_template: '{{ expand([''sensor.foo'']) | map(attribute=''state'')
+      | map(''float'', 0) | sum > 5 }}'
+  actions: []
+"""
+        path = self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertEqual(plan.patches[0].proposed_bytes, source.replace('sensor.foo', 'sensor.new').encode())
+        path.write_bytes(plan.patches[0].proposed_bytes)
+        inverse = plan_yaml(self.root, {'sensor.new': 'sensor.foo'})
+        self.assertTrue(inverse.ready, inverse.issues)
+        self.assertEqual(inverse.patches[0].proposed_bytes, source.encode())
+
     def test_preserves_source_comments_quotes_crlf_unicode_and_anchor(self):
         source = '# żółć\r\na: &ref sensor.foo # comment\r\nentity_id: *ref\r\nentity: "light.old"\r\n'
         self.put('configuration.yaml', source)

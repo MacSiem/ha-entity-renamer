@@ -16,7 +16,7 @@ def _fields(node):
     return {}
 
 
-def prove_script_parameters(documents, mapping, analyze, max_nodes):
+def prove_script_parameters(documents, analyze, max_nodes):
     """Bind declared parameters and authorize only arguments with a sink proof."""
     from .yaml_plan import _ENTITY, _STR, YAMLPlanError
 
@@ -29,7 +29,7 @@ def prove_script_parameters(documents, mapping, analyze, max_nodes):
         if budget < 0:
             raise YAMLPlanError('Script argument proof work limit')
 
-    def discover(node, context='', named=None):
+    def discover(node, context=''):
         charge()
         context = context.split(' ', 1)[0]
         values = _fields(node)
@@ -41,7 +41,7 @@ def prove_script_parameters(documents, mapping, analyze, max_nodes):
             elif values:
                 actors.append(node)
         elif context == 'script':
-            for key, body in ({named: node} if named else values).items():
+            for key, body in values.items():
                 if 'sequence' in _fields(body):
                     definitions['script.' + key].append(body)
                     actors.append(body)
@@ -55,7 +55,7 @@ def prove_script_parameters(documents, mapping, analyze, max_nodes):
                 elif not context and kind in ('automation', 'script', 'homeassistant'):
                     discover(value, kind)
 
-    for _, (tree, context) in documents.items():
+    for tree, context in documents.values():
         discover(tree, context)
 
     def calls(node, ancestry=()):
@@ -96,14 +96,8 @@ def prove_script_parameters(documents, mapping, analyze, max_nodes):
                     safe_shapes.add(shape)
             if safe_shapes:
                 contracts[service, name] = safe_shapes
-                if safe_shapes == {'scalar', 'list'}:
-                    # Only this fixed union can be admitted for arbitrary direct
-                    # service calls. Exact shapes remain required at call sites.
-                    parameters.setdefault(id(body), {})[name] = ('scalar', (origin,))
-                elif safe_shapes == {'list'}:
-                    parameters.setdefault(id(body), {})[name] = ('list', (origin,))
-                else:
-                    parameters.setdefault(id(body), {})[name] = ('scalar', (origin,))
+                shape = 'scalar' if 'scalar' in safe_shapes else 'list'
+                parameters.setdefault(id(body), {})[name] = (shape, (origin,))
 
     for actor in actors:
         for action, service, data in calls(actor):
