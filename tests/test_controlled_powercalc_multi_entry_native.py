@@ -5,6 +5,7 @@ backend, receipts, independent readback and cleanup all succeed.
 """
 import asyncio
 from decimal import Decimal
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -304,6 +305,14 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(json.loads(dashboard_path.read_bytes())['data']['config'], dashboard_before)
                 client = ClientSession()
                 self.addAsyncCleanup(client.close)
+                from custom_components.ha_entity_renamer.frontend import CARD_PATH
+                async with client.get('http://127.0.0.1:' + str(hass.http.server_port) + CARD_PATH) as response:
+                    self.assertEqual(response.status, 200)
+                    served = await response.read()
+                digest = hashlib.sha256(served).hexdigest()
+                self.assertEqual(digest, self.public_source_sha256['www/ha-entity-renamer.js'])
+                self.assertEqual(served, (self.installed_component / 'www/ha-entity-renamer.js').read_bytes())
+                evidence['card_served_sha256'] = digest
                 async def connect(label, group):
                     user = await hass.auth.async_create_user(label, group_ids=[group])
                     token = await hass.auth.async_create_refresh_token(user,

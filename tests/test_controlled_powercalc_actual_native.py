@@ -1,6 +1,7 @@
 """Core 11.1 explicit-pair Powercalc graph through the installed migration path."""
 import asyncio
 from decimal import Decimal
+import hashlib
 import json
 import os
 import shutil
@@ -39,7 +40,12 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         await super()._before_loader(hass, root)
         target = self.installed_component / 'www/ha-entity-renamer.js'
         target.parent.mkdir()
-        shutil.copyfile(Path(__file__).resolve().parents[1] / 'ha-entity-renamer.js', target)
+        source = (Path(__file__).resolve().parents[1] / 'custom_components' /
+                  'ha_entity_renamer' / 'www' / 'ha-entity-renamer.js')
+        shutil.copyfile(source, target)
+        self.public_source_sha256['www/ha-entity-renamer.js'] = hashlib.sha256(source.read_bytes()).hexdigest()
+        self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(),
+                         self.public_source_sha256['www/ha-entity-renamer.js'])
 
     async def asyncSetUp(self):
         directory = tempfile.TemporaryDirectory(prefix='controlled-pc-leaf-',
