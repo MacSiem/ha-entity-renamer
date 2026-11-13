@@ -3,6 +3,7 @@ import asyncio
 from decimal import Decimal
 import json
 import os
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -18,6 +19,12 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
     _setup_vendor_forward = actual.ActualProfileGraphNativeTests._setup_real_vendor
     remote_bytes = actual.ActualProfileGraphNativeTests.remote_bytes
     write_package = actual.ActualProfileGraphNativeTests.write_package
+
+    async def _before_loader(self, hass, root):
+        await super()._before_loader(hass, root)
+        target = self.installed_component / 'www/ha-entity-renamer.js'
+        target.parent.mkdir()
+        shutil.copyfile(Path(__file__).resolve().parents[1] / 'ha-entity-renamer.js', target)
 
     async def asyncSetUp(self):
         directory = tempfile.TemporaryDirectory(prefix='controlled-pc-leaf-',
