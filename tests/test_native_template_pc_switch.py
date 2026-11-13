@@ -22,18 +22,18 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         path, config = root / 'p2_template.yaml', root / 'configuration.yaml'
         config.write_text(config.read_text() + '\ntemplate: !include p2_template.yaml\n')
         templates = [{'sensor': [{'name': 'P2 total', 'unique_id': 'p2_total',
-            'state': "{% set items = ['" + leaf + "'] %}{% set ns = namespace(total=0) %}"
-                     "{% for item in items %}{% if states(item) in ['10', '10.0'] %}"
-                     "{% set ns.total = ns.total + (states(item) | float(0)) %}"
+            'state': "{% set items = ['" + old_source + "'] %}{% set ns = namespace(total=0) %}"
+                     "{% for item in items %}{% if states(item) in ['on'] %}"
+                     "{% set ns.total = ns.total + 1 %}"
                      "{% endif %}{% endfor %}{{ ns.total }}",
-            'attributes': {'copy': "{{ states('" + leaf + "') }}"}}],
+            'attributes': {'copy': "{{ states('" + old_source + "') }}"}}],
             'binary_sensor': [{'name': 'P2 delayed', 'unique_id': 'p2_delay',
-                'availability': "{{ states('" + leaf + "') != 'unavailable' }}",
-                'state': "{{ states('" + leaf + "') | float(0) > 0 }}", 'delay_on': '00:30:00'}],
+                'availability': "{{ states('" + old_source + "') != 'unavailable' }}",
+                'state': "{{ is_state('" + old_source + "', 'on') }}", 'delay_on': '00:30:00'}],
             'switch': [{'name': 'P2 switch', 'unique_id': 'p2_switch',
-                'state': "{{ states('" + leaf + "') | float(0) > 0 }}",
-                'turn_on': [{'action': 'test.capture', 'target': {'entity_id': leaf}}],
-                'turn_off': [{'action': 'test.capture', 'target': {'entity_id': leaf}}]},
+                'state': "{{ is_state('" + old_source + "', 'on') }}",
+                'turn_on': [{'action': 'test.capture', 'target': {'entity_id': old_source}}],
+                'turn_off': [{'action': 'test.capture', 'target': {'entity_id': old_source}}]},
                 {'name': 'P2 foreign', 'unique_id': 'p2_foreign', 'state': '{{ true }}'}]}]
         path.write_text(yaml.safe_dump(templates, sort_keys=False))
         initial = path.read_bytes()
@@ -139,11 +139,11 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
             self.assertIs(hass.states.get(e.entity_id), state)
         await switch.async_turn_on()
         await switch.async_turn_off()
-        self.assertEqual(events, [[leaf], [mapping[leaf]], [mapping[leaf]]])
+        self.assertEqual(events, [[old_source], [mapping[old_source]], [mapping[old_source]]])
         result = await runtime.recovery_restore(hass, op, fingerprint, guard=lambda: True, refresh=refresh)
         self.assertEqual(result['state'], 'rolled_back')
         self.assertEqual(path.read_bytes(), initial)
         self.assertIs(binary._delay_cancel, token)
         self.assertEqual(token.__self__.when(), deadline)
         await switch.async_turn_off()
-        self.assertEqual(events[-1], [leaf])
+        self.assertEqual(events[-1], [old_source])
