@@ -320,6 +320,32 @@ async def _native_store_write(hass, owner, method_name, receipt, input_state, ke
         sys.monitoring.free_tool_id(tool)
 
 
+
+async def _settle_yaml_discovery(hass):
+    # The native reload awaits discovery dispatch, which schedules actual
+    # platform setup separately. Await only this integration's exact sensor
+    # discovery tasks; never drain HA or unrelated editor work.
+    from homeassistant.components.sensor import DOMAIN
+    from homeassistant.helpers.entity_component import DATA_INSTANCES, EntityComponent
+    component = hass.data[DATA_INSTANCES].get(DOMAIN)
+    _need(type(component) is EntityComponent and component.hass is hass,
+          'setup_sensor_component_changed')
+    discovery = EntityComponent._async_component_platform_discovered.__code__
+    async with asyncio.timeout(10):
+        while True:
+            pending = []
+            for task in asyncio.all_tasks(hass.loop):
+                coro = task.get_coro()
+                frame = getattr(coro, 'cr_frame', None)
+                if (frame is not None and coro.cr_code is discovery
+                        and frame.f_locals.get('self') is component
+                        and frame.f_locals.get('platform') == 'powercalc'):
+                    pending.append(task)
+            if not pending:
+                return
+            await asyncio.gather(*(asyncio.shield(task) for task in pending))
+
+
 def _watch_restored_counters(hass, population):
     """Capture the first native state publication after a qualified setup."""
     from decimal import Decimal
@@ -785,6 +811,7 @@ class ControlledPowercalcHandoff:
         restored, stop_watch = _watch_restored_counters(self.hass, handoff['population'])
         try:
             await self.hass.services.async_call('powercalc', 'reload', {}, blocking=True, context=service_context)
+            await _settle_yaml_discovery(self.hass)
         finally:
             stop_watch()
         _need(set(restored) == {row['after_id'] for row in handoff['population']},
