@@ -193,8 +193,10 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             if public:
                 from aiohttp import ClientSession
                 from datetime import timedelta
+                from types import MappingProxyType
                 from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_USER
                 from homeassistant.components.sensor import SensorEntity
+                from homeassistant.config_entries import ConfigEntry, ConfigEntryState
                 from homeassistant.helpers.entity_component import DATA_INSTANCES
                 class OrdinarySensor(SensorEntity):
                     _attr_unique_id = 'synthetic-multi-ordinary'
@@ -204,8 +206,17 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     _attr_should_poll = False
                     _attr_device_info = {'identifiers': {('synthetic-multi-queue', 'ordinary-device')},
                                          'name': 'Synthetic ordinary device'}
+                ordinary_entry = ConfigEntry(domain='threshold', title='Synthetic ordinary owner',
+                    data={}, options={'name': 'Synthetic ordinary helper',
+                                      'entity_id': self.sources[0].entity_id,
+                                      'lower': 20, 'upper': None, 'hysteresis': 0},
+                    discovery_keys=MappingProxyType({}), source='user', version=1,
+                    minor_version=1, subentries_data=[], unique_id='synthetic-multi-ordinary-owner')
+                await hass.config_entries.async_add(ordinary_entry)
+                await hass.async_block_till_done()
+                self.assertIs(ordinary_entry.state, ConfigEntryState.LOADED)
                 ordinary_device = self.f.device.async_get_or_create(
-                    config_entry_id=self.entries[2].entry_id,
+                    config_entry_id=ordinary_entry.entry_id,
                     identifiers={('synthetic-multi-queue', 'ordinary-device')})
                 component = hass.data[DATA_INSTANCES]['sensor']
                 ordinary_entity = OrdinarySensor()
@@ -213,7 +224,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 ordinary_id = ordinary_entity.entity_id
                 platform = ordinary_entity.platform
                 await platform.async_remove_entity(ordinary_id)
-                platform.config_entry = self.entries[2]
+                platform.config_entry = ordinary_entry
                 ordinary_entity = OrdinarySensor()
                 await platform.async_add_entities([ordinary_entity])
                 await hass.async_block_till_done()
