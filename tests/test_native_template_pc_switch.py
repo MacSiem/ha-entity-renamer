@@ -169,3 +169,22 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         self.assertEqual(token.__self__.when(), deadline)
         await switch.async_turn_off()
         self.assertEqual(events[-1], [target])
+        # A real subsequent false is not a structural restart publication.
+        # It must reach the native tracker and cancel the held delay.
+        await source.async_turn_off()
+        for _ in range(200):
+            current = hass.states.get(sensor.entity_id)
+            if binary._delay_cancel is None and current is not None and float(current.state) == 0:
+                break
+            await asyncio.sleep(.05)
+        self.assertIsNone(binary._delay_cancel)
+        self.assertEqual(float(hass.states.get(sensor.entity_id).state), 0)
+        self.assertFalse(switch.is_on)
+        await source.async_turn_on(brightness=255)
+        for _ in range(200):
+            current = hass.states.get(sensor.entity_id)
+            if current is not None and float(current.state) == 1 and switch.is_on:
+                break
+            await asyncio.sleep(.05)
+        self.assertEqual(float(hass.states.get(sensor.entity_id).state), 1)
+        self.assertTrue(switch.is_on)
