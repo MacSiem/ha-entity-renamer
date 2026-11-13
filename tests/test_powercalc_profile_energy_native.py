@@ -434,7 +434,7 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
         hass, root = self.f.hass, self.f.root
         await self._flush_documents()
-        backend = importlib.import_module(fixtures.PACKAGE)
+        backend = importlib.import_module('custom_components.ha_entity_renamer')
         runtime = backend.Runtime('mixed-powercalc-fixture', None, None)
         hass.data[backend.DATA_RUNTIME] = runtime
 
