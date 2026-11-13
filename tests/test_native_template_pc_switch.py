@@ -71,7 +71,17 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         before = [hass.states.get(e.entity_id) for e in (sensor, binary, switch, foreign)]
         await switch.async_turn_on()
         from custom_components.ha_entity_renamer.recorder_guard import NativeRecorderGuard
-        await NativeRecorderGuard(hass).async_synchronize()
+        history = NativeRecorderGuard(hass)
+        await history.async_synchronize()
+        # Flush the native short-term statistics cycle before the immutable
+        # history snapshot, matching the existing mixed Powercalc fixture.
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.tasks import StatisticsTask
+        from homeassistant.util import dt as dt_util
+        now = dt_util.utcnow()
+        get_instance(hass).queue_task(StatisticsTask(now.replace(minute=now.minute // 5 * 5,
+            second=0, microsecond=0), False))
+        await history.async_synchronize()
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
         review = await runtime.native_yaml_prepare(hass, mapping, actor_id='p2-fixture',
