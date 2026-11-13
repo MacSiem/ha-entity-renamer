@@ -1,4 +1,5 @@
 """Prepared evidence stays exactly bound on every reconstruction."""
+import ast
 from copy import deepcopy
 from dataclasses import replace
 import importlib.util
@@ -15,6 +16,42 @@ receipts = mixed.receipts
 
 
 class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
+    async def test_state_binding_check_fences_once_and_rejects_drift(self):
+        # Execute the actual observer check with a real synthetic receipt chain.
+        binding = importlib.import_module(mixed.base.PACKAGE + '.native_template_state_binding')
+        program_type = importlib.import_module(mixed.base.PACKAGE + '.template_state_program').StateConfigProgram
+        fixture = await mixed.mixed_fixture()
+        chain = fixture['chain']
+        mapping = {old: new for change in fixture['changes'] for old, new in change.mapping.items()}
+        program = program_type('a', 'b', b'{}', b'{}', tuple(mapping.items()), (), (), b'[]')
+        state = chain.reconstruct_inputs()
+        arguments = {'live_intent': None, 'live_context': None, 'live_calls': ()}
+        prefix = binding.accepted_state_prefix(chain, program, input_state=state, **arguments)
+        observer = next(node for node in ast.parse(Path(binding.__file__).read_text()).body
+                        if isinstance(node, ast.AsyncFunctionDef)
+                        and node.name == 'async_observe_accepted_state_bindings')
+        check = next(node for node in observer.body
+                     if isinstance(node, ast.FunctionDef) and node.name == 'check')
+        source = ast.fix_missing_locations(ast.Module(body=[check], type_ignores=[]))
+        guard_current = True
+        def guard():
+            return guard_current
+        scope = dict(guard=guard, inspect=__import__('inspect'), _need=binding._need,
+                     accepted_prefix=prefix, accepted_state_prefix=binding.accepted_state_prefix,
+                     chain=chain, program=program, state=state, arguments=arguments)
+        exec(compile(source, binding.__file__, 'exec'), scope)
+        with patch.object(binding, '_state_inputs', wraps=binding._state_inputs) as inputs:
+            scope['check']()
+        self.assertEqual(inputs.call_count, 1)
+        guard_current = False
+        with self.assertRaises(ValueError):
+            scope['check']()
+        guard_current = True
+        row = fixture['preparations'].plans['yaml-change']['payload']
+        row['data']['receipt']['source_files'][0][1] = '0' * 64
+        with self.assertRaises((ValueError, receipts.RegistryReceiptError)):
+            scope['check']()
+
     def test_detached_evidence_distinguishes_signed_zero_and_nested_type_drift(self):
         original = {'nested': [0.0, -0.0, 1, True, {'x': 1.5}]}
         evidence = receipts._freeze_json(original)

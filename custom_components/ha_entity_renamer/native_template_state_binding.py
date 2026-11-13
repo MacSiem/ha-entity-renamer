@@ -672,7 +672,7 @@ async def async_observe_accepted_state_bindings(hass, chain, program, *, guard,
                 result.close()
             _need(False, 'template_state_synchronous_guard_required')
         _need(result is None or result is True, 'template_state_guard_rejected')
-        _state_inputs(chain, state, **arguments)
+        # accepted_state_prefix performs the same full _state_inputs fence.
         _need(accepted_prefix == accepted_state_prefix(chain, program, input_state=state, **arguments),
               'template_state_accepted_head_changed')
     check()
