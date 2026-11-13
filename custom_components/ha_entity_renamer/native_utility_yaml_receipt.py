@@ -271,7 +271,9 @@ def inspect_accepted(handoff, preparations, operation_id, plan, registry_changes
               and len(receipt['rows']) == len(receipt['after']), 'inspection_receipt_binding')
         names = set()
         for saved, cutover in zip(receipt['rows'], receipt['after'], strict=True):
-            _need(type(saved) is dict and saved.get('meter') in relevant, 'inspection_population')
+            _need(type(saved) is dict and set(saved) == {'meter', 'source', 'target', 'source_uuid',
+                  'entity_id', 'before', 'info'} and type(saved['before']) is list
+                  and len(saved['before']) == 5 and saved.get('meter') in relevant, 'inspection_population')
             row = actors[saved['meter']]
             _need(saved['meter'] not in names and saved['meter'] not in covered
                   and saved.get('source') == row.new and saved.get('target') == row.old

@@ -146,3 +146,38 @@ class CoordinatorReceiptTests(ReceiptTests):
             result = await coordinator.apply(plan, plan.fingerprint, 'operation')
         self.assertEqual(result.status, 'unknown')
         self.assertEqual(events, ['detach', 'registry', 'attach'])
+
+
+class AcceptedInspectionTests(unittest.TestCase):
+    def test_cutover_receipt_is_bound_but_live_counter_can_advance(self):
+        from custom_components.ha_entity_renamer.native_utility_yaml_receipt import inspect_accepted, _id
+        step = Step('source', 'registry', 'uuid', 'before', 'after', 'prepared')
+        plan = Plan('plan', ('registry',), ('registry',), (step,), 'covered', ('registry',))
+        handoff = object.__new__(UtilityYAMLHandoff)
+        row = SimpleNamespace(meter='meter', old='sensor.new', new='sensor.old', source_uuid='uuid',
+            entity_id='sensor.meter', info={'source': 'sensor.new'}, before=('sensor.meter', '19', {}, None, 'kWh'))
+        handoff.rows = (row,)
+        checks = []
+        handoff.check_population = lambda: checks.append(True)
+        change = SimpleNamespace(identity='uuid', mapping={'sensor.old': 'sensor.new'})
+        intent_ref = _id('operation', plan.fingerprint, step.key, 'forward', 'intent')
+        receipt_ref = _id('operation', plan.fingerprint, step.key, 'forward', 'receipt')
+        expected = {'operation': 'operation', 'fingerprint': plan.fingerprint, 'step': step.key, 'direction': 'forward'}
+        saved = {'meter': 'meter', 'source': 'sensor.old', 'target': 'sensor.new', 'source_uuid': 'uuid',
+                 'entity_id': 'sensor.meter', 'before': ['sensor.meter', '12', {}, None, 'kWh'],
+                 'info': {'source': 'sensor.old'}}
+        intent = {'kind': 'utility_yaml_intent', **expected, 'rows': [saved]}
+        receipt = {'kind': 'utility_yaml_receipt', **expected, 'intent': [intent_ref, 'i'],
+                   'rows': [saved], 'after': [list(saved['before'])]}
+        prep = SimpleNamespace(plans={intent_ref: {'digest': 'i', 'payload': intent},
+                                      receipt_ref: {'digest': 'r', 'payload': receipt}})
+        prep.resolve = lambda key, digest: prep.plans[key]['payload']
+        self.assertTrue(inspect_accepted(handoff, prep, 'operation', plan, (change,)))
+        self.assertEqual(len(checks), 2)
+        receipt['after'][0][1] = '13'
+        with self.assertRaises(Refused):
+            inspect_accepted(handoff, prep, 'operation', plan, (change,))
+        receipt['after'][0][1] = '12'
+        del prep.plans[receipt_ref]
+        with self.assertRaises(Refused):
+            inspect_accepted(handoff, prep, 'operation', plan, (change,))
