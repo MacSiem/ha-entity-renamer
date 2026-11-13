@@ -81,6 +81,37 @@ _EXTERNAL = re.compile(r"(?:[a-z][a-z0-9+.-]{0,31}://|javascript:|<script\b)", r
 _TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?=([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![A-Za-z0-9_]))", re.ASCII)
 
 
+def _inert_template(text, mapping):
+    """Recognize two complete non-reference forms without weakening other guards."""
+    if re.fullmatch(r"\s*\{#(?:(?!#\}).)*#\}\s*", text, re.S):
+        return not any(match.group(1) in mapping for match in _TOKEN.finditer(text))
+    if not _EXTERNAL.search(text) or '{#' in text or re.search(r'{%[-+]?\s*raw\b', text):
+        return False
+    try:
+        from jinja2 import Environment, nodes
+        tree = Environment().parse(text)
+        allowed = (nodes.Template, nodes.Output, nodes.Or, nodes.And, nodes.Compare,
+                   nodes.Operand, nodes.Call, nodes.Name, nodes.Const)
+        for node in [tree, *tree.find_all(nodes.Node)]:
+            if not isinstance(node, allowed):
+                return False
+            if isinstance(node, nodes.Name) and node.name != 'state_attr':
+                return False
+            if (isinstance(node, nodes.Const) and isinstance(node.value, str)
+                    and not re.match(r'^https?://', node.value, re.I)
+                    and any(match.group(1) in mapping for match in _TOKEN.finditer(node.value))):
+                return False
+            if isinstance(node, nodes.Call):
+                if (not isinstance(node.node, nodes.Name) or node.node.name != 'state_attr'
+                        or len(node.args) != 2 or node.kwargs or node.dyn_args or node.dyn_kwargs
+                        or not all(isinstance(arg, nodes.Const) and type(arg.value) is str for arg in node.args)
+                        or not re.match(r'^https?://', node.args[0].value, re.I)):
+                    return False
+        return any(isinstance(node, nodes.Call) for node in tree.find_all(nodes.Call))
+    except Exception:
+        return False
+
+
 def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                      binding_report=None, output_reference=False, trigger_entities=(), alias_only=False, strict_trigger_keys=False):
     """Parse only: return exact replacements and review marker (code, detail) pairs.
@@ -805,6 +836,8 @@ def analyze_template_bindings(text, mapping, bindings, *, max_nodes=10000,
         raise PlanError('external binding origins must have negative positions')
     if set(bindings) & {'states', 'is_state', 'state_attr', 'is_state_attr', 'expand'}:
         return text, [('unsupported_template_scope', 'YAML binding shadows HA global')], set(), origins
+    if _inert_template(text, mapping):
+        return text, [], set(), set()
     if _EXTERNAL.search(text) or '{#' in text or re.search(r'{%[-+]?\s*raw\b', text):
         return text, [('unsupported_template', 'External/comment/raw-bearing template')], set(), origins
     report = {}
@@ -887,6 +920,8 @@ def plan_references(
         return any(match.group(1) in mapping for match in _TOKEN.finditer(text))
 
     def template(text: str, path: Path) -> str:
+        if _inert_template(text, mapping):
+            return text
         if _EXTERNAL.search(text):
             markers.append(Marker(path, "external_content", "URL/script-bearing field left unchanged"))
             return text

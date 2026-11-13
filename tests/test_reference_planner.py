@@ -186,6 +186,22 @@ class ReferencePlannerTest(unittest.TestCase):
             self.assertEqual(plan.markers[0].code, "external_content")
 
     @requires_jinja
+    def test_inert_url_reads_and_comment_do_not_block_neighbor(self):
+        from reference_planner import analyze_template_bindings
+        mapping = {'sensor.a': 'sensor.b'}
+        for source in (
+            "{{ state_attr('https://example.invalid/a', 'value') == 'x' or state_attr('https://example.invalid/b', 'value') == 'y' }}",
+            "{# {% for item in states.sensor %}{{ item.state }}{% endfor %} #}",
+        ):
+            plan = plan_references(source, mapping, jinja())
+            self.assertEqual(plan.value, source)
+            self.assertFalse(plan.markers)
+            self.assertEqual(analyze_template_bindings(source, mapping, {'other': ('scalar', ((-1, 0, 'sensor.a'),))}),
+                             (source, [], set(), set()))
+        for source in ("{# sensor.a #}", "{{ state_attr('https://example.invalid/a', 'x') or states('sensor.a') }}"):
+            self.assertTrue(plan_references(source, mapping, jinja()).markers)
+
+    @requires_jinja
     def test_dynamic_and_unknown_references_are_marked(self):
         source = "{{ states('sensor.' ~ name) }} {{ custom('sensor.a') }}"
         plan = plan_references(source, {"sensor.a": "sensor.b"}, jinja())

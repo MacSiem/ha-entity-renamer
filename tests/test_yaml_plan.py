@@ -292,6 +292,29 @@ class YAMLPlannerTests(unittest.TestCase):
         self.assertTrue(inverse.ready, inverse.issues)
         self.assertEqual(inverse.patches[0].proposed_bytes, source.encode())
 
+    def test_inert_templates_preserved_alongside_exact_rewrite(self):
+        source = """automation:
+- id: inert
+  triggers:
+  - trigger: state
+    entity_id: sensor.foo
+  conditions:
+  - condition: template
+    value_template: "{{ state_attr('https://example.invalid/a', 'value') == 'x' or state_attr('https://example.invalid/b', 'value') == 'y' }}"
+  - condition: template
+    value_template: "{# {% for item in states.sensor %}{{ item.state }}{% endfor %} #}"
+  actions: []
+"""
+        path = self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        expected = source.replace('sensor.foo', 'sensor.new').encode()
+        self.assertEqual(plan.patches[0].proposed_bytes, expected)
+        path.write_bytes(expected)
+        inverse = plan_yaml(self.root, {'sensor.new': 'sensor.foo'})
+        self.assertTrue(inverse.ready, inverse.issues)
+        self.assertEqual(inverse.patches[0].proposed_bytes, source.encode())
+
     def test_preserves_source_comments_quotes_crlf_unicode_and_anchor(self):
         source = '# żółć\r\na: &ref sensor.foo # comment\r\nentity_id: *ref\r\nentity: "light.old"\r\n'
         self.put('configuration.yaml', source)
