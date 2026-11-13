@@ -186,6 +186,24 @@ class ReferencePlannerTest(unittest.TestCase):
             self.assertEqual(plan.markers[0].code, "external_content")
 
     @requires_jinja
+    def test_native_registry_discovery_is_dynamic_and_has_no_literal_edit(self):
+        source = "{% for entity in integration_entities('demo') %}{% set device = device_id(entity) %}{% for item in expand(device_entities(device)) %}{{ item.state }}{% endfor %}{% endfor %}"
+        plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+        self.assertEqual(plan.value, source)
+        self.assertFalse(plan.markers, plan.markers)
+        unsafe = source.replace("device_entities(device)", "device_entities(other)")
+        self.assertTrue(plan_references(unsafe, {'sensor.a': 'sensor.b'}, jinja()).markers)
+
+    @requires_jinja
+    def test_finite_entity_list_loop_membership(self):
+        source = "{% set items = ['sensor.a', 'sensor.other'] %}{% for item in items %}{% if item in items %}{{ states(item) }}{% endif %}{% endfor %}"
+        result = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+        self.assertFalse(result.markers, result.markers)
+        self.assertEqual(result.value, source.replace('sensor.a', 'sensor.b'))
+        unsafe = source.replace('item in items', 'external in items')
+        self.assertTrue(plan_references(unsafe, {'sensor.a': 'sensor.b'}, jinja()).markers)
+
+    @requires_jinja
     def test_inert_url_reads_and_comment_do_not_block_neighbor(self):
         from reference_planner import analyze_template_bindings
         mapping = {'sensor.a': 'sensor.b'}

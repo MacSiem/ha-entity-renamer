@@ -331,11 +331,13 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
     """
     producers, used, unsafe, templates, observed = {}, set(), set(), {}, {}
     consumers = {}
+    log_used = set()
     template_variables = []
     template_outputs = set()
     work = 0
     trigger_entities = ()
     strict_trigger_keys = False
+    response_names = set()
     script_parameters = script_parameters or {}
     script_arguments = script_arguments or {}
 
@@ -441,7 +443,7 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                         tuple(parts)), nodes
         return None
 
-    def scan(node, bindings, field=False, ancestry=(), reference_fields=True, template_output=False):
+    def scan(node, bindings, field=False, ancestry=(), reference_fields=True, template_output=False, dynamic_service=False, log_payload=False):
         charge()
         if node is None:
             return
@@ -466,13 +468,13 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                 result, markers, consumed, escaped = analyze_template_bindings(
                     node.value, mapping, bindings, max_nodes=max_nodes,
                     output_reference=field, trigger_entities=trigger_entities,
-                    strict_trigger_keys=strict_trigger_keys)
-                used.update(consumed)
+                    strict_trigger_keys=strict_trigger_keys, dynamic_service=dynamic_service, log_payload=log_payload)
+                (log_used if log_payload else used).update(consumed)
                 unsafe.update(escaped)
                 if any(code == 'unsupported_runtime_repeat' for code, _ in markers):
                     issue(node, 'yaml_runtime_repeat_variable_unsupported')
                 for origin in consumed:
-                    record(origin, 'jinja_entity_reference')
+                    record(origin, 'jinja_log_entity' if log_payload else 'jinja_entity_reference')
                 for origin in escaped:
                     record(origin, 'jinja_unsafe_or_unknown')
                 previous = templates.get(id(node))
@@ -532,6 +534,18 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                 unsafe.update(origins(bindings))
                 issue(key, 'yaml_variable_definition_unsupported')
                 scan(child, bindings)
+                continue
+            if key.value in response_names and isinstance(child, MappingNode):
+                # HA stop/response_variable proves this mapping is the Script
+                # response. Only its structural targets slot carries IDs.
+                for field_key, field_value in child.value:
+                    scan(field_key, bindings, reference_fields=False)
+                    scan(field_value, bindings, isinstance(field_key, ScalarNode)
+                         and field_key.value == 'targets', reference_fields=False)
+                prior = bindings.get(key.value)
+                if prior:
+                    unsafe.update(prior[1])
+                bindings[key.value] = None
                 continue
             part = static(child)
             alias = template_alias(child, bindings)
@@ -802,8 +816,20 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                                                                allow_literals=True) is None):
                                 issue(argument, 'yaml_script_argument_provenance_unavailable')
                             scan(argument, environment, proven, reference_fields=False)
+                    elif (isinstance(key, ScalarNode) and key.value == 'data'
+                          and isinstance(child, MappingNode)
+                          and isinstance(values.get('action', values.get('service')), ScalarNode)
+                          and isinstance(pairs(child).get('event'), ScalarNode)
+                          and '{{' not in pairs(child)['event'].value):
+                        for data_key, data_value in child.value:
+                            scan(data_key, environment)
+                            scan(data_value, environment, isinstance(data_key, ScalarNode)
+                                 and data_key.value in _FIELDS,
+                                 log_payload=isinstance(data_key, ScalarNode)
+                                 and data_key.value != 'event' and isinstance(data_value, ScalarNode))
                     else:
-                        scan(child, environment, isinstance(key, ScalarNode) and key.value in _FIELDS)
+                        scan(child, environment, isinstance(key, ScalarNode) and key.value in _FIELDS,
+                             dynamic_service=isinstance(key, ScalarNode) and key.value in ('action', 'service'))
             response = values.get('response_variable')
             if isinstance(response, ScalarNode) and bindings.get(response.value):
                 prior = bindings[response.value]
@@ -821,11 +847,28 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                 bindings.update(join([entry, bindings]))
 
     def scope(node, initial=None, automation=False):
-        nonlocal trigger_entities, strict_trigger_keys
+        nonlocal trigger_entities, strict_trigger_keys, response_names
         if not isinstance(node, MappingNode):
             return
         values = pairs(node)
         bindings = dict(initial or {})
+        response_names = set()
+        def collect_responses(item, ancestry=()):
+            charge()
+            if id(item) in ancestry:
+                raise YAMLPlanError('YAML response alias cycle')
+            ancestry += (id(item),)
+            if isinstance(item, MappingNode):
+                fields = pairs(item)
+                name = fields.get('response_variable')
+                if 'stop' in fields and isinstance(name, ScalarNode) and name.tag == _STR:
+                    response_names.add(name.value)
+                for _, child in item.value:
+                    collect_responses(child, ancestry)
+            elif isinstance(item, SequenceNode):
+                for child in item.value:
+                    collect_responses(child, ancestry)
+        collect_responses(node)
         trigger_entities = ()
         strict_trigger_keys = False
         if automation and not (set(values) & {'trigger_variables', 'use_blueprint'}):
@@ -868,6 +911,7 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                 scan(child, bindings, key.value in _FIELDS)
         trigger_entities = ()
         strict_trigger_keys = False
+        response_names = set()
 
     def template_scope(node):
         """Only native state block variables; all siblings share their closure.
@@ -990,6 +1034,8 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
         discover(tree, inherited_key)
     else:
         scope(tree, input_bindings)
+    unsafe.update(log_used - used)
+    used.update(log_used)
     return producers, used, unsafe, templates, observed, consumers, template_variables, template_outputs
 
 
@@ -1185,12 +1231,20 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                         source_field = source_field or (key.value == 'source'
                                                        and parent_key == '__utility_meter_entry__')
                         child_key = '__utility_meter_entry__' if parent_key == 'utility_meter' else key.value
+                        if path == 'configuration.yaml' and node is tree and key.value == 'homekit':
+                            child_key = '__homekit__'
+                        elif parent_key == '__homekit__' and key.value == 'filter':
+                            child_key = '__homekit_filter__'
+                        homekit_entities = (parent_key == '__homekit_filter__'
+                                            and key.value in ('include_entities', 'exclude_entities'))
+                        if homekit_entities and not isinstance(value, SequenceNode):
+                            issue(value, 'homekit_entity_filter_shape_unsupported')
                         child_variable = variable_definition or key.value in ('variables', 'trigger_variables')
                         child_script_root = (bool(owned_script_services) and path == 'configuration.yaml'
                                              and node is tree and key.value == 'script'
                                              and not variable_definition)
                         walk(value, depth + 1,
-                             (key.value in _FIELDS or source_field) and not child_variable, child_key,
+                             (key.value in _FIELDS or source_field or homekit_entities) and not child_variable, child_key,
                              lovelace or key.value == 'lovelace', child_variable, child_script_root)
                 else:
                     issue(node, "unsupported_yaml_node")

@@ -292,6 +292,115 @@ class YAMLPlannerTests(unittest.TestCase):
         self.assertTrue(inverse.ready, inverse.issues)
         self.assertEqual(inverse.patches[0].proposed_bytes, source.encode())
 
+    def test_conversation_table_state_and_logged_entity(self):
+        source = """automation:
+- id: conversation
+  triggers:
+  - trigger: conversation
+    command: report
+  variables:
+    table:
+      first: {entity: sensor.foo, label: Friendly}
+      second: {entity: sensor.other, label: Other}
+    selected: "{{ table.get(selection, {}) }}"
+    entity_id: "{{ selected.get('entity', '') }}"
+    label: "{{ selected.get('label', '') }}"
+  actions:
+  - variables:
+      state: "{{ states(entity_id) }}"
+      domain: "{{ entity_id.split('.')[0] }}"
+      detail: "{% for key in ['first', 'second'] %}{{ states(table.get(key, {}).get('entity', '')) }}{% endfor %}"
+  - action: synthetic.log
+    data:
+      event: state_report
+      detail: "Entity {{ entity_id }} label {{ label }}"
+"""
+        path = self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        expected = source.replace('sensor.foo', 'sensor.new').encode()
+        self.assertEqual(plan.patches[0].proposed_bytes, expected)
+        path.write_bytes(expected)
+        inverse = plan_yaml(self.root, {'sensor.new': 'sensor.foo'})
+        self.assertTrue(inverse.ready, inverse.issues)
+        self.assertEqual(inverse.patches[0].proposed_bytes, source.encode())
+        unproven = source.replace("{{ states(entity_id) }}", "unchanged").replace(
+            "{{ entity_id.split('.')[0] }}", "unchanged").replace(
+            "{{ states(table.get(key, {}).get('entity', '')) }}", "unchanged")
+        path.write_text(unproven)
+        self.assertFalse(self.plan().ready)
+        path.write_text(source.replace('label {{ label }}', 'label {{ entity_id }}'))
+        self.assertFalse(self.plan().ready)
+
+    def test_runtime_device_notify_does_not_claim_literal_reference(self):
+        source = """automation:
+- id: dynamic_notify
+  triggers:
+  - trigger: state
+    entity_id: sensor.foo
+  actions:
+  - repeat:
+      for_each: "{{ devices }}"
+      sequence:
+      - action: "notify.{{ device_attr(repeat.item, 'name') | slugify }}"
+"""
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertEqual(plan.patches[0].proposed_bytes, source.replace('sensor.foo', 'sensor.new').encode())
+        self.put('configuration.yaml', source.replace("repeat.item, 'name'", "repeat.item, 'entity_id'"))
+        self.assertFalse(self.plan().ready)
+
+    def test_homekit_entity_filters_are_scoped_and_byte_reversible(self):
+        for homekit in ("homekit:\n  filter:\n    exclude_entities: [sensor.foo, sensor.other]\n",
+                        "homekit:\n- name: Bridge\n  filter:\n    include_entities: [sensor.foo]\n"):
+            source = homekit + "other:\n  filter:\n    exclude_entities: [sensor.foo_label]\n"
+            path = self.put('configuration.yaml', source)
+            plan = self.plan()
+            self.assertTrue(plan.ready, plan.issues)
+            expected = source.replace('sensor.foo,', 'sensor.new,').replace('sensor.foo]', 'sensor.new]').encode()
+            self.assertEqual(plan.patches[0].proposed_bytes, expected)
+            path.write_bytes(expected)
+            inverse = plan_yaml(self.root, {'sensor.new': 'sensor.foo'})
+            self.assertTrue(inverse.ready, inverse.issues)
+            self.assertEqual(inverse.patches[0].proposed_bytes, source.encode())
+        self.put('configuration.yaml', 'homekit:\n  filter:\n    exclude_entities: sensor.foo\n')
+        self.assertIn('homekit_entity_filter_shape_unsupported', self.codes(self.plan()))
+        self.put('configuration.yaml', 'other:\n  homekit:\n    filter:\n      exclude_entities: [sensor.foo]\n')
+        self.assertFalse(self.plan().ready)
+
+    def test_script_response_targets_and_state_records(self):
+        source = """script:
+  sample:
+    sequence:
+    - variables:
+        groups:
+          first: {targets: [sensor.foo, sensor.other]}
+        selected: "{{ groups.get(selection, {}) }}"
+    - variables:
+        records: >-
+          {% set ns = namespace(values=[]) %}
+          {% for item in selected.targets %}
+          {% set ns.values = ns.values + [{'entity_id': item, 'state': states(item)}] %}
+          {% endfor %}{{ ns.values }}
+        response:
+          targets: "{{ selected.targets }}"
+          records: "{{ records }}"
+    - stop: finished
+      response_variable: response
+"""
+        path = self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        expected = source.replace('sensor.foo', 'sensor.new').encode()
+        self.assertEqual(plan.patches[0].proposed_bytes, expected)
+        path.write_bytes(expected)
+        inverse = plan_yaml(self.root, {'sensor.new': 'sensor.foo'})
+        self.assertTrue(inverse.ready, inverse.issues)
+        self.assertEqual(inverse.patches[0].proposed_bytes, source.encode())
+        path.write_text(source.replace("'state': states(item)", "'label': item"))
+        self.assertFalse(self.plan().ready)
+
     def test_inert_templates_preserved_alongside_exact_rewrite(self):
         source = """automation:
 - id: inert

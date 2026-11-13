@@ -271,7 +271,7 @@ class NativeYAMLRuntimeReadback:
         self.owned_automation = owned_automation
         self.script_dispatch = script_dispatch
 
-    def _projection(self, domain):
+    def _projection(self, domain, *, only_entity=None):
         from homeassistant.helpers.entity_component import DATA_INSTANCES
         from homeassistant.const import __version__
         if domain == 'homeassistant':
@@ -294,6 +294,10 @@ class NativeYAMLRuntimeReadback:
             entities = tuple(platform.entities.values())
         else:
             entities = tuple(component.entities)
+        if only_entity is not None:
+            if domain not in ('automation', 'script') or not any(item is only_entity for item in entities):
+                raise ValueError('native_diagnostic_entity_missing')
+            entities = (only_entity,)
         if domain == 'automation' and __version__ == '2026.11.1':
             from .native_controlled_yaml_core111 import prove_automation_projection
             prove_automation_projection()

@@ -180,6 +180,58 @@ def _native_families(observed):
     return result, entities, devices
 
 
+def _runtime_row_diagnostics(hass, domain, *, owned_automation=None):
+    """Independent, twice-sampled native row proofs; never mutation authority."""
+    from collections import Counter
+    from homeassistant.const import __version__
+    from homeassistant.helpers.entity_component import DATA_INSTANCES
+    from .yaml_runtime_observer import NativeYAMLRuntimeReadback, _pending_native_work
+    from .yaml_validation_worker import _fingerprint
+    supported = (__version__ in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.1')
+                 or __version__ == '2026.11.0' and domain == 'script')
+    if domain not in ('automation', 'script') or not supported or _pending_native_work(hass, (domain,)):
+        raise ValueError('runtime_unsettled')
+    component = hass.data.get(DATA_INSTANCES, {}).get(domain)
+    if component is None:
+        raise ValueError('native_component_unsettled')
+    entities = tuple(component.entities)
+    ids = Counter(getattr(entity, 'entity_id', None) for entity in entities)
+    unique = Counter(getattr(entity, 'unique_id', None) for entity in entities)
+    observer = NativeYAMLRuntimeReadback(hass, owned_automation=owned_automation)
+    result = []
+    for entity in entities:
+        entity_id = getattr(entity, 'entity_id', None)
+        uid = getattr(entity, 'unique_id', None)
+        if (type(entity_id) is not str or type(uid) is not str or not uid
+                or ids[entity_id] != 1 or unique[uid] != 1):
+            result.append((entity_id, 'UNKNOWN', 'native_identity_ambiguous'))
+            continue
+        try:
+            first, first_identity = observer._projection(domain, only_entity=entity)
+            second, second_identity = observer._projection(domain, only_entity=entity)
+            if (first_identity != second_identity or _fingerprint(first) != _fingerprint(second)
+                    or _pending_native_work(hass, (domain,))):
+                raise ValueError('runtime_row_changed')
+            result.append((entity_id, 'COMPLETE', ''))
+        except PermissionError:
+            result.append((entity_id, 'DENIED', 'read_access_denied'))
+        except (ValueError, KeyError, TypeError, AttributeError) as error:
+            reasons = {'native_automation_condition_unavailable', 'native_automation_type',
+                       'automation_listener_proof_unavailable', 'native_entity_missing',
+                       'native_script_not_settled', 'native_script_service_owner',
+                       'native_script_service_registry', 'native_script_type',
+                       'native_dynamic_trigger_not_covered', 'native_dynamic_event_not_covered',
+                       'native_trigger_platform_not_covered', 'native_state_duration_not_covered',
+                       'native_trigger_count_changed', 'native_trigger_owner_changed',
+                       'runtime_row_changed'}
+            reason = str(error) if isinstance(error, ValueError) and str(error) in reasons else 'runtime_row_unverified'
+            result.append((entity_id, 'UNKNOWN', reason))
+    if (component is not hass.data.get(DATA_INSTANCES, {}).get(domain)
+            or tuple(component.entities) != entities or _pending_native_work(hass, (domain,))):
+        raise ValueError('runtime_census_changed')
+    return tuple(sorted(result, key=lambda row: str(row[0])))
+
+
 def _runtime_family(hass, domain, *, owned_automation=None):
     """Reuse exact native consumer projections without executing user actions."""
     from homeassistant.const import __version__
@@ -208,7 +260,14 @@ def _runtime_family(hass, domain, *, owned_automation=None):
     except PermissionError:
         return _unknown(domain, 'read_access_denied', denied=True), None
     except (ValueError, KeyError, TypeError, AttributeError):
-        return _unknown(domain, 'runtime_inventory_unavailable'), None
+        try:
+            diagnostics = _runtime_row_diagnostics(hass, domain, owned_automation=owned_automation)
+        except (PermissionError, ValueError, KeyError, TypeError, AttributeError):
+            return _unknown(domain, 'runtime_inventory_unavailable'), None
+        # Preserve the UNKNOWN family and strict mutation fence. The detached
+        # rows only explain which independent observations could be proven.
+        return Family(domain, 'UNKNOWN', 'runtime_rows_partially_unverified',
+                      _json({'row_diagnostics': diagnostics}), ()), None
 
 
 def _consumer_family(name, outcome, mapping):
