@@ -22,7 +22,12 @@ def classify(preparations, lifecycle_store, record):
     if not homekit:
         return None
     if len(homekit) != len(changes):
-        raise Refused('homekit_mixed_recovery_scope_unqualified')
+        from .powercalc_group_metadata import PreparedPowercalcGroupMetadata
+        from .controlled_powercalc_composition import ControlledPowercalcComposition
+        if (type(composition) is not ControlledPowercalcComposition or not composition.external_source_proof
+                or any(type(change) not in (PreparedHelper, PreparedPowercalcGroupMetadata) for change in changes)
+                or any(type(change) is PreparedHelper and change not in homekit for change in changes)):
+            raise Refused('homekit_mixed_recovery_scope_unqualified')
     if (record.status != 'applied' or record.direction != 'forward'
             or record.phases != ('verified',) * len(record.plan.steps)):
         raise Refused('homekit_recovery_not_terminal')

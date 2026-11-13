@@ -27,17 +27,23 @@ class HomeKitLifecycleDriver:
         changes = prepare_entries(binding)
         resolver = lambda ref: root.preparations.resolve(ref, root.digests[ref])
         from .prepared import decode_change
-        resolved = [decode_change(resolver(step.prepared_ref)) for step in helpers]
+        resolved = [(step, decode_change(resolver(step.prepared_ref))) for step in helpers]
+        from .helper_transaction import PreparedHelper
+        from .powercalc_group_metadata import PreparedPowercalcGroupMetadata
+        homekit = [(step, change) for step, change in resolved
+                   if type(change) is PreparedHelper and change.before.get('domain') == 'homekit']
+        _need(all(type(change) is PreparedPowercalcGroupMetadata or (step, change) in homekit
+                  for step, change in resolved), 'helper_type_unqualified')
         adapters = tuple(step.adapter for step in steps)
         registries, dashboards, energy = adapters.count('registry'), adapters.count('dashboard'), adapters.count('energy')
-        _need(bool(registries) and bool(helpers) and len(helpers) == len(changes)
+        _need(bool(registries) and bool(homekit) and len(homekit) == len(changes)
               and energy in (0, 1) and adapters == (('registry',) * registries + ('helpers',) * len(helpers)
                                + ('energy',) * energy + ('dashboard',) * dashboards + ('yaml',))
-              and {change.identity for change in resolved} == {change.identity for change in changes}
-              and all(change in changes for change in resolved)
+              and {change.identity for _, change in homekit} == {change.identity for change in changes}
+              and all(change in changes for _, change in homekit)
               and all((step.identity, step.before_revision, step.after_revision)
                       == (change.identity, change.before_revision, change.after_revision)
-                      for step, change in zip(helpers, resolved))
+                      for step, change in homekit)
               and all(not step.caused_by for step in steps)
               and steps[-1].adapter == 'yaml'
               and max(steps.index(step) for step in helpers) < len(steps) - 1,

@@ -207,6 +207,19 @@ class NativeHelperLifecycle:
             payload = store.preparations.resolve(step.prepared_ref,
                                                   prepared_digests[step.prepared_ref])
             change = decode_change(payload)
+            from .powercalc_group_metadata import PreparedPowercalcGroupMetadata
+            if type(change) is PreparedPowercalcGroupMetadata:
+                # PC metadata is owned by the controlled PC handoff and its
+                # typed adapter, not by this HomeKit activation lease.
+                from .controlled_powercalc_composition import ControlledPowercalcComposition
+                _, composition = store.preparations.resolve_composition(plan.native_inputs)
+                if (type(composition) is not ControlledPowercalcComposition
+                        or not composition.external_source_proof or step.caused_by
+                        or (change.identity, change.before_revision, change.after_revision)
+                           != (step.identity, step.before_revision, step.after_revision)):
+                    _fail('ordinary_helper_binding_required')
+                change.plan()
+                continue
             if (step.caused_by or type(change) is not PreparedHelper
                     or (change.before['domain'] not in NATIVE_FIELDS
                         and change.before['identity']['entry_id'] not in template_changes)

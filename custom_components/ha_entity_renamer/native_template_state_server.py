@@ -134,8 +134,11 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             self.homekit_yaml_binding = await HomeKitYAMLBinding.capture(
                 self.hass, self.mapping, self.receipt, proofs, guard=self._scope)
             expected = prepare_entries(self.homekit_yaml_binding)
-            actual = tuple(decode_change(self.preparations.resolve(step.prepared_ref,
+            from .helper_transaction import PreparedHelper
+            helpers = tuple(decode_change(self.preparations.resolve(step.prepared_ref,
                 self.digests[step.prepared_ref])) for step in self.plan.steps if step.adapter == 'helpers')
+            actual = tuple(change for change in helpers if type(change) is PreparedHelper
+                           and change.before.get('domain') == 'homekit')
             _need(len(actual) == len(expected) and set(change.identity for change in actual)
                   == set(change.identity for change in expected)
                   and all(change in expected for change in actual), 'homekit_helper_preparation_changed')
@@ -170,8 +173,11 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             changed = [(before, after) for before, after in zip(
                 phase.capture.entries, phase.capture.expected, strict=True)
                 if not snapshot_equal(before, after)]
-            prepared = [decode_change(self.preparations.resolve(step.prepared_ref,
+            from .helper_transaction import PreparedHelper
+            helpers = [decode_change(self.preparations.resolve(step.prepared_ref,
                 self.digests[step.prepared_ref])) for step in self.plan.steps if step.adapter == 'helpers']
+            prepared = [item for item in helpers if type(item) is PreparedHelper
+                        and item.before.get('domain') == 'homekit']
             _need(len(changed) == len(prepared) and all(any(
                 snapshot_equal(before, item.after) and snapshot_equal(after, item.before)
                 for item in prepared) for before, after in changed), 'homekit_inspection_preparations')
