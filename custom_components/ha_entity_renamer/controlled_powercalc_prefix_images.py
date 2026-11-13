@@ -47,3 +47,40 @@ def reverse_images(handoff, pss, restore):
         prior_restore[before] = restored
         clones[row['uuid']] = restored
     return prior_pss, prior_restore, clones
+
+
+def materialize_reverse_images(pss, clones):
+    """Prove native constructors reproduce detached data, without storing it."""
+    from homeassistant.core import State
+    from homeassistant.helpers.json import json_bytes
+    from .native_input_baseline import _loads
+    from .native_restore_state_payload import _native, _capture, _canonical, _timestamp
+    api = _native()
+    version, _, _, _, _, StoredState, RestoredExtraData, _, _ = api
+    if version not in ('2026.11.0', '2026.11.1') or type(pss) is not dict or type(clones) is not dict:
+        raise Refused('controlled_powercalc_prefix_materialization_unverified')
+    groups = {}
+    for group, members in pss.items():
+        if type(group) is not str or type(members) is not dict:
+            raise Refused('controlled_powercalc_prefix_materialization_unverified')
+        groups[group] = {}
+        for name, row in members.items():
+            if row is None:
+                groups[group][name] = None
+                continue
+            state = State.from_dict(row) if type(row) is dict else None
+            if (type(state) is not State or state.entity_id != name
+                    or not _exact_json_equal(_loads(json_bytes(state.as_dict())), _freeze_json(row))):
+                raise Refused('controlled_powercalc_prefix_materialization_unverified')
+            groups[group][name] = state
+    stored = {}
+    for uuid, row in clones.items():
+        if type(uuid) is not str or type(row) is not dict or row.get('entity_registry_id') != uuid:
+            raise Refused('controlled_powercalc_prefix_materialization_unverified')
+        state = State.from_dict(row.get('state'))
+        extra = None if row.get('extra_data') is None else RestoredExtraData(row['extra_data'])
+        clone = StoredState(state, extra, _timestamp(row['last_seen']), uuid)
+        if type(state) is not State or _canonical(_capture(clone, api)) != _canonical(row):
+            raise Refused('controlled_powercalc_prefix_materialization_unverified')
+        stored[uuid] = clone
+    return groups, stored
