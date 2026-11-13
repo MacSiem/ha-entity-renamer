@@ -28,8 +28,22 @@ class HomeKitHelperNativeTests(unittest.IsolatedAsyncioTestCase):
         obsmod=importlib.import_module(fixture.PACKAGE+'.native_homekit_helper_observers')
         proofs=importlib.import_module(fixture.PACKAGE+'.helper_observers')
         before=helper.read_entry(hass,entry.entry_id)
-        observer=await obsmod.NativeHomeKitHelperObservers.capture(hass,[before],
-            [proofs.RegistryMappingProof(old,new,f.row.id)])
+        from dataclasses import replace
+        import tempfile
+        worker=importlib.import_module(fixture.PACKAGE+'.yaml_validation_worker')
+        homekit_binding=importlib.import_module(fixture.PACKAGE+'.native_homekit_yaml_binding')
+        with tempfile.TemporaryDirectory(dir=root.parent) as scratch:
+            candidate=__import__('pathlib').Path(scratch)
+            (candidate/'configuration.yaml').write_text(yaml(new))
+            original_seal=(await worker._expected_runtime(str(root), ['homekit']))['homekit']
+            candidate_seal=(await worker._expected_runtime(str(candidate), ['homekit']))['homekit']
+            self.assertIsNotNone(original_seal)
+            self.assertIsNotNone(candidate_seal)
+            receipt=replace(fixture.receipt_for(root, '2026.11.1'), changed_domains=('homekit',),
+                unsupported_domains=('homekit',), runtime_expected=(('homekit', original_seal, candidate_seal),))
+            binding=await homekit_binding.HomeKitYAMLBinding.capture(hass,{old:new},receipt,
+                [proofs.RegistryMappingProof(old,new,f.row.id)],guard=lambda:None)
+        observer=binding.observer
         forward=planner.plan_helper(before,{old:new});self.assertFalse(forward.markers)
         async def settle():await hass.async_block_till_done()
         async def intent(a,b):pass
