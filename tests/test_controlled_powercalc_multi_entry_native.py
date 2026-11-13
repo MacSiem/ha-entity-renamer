@@ -274,6 +274,28 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 await energy.async_update(preferences)
                 await energy._store.async_save(energy.data)
                 energy_before = json.loads((self.f.root / '.storage/energy').read_bytes())['data']
+                from copy import deepcopy
+                from homeassistant.components.lovelace.const import LOVELACE_DATA
+                from homeassistant.helpers.storage import Store
+                self.assertNotIn('lovelace', hass.config.components)
+                dashboard_metadata = {'id': 'p4_multi', 'url_path': 'p4-multi', 'mode': 'storage',
+                                      'require_admin': True, 'show_in_sidebar': True,
+                                      'title': 'Synthetic multi queue', 'icon': 'mdi:home'}
+                await Store(hass, 1, 'lovelace_dashboards').async_save({'items': [dashboard_metadata]})
+                self.assertTrue(await async_setup_component(hass, 'lovelace', await async_hass_config_yaml(hass)))
+                dashboard = hass.data[LOVELACE_DATA].dashboards['p4-multi']
+                dashboard_before = {'views': [{'title': 'Synthetic', 'cards': [
+                    {'type': 'entities', 'entities': [leaf_a, leaf_b]},
+                    {'type': 'custom:button-card', 'entity': leaf_a,
+                     'triggers_update': [leaf_a, leaf_b], 'name': 'Unchanged label'}]}]}
+                dashboard_after = deepcopy(dashboard_before)
+                cards = dashboard_after['views'][0]['cards']
+                cards[0]['entities'] = [mapping[leaf_a], mapping[leaf_b]]
+                cards[1]['entity'] = mapping[leaf_a]
+                cards[1]['triggers_update'] = [mapping[leaf_a], mapping[leaf_b]]
+                await dashboard.async_save(dashboard_before)
+                dashboard_path = self.f.root / '.storage/lovelace.p4_multi'
+                self.assertEqual(json.loads(dashboard_path.read_bytes())['data']['config'], dashboard_before)
                 client = ClientSession()
                 self.addAsyncCleanup(client.close)
                 async def connect(label, group):
@@ -360,6 +382,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual([row['stat_consumption'] for row in disk_energy['device_consumption']],
                                  [mapping[name] for name in energy_ids])
                 self.assertEqual(energy.data, disk_energy)
+                self.assertEqual(json.loads(dashboard_path.read_bytes())['data']['config'], dashboard_after)
+                self.assertEqual(await dashboard.async_load(False), dashboard_after)
             verify_seam(0, mapping)
             verify_ids(mapping)
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, expected_entries)
@@ -398,6 +422,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual({domain: path.read_bytes() for domain, path in files.items()}, yaml_before)
                 self.assertEqual(json.loads((self.f.root / '.storage/energy').read_bytes())['data'], energy_before)
                 self.assertEqual(energy.data, energy_before)
+                self.assertEqual(json.loads(dashboard_path.read_bytes())['data']['config'], dashboard_before)
+                self.assertEqual(await dashboard.async_load(False), dashboard_before)
             verify_seam(1, {new: old for old, new in mapping.items()})
             verify_ids({})
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, before_entries)
