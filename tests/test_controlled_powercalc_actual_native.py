@@ -20,9 +20,8 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
     remote_bytes = actual.ActualProfileGraphNativeTests.remote_bytes
     write_package = actual.ActualProfileGraphNativeTests.write_package
 
-    async def _startup_services(self, hass, root):
-        self.with_yaml = True
-        await cold.receipted.NativeReceiptedHelperTests._before_start(self, hass, root)
+    from test_core11_energy_mixed_cold_native import MixedPhase
+    _startup_services = MixedPhase._startup_services
 
     async def _before_loader(self, hass, root):
         await super()._before_loader(hass, root)
