@@ -105,9 +105,9 @@ def _controlled_powercalc_plan(plan, composition):
     adapters = tuple(step.adapter for step in plan.steps)
     registry, helpers = adapters.count('registry'), adapters.count('helpers')
     energy, dashboards = adapters.count('energy'), adapters.count('dashboard')
-    scopes = ('registry', 'helpers') + (('energy',) if energy else ()) + (
+    scopes = ('registry',) + (('helpers',) if helpers else ()) + (('energy',) if energy else ()) + (
         ('dashboard',) if 'dashboard' in plan.required_scopes else ()) + ('yaml',)
-    return (registry > 0 and helpers in (1, 2) and energy in (0, 1)
+    return (registry > 0 and helpers <= len(composition.previous.groups) + 1 and energy in (0, 1)
             and plan.required_scopes == scopes
             and adapters == ('registry',) * registry + ('helpers',) * helpers
                 + ('energy',) * energy + ('dashboard',) * dashboards + ('yaml',)

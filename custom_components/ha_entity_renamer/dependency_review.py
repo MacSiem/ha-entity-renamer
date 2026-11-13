@@ -98,7 +98,7 @@ def dependency_dashboards(changes, mapping):
     return rows
 
 
-def dependency_powercalc_groups(changes):
+def dependency_powercalc_groups(changes, *, controlled=False):
     """Expose the exact group reference without internal ConfigEntry IDs."""
     from .powercalc_group_metadata import PreparedPowercalcGroupMetadata
     rows = []
@@ -112,6 +112,7 @@ def dependency_powercalc_groups(changes):
                 or change.mapping != {before: after}):
             raise Refused('review_powercalc_group_unavailable')
         rows.append({'kind': 'powercalc', 'entity_id': before, 'before': before, 'after': after})
-    if len(rows) != 1:
+    if (len({row["before"] for row in rows}) != len(rows)
+            or controlled is not True and len(rows) != 1):
         raise Refused('review_powercalc_group_unavailable')
     return rows

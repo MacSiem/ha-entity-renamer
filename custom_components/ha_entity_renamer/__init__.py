@@ -232,7 +232,8 @@ class Runtime:
                     digests = dict(composition.prepared_digests)
                     helpers = [decode_change(self.preparations.resolve(step.prepared_ref, digests[step.prepared_ref]))
                                for step in plan.steps if step.adapter == 'helpers']
-                    dependencies['config_entries'] = dependency_powercalc_groups(helpers)
+                    dependencies['config_entries'] = dependency_powercalc_groups(
+                        helpers, controlled=type(composition) is ControlledPowercalcComposition)
                 if 'dashboard' in plan.required_scopes:
                     dependencies['domains'] = sorted([*dependencies['domains'], 'dashboard'])
                     from .dependency_review import dependency_dashboards

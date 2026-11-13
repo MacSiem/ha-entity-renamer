@@ -264,7 +264,7 @@ def _yaml_frozen_review(session, *, restored=False):
         digests = dict(session.composition.prepared_digests)
         helpers = [decode_change(session.preparations.resolve(step.prepared_ref, digests[step.prepared_ref]))
                    for step in session.plan.steps if step.adapter == 'helpers']
-        result['dependencies'].setdefault('config_entries', []).extend(dependency_powercalc_groups(helpers))
+        result['dependencies'].setdefault('config_entries', []).extend(dependency_powercalc_groups(helpers, controlled=True))
         result['dependencies']['domains'] = sorted(set(result['dependencies']['domains']
             + ['powercalc'] + (['energy'] if 'energy' in session.plan.required_scopes else [])
             + (['dashboard'] if 'dashboard' in session.plan.required_scopes else [])))
