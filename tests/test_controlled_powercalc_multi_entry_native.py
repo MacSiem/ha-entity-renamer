@@ -252,11 +252,15 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     'script': {'multi_public_script': {'sequence': [{'event': 'multi_public_script_result',
                         'event_data': {'value': "{{ states('" + leaf_b + "') }}"}}]}},
                 }
+                if hasattr(self, 'boot_automation'):
+                    programs['automation'].insert(0, self.boot_automation)
                 files = {domain: self.f.root / ('multi-public-' + domain + '.yaml') for domain in programs}
                 for domain, path in files.items():
                     path.write_text(yaml.safe_dump(programs[domain], sort_keys=False))
                 with (self.f.root / 'configuration.yaml').open('a') as stream:
                     for domain, path in files.items():
+                        if domain == 'automation' and hasattr(self, 'boot_automation'):
+                            continue  # Registered before the one actual startup.
                         stream.write('\n' + domain + ': !include ' + path.name + '\n')
                 config = await async_hass_config_yaml(hass)
                 for domain in programs:
@@ -265,6 +269,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     else:
                         self.assertTrue(await async_setup_component(hass, domain, config), domain)
                 await hass.async_block_till_done()
+                if hasattr(self, 'boot_automation'):
+                    self.assertEqual(len(self.boot_actions), 1, 'automation reload must not synthesize a boot')
                 yaml_before = {domain: path.read_bytes() for domain, path in files.items()}
                 from homeassistant.components.energy.data import async_get_manager
                 energy = await async_get_manager(hass)
@@ -384,6 +390,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(energy.data, disk_energy)
                 self.assertEqual(json.loads(dashboard_path.read_bytes())['data']['config'], dashboard_after)
                 self.assertEqual(await dashboard.async_load(False), dashboard_after)
+                if hasattr(self, 'boot_automation'):
+                    self.assertEqual(len(self.boot_actions), 1, 'forward reload must not synthesize a boot')
             verify_seam(0, mapping)
             verify_ids(mapping)
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, expected_entries)
@@ -424,6 +432,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(energy.data, energy_before)
                 self.assertEqual(json.loads(dashboard_path.read_bytes())['data']['config'], dashboard_before)
                 self.assertEqual(await dashboard.async_load(False), dashboard_before)
+                if hasattr(self, 'boot_automation'):
+                    self.assertEqual(len(self.boot_actions), 1, 'inverse reload must not synthesize a boot')
             verify_seam(1, {new: old for old, new in mapping.items()})
             verify_ids({})
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, before_entries)
@@ -438,6 +448,45 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             save()
 
 
+class ControlledMultiEntryColdPublicTests(ControlledMultiEntryTests):
+    async def _before_start(self, hass, root):
+        from homeassistant.core import callback
+        from homeassistant.util import dt as dt_util
+        await super()._before_start(hass, root)
+        self.boot_events, self.boot_actions = [], []
+        self.boot_begin = dt_util.utcnow()
+        @callback
+        def started(event):
+            self.boot_events.append(event)
+        @callback
+        def action(event):
+            self.boot_actions.append(event)
+        self.addCleanup(hass.bus.async_listen('homeassistant_start', started))
+        self.addCleanup(hass.bus.async_listen('p4_multi_actual_boot', action))
+
+    async def _setup_vendor_forward(self):
+        from homeassistant.config import async_hass_config_yaml
+        from homeassistant.setup import async_setup_component
+        import yaml
+        await super()._setup_vendor_forward()
+        self.boot_automation = {'id': 'p4_multi_actual_boot', 'alias': 'P4 one actual boot',
+            'triggers': [{'trigger': 'homeassistant', 'event': 'start'}],
+            'actions': [{'event': 'p4_multi_actual_boot'}]}
+        path = self.f.root / 'multi-public-automation.yaml'
+        path.write_text(yaml.safe_dump([self.boot_automation], sort_keys=False))
+        with (self.f.root / 'configuration.yaml').open('a') as stream:
+            stream.write('\nautomation: !include ' + path.name + '\n')
+        self.assertTrue(await async_setup_component(self.f.hass, 'automation',
+                                                     await async_hass_config_yaml(self.f.hass)))
+
+    async def asyncSetUp(self):
+        from homeassistant.util import dt as dt_util
+        from test_controlled_powercalc_actual_native import assert_one_native_cold_start
+        await super().asyncSetUp()
+        assert_one_native_cold_start(self, self.boot_events, self.boot_begin, dt_util.utcnow())
+        self.assertEqual(len(self.boot_actions), 1, 'one real automation start action')
+
+
 def load_tests(loader, tests, pattern):
     import unittest
-    return unittest.TestSuite([ControlledMultiEntryTests('test_two_entries_public_websocket_one_review_forward_fresh_inverse')])
+    return unittest.TestSuite([ControlledMultiEntryColdPublicTests('test_two_entries_public_websocket_one_review_forward_fresh_inverse')])
