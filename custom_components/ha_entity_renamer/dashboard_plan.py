@@ -8,7 +8,8 @@ from __future__ import annotations
 from dataclasses import replace
 import re
 
-from .reference_planner import Consumer, Context, Marker, Scope, Syntax, plan_references
+from .reference_planner import Consumer, Context, Marker, Scope, Syntax, Change, plan_references
+from .dashboard_custom import plan_button_expression, unchanged_computed_target, unchanged_finite_jinja, unchanged_button_style, unchanged_bubble_style, unchanged_button_field
 
 PASSIVE = frozenset('''type title name description label icon theme color unit attribute
 path url url_path navigation_path image alt_text state_image style aspect_ratio
@@ -25,7 +26,7 @@ show_last_changed text new_tab download view dashboard hide_if_unavailable
 show_empty initial_view show_add_event add_event_style add_event_size
 badges_position badges_wrap max_columns dense section_mode column_span
 grid_options layout_options card_size subview back_path panel theme_mode
-background visible header footer show_zone_radius default_zoom auto_fit fit_zones
+background visible header footer heading heading_style dense_section_placement top_margin refresh_interval show_zone_radius default_zoom auto_fit fit_zones
 dark_mode show_all map_style scale_ruler cluster label_mode focus
 allow_open_top_navigation allow disable_sandbox hide_background text_only
 show_camera display_type sensor_classes alert_classes area
@@ -52,6 +53,71 @@ ENTITY_LIST = frozenset({'entities', 'glance', 'history-graph', 'statistics-grap
 _ID = re.compile(r'[a-z_][a-z0-9_]*\.[a-z0-9_]+\Z')
 
 
+def _passive_template(value, mapping):
+    # CSS/presentation and source-proven button templates cannot consume an
+    # entity ID when neither selected IDs nor dynamic state/target access occur.
+    if type(value) is dict:
+        return all(type(k) is str and _passive_template(k, mapping) and _passive_template(v, mapping) for k, v in value.items())
+    if type(value) is list:
+        return all(_passive_template(v, mapping) for v in value)
+    if type(value) is str:
+        return '[[[' not in value and not any(identity in value for identity in (*mapping.keys(), *mapping.values())) and not re.search(
+            r'\b(?:states|hass|callService|fire-dom-event)\s*[.(\[]|\{[%{]', value)
+    return value is None or type(value) in (int, float, bool)
+
+
+
+def _foreign_static(value, mapping):
+    if type(value) is dict:
+        return all(type(k) is str and _foreign_static(k, mapping) and _foreign_static(v, mapping) for k, v in value.items())
+    if type(value) is list:
+        return all(_foreign_static(v, mapping) for v in value)
+    if type(value) is str:
+        if any(identity in value for identity in (*mapping.keys(), *mapping.values())) or 'states[' in value or 'states.' in value or '[[[' in value:
+            return False
+        if '{{' in value or '{%' in value:
+            plan = plan_references(value, mapping, Context(Consumer.DASHBOARD, (Scope((), Syntax.JINJA),)))
+            return not plan.changes and not plan.markers
+        return True
+    return value is None or type(value) in (int, float, bool)
+
+
+def _foreign_filter_safe(kind, card, mapping):
+    import fnmatch
+    if not _foreign_static(card, mapping): return False
+    if kind == 'custom:auto-entities':
+        filters = card.get('filter')
+        return (type(filters) is dict and set(filters) <= {'include', 'exclude'}
+                and filters.get('exclude', []) == [] and type(filters.get('include')) is list
+                and all(type(item) is dict and set(item) == {'domain'} and type(item['domain']) is str
+                        for item in filters['include'])
+                and all(old.split('.')[0] == new.split('.')[0] for old, new in mapping.items()))
+    if kind == 'custom:flex-table-card':
+        entities = card.get('entities')
+        if type(entities) is not dict or set(entities) != {'include'} or type(entities['include']) is not str: return False
+        pattern = entities['include']
+        return all(not fnmatch.fnmatchcase(old, pattern) and not fnmatch.fnmatchcase(new, pattern)
+                   for old, new in mapping.items())
+    if kind == 'custom:battery-state-card':
+        filters = card.get('filter')
+        if type(filters) is not dict or set(filters) - {'include', 'exclude'}: return False
+        for group in filters.values():
+            if type(group) is not list: return False
+            for rule in group:
+                if type(rule) is not dict or rule.get('name') not in {'entity_id', 'attributes.device_class', 'state'}: return False
+                if rule.get('name') != 'entity_id': continue
+                value, op = rule.get('value'), rule.get('operator')
+                if type(value) is not str or op not in (None, 'contains'): return False
+                try:
+                    regex = re.compile(value)
+                except re.error: return False
+                for old, new in mapping.items():
+                    if ((value in old) != (value in new) or fnmatch.fnmatchcase(old, value) != fnmatch.fnmatchcase(new, value)
+                            or bool(regex.search(old)) != bool(regex.search(new))): return False
+        return True
+    return False
+
+
 def plan_dashboard(config, mapping):
     """Plan only known semantic leaves; leave labels/URLs byte-for-byte intact.
 
@@ -62,7 +128,8 @@ def plan_dashboard(config, mapping):
     clean = plan_references(config, mapping, Context(Consumer.DASHBOARD, ())).value
     if type(clean) is not dict:
         raise ValueError('invalid_dashboard')
-    scopes, markers = [], []
+    scopes, markers, expressions = [], [], []
+    templates = clean.get('button_card_templates', {})
 
     def block(path, code='unsupported_dashboard_schema'):
         markers.append(Marker(path, code, 'Dashboard coverage requires a semantic adapter'))
@@ -74,6 +141,8 @@ def plan_dashboard(config, mapping):
         for i, item in enumerate(values):
             p = path + (i,) if many and type(value) is list else path
             # External statistic IDs remain untouched, never infer a new ID.
+            if unchanged_computed_target(item, mapping):
+                continue
             if type(item) is not str or not (_ID.fullmatch(item) or
                     (statistic and ':' in item and '{{' not in item)):
                 block(p, 'dynamic_dashboard_reference')
@@ -93,10 +162,21 @@ def plan_dashboard(config, mapping):
         if type(value) is not dict:
             block(path); return
         kind = value.get('action')
+        if kind == 'fire-dom-event':
+            if set(value) - {'action', 'browser_mod', 'haptic'}:
+                block(path, 'custom_dashboard_action'); return
+            event = value.get('browser_mod')
+            if type(event) is not dict or set(event) != {'service', 'data'} or event['service'] != 'browser_mod.popup':
+                block(path, 'custom_dashboard_action'); return
+            data = event['data']
+            if type(data) is not dict or set(data) - {'title', 'content'} or 'content' not in data:
+                block(path, 'custom_dashboard_action'); return
+            node(data['content'], path + ('browser_mod', 'data', 'content'), 'card')
+            return
         if kind not in {'none', 'toggle', 'more-info', 'navigate', 'url', 'assist',
                         'call-service', 'perform-action'}:
             block(path, 'custom_dashboard_action'); return
-        allowed = {'action', 'confirmation'}
+        allowed = {'action', 'confirmation', 'haptic'}
         if kind == 'more-info': allowed |= {'entity'}
         if kind == 'navigate': allowed |= {'navigation_path', 'navigation_replace'}
         if kind == 'url': allowed |= {'url_path'}
@@ -114,6 +194,13 @@ def plan_dashboard(config, mapping):
                 if type(child) is not dict: block(p); continue
                 for field, item in child.items():
                     if field == 'entity_id': ref(item, p + (field,), many=True)
+                    elif field == 'content' and value.get('service', value.get('perform_action')) == 'browser_mod.popup':
+                        node(item, p + (field,), 'card')
+                    elif (field == 'option' and value.get('service', value.get('perform_action')) == 'input_select.select_option' and type(item) is str
+                          or field in {'cycle', 'skip_condition'} and type(item) is bool
+                          or field in {'duration', 'godziny'} and (type(item) in (int, float) or field == 'duration' and type(item) is str and re.fullmatch(r'\d{1,3}:\d{2}:\d{2}', item))
+                          or field == 'title' and value.get('service', value.get('perform_action')) == 'browser_mod.popup' and type(item) is str):
+                        continue
                     else: block(p + (field,), 'unknown_service_data')
 
     def conditions(value, path):
@@ -153,6 +240,130 @@ def plan_dashboard(config, mapping):
             block(path); return
         for i, child in enumerate(value): node(child, path + (i,), role, **kwargs)
 
+    def styles_safe(value, variables):
+        if type(value) is dict:
+            return all(type(key) is str and _passive_template(key, mapping) and styles_safe(item, variables) for key,item in value.items())
+        if type(value) is list:
+            return all(styles_safe(item, variables) for item in value)
+        if type(value) is str and '[[[' in value:
+            return unchanged_button_style(value, variables, mapping)
+        return _passive_template(value, mapping)
+
+    def custom(value, path, kind):
+        # Explicitly owned component slots; unrecognized options are refused.
+        passive = PASSIVE | {'styles', 'show_label', 'show_entity_picture', 'size',
+                             'show_icon', 'show_name', 'show_state', 'button_type',
+                             'card_type', 'scrolling_effect', 'show_attribute', 'card_layout',
+                             'force_icon', 'modules', 'slider_live_update', 'hide_main_background',
+                             'color_type', 'hash', 'use_accent_color', 'temperature_colouring',
+                             'show_last_updated', 'RAG_colors_buttons_per_text_or_value', 'card_mod', 'show_background', 'state_background',
+                             'justify_content', 'buttons_layout', 'sub_button_type', 'extra_styles'}
+        for key, child in value.items():
+            p = path + (key,)
+            if key == 'type': continue
+            if key in {'styles', 'extra_styles', 'style'}:
+                if not (kind == 'custom:bubble-card' and unchanged_bubble_style(child, mapping)) and not styles_safe(child, value.get('variables', {})): block(p, 'dynamic_button_style')
+            elif key == 'entity': ref(child, p)
+            elif key == 'triggers_update' and kind == 'custom:button-card': ref(child, p, many=True)
+            elif key == 'template' and kind == 'custom:button-card':
+                names = [child] if type(child) is str else child
+                if type(templates) is not dict or type(names) is not list or any(type(n) is not str or n not in templates for n in names):
+                    block(p, 'unknown_button_template')
+            elif key == 'variables' and kind == 'custom:button-card':
+                if type(child) is not dict: block(p); continue
+                # Only source-proven variables whose values are reference trees.
+                for field, item in child.items():
+                    q = p + (field,)
+                    if field not in {'entity_ids', 'floor_entity_ids', 'bound_entity',
+                                     'source_entities', 'cluster_bindings', 'temperature_entity_id',
+                                     'humidity_entity_id', 'temperature_ids', 'humidity_ids', 'source_entity'}:
+                        if field in {'v4_role', 'exact_point_binding', 'left_percent', 'top_percent',
+                                     'cluster_ids', 'cluster_size', 'display_name', 'manual_point',
+                                     'mobile_stagger_group', 'point_code', 'point_floor', 'point_id',
+                                     'point_type', 'source_label', 'source_x', 'source_y', 'verification_status',
+                                     'bound_device_id', 'current_relay_verification', 'relay_verified_at',
+                                     'measurement', 'source_left', 'source_top', 'group_id', 'point_ids',
+                                     'room_confidence', 'visual_left_percent', 'visual_top_percent',
+                                     'confirmed_module_count', 'confidence_text', 'evidence',
+                                     'verification_method', 'floor', 'floor_point_counts', 'binding_note',
+                                     'verified_total', 'v4_layer', 'v4_owner', 'v4_schema', 'v4_home_merged',
+                                     'cluster_order', 'connectivity_status', 'position_accuracy', 'physical_description'}:
+                            continue
+                        block(q, 'unsupported_button_variable'); continue
+                    variable_refs(field, item, q)
+            elif key == 'label' and kind == 'custom:button-card' and type(child) is str and child.startswith('[[['):
+                expressions.append((p, child))
+            elif key in ACTIONS: action(child, p)
+            elif key in {'conditions', 'visibility'}: conditions(child, p)
+            elif key == 'sub_button' and kind == 'custom:bubble-card':
+                bubble_buttons(child, p, passive)
+            elif key == 'button_action' and kind == 'custom:bubble-card':
+                if type(child) is not dict: block(p); continue
+                for field, item in child.items():
+                    if field in ACTIONS: action(item, p + (field,))
+                    else: block(p + (field,))
+            elif key == 'custom_fields' and kind == 'custom:button-card':
+                if type(child) is not dict: block(p); continue
+                for field, item in child.items():
+                    q = p + (field,)
+                    if type(item) is dict and set(item) <= {'card', 'do_not_eval'} and 'card' in item and (
+                            'do_not_eval' not in item or type(item['do_not_eval']) is bool):
+                        node(item['card'], q + ('card',), 'card')
+                    elif type(item) is str and '[[[' in item:
+                        if not unchanged_button_field(item, value.get('variables', {}), mapping):
+                            block(q, 'unsupported_button_custom_field')
+                    elif type(item) is str and not any(identity in item for identity in (*mapping.keys(), *mapping.values())):
+                        continue
+                    else: block(q, 'unsupported_button_custom_field')
+            elif key == 'state' and kind == 'custom:bubble-card':
+                if type(child) not in (str, int, float, bool, list, dict): block(p)
+            elif key == 'state' and kind == 'custom:button-card':
+                if type(child) is not list: block(p); continue
+                for i, item in enumerate(child):
+                    if type(item) is not dict or set(item) - {'value', 'styles'}:
+                        block(p + (i,)); continue
+                    if 'styles' in item and not styles_safe(item['styles'], value.get('variables', {})):
+                        block(p + (i, 'styles'), 'dynamic_button_style')
+            elif key == 'cards': sequence(child, p, 'card')
+            elif key not in passive: block(p)
+
+    def bubble_buttons(value, path, passive):
+        if type(value) is dict and set(value) <= {'main', 'bottom'}:
+            for key, items in value.items(): bubble_buttons(items, path + (key,), passive)
+            return
+        if type(value) is not list: block(path); return
+        for i, button in enumerate(value):
+            q = path + (i,)
+            if type(button) is not dict: block(q); continue
+            for field, item in button.items():
+                p = q + (field,)
+                if field == 'entity': ref(item, p)
+                elif field in {'conditions', 'visibility'}: conditions(item, p)
+                elif field in ACTIONS: action(item, p)
+                elif field == 'group': bubble_buttons(item, p, passive)
+                elif field not in passive: block(p)
+
+    def variable_refs(field, value, path):
+        if field in {'bound_entity', 'temperature_entity_id', 'humidity_entity_id', 'source_entity'}:
+            if value is not None: ref(value, path)
+        elif field in {'entity_ids', 'source_entities', 'temperature_ids', 'humidity_ids'}:
+            if type(value) is not list: block(path); return
+            ref(value, path, many=True)
+        elif field == 'floor_entity_ids':
+            if type(value) is not dict: block(path); return
+            for floor, entities in value.items():
+                if type(entities) is not list: block(path + (floor,)); continue
+                ref(entities, path + (floor,), many=True)
+        elif field == 'cluster_bindings':
+            if type(value) is not dict: block(path); return
+            for name, binding in value.items():
+                p = path + (name,)
+                if type(binding) is not dict: block(p); continue
+                for key, item in binding.items():
+                    if key == 'entity_id': ref(item, p + (key,))
+                    elif key in {'name', 'device_id'} and type(item) is str: continue
+                    else: block(p + (key,), 'unsupported_button_variable')
+
     def node(value, path, role, statistic=False):
         if type(value) is str and role in {'row', 'badge', 'graph'}:
             ref(value, path, statistic=statistic); return
@@ -189,6 +400,30 @@ def plan_dashboard(config, mapping):
                     continue
                 block(p, 'unsupported_renamer_card_config')
             return
+        # Known passive foreign card families with static configuration. No
+        # IDs are rewritten here; any selected token/dynamic access blocks.
+        passive_foreign = {'custom:anchor-card', 'custom:mini-graph-card',
+                           'custom:apexcharts-card', 'custom:advanced-camera-card',
+                           'custom:mushroom-fan-card', 'custom:mushroom-humidifier-card',
+                           'energy-usage-graph', 'energy-sources-table', 'energy-devices-graph'}
+        if kind in {'custom:auto-entities', 'custom:flex-table-card', 'custom:battery-state-card'}:
+            if not _foreign_filter_safe(kind, value, mapping): block(path, 'foreign_filter_membership_unverified')
+            return
+        if kind in {'custom:android-tv-card', 'custom:fold-entity-row', 'custom:private-voice-text-card'}:
+            if not _foreign_static(value, mapping): block(path, 'foreign_component_dynamic')
+            return
+        if kind in passive_foreign:
+            if not _passive_template(value, mapping): block(path, 'foreign_component_dynamic')
+            return
+        if role == 'card' and kind == 'custom:mod-card':
+            for key, child in value.items():
+                if key == 'card': node(child, path + (key,), 'card')
+                elif key not in {'type', 'grid_options', 'card_mod', 'visibility'}: block(path + (key,))
+                elif key == 'visibility': conditions(child, path + (key,))
+            return
+        if role in {'card', 'element'} and kind in {'custom:button-card', 'custom:bubble-card'}:
+            custom(value, path, kind)
+            return
         known = (role in {'root', 'view', 'section'} or
                  role == 'card' and kind in CARDS or
                  role in {'row', 'graph'} and (kind is None or kind in ROWS) or
@@ -198,7 +433,13 @@ def plan_dashboard(config, mapping):
             block(path, 'custom_or_unknown_dashboard_component'); return
         for key, child in value.items():
             p = path + (key,)
-            if key == 'strategy': block(p, 'dynamic_dashboard_strategy')
+            if key == 'button_card_templates' and role == 'root':
+                if type(child) is not dict: block(p)
+                else:
+                    for name, definition in child.items():
+                        if type(definition) is not dict or not _passive_template(definition, mapping):
+                            block(p + (name,), 'dynamic_button_template')
+            elif key == 'strategy': block(p, 'dynamic_dashboard_strategy')
             elif key == 'views' and role == 'root': sequence(child, p, 'view')
             elif key == 'sections' and role == 'view': sequence(child, p, 'section')
             elif key == 'cards' and (role in {'view', 'section'} or kind in {'grid', 'horizontal-stack', 'vertical-stack'}):
@@ -228,11 +469,34 @@ def plan_dashboard(config, mapping):
                 # arbitrary feature data as if it were reference-only.
                 if child: block(p, 'unsupported_dashboard_features')
             elif key in {'header', 'footer'}:
-                # Includes action-bearing header/footer types.
-                block(p, 'unsupported_dashboard_header_footer')
+                # Empty header/footer has no component or action to execute.
+                if child not in ({}, None): block(p, 'unsupported_dashboard_header_footer')
+            elif key in {'entity', 'swipe_nav'} and role == 'root':
+                if not _passive_template(child, mapping): block(p)
+            elif key in {'card_mod', 'variables'} and role in {'root', 'view', 'section', 'card', 'element'}:
+                if not _passive_template(child, mapping): block(p)
             elif key not in PASSIVE: block(p)
     node(clean, (), 'root')
     result = plan_references(clean, mapping, Context(Consumer.DASHBOARD, tuple(scopes)))
-    return replace(result, markers=tuple(m for m in result.markers
-                   if m.code != 'no_supported_scopes') + tuple(markers),
+    extra_changes = []
+    for path, original in expressions:
+        updated, error = plan_button_expression(original, mapping)
+        if error:
+            markers.append(Marker(path, error, 'Button JavaScript requires a bounded static expression'))
+        elif updated != original:
+            target = result.value
+            for part in path[:-1]: target = target[part]
+            target[path[-1]] = updated
+            extra_changes.append(Change(path, 'value', original, updated))
+    retained = []
+    for marker in result.markers:
+        if marker.code == 'no_supported_scopes':
+            continue
+        if marker.code == 'dynamic_reference':
+            value = clean
+            for part in marker.path: value = value[part]
+            if type(value) is str and unchanged_finite_jinja(value, mapping):
+                continue
+        retained.append(marker)
+    return replace(result, changes=result.changes + tuple(extra_changes), markers=tuple(retained) + tuple(markers),
                    coverage='native_lovelace_known_schema_frontend_20260930.4')
