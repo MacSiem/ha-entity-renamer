@@ -73,6 +73,7 @@ const wait = async name => {
     for (const domain of ['powercalc','energy','template','automation','script','dashboard','homekit','utility_meter'])
       if (!reviewed.domains.includes(domain)) throw Error('missing reviewed dependency: ' + domain);
     await page.screenshot({path:dir + '/ui-review.png'});
+    fs.chmodSync(dir + '/ui-review.png', 0o600);
     write('review', reviewed);
     await wait('apply');
     await card.locator('#applyMigration').click();
@@ -90,6 +91,7 @@ const wait = async name => {
     if (applied.state !== 'applied' || applied.inspection !== 'applied' || !applied.registry)
       throw Error('UI apply not independently confirmed');
     await page.screenshot({path:dir + '/ui-applied.png'});
+    fs.chmodSync(dir + '/ui-applied.png', 0o600);
     write('applied', applied);
     await wait('restore');
     // External HomeKit/Utility lifecycle requires a fresh reverse operation;
@@ -122,6 +124,7 @@ const wait = async name => {
         || restored.operation_id !== inverse.operation_id)
       throw Error('UI restore not independently confirmed');
     await page.screenshot({path:dir + '/ui-restored.png'});
+    fs.chmodSync(dir + '/ui-restored.png', 0o600);
     write('restored', restored);
     await context.close();
   } finally { await browser.close(); }

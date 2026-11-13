@@ -214,6 +214,9 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     _attr_should_poll = False
                     _attr_device_info = {'identifiers': {('synthetic-multi-queue', 'ordinary-device')},
                                          'name': 'Synthetic ordinary device'}
+                class UtilitySource(OrdinarySensor):
+                    _attr_unique_id = 'synthetic-multi-utility-source'
+                    _attr_name = 'Utility source'
                 ordinary_entry = ConfigEntry(domain='threshold', title='Synthetic ordinary owner',
                     data={}, options={'name': 'Synthetic ordinary helper',
                                       'entity_id': self.sources[0].entity_id,
@@ -239,6 +242,9 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 platform.config_entry = ordinary_entry
                 ordinary_entity = OrdinarySensor()
                 await platform.async_add_entities([ordinary_entity])
+                if browser_ui:
+                    utility_entity = UtilitySource()
+                    await platform.async_add_entities([utility_entity])
                 await hass.async_block_till_done()
                 ordinary = self.f.entity.async_get(ordinary_id)
                 self.assertIsNotNone(ordinary)
@@ -247,7 +253,11 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 ordinary_name_before = ordinary.name
                 device_name_before = ordinary_device.name_by_user
                 if browser_ui:
-                    mapping[ordinary_id] = 'sensor.p4_ordinary_measurement'
+                    utility_id = utility_entity.entity_id
+                    utility_row = self.f.entity.async_get(utility_id)
+                    self.assertIs(utility_entity.registry_entry, utility_row)
+                    self.assertEqual(utility_row.device_id, ordinary_device.id)
+                    mapping[utility_id] = 'sensor.p4_utility_source'
                 # Native YAML consumers span both selected producers. They are
                 # loaded through HA before ORIGINAL is captured and checked
                 # independently after forward and inverse.
@@ -280,7 +290,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                         stream.write('\nhomekit:\n  name: P4 Synthetic Bridge\n  port: 21198\n'
                             '  ip_address: 192.0.2.1\n  advertise_ip: 192.0.2.1\n'
                             '  filter:\n    include_entities:\n      - ' + sources[0] + '\n'
-                            'utility_meter:\n  p4_meter:\n    source: ' + ordinary_id +
+                            'utility_meter:\n  p4_meter:\n    source: ' + utility_id +
                             '\n    cycle: daily\n')
                 config = await async_hass_config_yaml(hass)
                 for domain in programs:
@@ -381,11 +391,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     request_id += 1
                     await socket.send_json({'id': request_id, 'type': 'ha_entity_renamer/' + command, **payload})
                     return await socket.receive_json(timeout=2400)
-                selected = [{'entity_id': old, 'new_entity_id': new,
-                             **({'name': 'Synthetic ordinary name'} if browser_ui and old == ordinary_id else {})}
-                            for old, new in mapping.items()]
-                if not browser_ui:
-                    selected.append({'entity_id': ordinary_id, 'name': 'Synthetic ordinary name'})
+                selected = [{'entity_id': old, 'new_entity_id': new} for old, new in mapping.items()]
+                selected.append({'entity_id': ordinary_id, 'name': 'Synthetic ordinary name'})
                 devices = [{'device_id': ordinary_device.id, 'name_by_user': 'Synthetic ordinary device'}]
                 denied = await request(user, 'prepare', entities=selected, devices=devices)
                 self.assertFalse(denied['success'])
@@ -401,8 +408,9 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     for old, new in mapping.items():
                         entity = self.f.entity.async_get(old)
                         self.assertIsNotNone(entity)
-                        entities.append({'old': old, 'new': new, 'device': entity.device_id,
-                                         **({'name': 'Synthetic ordinary name'} if old == ordinary_id else {})})
+                        entities.append({'old': old, 'new': new, 'device': entity.device_id})
+                    entities.append({'old': ordinary_id, 'new': ordinary_id,
+                                     'name': 'Synthetic ordinary name', 'device': ordinary.device_id})
                     browser_request = {'label': 'multi-ui', 'port': hass.http.server_port,
                                        'entities': entities, 'device': ordinary_device.id,
                                        'device_name': 'Synthetic ordinary device',
@@ -424,8 +432,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 # Supply real numeric samples after Utility subscribes, so the
                 # retained value and native reset deadline have actual inputs.
                 for value in (2, 3):
-                    ordinary_entity._attr_native_value = value
-                    ordinary_entity.async_write_ha_state()
+                    utility_entity._attr_native_value = value
+                    utility_entity.async_write_ha_state()
                     await hass.async_block_till_done()
             await baseline()
             if browser_ui:
@@ -533,8 +541,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             save()
             self.assertEqual(result['state'], 'applied')
             if public:
-                self.assertEqual(self.f.entity.async_get(mapping.get(ordinary_id, ordinary_id)).name,
-                                 'Synthetic ordinary name')
+                self.assertEqual(self.f.entity.async_get(ordinary_id).name, 'Synthetic ordinary name')
                 self.assertEqual(self.f.device.async_get(ordinary_device.id).name_by_user,
                                  'Synthetic ordinary device')
                 for domain, path in files.items():
@@ -554,7 +561,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 if browser_ui:
                     meter = utility_meter()
                     self.assertEqual((meter.entity_id, meter.native_value, meter._next_reset), meter_before)
-                    self.assertEqual(meter._sensor_source_id, mapping[ordinary_id])
+                    self.assertEqual(meter._sensor_source_id, mapping[utility_id])
                     self.assertIsNotNone(meter._collecting)
                     self.assertEqual((_bridge_identity(bridge_entry), aid(mapping[sources[0]])),
                                      (bridge_identity, original_aid))
@@ -616,7 +623,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 if browser_ui:
                     meter = utility_meter()
                     self.assertEqual((meter.entity_id, meter.native_value, meter._next_reset), meter_before)
-                    self.assertEqual(meter._sensor_source_id, ordinary_id)
+                    self.assertEqual(meter._sensor_source_id, utility_id)
                     self.assertIsNotNone(meter._collecting)
                     self.assertEqual((_bridge_identity(bridge_entry), aid(sources[0])),
                                      (bridge_identity, original_aid))
