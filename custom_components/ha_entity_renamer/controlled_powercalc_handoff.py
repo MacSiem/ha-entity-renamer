@@ -428,7 +428,6 @@ class ControlledPowercalcHandoff:
     async def start(self, context):
         from pathlib import Path
         import homeassistant
-        from homeassistant.helpers.storage import Store
         from .native_unload_code_proof import prove_methods
         from .native_utility_setup_audit import _SOURCES
         from .powercalc_source_binding import PowercalcVendor, _pins
@@ -633,9 +632,12 @@ class ControlledPowercalcHandoff:
             _need(old not in data.entities and new not in data.entities, 'restore_target_changed')
             if __version__ == '2026.11.0':
                 from .native_restore_uuid import owned_slot
-                from .native_restore_state_escrow_io import captured
+                from . import native_restore_state_payload as codec
+                from custom_components.powercalc.sensors.energy import VirtualEnergyExtraStoredData
                 source = owned_slot(data, old, new, uuid, required=True)
-                _need(source.state.entity_id == old and captured(source) == payload.before_json,
+                extra = VirtualEnergyExtraStoredData if kind == 'integration' else None
+                before = codec._canonical(codec._capture(source, codec._native(), powercalc_extra=extra))
+                _need(source.state.entity_id == old and before == payload.before_json,
                       'restore_uuid_preimage_changed')
             else:
                 _need(new == old or new not in data.last_states
