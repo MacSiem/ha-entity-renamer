@@ -595,15 +595,19 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             evidence['review'] = review
             save()
             op, fingerprint = review['operation_id'], review['fingerprint']
-            async with runtime.operation_lock:
-                bound = await NativeTemplateStateServer.bind_prepared(hass, op, runtime.reviews[op].plan,
-                                                                       guard=guard, refresh=refresh)
-                try:
-                    self.assertEqual(dict(bound.composition.mapping), mapping)
-                    self.assertEqual(len(bound.composition.previous.groups), 2)
-                    self.assertTrue(all(g.entity_id not in mapping for g in bound.composition.previous.groups))
-                finally:
-                    bound.close()
+            # The public non-UI scenario checks the retained composition here.
+            # The UI scenario must keep its reviewed browser connection live;
+            # public Apply independently rebinds the same plan under its lock.
+            if not browser_ui:
+                async with runtime.operation_lock:
+                    bound = await NativeTemplateStateServer.bind_prepared(hass, op, runtime.reviews[op].plan,
+                                                                           guard=guard, refresh=refresh)
+                    try:
+                        self.assertEqual(dict(bound.composition.mapping), mapping)
+                        self.assertEqual(len(bound.composition.previous.groups), 2)
+                        self.assertTrue(all(g.entity_id not in mapping for g in bound.composition.previous.groups))
+                    finally:
+                        bound.close()
             if browser_ui:
                 ui_continue('apply')
                 result = await ui_wait('applied')
