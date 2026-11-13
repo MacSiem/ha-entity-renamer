@@ -40,26 +40,28 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         manager = await async_get_manager(hass)
         data = deepcopy(manager.data)
         data['energy_sources'] = probatio.Schema(ENERGY_SOURCE_SCHEMA)([{'type': 'grid',
-            'stat_energy_from': self.sum_energy.entity_id, 'stat_energy_to': None,
+            'stat_energy_from': source, 'stat_energy_to': None,
             'stat_cost': None, 'entity_energy_price': None, 'number_energy_price': 0.75,
-            'cost_adjustment_day': 0.0}])
+            'cost_adjustment_day': 0.0} for source in (self.sum_energy.entity_id, self.static_energy.entity_id)])
         await manager.async_update(data)
         await manager._store.async_save(manager.data)
         self.assertTrue(await async_setup_component(hass, 'energy', {}))
         await hass.async_block_till_done()
-        self.cost_source = hass.data['energy']['cost_sensors'][self.sum_energy.entity_id]
+        self.cost_sources = [hass.data['energy']['cost_sensors'][source]
+                             for source in (self.sum_energy.entity_id, self.static_energy.entity_id)]
         from homeassistant.components.energy.sensor import EnergyCostSensor
         from homeassistant.helpers.entity_platform import async_get_platforms
         costs = [entity for platform in async_get_platforms(hass, 'energy') for entity in platform.entities.values()
-                 if entity.entity_id == self.cost_source]
-        self.assertEqual(len(costs), 1)
-        self.assertIs(type(costs[0]), EnergyCostSensor)
+                 if entity.entity_id in self.cost_sources]
+        self.assertEqual(len(costs), 2)
+        self.assertTrue(all(type(cost) is EnergyCostSensor for cost in costs))
         config = root / 'configuration.yaml'
         with config.open('a') as out:
             out.write('\nhomekit:\n  name: Synthetic PC Bridge\n  port: 21198\n'
                 '  ip_address: 192.0.2.1\n  advertise_ip: 192.0.2.1\n'
                 '  filter:\n    include_entities:\n      - ' + self.yaml_source + '\n'
-                'utility_meter:\n  external_pc_meter:\n    source: ' + self.cost_source + '\n    cycle: daily\n')
+                'utility_meter:\n  external_pc_meter:\n    source: ' + self.cost_sources[0] + '\n    cycle: daily\n'
+                '  external_pc_meter_second:\n    source: ' + self.cost_sources[1] + '\n    cycle: daily\n')
         loaded = await async_hass_config_yaml(hass)
         for domain in ('utility_meter', 'homekit'):
             if domain == 'utility_meter' and domain in hass.config.components:
@@ -77,10 +79,23 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         await hass.services.async_call('homekit', 'reload', {}, blocking=True)
         await hass.async_block_till_done()
         await self._flush_documents()
+        # Compile native statistics before the reviewed history baseline, as in
+        # the other real Powercalc fixtures. This avoids a clock-dependent first
+        # statistics metadata creation during the transaction.
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.tasks import StatisticsTask
+        from homeassistant.util import dt as dt_util
+        from custom_components.ha_entity_renamer.recorder_guard import NativeRecorderGuard
+        history = NativeRecorderGuard(hass)
+        await history.async_synchronize()
+        now = dt_util.utcnow()
+        period = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
+        get_instance(hass).queue_task(StatisticsTask(period, False))
+        await history.async_synchronize()
         old_light, new_light = self.yaml_source, 'light.external_pc_target'
         old_energy, new_energy = self.sum_energy.entity_id, 'sensor.external_pc_energy_target'
-        old_utility, new_utility = self.cost_source, 'sensor.external_utility_target'
-        mapping = {old_light: new_light, old_energy: new_energy, old_utility: new_utility}
+        targets = ('sensor.external_utility_target', 'sensor.external_utility_second_target')
+        mapping = {old_light: new_light, old_energy: new_energy, **dict(zip(self.cost_sources, targets))}
         original_ids = {old: self.f.entity.async_get(old).id for old in mapping}
         entry = hass.config_entries.async_entries('homekit')[0]
         bridge = self.module('native_homekit_filter') if hasattr(self, 'module') else __import__(
@@ -92,12 +107,14 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
             self.assertEqual(len(rows), 1)
             return rows[0]
         original_aid = aid(old_light)
-        def meter():
+        def meter(name):
             rows = [entity for platform in async_get_platforms(hass, 'utility_meter')
-                    for entity in platform.entities.values() if getattr(entity, '_parent_meter', None) == 'external_pc_meter']
+                    for entity in platform.entities.values() if getattr(entity, '_parent_meter', None) == name]
             self.assertEqual(len(rows), 1)
             return rows[0]
-        original_meter = (meter().entity_id, meter().native_value, meter()._next_reset)
+        names = ('external_pc_meter', 'external_pc_meter_second')
+        original_meters = [(meter(name).entity_id, meter(name).native_value, meter(name)._next_reset)
+                           for name in names]
         runtime = self._runtime()
         async def refresh(): pass
         async def transition(selected):
@@ -121,14 +138,19 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         review = await transition(mapping)
         self.assertEqual(self.f.entity.async_get(new_light).id, original_ids[old_light])
         self.assertEqual(self.f.entity.async_get(new_energy).id, original_ids[old_energy])
-        self.assertEqual((meter().entity_id, meter().native_value, meter()._next_reset), original_meter)
-        self.assertEqual(meter()._sensor_source_id, new_utility)
-        self.assertIsNotNone(meter()._collecting)
+        for name, target, original in zip(names, targets, original_meters):
+            self.assertEqual((meter(name).entity_id, meter(name).native_value, meter(name)._next_reset), original)
+            self.assertEqual(meter(name)._sensor_source_id, target)
+            self.assertIsNotNone(meter(name)._collecting)
         self.assertEqual((aid(new_light), bridge._bridge_identity(entry)), (original_aid, identity))
         self.assertEqual((await async_get_manager(hass)).data['energy_sources'][0]['stat_energy_from'], new_energy)
         inspected = await runtime.recovery_inspect(hass, review['operation_id'], review['fingerprint'],
             guard=lambda: None, refresh=refresh)
         self.assertEqual(inspected['state'], 'applied', inspected)
         await transition({new: old for old, new in mapping.items()})
+        for name, source, original in zip(names, self.cost_sources, original_meters):
+            self.assertEqual((meter(name).entity_id, meter(name).native_value, meter(name)._next_reset), original)
+            self.assertEqual(meter(name)._sensor_source_id, source)
+            self.assertIsNotNone(meter(name)._collecting)
         self.assertEqual((aid(old_light), bridge._bridge_identity(entry)), (original_aid, identity))
         self.assertEqual((await async_get_manager(hass)).data['energy_sources'][0]['stat_energy_from'], old_energy)
