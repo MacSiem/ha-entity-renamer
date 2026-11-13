@@ -103,7 +103,8 @@ class TemplateSwitchRootTests(root.NativeTemplateStateRootCoverageTests):
         def trace(frame, event, arg):
             if event == 'exception' and 'ha_entity_renamer/' in frame.f_code.co_filename:
                 typ, value, _ = arg
-                caught.append((frame.f_code.co_name, typ.__name__, str(value)))
+                if not issubclass(typ, (StopIteration, GeneratorExit)):
+                    caught.append((frame.f_code.co_name, typ.__name__, str(value)))
             return trace
         sys.settrace(trace)
         try:
