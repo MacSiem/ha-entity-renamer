@@ -44,6 +44,11 @@ class HomeKitHelperNativeTests(unittest.IsolatedAsyncioTestCase):
             binding=await homekit_binding.HomeKitYAMLBinding.capture(hass,{old:new},receipt,
                 [proofs.RegistryMappingProof(old,new,f.row.id)],guard=lambda:None)
         observer=binding.observer
+        receipt_adapter=importlib.import_module(fixture.PACKAGE+'.native_homekit_helper_adapter')
+        changes=receipt_adapter.prepare_entries(binding)
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].before, before)
+        self.assertEqual(changes[0].after, observer.after[entry.entry_id])
         forward=planner.plan_helper(before,{old:new});self.assertFalse(forward.markers)
         async def settle():await hass.async_block_till_done()
         async def intent(a,b):pass
