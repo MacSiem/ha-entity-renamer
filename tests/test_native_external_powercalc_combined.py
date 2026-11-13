@@ -18,6 +18,18 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(card, target)
 
+    async def _startup_services(self, hass, root):
+        from homeassistant import auth
+        from homeassistant.setup import async_setup_component
+        self.with_yaml = False
+        try:
+            await fixture.cold.receipted.NativeReceiptedHelperTests._before_start(self, hass, root)
+        finally:
+            self.with_yaml = True
+        hass.auth = await auth.auth_manager_from_config(hass, [], [])
+        self.assertTrue(await async_setup_component(hass, 'http', {}))
+        self.assertTrue(await async_setup_component(hass, 'config', {}))
+
     async def _setup_vendor_forward(self):
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.setup import async_setup_component
