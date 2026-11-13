@@ -9,8 +9,8 @@ class TemplateSwitchRootTests(root.NativeTemplateStateRootCoverageTests):
     async def test_live_switch_graph(self):
         from homeassistant.core import Context
         from homeassistant.helpers.entity_platform import async_get_platforms
-        runtime, mapping, uuids, _ = await self.data(variant='sensor')
-        old = next(iter(mapping))
+        await self.prepare('yaml', variant='sensor', validate=False)
+        old = self.source_id
         (self.f.root / 'template.yaml').write_text('''- unique_id: scope
   switch:
   - unique_id: action
