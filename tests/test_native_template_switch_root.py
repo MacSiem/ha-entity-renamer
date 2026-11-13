@@ -52,7 +52,7 @@ class TemplateSwitchRootTests(root.NativeTemplateStateRootCoverageTests):
   binary_sensor:
   - unique_id: delay
     name: Delay
-    availability: "{{ has_value(\'''' + old + '''\') }}"
+    availability: "{{ states(\'''' + old + '''\') != \'unavailable\' }}"
     state: "{{ states(\'''' + old + '''\') | int(0) > 0 }}"
     delay_on: "00:05:00"
   switch:
