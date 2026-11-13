@@ -13,6 +13,7 @@ async def observe_inactive_prefix(hass, chain, record, *, guard):
     from homeassistant.helpers.restore_state import DATA_RESTORE_STATE, RestoreStateData
     from .controlled_powercalc_handoff import _native_restore_rows, _read_pinned, _restore_rows, _semantic
     from .controlled_powercalc_setup_receipts import validate_handoff
+    from .helper_native import read_entry
     from .native_input_baseline import _drained, _loads
     from .native_registry_receipts import _event_id, _exact_json_equal, _freeze_json
     from .native_template_prefix_recovery import acknowledged_powercalc_prefix_receipts
@@ -32,6 +33,13 @@ async def observe_inactive_prefix(hass, chain, record, *, guard):
     need(stored is not None)
     handoff = validate_handoff(chain, [key, stored['digest']], 'forward')
     entries = tuple(hass.config_entries.async_entries('powercalc'))
+    unload = chain.store.read(handoff['intent'][0])
+    need(unload is not None and unload['digest'] == handoff['intent'][1]
+         and type(unload['payload'].get('entries')) is dict)
+    entry_images = unload['payload']['entries']
+    need(set(entry_images) == {entry.entry_id for entry in entries}
+         and all(_exact_json_equal(read_entry(hass, entry.entry_id), _freeze_json(entry_images[entry.entry_id]))
+                 for entry in entries))
     pss, restore = hass.data.get('powercalc_group_storage'), hass.data.get(DATA_RESTORE_STATE)
     need(pss is not None and type(restore) is RestoreStateData and restore.hass is hass
          and all(entry.disabled_by is not None or entry.state is ConfigEntryState.NOT_LOADED for entry in entries)
@@ -50,6 +58,8 @@ async def observe_inactive_prefix(hass, chain, record, *, guard):
     need(first == second and tuple(hass.config_entries.async_entries('powercalc')) == entries
          and _idle(pss) and _idle(restore) and _snapshot(pss) == memory_pss
          and _native_restore_rows(restore) == memory_restore
+         and all(_exact_json_equal(read_entry(hass, entry.entry_id), _freeze_json(entry_images[entry.entry_id]))
+                 for entry in entries)
          and acknowledged_powercalc_prefix_receipts(chain, record))
     (pss_raw, pss_id, root_id, storage_id), (restore_raw, restore_id, root2, storage2) = first
     need(pss_raw is not None and restore_raw is not None and root_id == root2 and storage_id == storage2
