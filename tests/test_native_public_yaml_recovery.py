@@ -21,7 +21,6 @@ backend_fixture = auth_fixture.backend_fixture
 class NativePublicYAMLRecoveryTests(unittest.IsolatedAsyncioTestCase):
     with_yaml = True
     asyncSetUp = yaml_fixture.NativeTemplateYAMLServerTests.asyncSetUp
-    _before_loader = backend_fixture.NativeBackendLifecycleTests._before_loader
     _before_start = backend_fixture.NativeBackendLifecycleTests._before_start
     _loaded_backend = backend_fixture.NativeBackendLifecycleTests._loaded_backend
     _flush_documents = yaml_fixture.NativeTemplateYAMLServerTests._flush_documents
@@ -30,6 +29,17 @@ class NativePublicYAMLRecoveryTests(unittest.IsolatedAsyncioTestCase):
     data = yaml_fixture.NativeTemplateYAMLServerTests.data
     stimulus = yaml_fixture.NativeTemplateYAMLServerTests.stimulus
     _connection = auth_fixture.NativeBackendAuthTests._connection
+
+    async def _before_loader(self, hass, root):
+        import hashlib
+        import shutil
+        await backend_fixture.NativeBackendLifecycleTests._before_loader(self, hass, root)
+        source = (Path(__file__).resolve().parents[1] / 'custom_components' /
+                  'ha_entity_renamer' / 'www' / 'ha-entity-renamer.js')
+        target = self.installed_component / 'www/ha-entity-renamer.js'
+        target.parent.mkdir()
+        shutil.copyfile(source, target)
+        self.assertEqual(hashlib.sha256(target.read_bytes()).digest(), hashlib.sha256(source.read_bytes()).digest())
 
     def module(self, name):
         return backend_fixture.installed_module(name)
