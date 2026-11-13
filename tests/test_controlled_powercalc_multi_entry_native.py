@@ -60,11 +60,19 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
         evidence = {}
         def save():
             out.write_text(json.dumps(evidence, sort_keys=True, default=str))
+            out.chmod(0o600)
 
         monitor = sys.monitoring
         slot = next(i for i in range(6) if monitor.get_tool(i) is None)
         monitor.use_tool_id(slot, 'controlled Powercalc leaf diagnosis')
         def trace(code, offset, error):
+            from ordinary_energy_diagnostic import energy_exception
+            captured = energy_exception(code, error)
+            if captured is not None:
+                failures = evidence.setdefault('energy_exceptions', [])
+                if captured not in failures:
+                    failures.append(captured)
+                    save()
             path = Path(code.co_filename)
             value = str(error)
             if 'ha_entity_renamer' in path.parts and isinstance(error, (Refused, ValueError)) and len(value) < 160:
@@ -87,10 +95,12 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 if row not in reasons:
                     reasons.append(row)
         monitor.register_callback(slot, monitor.events.RAISE, trace)
-        monitor.set_events(slot, monitor.events.RAISE)
+        monitor.register_callback(slot, monitor.events.EXCEPTION_HANDLED, trace)
+        monitor.set_events(slot, monitor.events.RAISE | monitor.events.EXCEPTION_HANDLED)
         def stop_monitor():
             monitor.set_events(slot, 0)
             monitor.register_callback(slot, monitor.events.RAISE, None)
+            monitor.register_callback(slot, monitor.events.EXCEPTION_HANDLED, None)
             monitor.free_tool_id(slot)
         self.addCleanup(stop_monitor)
 
