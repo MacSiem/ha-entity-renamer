@@ -8,6 +8,10 @@ from test_controlled_powercalc_actual_native import ControlledActualGraphTests
 
 
 class ControlledPowercalcPrefixTests(ControlledActualGraphTests):
+    async def test_store_compensation_is_one_shot_and_preserves_foreign(self):
+        self.stage_only = True
+        await self.test_two_entry_confirmed_prefix_fresh_inspect_and_inverse()
+
     async def test_two_entry_confirmed_prefix_fresh_inspect_and_inverse(self):
         from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
         from homeassistant.core import State
@@ -76,6 +80,38 @@ class ControlledPowercalcPrefixTests(ControlledActualGraphTests):
                 hass, chain, record, guard=lambda: self.assertTrue(runtime.operation_lock.locked()))
         self.assertTrue(observed['handoff_digest'])
         self.assertEqual(await runtime.journal.load(op), before_inspection)
+        if getattr(self, 'stage_only', False):
+            from dataclasses import replace
+            from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
+            handoff_module = self.module('controlled_powercalc_handoff')
+            setup = self.module('controlled_powercalc_setup_receipts')
+            images = self.module('controlled_powercalc_prefix_images')
+            key = receipts._event_id(['controlled_pc_population', chain.root_id, 'forward', 'receipt'])
+            handoff = setup.validate_handoff(chain, [key, observed['handoff_digest']], 'forward')
+            expected_pss, expected_restore, _ = images.reverse_images(
+                handoff, self.module('powercalc_pss_handoff')._snapshot(pss),
+                handoff_module._native_restore_rows(hass.data[DATA_RESTORE_STATE]))
+            claimed = replace(record, restore_attempted=True)
+            await runtime.journal.save(claimed)
+            inverse = self.module('controlled_powercalc_prefix_store_inverse')
+            async with runtime.operation_lock:
+                guard = lambda: self.assertTrue(runtime.operation_lock.locked())
+                receipt = await inverse.restore_prefix_stores(hass, runtime, runtime.journal,
+                                                               claimed, chain, guard=guard, refresh=refresh)
+                self.assertTrue(receipt)
+                self.assertEqual(self.module('powercalc_pss_handoff')._snapshot(pss), expected_pss)
+                current = handoff_module._native_restore_rows(hass.data[DATA_RESTORE_STATE])
+                self.assertEqual(set(current), set(expected_restore))
+                for name, row in current.items():
+                    self.assertEqual(handoff_module._semantic(row),
+                                     handoff_module._semantic(expected_restore[name]))
+                with self.assertRaises(Exception):
+                    await inverse.restore_prefix_stores(hass, runtime, runtime.journal,
+                                                        claimed, chain, guard=guard, refresh=refresh)
+                self.assertEqual(self.module('powercalc_pss_handoff')._snapshot(pss), expected_pss)
+            self.assertEqual(await runtime.journal.load(op), claimed)
+            self.assertEqual(self.package.read_bytes(), package)
+            return
         inspected = await runtime.recovery_inspect(hass, op, fingerprint, guard=lambda: None, refresh=refresh)
         self.assertEqual((inspected['state'], inspected['eligible']), ('recoverable_prefix', True), inspected)
         self.assertEqual(await runtime.journal.load(op), record)
@@ -94,4 +130,5 @@ class ControlledPowercalcPrefixTests(ControlledActualGraphTests):
 
 
 def load_tests(loader, tests, pattern):
-    return unittest.TestSuite([ControlledPowercalcPrefixTests('test_two_entry_confirmed_prefix_fresh_inspect_and_inverse')])
+    return unittest.TestSuite([ControlledPowercalcPrefixTests('test_two_entry_confirmed_prefix_fresh_inspect_and_inverse'),
+                               ControlledPowercalcPrefixTests('test_store_compensation_is_one_shot_and_preserves_foreign')])
