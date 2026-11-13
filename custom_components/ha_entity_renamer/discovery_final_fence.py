@@ -70,6 +70,15 @@ class _ConsumerFence:
             self.energy_minor = self.energy._minor_version
         self.check()
 
+    def energy_only(self):
+        """Retain this capture's Energy policy when Dashboard gains its own fence."""
+        from copy import copy
+        self.check()
+        result = copy(self)
+        result.dashboard = None
+        result.check()
+        return result
+
     def check(self):
         from .native_discovery_consumers import _inventory,_energy_manager,_freeze
         from .lovelace_native import revision

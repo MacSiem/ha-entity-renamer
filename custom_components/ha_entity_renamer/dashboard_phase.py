@@ -137,10 +137,12 @@ class DashboardPhase:
 
 class DashboardConsumerFence:
     """Keep Energy unchanged while dashboard effects follow the receipt chain."""
-    def __init__(self, hass, observed, phase):
+    def __init__(self, hass, observed, phase, previous):
         from .discovery_final_fence import _ConsumerFence
+        _need(type(previous) is _ConsumerFence and previous.hass is hass
+              and previous.observed is observed, 'consumer_fence_changed')
         self.phase = phase
-        self.energy = _ConsumerFence(hass, observed, _plain, names=('energy',))
+        self.energy = previous.energy_only()
 
     def check(self):
         self.phase.check()

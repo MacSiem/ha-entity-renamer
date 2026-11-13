@@ -549,7 +549,7 @@ class NativeTemplateYAMLServer:
         _need(bool(phase.yaml_routes) or any(step.adapter == 'dashboard' for step in self.plan.steps),
               'dashboard_effect_or_route_required')
         self.dashboard_phase = phase
-        self.consumers.native = DashboardConsumerFence(self.hass, observed, phase)
+        self.consumers.native = DashboardConsumerFence(self.hass, observed, phase, self.consumers.native)
         self._scope()
 
     def _new_observer(self):

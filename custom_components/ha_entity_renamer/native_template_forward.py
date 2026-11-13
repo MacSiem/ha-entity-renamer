@@ -33,6 +33,18 @@ def _need(value, reason):
         raise Refused('template_forward_' + reason) from None
 
 
+def _require_prepared_energy(config, plan, prepared, reverse):
+    from .discovery import _plain
+    from .energy_native import PreparedEnergy
+    from .native_registry_receipts import _exact_json_equal, _freeze_json
+    _need(type(prepared) is PreparedEnergy, 'energy_preparation_mismatch')
+    before = prepared.after if reverse else prepared.before.value
+    after = prepared.before.value if reverse else prepared.after
+    _need(_exact_json_equal(_plain(config), _freeze_json(before))
+          and _exact_json_equal(plan.value, _freeze_json(after)),
+          'energy_preparation_mismatch')
+
+
 class _UnchangedConsumers:
     """Task-local read comparisons, never an adapter or effect capability."""
 
@@ -77,14 +89,7 @@ class _UnchangedConsumers:
                 plan = planner(_plain(config), selected_mapping)
                 _need(not plan.markers, name + '_dependency_unsupported')
                 if plan.changes and name == 'energy' and _powercalc_energy is not None:
-                    from .energy_native import PreparedEnergy
-                    from .native_registry_receipts import _exact_json_equal, _freeze_json
-                    before = _powercalc_energy.after if _powercalc_reverse else _powercalc_energy.before.value
-                    after = _powercalc_energy.before.value if _powercalc_reverse else _powercalc_energy.after
-                    _need(type(_powercalc_energy) is PreparedEnergy
-                          and _exact_json_equal(_plain(config), _freeze_json(before))
-                          and _exact_json_equal(plan.value, _freeze_json(after)),
-                          'energy_preparation_mismatch')
+                    _require_prepared_energy(config, plan, _powercalc_energy, _powercalc_reverse)
                     names.remove(name)  # This exact Energy step has its own receipt/physical CAS.
                 elif name != 'dashboard' or not _dashboard_effects:
                     _need(not plan.changes, name + '_dependency_unsupported')
