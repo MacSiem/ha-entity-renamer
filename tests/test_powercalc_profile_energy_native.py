@@ -450,6 +450,10 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
                     if type(obj) in (GroupedEnergySensor, VirtualEnergySensor)}
 
         for obj in counters().values():
+            if type(obj) is VirtualEnergySensor:
+                await obj.async_calibrate('0.010023004')
+        await hass.async_block_till_done()
+        for obj in counters().values():
             if type(obj) is GroupedEnergySensor:
                 obj._set_native_value(Decimal('1.234567891') if 'first' in obj.unique_id
                                       else Decimal('2.345678912'))
