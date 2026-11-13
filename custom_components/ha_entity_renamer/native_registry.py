@@ -379,6 +379,18 @@ class NativeRegistryBridge:
     def _matches(self, change, actual, expected):
         if _content(actual) == _content(expected):
             return True
+        # Energy's native manager may update a selected cost sensor's suggested
+        # ID after its source moves. Accept only the exact receipt-folded row;
+        # the requested entity ID and every other field must still match.
+        if (self.native_images is not None and change.kind == 'entity'
+                and change.before.get('platform') == 'energy' and expected == change.after
+                and actual.get('entity_id') == expected.get('entity_id')):
+            permitted = dict(expected, suggested_object_id=actual.get('suggested_object_id'))
+            if _content(actual) == _content(permitted):
+                rows = self.native_images()['core.entity_registry']['data']['entities']
+                if sum(row.get('id') == change.identity and _content(row) == _content(actual)
+                       for row in rows) == 1:
+                    return True
         # Core records the preceding Script unique ID on the reverse call.
         # Accept that non-ORIGINAL field only with this live effect's exact
         # service/row witness or an already authenticated native receipt.

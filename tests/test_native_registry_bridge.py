@@ -307,3 +307,20 @@ class Tests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnergyAcceptedRowTests(unittest.TestCase):
+    def test_cost_suggestion_requires_exact_receipted_row_and_target(self):
+        from types import SimpleNamespace
+        before = {'id': 'uuid', 'platform': 'energy', 'entity_id': 'sensor.old',
+                  'suggested_object_id': 'old_cost', 'name': None}
+        after = {**before, 'entity_id': 'sensor.new'}
+        actual = {**after, 'suggested_object_id': 'renamed_cost'}
+        change = SimpleNamespace(kind='entity', identity='uuid', before=before, after=after)
+        images = {'core.entity_registry': {'data': {'entities': [deepcopy(actual)]}}}
+        bridge = Bridge(IO(), Recorder(IO()), native_images=lambda: images)
+        self.assertTrue(bridge._matches(change, actual, after))
+        self.assertFalse(bridge._matches(change, actual, before))
+        self.assertFalse(bridge._matches(change, {**actual, 'name': 'foreign'}, after))
+        images['core.entity_registry']['data']['entities'][0]['suggested_object_id'] = 'unreceipted'
+        self.assertFalse(bridge._matches(change, actual, after))
