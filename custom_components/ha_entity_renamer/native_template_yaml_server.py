@@ -148,12 +148,11 @@ def _registry_mapping(changes, composition, *, dashboard_plan=False):
         if change.kind == 'entity':
             allowed = {'entity_id', 'modified_at'} | ({'name'} if names else set())
             if powercalc and before.get('platform') == 'powercalc' and change.mapping:
-                from .controlled_powercalc_registry import is_group_move
-                _need(is_group_move(before, after) and any(
+                from .native_registry_transition import _powercalc_group_suggested_move
+                _need(_powercalc_group_suggested_move(before, after) and any(
                     group.registry_id == change.identity and group.entity_id == before['entity_id']
                     for group in composition.previous.groups), 'powercalc_group_scope_required')
-                if before.get('config_entry_id') is not None:
-                    allowed.add('suggested_object_id')
+                allowed.add('suggested_object_id')
             if script_move:
                 allowed |= {'unique_id', 'previous_unique_id'}
                 if default_name_move:

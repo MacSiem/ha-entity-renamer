@@ -432,8 +432,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 group = next((item for item in pc_previous.groups if item.entity_id == old
                               and item.registry_id == source[0]['id']), None)
                 _need(group is not None, 'powercalc_group_scope')
+                prepared = prepare_group_registry(prepared, group, self.receipt.version, controlled=True)
                 if source[0].get('config_entry_id') is not None:
-                    prepared = prepare_group_registry(prepared, group, self.receipt.version, controlled=True)
                     pc_metadata.append(prepare_group_metadata(
                         read_entry(self.hass, source[0]['config_entry_id']), old, new))
             if old in owned_script:

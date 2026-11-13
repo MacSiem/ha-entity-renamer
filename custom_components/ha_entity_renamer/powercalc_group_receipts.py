@@ -152,7 +152,7 @@ def validate_group_receipt(chain, payload, change):
     composition = _composition(chain)
     if type(composition) is ControlledPowercalcComposition:
         from .controlled_powercalc_setup_receipts import validate_handoff
-        from .controlled_powercalc_registry import is_group_move
+        from .native_registry_transition import _powercalc_group_suggested_move
         direction = payload['binding']['direction']
         handoff = validate_handoff(chain, payload.get('controlled_powercalc_handoff'), direction)
         controlled = payload.get('controlled_powercalc_group')
@@ -162,7 +162,7 @@ def validate_group_receipt(chain, payload, change):
         if not is_group:
             _need(controlled is None, 'unexpected_controlled_group_subeffect')
             return
-        _need(is_group_move(change.before, change.after)
+        _need(_powercalc_group_suggested_move(change.before, change.after)
               and type(controlled) is list and len(controlled) == 2, 'controlled_group_scope')
         key = _event_id(['controlled_pc_group', chain.root_id, payload['binding']['index'],
                          direction, 'receipt'])

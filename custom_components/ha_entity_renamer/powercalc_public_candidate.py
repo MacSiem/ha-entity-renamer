@@ -59,8 +59,12 @@ def build_candidate(original, mapping, version, energy=None, *, mixed=False, sou
               'group_sensor_identity')
         entry_id = group.get('config_entry_id')
         if mixed and entry_id is None:
-            # A YAML group still derives its suggested ID from its unchanged
-            # name. The native registry move carries only the user entity ID.
+            # Native setup resolves the new entity ID by unique ID, then
+            # Core uses its object ID as the native suggested ID.
+            _need(version == '2026.11.0'
+                  and group.get('suggested_object_id') == old_group.removeprefix('sensor.'),
+                  'yaml_group_suggested_identity')
+            derived_groups[old_group] = new_group.removeprefix('sensor.')
             continue
         _need(group.get('suggested_object_id') == old_group.removeprefix('sensor.'),
               'group_suggested_identity')
