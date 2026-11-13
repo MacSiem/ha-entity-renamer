@@ -52,23 +52,32 @@ def _snapshot(store):
 def _clone(state, new_id):
     from homeassistant.core import State
     _need(type(state) is State, 'native_clone_required')
-    if new_id == state.entity_id:
-        # Core updates last_reported on a reported state while its serialized
-        # cache may retain the earlier value. Preserve both native observations
-        # without sharing the mutable State or its cache across aliases.
-        from copy import copy
-        result = copy(state)
-        result._cache = dict(state._cache)
-    else:
-        result = State(new_id, state.state, state.attributes, last_changed=state.last_changed,
-                       last_updated=state.last_updated, last_reported=state.last_reported,
-                       context=state.context)
     expected = dict(state.as_dict())
     expected['entity_id'] = new_id
+    # A repeated native report mutates last_reported without invalidating
+    # the serialized State cache. Build that exact serialized preimage
+    # first, then restore the separately observed live report timestamp.
+    from datetime import datetime
+    native_fields = {}
+    if hasattr(state, 'state_info'):
+        native_fields['state_info'] = state.state_info
+    if hasattr(state, 'last_updated_timestamp'):
+        native_fields['last_updated_timestamp'] = state.last_updated_timestamp
+    result = State(new_id, state.state, state.attributes, last_changed=state.last_changed,
+                   last_updated=state.last_updated,
+                   last_reported=datetime.fromisoformat(expected['last_reported']),
+                   context=state.context, **native_fields)
+    result.as_dict()
+    result.last_reported = state.last_reported
+    result._cache.pop('last_reported_timestamp', None)
     actual = result.as_dict()
     _need(actual == expected, 'native_clone_changed_fields:' + ','.join(
         sorted(key for key in set(actual) | set(expected) if actual.get(key) != expected.get(key))))
-    _need(result is not state and result.last_reported == state.last_reported,
+    _need(result is not state and result._cache is not state._cache
+          and result.last_reported == state.last_reported
+          and result.context is state.context
+          and getattr(result, 'state_info', None) is getattr(state, 'state_info', None)
+          and getattr(result, 'last_updated_timestamp', None) == getattr(state, 'last_updated_timestamp', None),
           'native_clone_live_report_changed')
     return result
 
