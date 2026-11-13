@@ -12,7 +12,7 @@ from types import CodeType, MethodType
 
 from .powercalc_profile_inputs import (
     need, digest, table_digest, PreparedProfileFiles, custom_profile_locator,
-    assert_profile_cache_directories,
+    assert_profile_cache_directories, assert_leaf_controls,
 )
 
 
@@ -82,10 +82,10 @@ def extend_vendor(vendor):
     from homeassistant.util import color
     from .native_integration_unload_audit import _INTEGRATION
     vendor.integration = integration
-    vendor.ha_pins['components/integration/sensor.py'] = _INTEGRATION[vendor.core_version]
+    vendor.ha_pins['components/integration/sensor.py'] = _INTEGRATION['2026.11.0' if vendor.core_version == '2026.11.1' else vendor.core_version]
     vendor.ha_pins['util/color.py'] = (
         'd88de5d2232455cc1e6085c796c6865049b9aaa731ffcfa533304b0c8998546a'
-        if vendor.core_version == '2026.11.0' else
+        if vendor.core_version in ('2026.11.0', '2026.11.1') else
         '20bf486782dfac8cb1607beddc26188fb82610bb5fabf42a6046b4e6b4ac4bb2')
     vendor.ha_refs += tuple((owner, name) for owner in (color, lut) for name in
         ('color_temperature_kelvin_to_mired', 'color_temperature_to_hs'))
@@ -216,6 +216,7 @@ def _bind_manual(hass, cls, entity, profile, source):
     from .powercalc_source_binding import _dispatch_token
 
     mode, settings = profile['strategy'], profile['settings']
+    standby = profile.get('standby_power')
     strategy = entity._strategy_instance
     need(str(entity._calculation_strategy) == mode and strategy._source_entity is source
          and entity._power_profile is None and entity._sub_profile_selector is None
@@ -227,7 +228,10 @@ def _bind_manual(hass, cls, entity, profile, source):
          and entity._rounding_digits == hass.data['powercalc']['config'].get('power_sensor_precision', 2)
          and entity._standby_sensors is hass.data['powercalc']['standby_power_sensors']
          and entity._calculation_enabled_condition is None and entity._multiply_factor is None
-         and entity._standby_power == 0 and entity._standby_power_on == 0
+         and type(entity._standby_power) is Decimal
+         and entity._standby_power == Decimal(str(standby if standby is not None else 0))
+         and entity._sensor_config.get('standby_power') == standby
+         and entity._standby_power_on == 0
          and entity._availability_entity is None and not entity._sensor_config.get('sleep_power')
          and not entity._sensor_config.get('unavailable_power'), 'manual_semantics_changed')
     from custom_components.powercalc.sensors.power import OFF_STATES, OFF_STATES_BY_DOMAIN
@@ -251,8 +255,8 @@ def _bind_manual(hass, cls, entity, profile, source):
     need(mode == 'linear', 'manual_strategy_unverified')
     native = cls['LinearStrategy']
     need(type(strategy) is native and strategy._hass is hass and strategy._value_entity is source
-         and strategy._config == settings and strategy._standby_power in (None, 0)
-         and strategy._calibration == [(0, float(settings.get('min_power', 0))),
+         and strategy._config == settings and strategy._standby_power == standby
+         and strategy._calibration == [(0, float(settings.get('min_power') or standby or 0)),
                                        (255, float(settings['max_power']))]
          and strategy._power_curve is None and
          ((strategy._initialized is True and strategy._attribute == 'brightness') or
@@ -315,6 +319,7 @@ def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity
             if 'source_registry' in profile:
                 need([source_row['id'], source_row['unique_id'], source_row['platform']] ==
                      profile['source_registry'], 'profile_source_registry_changed')
+            assert_leaf_controls(entity._sensor_config)
             if 'strategy' in profile:
                 mode = profile['strategy']
                 if profile['origin'].startswith('entry:'):
@@ -388,7 +393,8 @@ def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity
                  and entity._availability_entity is None and entity._standby_power_on == 0
                  and entity._standby_power == Decimal(str(actual._json_data.get('standby_power', 0)))
                  and not entity._sensor_config.get('sleep_power') and not entity._sensor_config.get('unavailable_power')
-                 and entity._sensor_config.get('entity_id') == profile['source'], 'lut_semantics_changed')
+                 and entity._sensor_config.get('entity_id') == profile['source']
+                 and entity._sensor_config.get('standby_power') is None, 'lut_semantics_changed')
             _dispatch_token(factory, cls['PowerCalculatorStrategyFactory'], ('create', '_create_lut'))
             need(factory._prepare is cls['PowerCalculatorStrategyFactory']._prepare,
                  'factory_instance_dispatch_changed')
@@ -457,6 +463,7 @@ def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity
                 need(native_config.get('create_group') == cfg['create_group']
                      and native_config.get('unique_id') == group['unique_id']
                      and native_config.get('create_energy_sensor') is True
+                     and native_config.get('hide_members', False) is False
                      and hass.data['powercalc']['group_entities'].get(entity.entity_id) is entity,
                      'yaml_group_origin_changed')
             if cfg['group_type'] == 'custom':

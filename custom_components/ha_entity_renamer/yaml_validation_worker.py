@@ -26,6 +26,9 @@ _DIAGNOSTIC_REASONS = frozenset({
     'powercalc_profile_entry_options_unverified',
     'powercalc_profile_fresh_plan_required',
     'powercalc_profile_group_variant_unverified',
+    'powercalc_profile_yaml_group_pair_unverified',
+    'powercalc_profile_leaf_controls_unverified',
+    'powercalc_profile_linear_config_unverified',
     'powercalc_profile_input_depth',
     'powercalc_profile_input_limit',
     'powercalc_profile_inputs_changed',
@@ -764,7 +767,7 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
     result = {}
     try:
         from homeassistant.const import __version__
-        if __version__ in ('2026.10.2', '2026.10.4', '2026.11.0'):
+        if __version__ in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
             # Current native trigger validation requires its own platform
             # registry initialized even when no automation is activated.
             from homeassistant.helpers import trigger
@@ -1057,7 +1060,10 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
                 stable_script_services=(), owned_script_services=(), mixed_powercalc=False):
     from homeassistant.const import __version__
     from homeassistant.scripts.check_config import async_check_config
-    if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0'):
+    if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
+        return {'status': 'unsupported_runtime'}
+    if __version__ == '2026.11.1' and (not powercalc_profiles or powercalc_candidate
+            or mixed_powercalc or template_source_profile is not None or native_helpers):
         return {'status': 'unsupported_runtime'}
     if template_source_profile is not None and (
             template_source_profile != TEMPLATE_STATE_SOURCE_PROFILE or not with_sources

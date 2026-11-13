@@ -23,7 +23,7 @@ from .yaml_validation_worker import _fingerprint, powercalc_fixed_semantics
 _TREE = '6f21338bcb02d2b488f8b1e9851b4d20300a888d7a493fdb753f78603f27c91c'
 _TREE_127 = '0fb642a97d3179d56ef73dcdb22e7d5025ed549507b6148b194e2cf626adc72b'
 _PAIRS = {'2026.10.2': ('v1.26.1', _TREE), '2026.10.4': ('v1.26.1', _TREE),
-          '2026.11.0': ('v1.27.0', _TREE_127)}
+          '2026.11.0': ('v1.27.0', _TREE_127), '2026.11.1': ('v1.27.0', _TREE_127)}
 _PREFIX = 'custom_components.powercalc'
 
 
@@ -147,7 +147,7 @@ class PowercalcVendor:
         self.ha_pins = {
             'helpers/event.py': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
             'core.py': '1fe2fcfb91fbb6edfb4450dad3ae5ebc4e325664770fedbd607d103d91ce4f19'}
-        if __version__ == '2026.11.0':
+        if __version__ in ('2026.11.0', '2026.11.1'):
             self.ha_pins = {
                 'helpers/event.py': '35a453cdc015a58ce9e49f2dec4da042babd261930a758eac97a7c2138ba0960',
                 'core.py': '5671149ec3405c4ec81eed05f58e3c392dafe0af141ec6ac7ea1a2b4b658d038'}
@@ -215,7 +215,7 @@ class OriginalPowercalcSources:
     @property
     def sha256(self):
         core = json.loads(self.native_json)['version']
-        tree = _TREE_127 if core == '2026.11.0' else _TREE
+        tree = _PAIRS[core][1]
         value = [tree, self.ledger.sha256, self.receipt_json.decode(), self.native_json.decode()]
         if self.closed_graph_json is not None:
             value.append(self.closed_graph_json.decode())
@@ -250,6 +250,8 @@ def seal_powercalc_sources(receipt, plan, ledger, native):
         planned = {row.path: row.sha256 for row in plan.powercalc_inputs.files
                    if row.path.startswith('powercalc/profiles/')}
         _need(dict(closed['files']) == planned, 'profile_graph_membership_mismatch')
+        from .powercalc_profile_inputs import assert_remote_cache_isolated
+        assert_remote_cache_isolated(plan.powercalc_inputs, closed, receipt.version)
     plain = {k: v for k, v in native.items() if k != 'closed_graph'}
     return OriginalPowercalcSources(ledger, _receipt_bytes(receipt), _json(plain),
                                    None if closed is None else _json(closed))

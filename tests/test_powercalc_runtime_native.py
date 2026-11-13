@@ -53,7 +53,7 @@ class PowercalcRuntimeNativeTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         from homeassistant.const import __version__
-        if __version__ not in ('2026.10.2', '2026.10.4', '2026.11.0'):
+        if __version__ not in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
             self.skipTest('requires an exact Core/vendor fixture pair')
         supplied = os.environ.get('POWERCALC_COMPONENT_DIR')
         if not supplied:
@@ -61,7 +61,7 @@ class PowercalcRuntimeNativeTests(unittest.IsolatedAsyncioTestCase):
         vendor = Path(supplied).resolve()
         # Pin public executable source; never read a private migration manifest.
         expected_tree = ('0fb642a97d3179d56ef73dcdb22e7d5025ed549507b6148b194e2cf626adc72b'
-                         if __version__ == '2026.11.0' else
+                         if __version__ in ('2026.11.0', '2026.11.1') else
                          '6f21338bcb02d2b488f8b1e9851b4d20300a888d7a493fdb753f78603f27c91c')
         files = {}
         for file in vendor.rglob('*'):

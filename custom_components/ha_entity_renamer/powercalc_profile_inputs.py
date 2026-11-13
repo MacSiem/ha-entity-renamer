@@ -99,7 +99,7 @@ def prepare_profile_files(receipt, original):
     return PreparedProfileFiles(original.receipt_json, original.closed_graph_json, actual)
 
 
-def _capture_inputs(root):
+def _capture_inputs(root, *, allow_remote_cache=False):
     from .yaml_plan import _Reader, Limits, FileSnapshot, PowercalcSourceInputs
     from .yaml_validation import _STORAGE, _TREES
     from .native_input_baseline import _open_absolute_directory
@@ -125,10 +125,12 @@ def _capture_inputs(root):
         directory('.', _TREES | {'.storage', 'powercalc', 'powercalc-custom-models',
                                  'configuration.yaml', 'secrets.yaml'})
         directory('powercalc', {'profiles'})
-        directory('.storage', _STORAGE | {'energy', 'powercalc_profiles'})
+        storage = directory('.storage', _STORAGE | {'energy', 'powercalc_profiles'})
+        remote = next((row for row in storage if row[0] == 'powercalc_profiles'), None)
+        need(remote is None or (allow_remote_cache and stat.S_ISDIR(remote[1])),
+             'alternative_loader_unverified')
         directory('custom_components/powercalc')
-        for unsupported in ('powercalc-custom-models', '.storage/powercalc_profiles',
-                            'custom_components/powercalc/custom_data'):
+        for unsupported in ('powercalc-custom-models', 'custom_components/powercalc/custom_data'):
             try:
                 fd = reader.open(unsupported, directory=True)
             except FileNotFoundError:
@@ -176,16 +178,35 @@ async def async_add_powercalc_source_inputs(hass, plan, *, guard):
     vendor = PowercalcVendor(hass, with_profiles=True)
     await _settled_executor(hass, vendor.sources)
     _guard(guard)
-    inputs = await _settled_executor(hass, _capture_inputs, hass.config.config_dir)
+    def capture():
+        return _capture_inputs(hass.config.config_dir, allow_remote_cache=vendor.vendor_version == 'v1.27.0')
+    inputs = await _settled_executor(hass, capture)
     _guard(guard)
     def final():
         vendor.sources()
-        need(_capture_inputs(hass.config.config_dir) == inputs, 'inputs_changed')
+        need(capture() == inputs, 'inputs_changed')
     await _settled_executor(hass, final)
     vendor.bindings()
     _guard(guard)
     need(not ({r.path for r in plan.files} & {r.path for r in inputs.files}), 'yaml_overlap')
     return replace(plan, powercalc_inputs=inputs)
+
+
+def assert_remote_cache_isolated(inputs, graph, core_version):
+    """The pinned vendor's explicit locator uses LocalLoader directly.
+
+    The remote directory identity is fenced; its contents are never staged,
+    read or used as a model library. Implicit lookup with that cache present
+    is outside this proof, as are selector/sub-profile paths.
+    """
+    if not any(path == '.storage' and any(row[0] == 'powercalc_profiles' for row in rows)
+               for path, rows, _ in inputs.directories):
+        return
+    need(core_version in ('2026.11.0', '2026.11.1')
+         and all('strategy' in row or (
+             row.get('custom_model_directory') == row['directory']
+             and [variant['name'] for variant in row['variants']] == [None])
+             for row in graph['profiles']), 'remote_cache_isolation_unverified')
 
 
 def custom_profile_locator(value):
@@ -212,6 +233,17 @@ def assert_profile_cache_directories(profiles):
                 need(previous == profile['directory'], 'cache_key_directory_conflict')
 
 
+_LEAF_CONTROLS = {'create_utility_meters': False, 'energy_integration_method': 'left',
+                  'ignore_unavailable_state': False, 'create_standby_energy_sensor': False,
+                  'energy_filter_outlier_enabled': False}
+
+
+def assert_leaf_controls(cfg):
+    for key, default in _LEAF_CONTROLS.items():
+        value = cfg.get(key, default)
+        need(value is False if default is False else value == default, 'leaf_controls_unverified')
+
+
 def source_config(cfg):
     """One local LUT source subset, with Energy explicit; no hidden overrides."""
     from annotatedyaml.objects import NodeDictClass, NodeStrClass
@@ -219,7 +251,8 @@ def source_config(cfg):
     # Accept their exact types, without coercing arbitrary config objects.
     text_types = (str, NodeStrClass)
     allowed = {'name', 'entity_id', 'unique_id', 'sensor_type', 'manufacturer', 'model',
-        'mode', 'create_energy_sensor', '_power_entity', '_energy_entity', 'custom_model_directory'}
+        'mode', 'create_energy_sensor', '_power_entity', '_energy_entity', 'custom_model_directory'} | _LEAF_CONTROLS.keys()
+    assert_leaf_controls(cfg)
     need(type(cfg) in (dict, NodeDictClass) and not set(cfg) - allowed
          and cfg.get('sensor_type', 'virtual_power') == 'virtual_power'
          and cfg.get('mode', 'lut') == 'lut' and cfg.get('create_energy_sensor') is True
@@ -233,9 +266,11 @@ def source_config(cfg):
 
 
 def manual_source_config(cfg):
-    """Finite, unadjusted manual strategies whose native dispatch can be bound."""
+    """Finite manual strategies whose native dispatch can be bound."""
     allowed = {'name', 'entity_id', 'unique_id', 'sensor_type', 'mode',
-               'create_energy_sensor', '_power_entity', '_energy_entity', 'fixed', 'linear'}
+               'create_energy_sensor', '_power_entity', '_energy_entity', 'fixed', 'linear',
+               'standby_power'} | _LEAF_CONTROLS.keys()
+    assert_leaf_controls(cfg)
     mode = 'fixed' if 'fixed' in cfg else 'linear'
     need(not set(cfg) - allowed and ('fixed' in cfg) != ('linear' in cfg)
          and cfg.get('sensor_type', 'virtual_power') == 'virtual_power'
@@ -247,13 +282,23 @@ def manual_source_config(cfg):
     if mode == 'fixed':
         need(set(values) == {'power'}, 'fixed_config_unverified')
     else:
-        need(set(values) in ({'max_power'}, {'min_power', 'max_power'})
+        need(set(values) in ({'max_power'}, {'min_power', 'max_power'},
+                             {'min_power', 'max_power', 'gamma_curve'})
+             and values.get('gamma_curve', 1) == 1
              and cfg['entity_id'].startswith('light.'), 'linear_config_unverified')
     need(all(type(value) in (int, float) and math.isfinite(value) and value >= 0
              for value in values.values()), 'manual_value_unverified')
     if mode == 'linear':
         need(values.get('min_power', 0) < values['max_power'], 'linear_range_unverified')
-    return {'strategy': mode, 'settings': dict(values), 'entity_id': str(cfg['entity_id'])}
+    semantic = {'strategy': mode, 'settings': dict(values), 'entity_id': str(cfg['entity_id'])}
+    if 'standby_power' in cfg:
+        standby = cfg['standby_power']
+        need(type(standby) in (int, float) and math.isfinite(standby)
+             and standby in ((0,) if mode == 'fixed' else (0, 0.3)), 'standby_unverified')
+        if mode == 'linear' and standby:
+            need('min_power' in values and values['min_power'] > 0, 'standby_unverified')
+        semantic['standby_power'] = standby
+    return semantic
 
 
 def yaml_sources(configs):
@@ -266,18 +311,25 @@ def yaml_sources(configs):
             originals.append(('yaml:' + uid, cfg, uid))
             continue
         allowed = {'create_group', 'entities', 'unique_id', 'create_energy_sensor', 'group_type',
-                   'force_calculate_group_energy', 'energy_sensor_precision'}
+                   'force_calculate_group_energy', 'energy_sensor_precision', 'hide_members'}
         members = cfg.get('entities')
         need(not set(cfg) - allowed and isinstance(cfg['create_group'], str)
              and cfg.get('group_type', 'custom') == 'custom'
              and cfg.get('force_calculate_group_energy', False) is False
+             and cfg.get('hide_members', False) is False
              and cfg.get('create_energy_sensor', True) is True
              and isinstance(members, list) and members, 'yaml_group_variant_unverified')
         if 'energy_sensor_precision' in cfg:
             precision = cfg['energy_sensor_precision']
             need(type(precision) is int and 0 <= precision <= 6, 'yaml_group_precision_unverified')
-        refs = []
+        refs, pairs = [], []
         for leaf in members:
+            if isinstance(leaf, dict) and set(leaf) == {'power_sensor_id', 'energy_sensor_id'}:
+                power, energy = (leaf[key] for key in ('power_sensor_id', 'energy_sensor_id'))
+                need(all(isinstance(eid, str) and eid.startswith('sensor.') for eid in (power, energy))
+                     and power != energy, 'yaml_group_pair_unverified')
+                pairs.append((str(power), str(energy)))
+                continue
             need(isinstance(leaf, dict) and isinstance(leaf.get('entity_id'), str),
                  'yaml_group_member_unverified')
             source = str(leaf['entity_id'])
@@ -286,11 +338,12 @@ def yaml_sources(configs):
                 need(isinstance(leaf_uid, str) and leaf_uid, 'yaml_leaf_unique_id_required')
                 originals.append(('yaml:' + leaf_uid, leaf, leaf_uid))
             refs.append((source, leaf_uid))
+        need(not (refs and pairs), 'yaml_group_pair_unverified')
         groups.append({'origin': 'yaml:' + uid, 'config_sha256': digest(cfg),
                        'config': {'group_type': 'custom', 'create_group': str(cfg['create_group']),
                                   **({'energy_sensor_precision': cfg['energy_sensor_precision']}
                                      if 'energy_sensor_precision' in cfg else {})},
-                       'unique_id': str(uid), 'references': refs})
+                       'unique_id': str(uid), **({'pairs': pairs} if pairs else {'references': refs})})
     return originals, groups
 
 
@@ -422,7 +475,7 @@ async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
     # Core 11's entity registry derives disabled_by from real config entries.
     # This runs only in the isolated staged checker, never in the live runtime.
     from homeassistant.const import __version__
-    if __version__ == '2026.11.0':
+    if __version__ in ('2026.11.0', '2026.11.1'):
         from homeassistant.config_entries import ConfigEntries
         need(hass.config_entries is None, 'checker_config_entries_already_initialized')
         hass.config_entries = ConfigEntries(hass, {})
@@ -468,7 +521,7 @@ async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
              'source_registry_required')
         profile = None
         if manual:
-            data = {key: semantic[key] for key in ('strategy', 'settings')}
+            data = {key: value for key, value in semantic.items() if key != 'entity_id'}
         else:
             locator = semantic.get('custom_model_directory')
             if locator is not None:
@@ -489,7 +542,7 @@ async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
             data.update(manufacturer=profile.manufacturer, model=profile.model)
         data.update(origin=origin, source=semantic['entity_id'], config_sha256=digest(cfg),
                     unique_id=configured_unique_id or source.unique_id)
-        if manual or origin.startswith('yaml:') and any('references' in group for group in groups):
+        if manual or origin.startswith('yaml:') and any('references' in group or 'pairs' in group for group in groups):
             row = source.entity_entry
             data['source_registry'] = [row.id, row.unique_id, row.platform]
         profiles.append(data)
@@ -516,11 +569,25 @@ async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
          'graph_unique_ids_ambiguous')
     yaml_leaves = [row for row in profiles if row['origin'].startswith('yaml:')]
     registry = er.async_get(hass)
+    profiles_by_uid = {row['unique_id']: row for row in profiles}
     for group in groups:
-        if 'references' not in group:
+        if 'references' not in group and 'pairs' not in group:
             continue
         members = {}
-        for source, unique_id in group.pop('references'):
+        for power_id, energy_id in group.pop('pairs', ()):
+            power, energy = registry.async_get(power_id), registry.async_get(energy_id)
+            need(power is not None and energy is not None
+                 and power.platform == energy.platform == 'powercalc'
+                 and power.unique_id in profiles_by_uid
+                 and energy.unique_id == power.unique_id + '_energy'
+                 and power.unique_id not in members, 'yaml_group_pair_unverified')
+            profile = profiles_by_uid[power.unique_id]
+            entry_id = profile['origin'][6:] if profile['origin'].startswith('entry:') else None
+            need(power.config_entry_id == energy.config_entry_id == entry_id
+                 and power.config_subentry_id is None and energy.config_subentry_id is None,
+                 'yaml_group_member_origin_changed')
+            members[power.unique_id] = [power_id, power.id, energy_id, energy.id]
+        for source, unique_id in group.pop('references', ()):
             matches = [row for row in yaml_leaves if row['source'] == source
                        and (unique_id is None or row['unique_id'] == unique_id)]
             need(len(matches) == 1, 'yaml_group_reference_unresolved')
