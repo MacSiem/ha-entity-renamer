@@ -1,5 +1,6 @@
 """Native Template switch source and idle action cutover regression."""
 import copy
+import asyncio
 import importlib
 import unittest
 
@@ -62,4 +63,40 @@ class TemplateSwitchActionTransferTests(profile.NativeTemplateStateSourceProfile
         await entity.async_turn_off()
         self.assertEqual(events[-1], ['switch.original'])
         for script in original_scripts.values():
+            script._async_unload()
+
+    async def test_running_switch_action_is_stopped_before_cutover(self):
+        from homeassistant.components.template.switch import StateSwitchEntity
+        from homeassistant.core import Context
+        checked = await self.checked("""- unique_id: scope
+  switch:
+  - unique_id: active
+    name: Active
+    state: "{{ true }}"
+    turn_on:
+    - delay: "00:10:00"
+    - event: must_not_fire
+    turn_off:
+    - event: unused
+""")
+        cfg = checked['template'][0]['switch'][0]
+        entity = StateSwitchEntity(self.f.hass, cfg, 'scope-active')
+        entity._context = Context()
+        worker = self.module('yaml_validation_worker')
+        images = tuple((name, worker._normal(cfg[name]), worker._normal(cfg[name]))
+                       for name in ('turn_on', 'turn_off'))
+        action = asyncio.create_task(entity.async_turn_on())
+        for _ in range(100):
+            if entity._action_scripts['turn_on'].is_running:
+                break
+            await asyncio.sleep(0)
+        self.assertTrue(entity._action_scripts['turn_on'].is_running)
+        checks = []
+        actions = self.module('native_template_switch_actions')
+        await actions.SwitchActionTransfer.suspend_running(self.f.hass, ((entity, images),),
+                                                          lambda: checks.append(True))
+        await action
+        self.assertFalse(entity._action_scripts['turn_on'].is_running)
+        self.assertGreaterEqual(len(checks), 2)
+        for script in entity._action_scripts.values():
             script._async_unload()

@@ -41,6 +41,30 @@ class SwitchActionTransfer:
             obj.rows.append((entity, images, scripts, census, _graph(entity._action_scripts, include_scripts=True)))
         return obj
 
+    @staticmethod
+    async def suspend_running(hass, pairs, guard):
+        """Stop only affected native switch actions, before the registry call."""
+        if not pairs:
+            return
+        from homeassistant.components.template.switch import StateSwitchEntity
+        from homeassistant.helpers.script import Script
+        from .yaml_validation_worker import _normal
+        for entity, images in pairs:
+            guard()
+            _need(type(entity) is StateSwitchEntity and entity.hass is hass
+                  and type(entity._action_scripts) is dict, 'template_switch_action_owner_changed')
+            expected = {name: before for name, before, _ in images if before is not None}
+            _need(set(entity._action_scripts) == set(expected), 'template_switch_action_inventory_changed')
+            for name, script in tuple(entity._action_scripts.items()):
+                _need(type(script) is Script and script._hass is hass and script.domain == 'template'
+                      and script.sequence is entity._config[name] and _normal(script.sequence) == expected[name],
+                      'template_switch_action_source_changed')
+                if script.is_running:
+                    await script.async_stop()
+                    guard()
+                    _need(entity._action_scripts.get(name) is script and not script.is_running,
+                          'template_switch_action_stop_unconfirmed')
+
     def install(self):
         from .yaml_validation_worker import _normal
         _need(self.phase == 'captured')

@@ -175,6 +175,12 @@ class NativeTemplateStateRegistryEffect:
         return obj
 
     async def before_attempt(self):
+        from .native_template_switch_actions import SwitchActionTransfer
+        def action_guard():
+            self.guard()
+            self.root.chain.verify_intent_source(self.intent, self.context, self.before)
+            self.state.assert_current(self.root.receipt)
+        await SwitchActionTransfer.suspend_running(self.root.hass, self.transition.action_pairs, action_guard)
         if self.delivery is not None:
             await self.delivery.drain()
         if self.script_cutover is not None:
