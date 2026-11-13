@@ -135,8 +135,6 @@ def plan_dashboard(config, mapping):
         markers.append(Marker(path, code, 'Dashboard coverage requires a semantic adapter'))
 
     def ref(value, path, many=False, statistic=False):
-        if value is None:
-            return
         values = value if many and type(value) is list else [value]
         if not values:
             return
@@ -330,7 +328,7 @@ def plan_dashboard(config, mapping):
 
     def variable_refs(field, value, path):
         if field in {'bound_entity', 'temperature_entity_id', 'humidity_entity_id', 'source_entity'}:
-            ref(value, path)
+            if value is not None: ref(value, path)
         elif field in {'entity_ids', 'source_entities', 'temperature_ids', 'humidity_ids'}:
             if type(value) is not list: block(path); return
             ref(value, path, many=True)

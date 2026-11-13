@@ -13,7 +13,7 @@ const { chromium } = require('playwright');
       hassUrl:origin, clientId:origin+'/'})), {access, origin});
     const page = await context.newPage();
     await page.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
-    await page.goto(origin+'/lovelace/0', {waitUntil:'domcontentloaded'});
+    await page.goto(origin+'/p3-test/0', {waitUntil:'domcontentloaded'});
     try { await page.locator('hui-button-card').first().waitFor({state:'attached',timeout:30000}); }
     catch (error) {
       const diagnostic = await page.evaluate(() => {

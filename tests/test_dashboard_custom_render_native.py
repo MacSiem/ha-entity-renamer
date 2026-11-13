@@ -40,6 +40,11 @@ class DashboardCustomRender(unittest.IsolatedAsyncioTestCase):
                     step.step = name; await step._async_mark_done(hass)
         self.assertTrue(await async_setup_component(hass, 'input_boolean', {'input_boolean': {'sample':{'name':'Synthetic Toggle'}}}))
         await hass.async_block_till_done()
+        from homeassistant.helpers.storage import Store
+        metadata = {'id':'p3_test', 'url_path':'p3-test', 'mode':'storage',
+                    'require_admin':False, 'show_in_sidebar':True,
+                    'title':'Synthetic dashboard', 'icon':'mdi:toggle-switch'}
+        await Store(hass, 1, 'lovelace_dashboards').async_save({'items':[metadata]})
         self.assertTrue(await async_setup_component(hass, 'lovelace', await async_hass_config_yaml(hass)))
         self.assertTrue(await async_setup_component(hass, 'frontend', {}))
         self.assertTrue(await async_setup_component(hass, 'api', {}))
@@ -60,7 +65,7 @@ class DashboardCustomRender(unittest.IsolatedAsyncioTestCase):
              'sub_button':[{'entity':old,'visibility':[{'condition':'state','entity':old,'state':'on'}]}],
              'tap_action':{'action':'toggle'}},
         ]}]}
-        manager = native.dashboards[None]
+        manager = native.dashboards['p3-test']
         await manager.async_save(config)
         user = await hass.auth.async_create_user('Synthetic Admin', group_ids=[GROUP_ID_ADMIN])
         refresh = await hass.auth.async_create_refresh_token(user, client_id=f'http://127.0.0.1:{port}/')
