@@ -367,6 +367,65 @@ class MixedPhase(PowercalcColdPhase):
     def guard(self):
         self.assertIs(self.f.hass.config_entries.async_get_entry(self.entry.entry_id), self.entry)
 
+    async def test_generated_stat_rate_pending_refuses_until_native_save(self):
+        from copy import deepcopy
+        import probatio
+        from homeassistant.components.energy.data import ENERGY_SOURCE_SCHEMA, async_get_manager
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        from custom_components.ha_entity_renamer.energy_native import NativeEnergy
+        from custom_components.ha_entity_renamer.persistence import PersistenceError
+
+        hass = self.f.hass
+        manager = await async_get_manager(hass)
+        native = NativeEnergy(hass, manager)
+        original = await native.read()
+        power_id = self._graph()['graph-fixed'].entity_id
+        config = deepcopy(original.value)
+        config['energy_sources'][0]['power_config'] = {'stat_rate_inverted': power_id}
+        config['energy_sources'] = probatio.Schema(ENERGY_SOURCE_SCHEMA)(config['energy_sources'])
+        await manager.async_update(config)
+        await hass.async_block_till_done()
+        await manager._store.async_save(manager.data)
+        settled = await native.read()
+        stat_rate = settled.value['energy_sources'][0]['stat_rate']
+        power_sensor = [obj for platform in async_get_platforms(hass, 'energy')
+                        for obj in platform.entities.values() if obj.entity_id == stat_rate]
+        self.assertEqual(len(power_sensor), 1)
+        self.assertEqual(power_sensor[0].registry_entry.platform, 'energy')
+        uuid = power_sensor[0].registry_entry.id
+
+        new_rate = 'sensor.graph_generated_rate_target'
+        snapshot, plan = await native.plan({stat_rate: new_rate})
+        with self.assertRaisesRegex(PersistenceError, 'energy_generated_identity_requires_plan'):
+            native.prepare(snapshot, plan)
+        self.assertEqual(await native.read(), settled)
+
+        observed = self.f.entity.async_update_entity(stat_rate, new_entity_id=new_rate)
+        await hass.async_block_till_done()
+        self.assertEqual(observed.id, uuid)
+        self.assertEqual(manager.data['energy_sources'][0]['stat_rate'], new_rate)
+        self.assertEqual(self._storage('energy'), settled.value)
+        with self.assertRaisesRegex(PersistenceError, 'energy_native_write_pending'):
+            await native.read()
+        self.assertGreater(manager._store._delay_handle.when() - hass.loop.time(), 55)
+        self.evidence['stat_rate_pending'] = {'before': stat_rate, 'after': new_rate, 'uuid': uuid,
+                                             'disk_unchanged': True}
+        async with asyncio.timeout(75):
+            while manager._store._data is not None or manager._store._write_lock.locked():
+                await asyncio.sleep(.25)
+        saved = await native.read()
+        expected = deepcopy(settled.value)
+        expected['energy_sources'][0]['stat_rate'] = new_rate
+        self.assertEqual(saved.value, expected)
+        self.assertNotEqual(saved.file_identity, settled.file_identity)
+        self.evidence['stat_rate_native_save'] = True
+
+        self.f.entity.async_update_entity(new_rate, new_entity_id=stat_rate)
+        await hass.async_block_till_done()
+        await manager.async_update(original.value)
+        await manager._store.async_save(manager.data)
+        self.assertEqual((await native.read()).value, original.value)
+
     async def test_flow(self):
         from homeassistant.core import State, callback
         from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
@@ -487,16 +546,22 @@ class MixedPhase(PowercalcColdPhase):
 
 
 class Core11MixedColdNative(unittest.TestCase):
+    def test_native_core11_energy_stat_rate(self):
+        self._run_phases(('forward',), 'test_generated_stat_rate_pending_refuses_until_native_save')
+
     def test_native_core11_mixed_cold_round_trip(self):
+        self._run_phases(('forward', 'resume'), 'test_flow')
+
+    def _run_phases(self, phases, method):
         parent = os.environ.get('RENAMER_TEST_SCRATCH') or tempfile.gettempdir()
         with tempfile.TemporaryDirectory(prefix='core11-energy-', dir=parent) as directory:
             root = Path(directory)
             try:
-                for phase in ('forward', 'resume'):
+                for phase in phases:
                     env = dict(os.environ, RENAMER_POWER_COLD_CONFIG=directory,
                                RENAMER_POWER_COLD_PHASE=phase, PYTHONPATH=str(Path(__file__).resolve().parents[1]))
                     result = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()),
-                        'MixedPhase.test_flow'], env=env, capture_output=True, text=True, timeout=2300)
+                        'MixedPhase.' + method], env=env, capture_output=True, text=True, timeout=2300)
                     (QA / ('core11-mixed-' + phase + '.stdout')).write_text(result.stdout)
                     (QA / ('core11-mixed-' + phase + '.stderr')).write_text(result.stderr)
                     self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
