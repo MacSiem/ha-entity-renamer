@@ -14,6 +14,17 @@ import test_powercalc_actual_profiles_native as actual
 import test_powercalc_public_cold_native as cold
 
 
+def assert_one_native_cold_start(test, events, boot_begin, boot_end):
+    """P4 cold test: native bus capture must contain one real boot event."""
+    from homeassistant.core import EventOrigin
+    test.assertEqual(len(events), 1)
+    event, = events
+    test.assertEqual(event.event_type, 'homeassistant_start')
+    test.assertEqual(event.origin, EventOrigin.local)
+    test.assertLessEqual(boot_begin, event.time_fired)
+    test.assertLessEqual(event.time_fired, boot_end)
+
+
 @unittest.skipUnless(actual.fixtures.HAS_HA, 'requires pinned native HA')
 class ControlledActualGraphTests(cold.PowercalcColdPhase):
     namespace_source_bytes = b'# Synthetic Powercalc namespace\n'
@@ -166,6 +177,19 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
                 {'event': 'controlled_yaml_script_result', 'event_data':
                  {'watts': "{{ states(local.input.power) | float(-1) }}"}}]},
 
+                'controlled_yaml_mixed': {'fields': {'preview': {}, 'selection': {}}, 'sequence': [
+                    {'variables': {'groups': {'first': {'targets': [leaf], 'label': 'Plain label'}},
+                                   'selected': "{{ groups.get(selection, {}) }}"}},
+                    {'if': "{{ preview | default(false) }}", 'then': [
+                        {'variables': {'result': {'targets': '{{ selected.targets }}'}}},
+                        {'stop': 'preview', 'response_variable': 'result'}]},
+                    {'action': 'script.' + script, 'data': {'power_ids': '{{ selected.targets }}'}},
+                    {'variables': {'records': "{% set ns = namespace(values=[]) %}"
+                        "{% for item in selected.targets %}"
+                        "{% set ns.values = ns.values + [{'entity_id': item, 'state': states(item)}] %}"
+                        "{% endfor %}{{ ns.values }}"}},
+                    {'variables': {'result': {'targets': '{{ selected.targets }}', 'records': '{{ records }}'}}},
+                    {'stop': 'executed', 'response_variable': 'result'}]},
                 'controlled_yaml_foreign': {'sequence': [{'event': 'controlled_yaml_foreign_script'}]}},
         }
         for domain, path in files.items():
@@ -342,6 +366,14 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             self.assertEqual(labels, ['Plain label'])
             await hass.services.async_call('script', script, {'power_ids': power_id}, blocking=True)
             self.assertEqual(seen['script'], [watts, watts])
+            preview = await hass.services.async_call('script', 'controlled_yaml_mixed',
+                {'selection': 'first', 'preview': True}, blocking=True, return_response=True)
+            self.assertEqual(preview, {'targets': [power_id]})
+            executed = await hass.services.async_call('script', 'controlled_yaml_mixed',
+                {'selection': 'first', 'preview': False}, blocking=True, return_response=True)
+            self.assertEqual(executed, {'targets': [power_id],
+                                        'records': [{'entity_id': power_id, 'state': hass.states.get(power_id).state}]})
+            self.assertEqual(seen['argument'], [watts, watts, watts])
             self.assertTrue(hass.states.is_state(active_id, 'on'))
             self.assertTrue(entity('automation', 'controlled_yaml_on').is_on)
             self.assertFalse(entity('automation', 'controlled_yaml_off').is_on)
@@ -363,6 +395,24 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             await light.async_turn_off()
         await hass.async_block_till_done()
         await signal('baseline', {})
+        # Diagnostic failure in one independent actor must not erase evidence
+        # for another; the strict full-domain projection still refuses.
+        from custom_components.ha_entity_renamer import native_controlled_yaml_core111 as core111
+        from custom_components.ha_entity_renamer.discovery import _runtime_row_diagnostics
+        from custom_components.ha_entity_renamer.yaml_runtime_observer import NativeYAMLRuntimeReadback
+        native_registration = core111.automation_registration_token
+        rejected = entity('automation', 'controlled_yaml_action_only')
+        kept = entity('automation', 'controlled_yaml_on')
+        def one_failure(actor):
+            if actor is rejected:
+                raise ValueError('native_dynamic_trigger_not_covered')
+            return native_registration(actor)
+        with patch.object(core111, 'automation_registration_token', side_effect=one_failure):
+            diagnostic = {row[0]: row[1:] for row in _runtime_row_diagnostics(hass, 'automation')}
+            self.assertEqual(diagnostic[rejected.entity_id], ('UNKNOWN', 'native_dynamic_trigger_not_covered'))
+            self.assertEqual(diagnostic[kept.entity_id], ('COMPLETE', ''))
+            with self.assertRaises(ValueError):
+                NativeYAMLRuntimeReadback(hass)._projection('automation')
         await flush()
         history = NativeRecorderGuard(hass)
         await history.async_synchronize()

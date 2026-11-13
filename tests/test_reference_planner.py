@@ -186,6 +186,54 @@ class ReferencePlannerTest(unittest.TestCase):
             self.assertEqual(plan.markers[0].code, "external_content")
 
     @requires_jinja
+    def test_actual_template_state_membership_shapes_are_byte_reversible(self):
+        sources = (
+            "{% set meters = ['sensor.a', 'sensor.other'] %}{% set valid = ['on', 'off'] %}{% for item in meters %}{% if states(item) in valid %}{{ states(item) }}{% endif %}{% endfor %}",
+            "{% set meters = ['sensor.a', 'sensor.other'] %}{% set excluded = ['unknown', 'unavailable'] %}{% for item in meters %}{% set reading = states(item) %}{% if reading not in excluded %}{{ state_attr(item, 'unit') }}{% endif %}{% endfor %}",
+        )
+        for source in sources:
+            forward = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+            self.assertFalse(forward.markers, forward.markers)
+            self.assertEqual(forward.value, source.replace('sensor.a', 'sensor.b'))
+            inverse = plan_references(forward.value, {'sensor.b': 'sensor.a'}, jinja())
+            self.assertFalse(inverse.markers, inverse.markers)
+            self.assertEqual(inverse.value.encode(), source.encode())
+
+    @requires_jinja
+    def test_native_registry_discovery_is_dynamic_and_has_no_literal_edit(self):
+        source = "{% for entity in integration_entities('demo') %}{% set device = device_id(entity) %}{% for item in expand(device_entities(device)) %}{{ item.state }}{% endfor %}{% endfor %}"
+        plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+        self.assertEqual(plan.value, source)
+        self.assertFalse(plan.markers, plan.markers)
+        unsafe = source.replace("device_entities(device)", "device_entities(other)")
+        self.assertTrue(plan_references(unsafe, {'sensor.a': 'sensor.b'}, jinja()).markers)
+
+    @requires_jinja
+    def test_finite_entity_list_loop_membership(self):
+        source = "{% set items = ['sensor.a', 'sensor.other'] %}{% for item in items %}{% if item in items %}{{ states(item) }}{% endif %}{% endfor %}"
+        result = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+        self.assertFalse(result.markers, result.markers)
+        self.assertEqual(result.value, source.replace('sensor.a', 'sensor.b'))
+        unsafe = source.replace('item in items', 'external in items')
+        self.assertTrue(plan_references(unsafe, {'sensor.a': 'sensor.b'}, jinja()).markers)
+
+    @requires_jinja
+    def test_inert_url_reads_and_comment_do_not_block_neighbor(self):
+        from reference_planner import analyze_template_bindings
+        mapping = {'sensor.a': 'sensor.b'}
+        for source in (
+            "{{ state_attr('https://example.invalid/a', 'value') == 'x' or state_attr('https://example.invalid/b', 'value') == 'y' }}",
+            "{# {% for item in states.sensor %}{{ item.state }}{% endfor %} #}",
+        ):
+            plan = plan_references(source, mapping, jinja())
+            self.assertEqual(plan.value, source)
+            self.assertFalse(plan.markers)
+            self.assertEqual(analyze_template_bindings(source, mapping, {'other': ('scalar', ((-1, 0, 'sensor.a'),))}),
+                             (source, [], set(), set()))
+        for source in ("{# sensor.a #}", "{{ state_attr('https://example.invalid/a', 'x') or states('sensor.a') }}"):
+            self.assertTrue(plan_references(source, mapping, jinja()).markers)
+
+    @requires_jinja
     def test_dynamic_and_unknown_references_are_marked(self):
         source = "{{ states('sensor.' ~ name) }} {{ custom('sensor.a') }}"
         plan = plan_references(source, {"sensor.a": "sensor.b"}, jinja())

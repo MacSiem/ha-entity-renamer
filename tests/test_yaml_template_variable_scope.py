@@ -50,6 +50,26 @@ class TemplateStateBlockVariablePlannerTests(unittest.TestCase):
             self.assertIn(code, {issue.code for issue in plan.issues})
         return plan
 
+    def test_native_this_identity_is_only_bound_in_state_entity_scope(self):
+        source = '''template:
+  - sensor:
+      - name: Example
+        state: "{{ states(this.entity_id) }}"
+        attributes:
+          other: "{{ states('sensor.foo') }}"
+'''
+        plan = self.plan(source)
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertIn(b'states(this.entity_id)', plan.patches[0].proposed_bytes)
+        self.assertIn(b'sensor.new', plan.patches[0].proposed_bytes)
+        self.assert_blocked('''automation:
+  - actions:
+      - value_template: "{{ states(this.entity_id) }}"
+''')
+        shadowed = self.plan(source.replace('states(this.entity_id)',
+            "states(this.entity_id) }}{% set this = 'sensor.foo' %}{{ 'ok'"))
+        self.assertFalse(shadowed.ready)
+
     def test_scalar_alias_closure_spans_all_sensor_binary_slots_and_snapshots(self):
         source = '''# retain comment and quoting
  template:
