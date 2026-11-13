@@ -42,6 +42,30 @@ def acknowledged_registry_prefix(record):
             and record.phases == ('verified',) * count + ('pending',) * (len(record.phases) - count))
 
 
+def acknowledged_powercalc_registry_prefix(record):
+    """Recognize shape only; receipt, native state and inverse admission are separate."""
+    from .transaction import Record
+    if (type(record) is not Record or record.direction != 'forward'
+            or record.status not in ('applying', 'unknown', 'ready')
+            or len(record.phases) != len(record.plan.steps)
+            or record.plan.required_scopes != record.plan.covered_scopes
+            or record.plan.required_scopes != record.plan.verification_adapters
+            or any(step.caused_by for step in record.plan.steps)):
+        return False
+    adapters = tuple(step.adapter for step in record.plan.steps)
+    registry, helpers = adapters.count('registry'), adapters.count('helpers')
+    energy, dashboard = adapters.count('energy'), adapters.count('dashboard')
+    scopes = (('registry',) + (('helpers',) if helpers else ()) +
+              (('energy',) if energy else ()) + (('dashboard',) if dashboard else ()) + ('yaml',))
+    if (not registry or energy > 1 or record.plan.required_scopes != scopes
+            or adapters != (('registry',) * registry + ('helpers',) * helpers +
+                            ('energy',) * energy + ('dashboard',) * dashboard + ('yaml',))):
+        return False
+    count = record.phases.count('verified')
+    return (0 < count <= registry
+            and record.phases == ('verified',) * count + ('pending',) * (len(record.phases) - count))
+
+
 def unstarted_rollback_complete(chain, record):
     """Coordinator leaves genuinely unstarted steps pending after compensation.
 
