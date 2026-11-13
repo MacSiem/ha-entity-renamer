@@ -60,6 +60,9 @@ class ControlledPowercalcPrefixTests(ControlledActualGraphTests):
         await pss.persist_states()
         await restore.async_dump_states()
         await self._flush_documents()
+        # Ensure fixture-generated state metadata is committed before the
+        # reviewed history snapshot; late Recorder writes must still refuse.
+        await self.module('recorder_guard').NativeRecorderGuard(hass).async_synchronize()
         foreign_before = json.loads((self.f.root / '.storage/powercalc_group').read_bytes())['data'][
             'sensor.foreign_fixture_group']
         package = self.package.read_bytes()
