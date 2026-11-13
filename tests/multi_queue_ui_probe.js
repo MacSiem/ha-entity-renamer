@@ -19,6 +19,8 @@ const wait = async name => {
 };
 (async () => {
   const browser = await chromium.launch({headless:true, executablePath:'/ms-playwright/chromium-1219/chrome-linux/chrome', args:['--no-sandbox']});
+  let page, card;
+  const wsErrors = [];
   try {
     const member = await browser.newContext({viewport:{width:1280,height:900}});
     const memberAccess = fs.readFileSync(dir + '/render-user-token', 'utf8');
@@ -38,8 +40,7 @@ const wait = async name => {
     await context.addInitScript(({access,origin}) => localStorage.setItem('hassTokens', JSON.stringify({
       access_token:access, token_type:'Bearer', expires_in:18000, expires:Date.now()+17900000,
       hassUrl:origin, clientId:origin+'/'})), {access, origin});
-    const page = await context.newPage();
-    const wsErrors = [];
+    page = await context.newPage();
     page.on('websocket', socket => socket.on('framereceived', event => {
       try {
         const message = JSON.parse(event.payload);
@@ -49,7 +50,7 @@ const wait = async name => {
     }));
     await page.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await page.goto(origin + '/p4-ui/0', {waitUntil:'domcontentloaded'});
-    const card = page.locator('ha-entity-renamer');
+    card = page.locator('ha-entity-renamer');
     await card.waitFor({state:'visible', timeout:30000});
     await page.waitForFunction(() => document.querySelector('home-assistant')?.hass?.user?.is_admin === true);
     const queue = async (entities, deviceName) => {
@@ -138,7 +139,18 @@ const wait = async name => {
     fs.chmodSync(dir + '/ui-restored.png', 0o600);
     write('restored', restored);
     await context.close();
-  } finally { await browser.close(); }
+  } finally {
+    let migration = null;
+    try {
+      if (card && await card.count()) migration = await card.evaluate(el => ({
+        stage:el._migration?.stage, busy:el._migration?.busy,
+        inspection:el._migration?.inspection?.state, applyState:el._migration?.applyState,
+        registry:el._migration?.registryMatches, progress:el._migration?.journal?.progress || null
+      }));
+    } catch (error) { migration = {snapshot_error:String(error)}; }
+    write('terminal-witness', {migration, wsErrors});
+    await browser.close();
+  }
 })().catch(error => {
   for (const label of ['review','applied','restored']) if (!fs.existsSync(`${dir}/${label}.json`)) write(label, {error:String(error)});
   process.exitCode=1;
