@@ -249,6 +249,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                  receipt: ValidationReceipt, prepared_digests: dict[str, str], *, yaml_original_metadata=None,
                  dashboard_original_metadata=None):
         from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML, assert_state_yaml_composition
+        from .native_external_yaml import PreparedExternalStateYAML
         if (type(store) is not RegistryReceiptStore or type(plan) is not Plan
                 or type(operation_id) is not str or not operation_id):
             _fail('binding_invalid')
@@ -292,7 +293,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                              'dashboard': PreparedDashboard}[step.adapter]
             if (type(change) is not expected_type
                     and not (step.adapter == 'helpers' and type(change) is PreparedPowercalcGroupMetadata)
-                    and not (step.adapter == 'yaml' and (type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML)
+                    and not (step.adapter == 'yaml' and (type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedExternalStateYAML)
                                                         or _is_powercalc_yaml(change)))):
                 _fail('preparation_mismatch')
             if step.adapter == 'dashboard':
@@ -325,7 +326,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                            'dashboard_digest': _digest(json.loads(_json(asdict(change))))}
             elif step.adapter == 'yaml':
                 change.checked()
-                if type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML):
+                if type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML, PreparedExternalStateYAML):
                     assert_state_yaml_composition(self, change)
                 if _is_powercalc_yaml(change):
                     _assert_powercalc_yaml(self, change)
@@ -423,6 +424,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                     receipt: ValidationReceipt, prepared_digests: dict[str, str], *,
                     yaml_original_metadata=None, dashboard_original_metadata=None) -> RegistryReceiptChain:
         from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML
+        from .native_external_yaml import PreparedExternalStateYAML
         yaml_indices = [i for i, step in enumerate(plan.steps) if step.adapter == 'yaml']
         if yaml_indices and yaml_indices != [len(plan.steps) - 1]:
             _fail('gap_yaml_order')
@@ -432,7 +434,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             step = yaml_steps[-1]
             change = decode_change(store.preparations.resolve(
                 step.prepared_ref, prepared_digests[step.prepared_ref]))
-            if (type(change) not in (PreparedYAML, PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML)
+            if (type(change) not in (PreparedYAML, PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedExternalStateYAML)
                     and not _is_powercalc_yaml(change)):
                 _fail('preparation_mismatch')
             captured = capture_yaml_original_metadata(receipt, change)
@@ -509,6 +511,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
     def _original_change(self, index):
         """Re-resolve immutable original; never validate mutable cached helpers."""
         from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML, assert_state_yaml_composition
+        from .native_external_yaml import PreparedExternalStateYAML
         if self.plan.steps[index].adapter == 'yaml':
             binding = self.root['bindings'][index]
             payload = self.preparations.resolve(binding['ref'], binding['digest'])
@@ -521,7 +524,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                     or self.changes[index] != original_change):
                 _fail('preparation_mismatch')
             change = deepcopy(original_change)
-            if type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML):
+            if type(change) in (PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML, PreparedExternalStateYAML):
                 assert_state_yaml_composition(self, change)
             if _is_powercalc_yaml(change) and not self._powercalc_preparations_unchanged():
                 _assert_powercalc_yaml(self, change)

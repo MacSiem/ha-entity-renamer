@@ -133,6 +133,10 @@ class HomeKitLifecycleDriver:
             root._scope(); lease.check()
             await root._terminal(result, rollback=False)
             root._scope(); lease.check()
+            if getattr(root, 'utility_yaml_binding', None) is not None:
+                _need(await coordinator.adapters['registry'].verify(root.plan) is True,
+                      'utility_terminal_readback_unconfirmed')
+                root._scope(); lease.check()
             _need(await binding.observer.verify_inventory(root.plan) is True
                   and binding.verify('after') is True, 'runtime_unconfirmed')
             status = life.inspect()

@@ -69,7 +69,7 @@ class UtilityYAMLRegistryAdapter:
         mapping = change.mapping
         return {new:old for old,new in mapping.items()} if reverse else dict(mapping)
 
-    def _receipt_valid(self, step, direction, intent_ref, receipt_ref):
+    def _receipt_valid(self, step, direction, intent_ref, receipt_ref, *, ignore_sources=frozenset()):
         """Reopen both immutable records and independently sample native actors."""
         from homeassistant.components.utility_meter.const import DATA_TARIFF_SENSORS
         from homeassistant.helpers import entity_registry as er
@@ -88,7 +88,7 @@ class UtilityYAMLRegistryAdapter:
               and len(receipt.get('after', ())) == len(receipt['rows']), 'receipt_binding')
         registry = er.async_get(self.handoff.hass)
         actors = {row.meter: row for row in self.handoff.rows}
-        self.handoff.check_population()
+        self.handoff.check_population(ignore_sources=ignore_sources)
         for saved, after in zip(receipt['rows'], receipt['after'], strict=True):
             row = actors.get(saved['meter'])
             _need(row is not None, 'receipt_population')
@@ -128,10 +128,30 @@ class UtilityYAMLRegistryAdapter:
         except Exception:
             return Position.UNKNOWN
 
+    def _completed_guard(self, current_step):
+        """Keep every previously completed Utility actor fenced across awaits."""
+        _need(self.context is not None and self.preparations.plans is not None, 'context')
+        ignore_sources = frozenset(self._mapping(current_step, False))
+        for candidate in self.context.record.plan.steps:
+            if candidate.adapter != 'registry' or candidate == current_step:
+                continue
+            for direction in ('rollback', 'forward'):
+                intent, receipt = self._refs(candidate, direction)
+                if receipt in self.preparations.plans:
+                    _need(intent in self.preparations.plans, 'receipt_binding')
+                    self._receipt_valid(candidate, direction, intent, receipt, ignore_sources=ignore_sources)
+                    break
+                _need(intent not in self.preparations.plans, 'unresolved_intent')
+
     async def _effect(self, step, guard, *, reverse):
         direction = 'rollback' if reverse else 'forward'
         _need(self.context is not None, 'context')
         self.context.require_effect(step, direction)
+        original_guard = guard
+        def guarded():
+            original_guard(); self.guard(); self._completed_guard(step)
+        guard = guarded
+        guard()
         mapping = self._mapping(step, reverse)
         if not mapping:
             return await (self.inner.compensate(step, guard) if reverse else self.inner.apply(step, guard))

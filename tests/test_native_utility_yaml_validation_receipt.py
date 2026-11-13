@@ -33,7 +33,7 @@ class UtilityValidationReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plan.ready, plan.issues)
         result = await validation.async_validate_proposed_with_template_state_sources(
             self.f.hass, plan, mapping, self.f.root.parent,
-            with_state_program=True, with_utility_sources=True)
+            with_state_program=True)
         receipt = result.receipt
         self.assertIn('utility_meter', receipt.changed_domains)
         self.assertIn('utility_meter', receipt.unsupported_domains)

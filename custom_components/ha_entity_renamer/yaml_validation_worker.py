@@ -183,28 +183,30 @@ def changed_domains(before, after):
 def _homekit_filter_only(before, after, mapping):
     """True only for exact mapped entity-list edits in the same YAML bridges."""
     from copy import deepcopy
+    from collections.abc import Mapping
     if type(mapping) is not dict or not mapping:
         return False
     old, new = before.get('homekit'), after.get('homekit')
-    old = old if type(old) is list else [old]
-    new = new if type(new) is list else [new]
-    if len(old) != len(new) or not old or any(type(v) is not dict for v in old + new):
+    old = list(old) if isinstance(old, list) else [old]
+    new = list(new) if isinstance(new, list) else [new]
+    if len(old) != len(new) or not old or any(not isinstance(v, Mapping) for v in old + new):
         return False
     projected = deepcopy(old)
     for bridge in projected:
         filt = bridge.get('filter', {})
-        if type(filt) is not dict:
+        if not isinstance(filt, Mapping):
             return False
         for key in ('include_entities', 'exclude_entities'):
             if key not in filt:
                 continue
             values = filt[key]
-            if type(values) is not list or any(type(v) is not str for v in values):
+            if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
                 return False
             filt[key] = [mapping.get(v, v) for v in values]
             if len(set(filt[key])) != len(filt[key]):
                 return False
-    return projected == new and old != new
+    exact = _source_module('native_utility_yaml_projection')._exact
+    return exact(projected, new) and not exact(old, new)
 
 
 def _normal(value):
@@ -853,6 +855,8 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
                         # runtime binder explicitly admits the associated receipt.
                         projection = sorted([[cfg['name'], cfg['port'], cfg.get('filter', {})]
                                              for cfg in checked[domain]], key=lambda row: (row[0], row[1]))
+                    elif domain == 'utility_meter':
+                        projection = _source_module('native_utility_yaml_projection').native_projection(checked)
                     elif domain == 'template':
                         projection = qualified_template_state_projection(checked, hass.config.config_dir)
                     elif domain == 'script':
@@ -1109,7 +1113,13 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
     from homeassistant.scripts.check_config import async_check_config
     if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
         return {'status': 'unsupported_runtime'}
-    if __version__ == '2026.11.1' and (
+    ordinary_template_state = (with_sources and template_state_program
+        and template_source_profile == TEMPLATE_STATE_SOURCE_PROFILE
+        and type(template_reference_mapping) is dict and dependent_reference_mapping is None
+        and not registry_only_template and not powercalc_profiles and not powercalc_candidate
+        and not native_helpers and not stable_script_services and not owned_script_services
+        and not mixed_powercalc)
+    if __version__ == '2026.11.1' and not ordinary_template_state and (
             not powercalc_profiles or native_helpers or owned_script_services
             or not mixed_powercalc and (powercalc_candidate or template_source_profile is not None)):
         return {'status': 'unsupported_runtime'}
@@ -1206,10 +1216,19 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
             and new_runtime.get('template') is not None
             and old_runtime['template'] != new_runtime['template']):
         unsupported = [domain for domain in unsupported if domain != 'template']
+    external_proof = []
+    for domain in ('homekit', 'utility_meter'):
+        if domain not in changed:
+            continue
+        mapping = template_reference_mapping
+        verified = bool(mapping) and (_homekit_filter_only(before, after, mapping)
+            if domain == 'homekit' else _source_module('native_utility_yaml_projection').source_only(before, after, mapping))
+        external_proof.append([domain, bool(verified)])
     result = {'status': 'valid', 'version': __version__, 'changed_domains': changed,
               'unsupported_domains': unsupported,
               'runtime_expected': [(domain, old_runtime.get(domain), new_runtime.get(domain))
-                                   for domain in changed]}
+                                   for domain in changed],
+              'external_source_proof': external_proof}
     if dependent_proof is not None:
         result['dependent_config_program'] = await program_module.native_prefix_images(
             before_root, dependent_reference_mapping, dependent_proof, old_dependent, new_dependent,

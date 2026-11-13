@@ -223,6 +223,13 @@ def encode_change(change):
     from .helper_transaction import PreparedHelper
     from .yaml_transaction import PreparedYAML
     from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML
+    if type(change).__module__ == __package__ + '.native_external_yaml':
+        from .native_external_yaml import PreparedExternalStateYAML
+        if type(change) is not PreparedExternalStateYAML:
+            raise ValueError('unsupported_prepared_change')
+        change.checked()
+        return canonical(json.loads(json.dumps({'kind': 'template_external_state_yaml',
+            'data': asdict(change)}, allow_nan=False)))[0]
     if type(change).__module__ == __package__ + '.powercalc_group_metadata':
         from .powercalc_group_metadata import PreparedPowercalcGroupMetadata
         if type(change) is not PreparedPowercalcGroupMetadata:
@@ -255,6 +262,9 @@ def decode_change(row):
     if type(row) is not dict or set(row) != {'kind', 'data'} or type(row['data']) is not dict:
         raise ValueError('invalid_prepared_change')
     data = deepcopy(row['data'])
+    if row['kind'] == 'template_external_state_yaml':
+        from .native_external_yaml import decode_external_state_yaml
+        return decode_external_state_yaml(data)
     if row['kind'] == 'powercalc_group_metadata':
         from .powercalc_group_metadata import PreparedPowercalcGroupMetadata
         change = PreparedPowercalcGroupMetadata(**data)

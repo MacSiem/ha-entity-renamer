@@ -63,7 +63,8 @@ class NativeMixedTemplateStateYAMLRuntimeReadback(NativeTemplateStateYAMLRuntime
         super().__init__(hass, chain, composition, guard=guard, entry_witness=entry_witness)
 
     def assert_change(self, change):
-        _need(type(change) in (PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML))
+        from .native_external_yaml import PreparedExternalStateYAML
+        _need(type(change) in (PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML, PreparedExternalStateYAML))
         change.checked()
         composition = assert_state_yaml_composition(self.chain, change)
         _need(composition.state_config_program == self.program and change.receipt == self.receipt
@@ -182,7 +183,8 @@ class _MixedStateYAMLHooks(_TemplateStateYAMLHooks):
 class ReceiptedMixedTemplateStateYAMLTransactionAdapter(ReceiptedTemplateStateYAMLTransactionAdapter):
     def _change(self, step):
         change = self.resolver(step.prepared_ref)
-        _need(type(change) in (PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML))
+        from .native_external_yaml import PreparedExternalStateYAML
+        _need(type(change) in (PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML, PreparedExternalStateYAML))
         change.checked()
         _need(bool(self.chain.plan.steps) and step == self.chain.plan.steps[-1]
               and step.adapter == 'yaml' and change == self.chain._original_change(self.chain.yaml_index)

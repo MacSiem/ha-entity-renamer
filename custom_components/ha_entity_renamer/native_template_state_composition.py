@@ -25,6 +25,7 @@ _PROFILE = 'template_state_binding_v3'
 _MIXED_PROFILE = 'template_mixed_state_binding_v1'
 _RELOAD_PROFILE = 'template_controlled_reload_v1'
 _ENTRY_PROFILE = 'template_controlled_reload_entry_v1'
+_EXTERNAL_PROFILE = 'template_external_state_binding_v1'
 _TYPES.update({t.__name__: t for t in (OriginalTemplateStateSources,
     CandidateTemplateStateSources, StateConfigProgram, Plan, FileSnapshot, DirectorySnapshot,
     IncludeEdge, FilePatch, Edit, Issue, VariableBindingProof, TemplateVariableBinding, PowercalcSourceInputs)})
@@ -165,6 +166,20 @@ class MixedTemplateStateComposition(TemplateStateComposition):
 
 
 @dataclass(frozen=True)
+class ExternalStateComposition(MixedTemplateStateComposition):
+    """Persist exact external evidence; activation needs live typed bindings."""
+    external_source_proof: tuple[tuple[str, bool], ...] = ()
+
+    def _assert_changed_scope(self, receipt):
+        from .yaml_transaction import _assert_external_state_scope
+        _assert_external_state_scope(receipt)
+        expected = tuple((domain, True) for domain in ('homekit', 'utility_meter')
+                         if domain in receipt.changed_domains)
+        _need(bool(receipt.proposed_files) and 'template' in receipt.changed_domains
+              and bool(expected) and self.external_source_proof == expected)
+
+
+@dataclass(frozen=True)
 class ControlledReloadComposition(MixedTemplateStateComposition):
     """New review contract: A/S may be reloaded after explicit warning."""
 
@@ -186,6 +201,14 @@ class ControlledReloadEntryComposition(ControlledReloadComposition):
         _assert_mixed_state_scope(receipt, allow_dependent_only=True, allow_template_entry=True)
         _need(bool(receipt.proposed_files))
 
+
+
+def encode_external_state_composition(value, baseline):
+    return _encode_state_composition(value, baseline, ExternalStateComposition, _EXTERNAL_PROFILE)
+
+
+def decode_external_state_composition(payload, baseline):
+    return _decode_state_composition(payload, baseline, ExternalStateComposition, _EXTERNAL_PROFILE)
 
 
 def encode_state_composition(value, baseline):
@@ -217,6 +240,8 @@ def _encode_state_composition(value, baseline, cls, profile):
         'consumer_history': _history(value.consumer_history),
         'coverage_sha256': value.coverage_sha256,
         'physical_consumers': _typed(value.physical_consumers, tuple[tuple[str, str, str], ...], encode=True)}
+    if cls is ExternalStateComposition:
+        result['external_source_proof'] = _typed(value.external_source_proof, tuple[tuple[str, bool], ...], encode=True)
     value.assert_baseline(baseline)
     return result
 
@@ -237,9 +262,10 @@ def decode_reload_entry_composition(payload, baseline):
 
 
 def _decode_state_composition(payload, baseline, cls, profile):
+    extra = {'external_source_proof'} if cls is ExternalStateComposition else set()
     _need(type(payload) is dict and set(payload) == {'schema', 'profile', 'evidence',
         'original_sources', 'candidate_sources', 'state_config_program', 'yaml_plan', 'mapping', 'prepared_digests',
-        'source_history', 'consumer_history', 'coverage_sha256', 'physical_consumers'}
+        'source_history', 'consumer_history', 'coverage_sha256', 'physical_consumers'} | extra
         and type(payload['schema']) is int and payload['schema'] == 3
         and payload['profile'] == profile)
     value = cls(
@@ -252,7 +278,9 @@ def _decode_state_composition(payload, baseline, cls, profile):
         _typed(payload['prepared_digests'], tuple[tuple[str, str], ...], encode=False),
         _history(payload['source_history']), _history(payload['consumer_history']),
         payload['coverage_sha256'],
-        _typed(payload['physical_consumers'], tuple[tuple[str, str, str], ...], encode=False))
+        _typed(payload['physical_consumers'], tuple[tuple[str, str, str], ...], encode=False),
+        **({'external_source_proof': _typed(payload['external_source_proof'], tuple[tuple[str, bool], ...], encode=False)}
+           if cls is ExternalStateComposition else {}))
     value.assert_baseline(baseline)
     return value
 
@@ -273,7 +301,7 @@ def _retained_fields(value):
                                 for key, item in value.items()))
     from .controlled_powercalc_composition import ControlledPowercalcComposition
     from .powercalc_composition import _TYPES as powercalc_types
-    if (kind in (TemplateStateComposition, MixedTemplateStateComposition, ControlledReloadComposition,
+    if (kind in (TemplateStateComposition, MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition,
                  ControlledReloadEntryComposition, ControlledPowercalcComposition) or kind in _TYPES.values() or kind in powercalc_types.values()):
         return (kind, tuple((field.name, _retained_fields(getattr(value, field.name)))
                              for field in fields(kind)))

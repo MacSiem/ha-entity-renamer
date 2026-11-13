@@ -64,6 +64,7 @@ class TemplateStateSourceValidation:
     candidate_sources: CandidateTemplateStateSources
     state_config_program: object = None
     dependent_config_program: object = None
+    external_source_proof: tuple = ()
 
     @property
     def migration_ready(self):
@@ -453,7 +454,7 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                                    template_reference_mapping=None, template_state_program=False,
                                    dependent_reference_mapping=None, registry_only_template=False,
                                    owned_script_services=(), dashboard_yaml=None, dashboard_storage=None,
-                                   mixed_powercalc=False, utility_reference_mapping=None):
+                                   mixed_powercalc=False):
     """Return only after native validation of the entire proposed graph succeeds.
 
     scratch_parent must be private local storage OUTSIDE config_root. It contains
@@ -506,12 +507,6 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
         if ((dashboard_yaml is not None and dashboard_yaml.mapping_items != items)
                 or (dashboard_storage is not None and dashboard_storage.mapping_items != items)):
             raise YAMLValidationError('dashboard_mapping_mismatch')
-    if utility_reference_mapping is not None:
-        from .yaml_plan import _mapping
-        utility_reference_mapping = _mapping(utility_reference_mapping)
-        if (not with_sources or template_reference_mapping is None
-                or utility_reference_mapping != template_reference_mapping):
-            raise YAMLValidationError('utility_source_mapping_required')
     if powercalc_candidate_documents is not None:
         from .powercalc_candidate_sources import PlannedPowercalcDocuments
         if (not with_sources or powercalc_bundle is None or plan.powercalc_inputs is None
@@ -630,20 +625,6 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 error = YAMLValidationError('native_config_rejected')
                 error.add_note(checker_failure_note(result, process.returncode))
                 raise error
-            if utility_reference_mapping is not None and 'utility_meter' in result['changed_domains']:
-                from .native_utility_yaml_validation import utility_projection
-                projection = await utility_projection(before, after, utility_reference_mapping, stage,
-                                                       result['version'], timeout=timeout)
-                runtime = result.get('runtime_expected')
-                if (type(runtime) is not list or any(type(row) is not list or len(row) != 3 for row in runtime)
-                        or len([row for row in runtime if row[0] == 'utility_meter']) != 1):
-                    raise YAMLValidationError('utility_checker_original_scope')
-                result['runtime_expected'] = [projection if row[0] == 'utility_meter' else row
-                                              for row in runtime]
-                # Retain unsupported until the native handoff and lifecycle are
-                # independently bound to the same immutable plan and receipt.
-                if 'utility_meter' not in result['unsupported_domains']:
-                    raise YAMLValidationError('utility_checker_activation_scope')
             if native_helpers:
                 expected = template_entry_seal(native_helpers,result['version'])
                 received = [tuple(row) for row in result.get('runtime_expected',())
@@ -709,7 +690,15 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                             result['template_state_config_program'],
                             result['template_candidate_state_config_program'],
                             mapping=template_reference_mapping, plan=plan)
-                    return TemplateStateSourceValidation(receipt, evidence, original, candidate, program, dependent_program)
+                    external = result.get('external_source_proof', [])
+                    if (type(external) is not list or any(type(row) is not list or len(row) != 2
+                            or row[0] not in ('homekit', 'utility_meter') or type(row[1]) is not bool
+                            for row in external)
+                            or tuple(row[0] for row in external) != tuple(
+                                domain for domain in ('homekit', 'utility_meter') if domain in receipt.changed_domains)):
+                        raise YAMLValidationError('external_source_proof_invalid')
+                    return TemplateStateSourceValidation(receipt, evidence, original, candidate, program,
+                                                         dependent_program, tuple(tuple(row) for row in external))
                 if dependent_program is not None:
                     return DependentConfigValidation(receipt, evidence, dependent_program)
                 return receipt, evidence
@@ -744,20 +733,19 @@ async def async_validate_proposed_with_dependent_config_program(hass, plan, mapp
 async def async_validate_proposed_with_template_state_sources(
         hass, plan, mapping, scratch_parent, *, timeout=120, with_state_program=False,
         with_dependent_program=False, registry_only_template=False, owned_script_services=(),
-        dashboard_yaml=None, dashboard_storage=None, native_helpers=(), with_utility_sources=False):
+        dashboard_yaml=None, dashboard_storage=None, native_helpers=()):
     """Explicit internal full-state source preflight; no readiness/activation.
 
     Same staging, isolated native checker, receipt and source/directory fences.
     This opt-in does not replace the legacy receipt or its old reload semantics.
     """
-    if type(with_dependent_program) is not bool or type(with_utility_sources) is not bool:
+    if type(with_dependent_program) is not bool:
         raise YAMLValidationError('dependent_config_program_scope_required')
     return await _async_validate_proposed(hass, plan, scratch_parent, timeout=timeout,
         with_sources=True, template_reference_mapping=mapping, template_state_program=with_state_program,
         dependent_reference_mapping=mapping if with_dependent_program else None,
         registry_only_template=registry_only_template, owned_script_services=owned_script_services,
-        dashboard_yaml=dashboard_yaml, dashboard_storage=dashboard_storage, native_helpers=native_helpers,
-        utility_reference_mapping=mapping if with_utility_sources else None)
+        dashboard_yaml=dashboard_yaml, dashboard_storage=dashboard_storage, native_helpers=native_helpers)
 
 
 def assert_proposal_matches(receipt, plan):
@@ -827,14 +815,11 @@ async def async_validate_proposed_with_powercalc_sources(hass, plan, scratch_par
 
 async def async_validate_mixed_powercalc_template_sources(
         hass, plan, mapping, scratch_parent, candidate_documents, *, timeout=120,
-        owned_script_services=(), dashboard_yaml=None, dashboard_storage=None, native_helpers=(),
-        with_utility_sources=False):
+        owned_script_services=(), dashboard_yaml=None, dashboard_storage=None, native_helpers=()):
     """One checker invocation and receipt for both explicitly qualified profiles.
 
     This validates source evidence only; it grants no mutation or lifecycle capability.
     """
-    if type(with_utility_sources) is not bool:
-        raise YAMLValidationError('utility_source_mapping_required')
     from .powercalc_source_binding import PowercalcVendor
     vendor = PowercalcVendor(hass, with_profiles=True)
     bundle = await _settled_executor(hass, vendor.sources)
@@ -844,7 +829,7 @@ async def async_validate_mixed_powercalc_template_sources(
         template_reference_mapping=mapping, template_state_program=True,
         dependent_reference_mapping=mapping, owned_script_services=owned_script_services,
         dashboard_yaml=dashboard_yaml, dashboard_storage=dashboard_storage, mixed_powercalc=True,
-        native_helpers=native_helpers, utility_reference_mapping=mapping if with_utility_sources else None)
+        native_helpers=native_helpers)
     def final_sources():
         vendor.sources()
         assert_validation_current(result.receipt)

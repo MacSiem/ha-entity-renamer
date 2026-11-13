@@ -119,7 +119,7 @@ class UtilityYAMLHandoff:
                   and {k:v for k,v in self.data[meter].items() if k != DATA_TARIFF_SENSORS} == info,
                   'foreign_changed')
 
-    def check_population(self):
+    def check_population(self, *, ignore_sources=frozenset()):
         """No removed, replaced foreign, or newly discovered YAML actor."""
         from homeassistant.components.utility_meter.const import DATA_UTILITY
         from homeassistant.helpers.entity_platform import async_get_platforms
@@ -129,7 +129,10 @@ class UtilityYAMLHandoff:
         actual = [(platform, entity) for platform in async_get_platforms(self.hass, 'utility_meter')
                   for entity in platform.entities.values()
                   if type(entity) is sensor.UtilityMeterSensor and platform.config_entry is None]
-        expected = {(id(row.platform), row.entity_id) for row in self.rows}
+        ignored = {(id(row.platform), row.entity_id) for row in self.rows if row.old in ignore_sources}
+        actual = [(platform, entity) for platform, entity in actual
+                  if (id(platform), entity.entity_id) not in ignored]
+        expected = {(id(row.platform), row.entity_id) for row in self.rows if row.old not in ignore_sources}
         expected.update((id(platform), entity.entity_id) for platform, entity, _, _ in self.foreign)
         _need(len(actual) == len(expected)
               and {(id(platform), entity.entity_id) for platform, entity in actual} == expected,
