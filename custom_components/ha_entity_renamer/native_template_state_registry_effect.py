@@ -410,6 +410,8 @@ class NativeTemplateStateRegistryEffect:
         try:
             if self.witness is not None:
                 result = self.witness.mutate()
+                if self.transport is not None:
+                    self.transport.actions.commit()
                 if self.script_phase is not None:
                     self.script_phase.mark_attempt(self)
                 return result
@@ -425,7 +427,10 @@ class NativeTemplateStateRegistryEffect:
                 finally:
                     if getattr(self.io, '_script_service_capability', None) is self.script_cutover:
                         del self.io._script_service_capability
-            return self.io.mutate(self.change, target)
+            result = self.io.mutate(self.change, target)
+            if self.transport is not None:
+                self.transport.actions.commit()
+            return result
         except BaseException:
             if self.witness is not None and not self._registry_attempted():
                 # The final owning guard can refuse after installing bindings
@@ -437,6 +442,8 @@ class NativeTemplateStateRegistryEffect:
                 finally:
                     self.witness.close()
             else:
+                if self.transport is not None and self.transport.actions.phase == 'installed':
+                    self.transport.actions.commit()
                 if self.script_phase is not None:
                     if self.witness is None or not self.witness.failed_handoff:
                         self.script_phase.poison(self)

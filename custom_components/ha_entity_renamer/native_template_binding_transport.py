@@ -803,6 +803,12 @@ class NativeTemplateBindingTransport:
                 row['installed_graph'] = (_graph(row['installed_bindings']), _graph(row['installed_attrs']))
                 row['installed_holds'] = self._retain_graph((row['installed_bindings'], row['installed_attrs']))
             self.actions.install()
+            # Action projection changes the copied _config. Refresh the
+            # installed ownership fence only after both groups are installed.
+            from .native_script_config_transport import _graph
+            for row in self.rows:
+                row['installed_graph'] = (_graph(row['installed_bindings']), _graph(row['installed_attrs']))
+                row['installed_holds'] = self._retain_graph((row['installed_bindings'], row['installed_attrs']))
             self.phase = 'installed'
         except BaseException as error:
             # A native factory may fail after constructing its filtered tracker
@@ -926,5 +932,4 @@ class NativeTemplateBindingTransport:
     def mark_registry_attempt(self, caller_context):
         self._check('registry_attempt', caller_context)
         _need(self.phase == 'installed', 'template_binding_install_required')
-        self.actions.commit()
         self.phase = 'registry_attempted'
