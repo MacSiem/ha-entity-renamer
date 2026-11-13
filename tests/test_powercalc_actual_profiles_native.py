@@ -107,7 +107,7 @@ class ActualProfileGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         self.entities = {e.unique_id: e for p in async_get_platforms(hass, 'powercalc')
                          for e in p.entities.values()}
         self.members = {'fixture-group-a': (0, 1, 3, 4, 9, 10),
-                        'fixture-group-b': (2, 5, 6, 7, 8, 9, 11)}
+                        'fixture-group-b': (2, 5, 6, 7, 8, 11, 12)}
         groups = [{'create_group': uid, 'unique_id': uid, 'create_energy_sensor': True,
                    'hide_members': False, 'entities': [
                        {'power_sensor_id': self.entities[f'fixture-meter-{i}'].entity_id,
@@ -178,8 +178,10 @@ class ActualProfileGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         linear = self.entities['fixture-meter-0']
         original_standby = linear._standby_power
         linear._standby_power = Decimal('0.4')
-        with self.assertRaises(ValueError):
-            await self.bind()
+        drift = await self.bind()
+        self.assertEqual(drift.status, 'UNKNOWN')
+        self.assertFalse(drift.migration_ready)
+        self.assertFalse(next(row for row in drift.rows if row.entity_id == linear.entity_id).source_verified)
         linear._standby_power = original_standby
         self.assertEqual(await self.bind(), result)
         broken = deepcopy(self.groups)
