@@ -277,7 +277,7 @@ class NativeTemplateStateRegistryEffect:
             self.caller = _BindingCallerContext(self.task, self._fence)
             self.transport = NativeTemplateBindingTransport.capture(self.root.hass,
                 self.transfer_entities, source_pairs=self.transition.source_pairs,
-                caller_context=self.caller,
+                caller_context=self.caller, action_pairs=self.transition.action_pairs,
                 rename_witness=self.witness,
                 own_identity=None if self.own_entity is None else (self.own_entity, self.source, self.target),
                 configured_variable_pairs=tuple(BindingVariablePair(p.container, p.name,

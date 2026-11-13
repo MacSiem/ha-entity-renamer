@@ -69,7 +69,7 @@ def native_state_descriptors(checked, root, *, source_paths):
     for block in checked.get('template', ()):
         if 'trigger' in block or 'triggers' in block:
             continue
-        for platform in ('sensor', 'binary_sensor'):
+        for platform in ('sensor', 'binary_sensor', 'switch'):
             for entity, key in zip(block.get(platform, ()),
                     _template_entity_keys(block, platform, root, full_state=True), strict=True):
                 rows.append(['template.' + platform, key,
@@ -256,6 +256,12 @@ def _project(semantic, mapping, active):
             return {'$variables': visit(value['$variables'], path + ('$variables',))}
         if type(value) is list:
             return [visit(child, path + (i,)) for i, child in enumerate(value)]
+        # Only action service targets are entity references. Ordinary strings
+        # (including service data and labels) never acquire reference meaning.
+        if ('turn_on' in path or 'turn_off' in path) and len(path) >= 2 and path[-2:] == ('target', 'entity_id') and type(value) is str:
+            return chosen.get(value, value)
+        if ('turn_on' in path or 'turn_off' in path) and len(path) >= 3 and path[-3:-1] == ('target', 'entity_id') and type(path[-1]) is int and type(value) is str:
+            return chosen.get(value, value)
         return deepcopy(value)
     result = visit(result, ())
     qualified = {token for token in used if token not in unsafe}

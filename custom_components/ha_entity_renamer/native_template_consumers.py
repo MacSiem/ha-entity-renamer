@@ -177,6 +177,13 @@ class _Native:
             '2e4afdb3e16a7e6339bd72966a5d9a6d1bff5e7c602797e20118a1a191944bf7'}
             if __version__ == '2025.6.0' else {'helpers/template/render_info.py':
             '259fba6cd34246e9a022dd67e9b9a5f5a041a307637b9cc15c74b7afd5249ca9'})
+        self.switch = None
+        if __version__ in ('2026.11.0', '2026.11.1'):
+            from homeassistant.components.template import switch
+            from homeassistant.helpers.script import Script
+            self.switch = switch.StateSwitchEntity
+            self.pins.update({'components/template/switch.py': '8599819b248e7c9783fb62eff18aefba0a93c8834f3e2a0524c30914d01a3452',
+                              'helpers/script.py': '4e7e2e4ac0b2bb43e9f2d56c785e7851c7e01967eefb17e52ca1358ab9824efa'})
         self.sensor = (sensor.SensorTemplate if __version__ == '2025.6.0'
                        else sensor.StateSensorEntity)
         self.binary = (binary_sensor.BinarySensorTemplate if __version__ == '2025.6.0'
@@ -233,6 +240,12 @@ class _Native:
                       (RenderInfo, '_freeze_static'), (RenderInfo, '_freeze_sets'),
                       (self.render_module, '_true'), (self.render_module, '_false'),
                       (cv, 'string'), (cv, 'icon'), (cv, 'whitespace')]
+        if self.switch is not None:
+            self.refs += [(switch.StateSwitchEntity, '__init__'),
+                          (switch.AbstractTemplateSwitch, '__init__'),
+                          (switch.AbstractTemplateSwitch, 'async_turn_on'),
+                          (switch.AbstractTemplateSwitch, 'async_turn_off'),
+                          (AbstractTemplateEntity, 'add_script'), (Script, '__init__')]
         from .native_template_metadata import IconValidatorProof
         self.icon_proof = IconValidatorProof(self)
         self.methods, self.codes = prove_methods(self.root, self.pins, self.refs)

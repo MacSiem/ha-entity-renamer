@@ -24,7 +24,7 @@ _CACHES = ('_repeat_script', '_choose_data', '_if_data', '_parallel_scripts', '_
 
 def _cache_names():
     from homeassistant.const import __version__
-    _need(__version__ in ('2025.6.0', '2026.10.2', '2026.10.4'))
+    _need(__version__ in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'))
     return (('_config_cache' if __version__ == '2025.6.0' else '_condition_cache'),) + _CACHES
 
 

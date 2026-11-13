@@ -383,7 +383,7 @@ def _template_entity_keys(block, platform, root=None, *, full_state=False):
     """
     from pathlib import Path
     from homeassistant.const import __version__
-    from homeassistant.components.template import sensor, binary_sensor
+    from homeassistant.components.template import sensor, binary_sensor, switch
     from homeassistant.util.yaml.objects import NodeDictClass
     if __package__:
         from .template_physical_identity import physical_template_key
@@ -404,8 +404,8 @@ def _template_entity_keys(block, platform, root=None, *, full_state=False):
         raise ValueError('template_physical_origin_unverified')
     raw = block.raw_config.get(platform, ())
     raw = [raw] if isinstance(raw, dict) else list(raw)
-    module = sensor if platform == 'sensor' else binary_sensor
-    schema = getattr(module, ('SENSOR_' if platform == 'sensor' else 'BINARY_SENSOR_')
+    module = {'sensor': sensor, 'binary_sensor': binary_sensor, 'switch': switch}[platform]
+    schema = getattr(module, {'sensor': 'SENSOR_', 'binary_sensor': 'BINARY_SENSOR_', 'switch': 'SWITCH_'}[platform]
                      + ('SCHEMA' if __version__ == '2025.6.0' else 'YAML_SCHEMA'))
     candidates = []
     for item in raw:
@@ -589,7 +589,7 @@ def full_template_state_semantics(block, platform, entity):
     supply their exact native .strip() bodies through _normal, never our strip.
     This is a source declaration, not permission to run or rebind anything.
     """
-    if platform not in ('sensor', 'binary_sensor') or 'triggers' in block or 'trigger' in block:
+    if platform not in ('sensor', 'binary_sensor', 'switch') or 'triggers' in block or 'trigger' in block:
         raise ValueError('template_state_profile_family')
     from homeassistant.components.template.const import PLATFORMS
     context = {key: value for key, value in block.items() if key not in PLATFORMS}
@@ -666,7 +666,7 @@ def template_state_source_projection(checked, root=None):
     for block in checked.get('template', ()):
         if 'triggers' in block or 'trigger' in block:
             continue
-        for platform in ('sensor', 'binary_sensor'):
+        for platform in ('sensor', 'binary_sensor', 'switch'):
             for entity, key in zip(block.get(platform, ()),
                     _template_entity_keys(block, platform, root, full_state=True), strict=True):
                 states.append(['template.' + platform, key,

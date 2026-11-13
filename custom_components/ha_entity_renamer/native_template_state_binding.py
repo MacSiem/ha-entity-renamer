@@ -75,6 +75,7 @@ class StateBindingTransition:
     configured_variables: tuple[ConfiguredVariablePair, ...]
     rendered_variables: tuple[RenderedVariablePair, ...]
     target_semantics: tuple
+    action_pairs: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -129,7 +130,7 @@ class StateConsumerSnapshot:
               and type(target) is frozenset and len(target ^ self.prefix.active) == 1,
               'template_state_single_registry_step_required')
         desired = {(d, k): (cfg, variables) for d, k, cfg, variables in program.rows(target)}
-        result, variables, configured, entities, semantics = [], [], [], [], []
+        result, variables, configured, entities, semantics, actions = [], [], [], [], [], []
         for row in self.rows:
             semantic, static = desired[row.domain, row.source_key]
             target_templates = dict(_templates(_effective_config(semantic)))
@@ -138,6 +139,10 @@ class StateConsumerSnapshot:
                 continue
             entities.append(row.entity)
             semantics.append((row.domain, row.source_key, semantic))
+            if row.domain == 'template.switch':
+                before_cfg, after_cfg = _effective_config(row.semantic), _effective_config(semantic)
+                actions.append((row.entity, tuple((name, _get(before_cfg, name), _get(after_cfg, name))
+                    for name in ('turn_on', 'turn_off'))))
             location = next(value for value in program.source_locations
                             if value[:2] == (row.domain, row.source_key))
             before_config = _get(_effective_config(row.semantic), 'variables')
@@ -188,7 +193,7 @@ class StateConsumerSnapshot:
                   'template_state_shared_variables_collision')
             seen[key] = (pair.before, pair.after)
         return StateBindingTransition(tuple(entities), tuple(result), tuple(configured),
-            tuple(variables), tuple(semantics))
+            tuple(variables), tuple(semantics), tuple(actions))
 
 
 def _state_inputs(chain, input_state=None, *, live_intent=None, live_context=None, live_calls=()):
@@ -527,7 +532,7 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents, *,
                   'template_state_entity_identity_changed')
             live.add(entity_id)
             domain = 'template.' + platform.domain
-            if type(entity) not in (native.sensor, native.binary) or platform.config_entry is not None:
+            if type(entity) not in (native.sensor, native.binary, native.switch) or platform.config_entry is not None:
                 # Unrelated trigger/other families stay present and unchanged.
                 # Their full native config/source membership is checked below.
                 cfg = getattr(entity, '_config', None)
