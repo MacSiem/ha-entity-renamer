@@ -194,6 +194,14 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 from aiohttp import ClientSession
                 from datetime import timedelta
                 from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_USER
+                ordinary_id = self.sources[0].entity_id
+                ordinary = self.f.entity.async_get(ordinary_id)
+                self.assertIsNotNone(ordinary)
+                ordinary_name_before = ordinary.name
+                ordinary_device = self.f.device.async_get_or_create(
+                    config_entry_id=self.entries[2].entry_id,
+                    identifiers={('synthetic-multi-queue', 'ordinary-device')})
+                device_name_before = ordinary_device.name_by_user
                 client = ClientSession()
                 self.addAsyncCleanup(client.close)
                 async def connect(label, group):
@@ -217,7 +225,9 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     await socket.send_json({'id': request_id, 'type': 'ha_entity_renamer/' + command, **payload})
                     return await socket.receive_json(timeout=2400)
                 selected = [{'entity_id': old, 'new_entity_id': new} for old, new in mapping.items()]
-                denied = await request(user, 'prepare', entities=selected)
+                selected.append({'entity_id': ordinary_id, 'name': 'Synthetic ordinary name'})
+                devices = [{'device_id': ordinary_device.id, 'name_by_user': 'Synthetic ordinary device'}]
+                denied = await request(user, 'prepare', entities=selected, devices=devices)
                 self.assertFalse(denied['success'])
                 evidence['nonadmin_denied'] = denied.get('error', {}).get('code')
             await pulse()
@@ -239,7 +249,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             self.assertEqual(self.package.read_bytes(), original_package)
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, before_entries)
             if public:
-                reply = await request(admin, 'prepare', entities=selected)
+                reply = await request(admin, 'prepare', entities=selected, devices=devices)
                 self.assertTrue(reply.get('success'), reply)
                 review = reply['result']
             else:
@@ -265,6 +275,10 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             evidence['apply'] = result
             save()
             self.assertEqual(result['state'], 'applied')
+            if public:
+                self.assertEqual(self.f.entity.async_get(ordinary_id).name, 'Synthetic ordinary name')
+                self.assertEqual(self.f.device.async_get(ordinary_device.id).name_by_user,
+                                 'Synthetic ordinary device')
             verify_seam(0, mapping)
             verify_ids(mapping)
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, expected_entries)
@@ -296,6 +310,10 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             evidence['restore'] = result
             save()
             self.assertEqual(result['state'], 'rolled_back')
+            if public:
+                self.assertEqual(self.f.entity.async_get(ordinary_id).name, ordinary_name_before)
+                self.assertEqual(self.f.device.async_get(ordinary_device.id).name_by_user,
+                                 device_name_before)
             verify_seam(1, {new: old for old, new in mapping.items()})
             verify_ids({})
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, before_entries)
