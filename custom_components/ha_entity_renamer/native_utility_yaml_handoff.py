@@ -7,6 +7,7 @@ Failure after removal is UNKNOWN and must never trigger implicit replay.
 from __future__ import annotations
 
 from copy import deepcopy
+import asyncio
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -60,6 +61,7 @@ class Row:
     old: str
     new: str
     entity_id: str
+    source_uuid: str
     platform: object
     entity: object
     before: tuple
@@ -70,6 +72,7 @@ class UtilityYAMLHandoff:
     def __init__(self, hass, mapping, rows, foreign, data):
         self.hass, self.mapping, self.rows, self.foreign, self.data = hass, dict(mapping), rows, foreign, data
         self.uncertain = False
+        self.pending = None
 
     @classmethod
     def capture(cls, hass, mapping):
@@ -100,7 +103,7 @@ class UtilityYAMLHandoff:
                   and entity._tariff is None and entity._tariff_entity is None
                   and info.get(DATA_TARIFF_SENSORS) == [entity] and entity._collecting is not None,
                   'unsupported_meter')
-            rows.append(Row(meter, old, mapping[old], entity.entity_id, platform, entity,
+            rows.append(Row(meter, old, mapping[old], entity.entity_id, sources[old].id, platform, entity,
                             _static(entity), deepcopy({k:v for k,v in info.items() if k != DATA_TARIFF_SENSORS})))
         expected = {key for key, info in data.items() if key not in entries and type(info) is dict and info.get('source') in mapping}
         _need(bool(rows) and {row.meter for row in rows} == expected and len({row.meter for row in rows}) == len(rows), 'population')
@@ -113,24 +116,40 @@ class UtilityYAMLHandoff:
                   and {k:v for k,v in self.data[meter].items() if k != DATA_TARIFF_SENSORS} == info,
                   'foreign_changed')
 
-    async def apply_one(self, row, *, guard, record_intent):
-        _need(not self.uncertain and row in self.rows, 'ownership')
-        from homeassistant.components.utility_meter.const import DATA_TARIFF_SENSORS, CONF_METER
+    async def detach_one(self, row, *, guard, record_intent):
+        """Detach BEFORE registry rename, letting RestoreSensor retain last data."""
+        _need(not self.uncertain and self.pending is None and row in self.rows, 'ownership')
+        from homeassistant.components.utility_meter.const import DATA_TARIFF_SENSORS
         from homeassistant.helpers import entity_registry as er
-        sensor = _installed()
-        guard(); self.check_foreign()
-        source = self.hass.states.get(row.new)
+        _installed(); guard(); self.check_foreign()
+        source = self.hass.states.get(row.old)
         registry = er.async_get(self.hass)
-        _need(source is not None and registry.async_get(row.new) is not None
-              and registry.async_get(row.old) is None, 'renamed_source_unavailable')
+        native = registry.async_get(row.old)
+        _need(source is not None and native is not None and native.id == row.source_uuid
+              and registry.async_get(row.new) is None, 'original_source_unavailable')
         _need(row.platform.entities.get(row.entity_id) is row.entity and _static(row.entity) == row.before
               and self.data[row.meter][DATA_TARIFF_SENSORS] == [row.entity], 'meter_changed')
         await record_intent(row)
         guard(); self.check_foreign()
+        _need(self.hass.states.get(row.old) is source and _static(row.entity) == row.before, 'source_changed')
         self.uncertain = True
         await row.platform.async_remove_entity(row.entity_id)
         guard(); self.check_foreign()
-        _need(self.hass.states.get(row.new) is source, 'source_changed_during_detach')
+        _need(self.hass.states.get(row.old) is source and row.entity_id not in row.platform.entities,
+              'source_changed_during_detach')
+        self.pending = row
+
+    async def attach_one(self, row, *, guard):
+        """Native factory/add AFTER registry rename, then independently compare."""
+        from homeassistant.components.utility_meter.const import DATA_TARIFF_SENSORS, CONF_METER
+        from homeassistant.helpers import entity_registry as er
+        _need(self.uncertain and self.pending is row, 'detach_required')
+        sensor = _installed(); guard(); self.check_foreign()
+        source = self.hass.states.get(row.new)
+        registry = er.async_get(self.hass)
+        native = registry.async_get(row.new)
+        _need(source is not None and native is not None and native.id == row.source_uuid
+              and registry.async_get(row.old) is None, 'renamed_source_unavailable')
         info = self.data[row.meter]
         _need({k:v for k,v in info.items() if k != DATA_TARIFF_SENSORS} == row.info
               and info[DATA_TARIFF_SENSORS] == [row.entity], 'meter_info_changed')
@@ -141,11 +160,13 @@ class UtilityYAMLHandoff:
                                           {row.meter: {CONF_METER: row.meter}})
         guard(); _need(len(made) == 1 and info[DATA_TARIFF_SENSORS] == made, 'factory')
         await row.platform.async_add_entities(made)
+        await asyncio.sleep(0)
         guard(); self.check_foreign()
         new_entity = made[0]
         _need(self.hass.states.get(row.new) is source and new_entity.entity_id == row.entity_id
               and row.platform.entities.get(row.entity_id) is new_entity
               and new_entity._sensor_source_id == row.new and new_entity._collecting is not None
               and _static(new_entity) == row.before, 'runtime_readback')
+        self.pending = None
         self.uncertain = False
         return new_entity
