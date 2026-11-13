@@ -10,7 +10,7 @@ import hashlib
 import json
 from datetime import timedelta
 
-from .native_utility_yaml_handoff import UtilityYAMLHandoff, _static
+from .native_utility_yaml_handoff import UtilityYAMLHandoff, _continued, _static
 from .transaction import PhaseContext, Position, Refused
 from .utility_meter_observers import _plain
 
@@ -112,7 +112,10 @@ class UtilityYAMLRegistryAdapter:
                   and info.get(DATA_TARIFF_SENSORS) == [entity]
                   and _info({k:v for k,v in info.items() if k != DATA_TARIFF_SENSORS})
                       == {**saved['info'], 'source': saved['target']}
-                  and _plain(_static(entity)) == after == saved['before'], 'receipt_readback')
+                  and after == saved['before']
+                  and (_continued(row.before, _static(entity), entity,
+                                  self.handoff.hass.states.get(saved['target']))
+                       if direction == 'forward' else _plain(_static(entity)) == after), 'receipt_readback')
         return True
 
     async def inspect(self, step):
@@ -174,8 +177,14 @@ class UtilityYAMLRegistryAdapter:
         _need(intent_ref not in self.preparations.plans and receipt_ref not in self.preparations.plans, 'no_replay')
         intent_digest = None
         async def record_intent(items):
-            nonlocal intent_digest
-            _need(tuple(items) == rows, 'population')
+            nonlocal intent_digest, rows
+            _need(len(items) == len(rows) and all(
+                (current.meter, current.old, current.new, current.entity_id, current.source_uuid,
+                 current.platform, current.entity, current.info) ==
+                (previous.meter, previous.old, previous.new, previous.entity_id, previous.source_uuid,
+                 previous.platform, previous.entity, previous.info)
+                for current, previous in zip(items, rows, strict=True)), 'population')
+            rows = tuple(items)
             guard(); self.guard()
             payload = {'kind':'utility_yaml_intent', 'operation':self.operation_id,
                        'fingerprint':self.fingerprint, 'step':step.key, 'direction':direction,

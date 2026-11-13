@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation, localcontext
 from hashlib import sha256
 from pathlib import Path
 import sys
@@ -55,6 +56,35 @@ def _static(entity):
     _need(state is not None and entity.extra_restore_state_data is not None, 'state_missing')
     return (entity.entity_id, state.state, deepcopy(entity.extra_restore_state_data.as_dict()),
             entity._next_reset, entity._attr_native_unit_of_measurement)
+
+
+def _continued(before, current, entity, source):
+    """Accept only native, monotonic BASIC counter progress from the same source."""
+    if before == current:
+        return True
+    try:
+        if (source is None or not entity.available or entity._collecting is None
+                or any(getattr(entity, name) is not False for name in
+                       ('_sensor_delta_values', '_sensor_net_consumption',
+                        '_sensor_periodically_resetting', '_sensor_always_available'))
+                or before[0] != current[0] or before[3:] != current[3:]):
+            return False
+        old, new = deepcopy(before[2]), deepcopy(current[2])
+        old_value, new_value = old.pop('native_value'), new.pop('native_value')
+        old_source, new_source = old.pop('last_valid_state'), new.pop('last_valid_state')
+        if old != new or old_value.get('__type') != new_value.get('__type'):
+            return False
+        a0, a1 = Decimal(old_value['decimal_str']), Decimal(new_value['decimal_str'])
+        s0, s1 = Decimal(old_source), Decimal(new_source)
+        if not all(value.is_finite() and value >= 0 for value in (a0, a1, s0, s1)):
+            return False
+        with localcontext() as context:
+            context.prec = 384
+            return (s1 >= s0 and a1 == a0 + s1 - s0 and Decimal(source.state) == s1
+                    and Decimal(before[1]) == a0 and Decimal(current[1]) == a1
+                    and entity._last_valid_state == s1)
+    except (AttributeError, KeyError, TypeError, ValueError, InvalidOperation):
+        return False
 
 
 @dataclass(frozen=True)
@@ -161,8 +191,15 @@ class UtilityYAMLHandoff:
               and all(native.id == row.source_uuid and row.new == rows[0].new for row in rows),
               'original_source_unavailable')
         for row in rows:
-            _need(row.platform.entities.get(row.entity_id) is row.entity and _static(row.entity) == row.before
+            current = _static(row.entity)
+            _need(row.platform.entities.get(row.entity_id) is row.entity
+                  and _continued(row.before, current, row.entity, source)
                   and self.data[row.meter][DATA_TARIFF_SENSORS] == [row.entity], 'meter_changed')
+        # Bind the intent to the actual native cutover state, after checking
+        # every change since capture against the same live source.
+        rows = tuple(replace(row, before=_static(row.entity)) for row in rows)
+        by_meter = {row.meter: row for row in rows}
+        self.rows = tuple(by_meter.get(row.meter, row) for row in self.rows)
         await record_intent(rows)
         guard(); self.check_foreign()
         _need(self.hass.states.get(old) is source and all(_static(row.entity) == row.before for row in rows),

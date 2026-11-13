@@ -5,9 +5,26 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from custom_components.ha_entity_renamer.native_utility_yaml_handoff import UtilityYAMLHandoff
+from custom_components.ha_entity_renamer.native_utility_yaml_handoff import UtilityYAMLHandoff, _continued
 from custom_components.ha_entity_renamer.native_utility_yaml_receipt import UtilityYAMLRegistryAdapter
 from custom_components.ha_entity_renamer.transaction import PhaseContext, Plan, Position, Record, Refused, Step
+
+
+class CounterContinuityTests(unittest.TestCase):
+    def test_increment_requires_matching_source_and_preserves_deadline(self):
+        from decimal import Decimal
+        def sample(value, deadline='tomorrow'):
+            return ('sensor.meter', value, {'native_value': {'__type': 'decimal', 'decimal_str': value},
+                    'last_valid_state': value, 'last_period': '0', 'status': 'collecting'}, deadline, 'EUR')
+        entity = SimpleNamespace(available=True, _collecting=lambda: None,
+            _sensor_delta_values=False, _sensor_net_consumption=False,
+            _sensor_periodically_resetting=False, _sensor_always_available=False,
+            _last_valid_state=Decimal('12'))
+        source = SimpleNamespace(state='12')
+        self.assertTrue(_continued(sample('10'), sample('12'), entity, source))
+        self.assertFalse(_continued(sample('10'), sample('12', 'changed'), entity, source))
+        self.assertFalse(_continued(sample('10'), sample('11'), entity, source))
+        self.assertFalse(_continued(sample('13'), sample('12'), entity, source))
 
 
 class Preparations:
@@ -41,7 +58,8 @@ class ReceiptTests(unittest.IsolatedAsyncioTestCase):
     def setup_case(self, fail=False):
         events, prep = [], Preparations()
         row = SimpleNamespace(meter='meter', old='sensor.old', new='sensor.new', source_uuid='uuid',
-                              entity_id='sensor.meter', before=('sensor.meter', '12', {}, None, 'kWh'), info={})
+                              entity_id='sensor.meter', before=('sensor.meter', '12', {}, None, 'kWh'),
+                              platform=object(), entity=object(), info={})
         handoff = object.__new__(UtilityYAMLHandoff)
         handoff.rows = (row,)
         handoff.mapping = {'sensor.old':'sensor.new'}
