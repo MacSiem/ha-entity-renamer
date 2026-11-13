@@ -148,6 +148,16 @@ class CoordinatorReceiptTests(ReceiptTests):
         self.assertEqual(events, ['detach', 'registry', 'attach'])
 
 
+class NativeInfoEncodingTests(unittest.TestCase):
+    def test_yaml_string_subclass_keys_are_preserved_as_plain_strings(self):
+        from custom_components.ha_entity_renamer.native_utility_yaml_receipt import _info
+        class YAMLKey(str): pass
+        self.assertEqual(_info({YAMLKey('source'): 'sensor.before', YAMLKey('cycle'): 'daily'}),
+                         {'source': 'sensor.before', 'cycle': 'daily'})
+        with self.assertRaises(Refused):
+            _info({1: 'unsupported'})
+
+
 class AcceptedInspectionTests(unittest.TestCase):
     def test_cutover_receipt_is_bound_but_live_counter_can_advance(self):
         from custom_components.ha_entity_renamer.native_utility_yaml_receipt import inspect_accepted, _id

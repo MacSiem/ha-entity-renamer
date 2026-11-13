@@ -30,7 +30,11 @@ def _info(value):
     # Core's validated YAML schema supplies offset as timedelta; preserve its
     # exact integer components instead of stringifying an arbitrary object.
     _need(type(value) is dict, 'info')
-    result = dict(value)
+    # Native YAML parser preserves source positions in string subclasses.
+    # Normalize those keys without admitting non-string or colliding keys.
+    _need(all(isinstance(key, str) for key in value), 'info_key')
+    result = {str(key): item for key, item in value.items()}
+    _need(len(result) == len(value), 'info_key_collision')
     offset = result.get('offset')
     if isinstance(offset, timedelta):
         result['offset'] = {'days': offset.days, 'seconds': offset.seconds,
