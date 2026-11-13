@@ -124,3 +124,61 @@ async def reload_after_yaml(hass, captured, *, verify_source, guard, record_inte
             expected = FILTER_SCHEMA(after['options'].get('filter', {})).get_filter()
             _need(filt(old) == expected(old) and filt(new) == expected(new), 'runtime_filter')
     return captured.expected
+
+
+def _projection(rows):
+    """Same canonical imported-bridge projection as the isolated checker."""
+    from homeassistant.components.homekit.const import BRIDGE_NAME, DEFAULT_PORT
+    return sorted([[row['data'].get('name', BRIDGE_NAME),
+                    row['data'].get('port', DEFAULT_PORT),
+                    row['options'].get('filter', {})]
+                   for row in rows if row['identity']['source'] == 'import'],
+                  key=lambda row: (row[0], row[1]))
+
+
+class HomeKitFilterPhase:
+    """Live phase bound to both ORIGINAL checker seals and native bridge state."""
+    def __init__(self, hass, mapping, runtime_expected):
+        from .yaml_validation_worker import _fingerprint
+        seals = [row for row in runtime_expected if row[0] == 'homekit']
+        _need(len(seals) == 1 and None not in seals[0][1:] and seals[0][1] != seals[0][2],
+              'checker_seal_missing')
+        self.hass, self.mapping = hass, dict(mapping)
+        self.old_digest, self.new_digest = seals[0][1:]
+        entries = tuple(sorted(hass.config_entries.async_entries('homekit'), key=lambda e: e.entry_id))
+        rows = tuple(read_entry(hass, entry.entry_id) for entry in entries)
+        digest = _fingerprint(_projection(rows))
+        _need(digest in (self.old_digest, self.new_digest), 'baseline_projection')
+        self.position = 'before' if digest == self.old_digest else 'after'
+        selected = self.mapping if self.position == 'before' else {v: k for k, v in self.mapping.items()}
+        self.capture = capture(hass, selected)
+        desired = self.new_digest if self.position == 'before' else self.old_digest
+        _need(_fingerprint(_projection(self.capture.expected)) == desired, 'candidate_projection')
+        self.active = False
+
+    def check(self):
+        _need(not self.active, 'reload_pending')
+        ids = tuple(row['identity']['entry_id'] for row in self.capture.entries)
+        _need(tuple(sorted(e.entry_id for e in self.hass.config_entries.async_entries('homekit'))) == ids,
+              'inventory_changed')
+        _need(tuple(read_entry(self.hass, key) for key in ids) == self.capture.entries,
+              'entry_changed')
+        _need(tuple(_bridge_identity(self.hass.config_entries.async_get_entry(key)) for key in ids)
+              == self.capture.bridge_identity, 'bridge_identity_changed')
+
+    async def activate(self, *, direction, verify_source, guard, record_intent, settle):
+        expected = 'before' if direction == 'forward' else 'after'
+        _need(direction in ('forward', 'rollback') and self.position == expected, 'wrong_position')
+        self.check()
+        self.active = True
+        try:
+            await reload_after_yaml(self.hass, self.capture, verify_source=verify_source,
+                guard=guard, record_intent=record_intent, settle=settle)
+            self.position = 'after' if direction == 'forward' else 'before'
+            selected = {v: k for k, v in self.mapping.items()} if self.position == 'after' else self.mapping
+            self.capture = capture(self.hass, selected)
+        except BaseException:
+            # Active stays set after an uncertain native effect: no replay.
+            raise
+        self.active = False
+        self.check()

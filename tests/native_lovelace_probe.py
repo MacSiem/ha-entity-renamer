@@ -9,7 +9,7 @@ import argparse
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-NAMES = ('reference_planner', 'persistence', 'dashboard_plan', 'lovelace_native', 'transaction', 'journal', 'energy_plan', 'energy_native', 'helper_plan', 'helper_native', 'helper_persistence')
+NAMES = ('reference_planner', 'persistence', 'dashboard_custom', 'dashboard_plan', 'lovelace_native', 'transaction', 'journal', 'energy_plan', 'energy_native', 'helper_plan', 'helper_native', 'helper_persistence')
 sources = {name: (ROOT / 'custom_components/ha_entity_renamer' / (name + '.py')).read_text()
            for name in NAMES}
 sources['native_helper_persistence_scenario'] = (ROOT / 'tests/native_helper_persistence_scenario.py').read_text()

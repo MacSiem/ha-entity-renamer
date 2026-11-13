@@ -180,6 +180,33 @@ def changed_domains(before, after):
 
 
 
+def _homekit_filter_only(before, after, mapping):
+    """True only for exact mapped entity-list edits in the same YAML bridges."""
+    from copy import deepcopy
+    if type(mapping) is not dict or not mapping:
+        return False
+    old, new = before.get('homekit'), after.get('homekit')
+    old = old if type(old) is list else [old]
+    new = new if type(new) is list else [new]
+    if len(old) != len(new) or not old or any(type(v) is not dict for v in old + new):
+        return False
+    projected = deepcopy(old)
+    for bridge in projected:
+        filt = bridge.get('filter', {})
+        if type(filt) is not dict:
+            return False
+        for key in ('include_entities', 'exclude_entities'):
+            if key not in filt:
+                continue
+            values = filt[key]
+            if type(values) is not list or any(type(v) is not str for v in values):
+                return False
+            filt[key] = [mapping.get(v, v) for v in values]
+            if len(set(filt[key])) != len(filt[key]):
+                return False
+    return projected == new and old != new
+
+
 def _normal(value):
     """Bounded, typed native config encoding; never render templates or use repr."""
     from collections.abc import Mapping

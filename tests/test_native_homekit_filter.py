@@ -17,3 +17,13 @@ class HomeKitFilterTests(unittest.TestCase):
                 plan_filter({'filter': {'exclude_entities': values}}, {'sensor.old': 'sensor.new'})
 
 if __name__ == '__main__': unittest.main()
+
+class HomeKitReceiptTests(unittest.TestCase):
+    def test_worker_admits_only_selected_filter_lists(self):
+        from custom_components.ha_entity_renamer.yaml_validation_worker import _homekit_filter_only
+        before = {'homekit': [{'name':'Bridge', 'filter': {'exclude_entities':['sensor.old']}}]}
+        after = {'homekit': [{'name':'Bridge', 'filter': {'exclude_entities':['sensor.new']}}]}
+        self.assertTrue(_homekit_filter_only(before, after, {'sensor.old':'sensor.new'}))
+        self.assertFalse(_homekit_filter_only(before, after, {'sensor.other':'sensor.new'}))
+        changed_name = {'homekit': [{'name':'Other', 'filter': {'exclude_entities':['sensor.new']}}]}
+        self.assertFalse(_homekit_filter_only(before, changed_name, {'sensor.old':'sensor.new'}))

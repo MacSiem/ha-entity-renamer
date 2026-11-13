@@ -49,6 +49,14 @@ class UtilityBaselineCodecTests(unittest.TestCase):
     def decode(self, value):
         return u.decode_runtime_baseline({'entry_id': 'entry', 'payload': value})
 
+    def test_core111_reuses_identical_core110_native_profile(self):
+        doc = baseline_document()
+        doc['core'] = '2026.11.1'
+        doc['helper_rows'][0]['compat_name'] = None
+        baseline = self.decode(doc)
+        self.assertEqual(u.encode_runtime_baseline(baseline)['payload']['core'], '2026.11.1')
+        self.assertTrue(u.verify_baseline_binding(baseline, doc['before'], doc['after']))
+
     def test_roundtrip_is_detached_frozen_and_bound_to_original_preparation(self):
         doc = baseline_document()
         baseline = self.decode(doc)

@@ -44,7 +44,8 @@ class UnsupportedEntryReferences(Refused):
         self.sources = tuple({'domain': plan.before['domain'],
             'entry_id': plan.before['identity']['entry_id'],
             'references': references(plan),
-            'reasons': sorted({marker.code for marker in plan.markers}) or ['unsupported_config_entry_change']}
+            'reasons': (['homekit_native_activation_receipt_required'] if plan.before['domain'] == 'homekit'
+                        else sorted({marker.code for marker in plan.markers}) or ['unsupported_config_entry_change'])}
             for plan in plans if plan.blocked or plan.changes)
         super().__init__('unsupported_config_entry_scope')
 
