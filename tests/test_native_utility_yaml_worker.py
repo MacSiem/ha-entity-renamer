@@ -53,3 +53,21 @@ class UtilityYAMLWorkerTests(unittest.IsolatedAsyncioTestCase):
         result = json.loads(stdout)
         self.assertEqual(result['status'], 'valid')
         self.assertEqual(len(result['runtime_expected'][1]), 64)
+
+    async def test_server_validation_reads_bound_isolated_result(self):
+        base = fixture.NativeBaselineTests(methodName='runTest')
+        await base.asyncSetUp()
+        self.addAsyncCleanup(base.asyncTearDown)
+        before, after = base.root / 'server-before', base.root / 'server-after'
+        before.mkdir(); after.mkdir()
+        for root, entity in ((before, 'sensor.old'), (after, 'sensor.new')):
+            (root / 'configuration.yaml').write_text(
+                'utility_meter:\n  selected:\n    source: ' + entity + '\n    cycle: daily\n')
+        validation = importlib.import_module(fixture.PACKAGE + '.native_utility_yaml_validation')
+        row = await validation.utility_projection(before, after, {'sensor.old':'sensor.new'},
+                                                   base.root, '2026.11.1', timeout=30)
+        self.assertEqual(row[0], 'utility_meter')
+        self.assertNotEqual(*row[1:])
+        with self.assertRaises(validation.YAMLValidationError):
+            await validation.utility_projection(before, after, {'sensor.foreign':'sensor.new'},
+                                                 base.root, '2026.11.1', timeout=30)
