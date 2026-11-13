@@ -21,7 +21,7 @@ class PowercalcTemplateIngress:
         from .powercalc_source_binding import PowercalcVendor
         obj = cls()
         obj.handoff, obj.hass, obj.rows = handoff, handoff.hass, []
-        obj.pending, obj.ready = {}, set()
+        obj.pending, obj.ready, obj.error = {}, set(), None
         mapping = dict(handoff.root.mapping)
         if handoff.direction == 'rollback':
             mapping = {new: old for old, new in mapping.items()}
@@ -54,26 +54,31 @@ class PowercalcTemplateIngress:
                         def action(event):
                             data = event.data
                             name, before, after = data.get('entity_id'), data.get('old_state'), data.get('new_state')
-                            if name in obj.ids and after is not None:
-                                entry = obj.registry.async_get(name)
-                                owners = [platform.entities[name] for platform in async_get_platforms(obj.hass, 'powercalc')
-                                          if name in platform.entities]
-                                _need(entry is not None and entry.id == obj.ids[name]
-                                      and entry.platform == 'powercalc' and len(owners) == 1
-                                      and type(owners[0]) in obj.classes and owners[0].registry_entry is entry,
-                                      'powercalc_template_ingress_registry_changed')
-                                key = (id(original.__self__), name)
-                                if before is None and after.state in ('unknown', 'unavailable') and key not in obj.ready:
-                                    obj.pending[key] = (original, event)
-                                    return
-                                if key in obj.pending:
-                                    try:
-                                        finite = Decimal(after.state).is_finite()
-                                    except (InvalidOperation, ValueError):
-                                        finite = False
-                                    if finite:
-                                        obj.pending.pop(key)
-                                        obj.ready.add(key)
+                            try:
+                                if name in obj.ids and after is not None:
+                                    entry = obj.registry.async_get(name)
+                                    owners = [platform.entities[name] for platform in async_get_platforms(obj.hass, 'powercalc')
+                                              if name in platform.entities]
+                                    _need(entry is not None and entry.id == obj.ids[name]
+                                          and entry.platform == 'powercalc' and len(owners) == 1
+                                          and type(owners[0]) in obj.classes and owners[0].registry_entry is entry,
+                                          'powercalc_template_ingress_registry_changed')
+                                    key = (id(original.__self__), name)
+                                    if before is None and after.state in ('unknown', 'unavailable') and key not in obj.ready:
+                                        obj.pending[key] = (original, event)
+                                        return
+                                    if key in obj.pending:
+                                        try:
+                                            finite = Decimal(after.state).is_finite()
+                                        except (InvalidOperation, ValueError):
+                                            finite = False
+                                        if finite:
+                                            obj.pending.pop(key)
+                                            obj.ready.add(key)
+                            except Exception as error:
+                                # HA dispatch logs callback errors; retain the error for
+                                # the owning transaction and deliver this real event.
+                                obj.error = error
                             original(event)
                         return action
                     wrapper = make_action(original)
@@ -99,3 +104,4 @@ class PowercalcTemplateIngress:
         pending, self.pending = self.pending, {}
         for original, event in pending.values():
             original(event)
+        _need(self.error is None, 'powercalc_template_ingress_callback_failed')
