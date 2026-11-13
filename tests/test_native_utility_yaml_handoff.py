@@ -47,12 +47,27 @@ class UtilityYAMLHandoffNativeTests(unittest.IsolatedAsyncioTestCase):
         intent=[]
         async def record(rows): intent.append(tuple(sorted(row.meter for row in rows)))
         def guard(): pass
-        forward = adapter.UtilityYAMLHandoff.capture(hass, {old:new})
+        binding_module = importlib.import_module(fixture.PACKAGE + '.native_utility_yaml_binding')
+        worker = importlib.import_module(fixture.PACKAGE + '.yaml_validation_worker')
+        from copy import deepcopy
+        before_projection = binding_module._projection(hass)
+        after_projection = deepcopy(before_projection)
+        for _, cfg in after_projection:
+            if cfg['source'] == old: cfg['source'] = new
+        seal = ('utility_meter', worker._fingerprint(before_projection), worker._fingerprint(after_projection))
+        binding = binding_module.UtilityYAMLBinding.capture(hass, {old:new}, (seal,))
+        self.assertTrue(binding.check_prefix(frozenset()))
+        refused=importlib.import_module(fixture.PACKAGE+'.transaction').Refused
+        with self.assertRaises(refused):
+            binding_module.UtilityYAMLBinding.capture(hass, {old:new},
+                (('utility_meter', '0'*64, seal[2]),))
+        forward = binding.handoff
         await forward.detach_group(old, guard=guard, record_intent=record)
         base.entity.async_update_entity(old, new_entity_id=new)
         await hass.async_block_till_done()
         changed_rows = await forward.attach_group(old, guard=guard)
         changed = next(e for e in changed_rows if e._parent_meter == 'p3_meter')
+        self.assertTrue(binding.check_prefix(frozenset((old,))))
         await hass.async_block_till_done()
         self.assertEqual(changed.native_value, old_value)
         self.assertIs(sensors()['p3_foreign_meter'], foreign)
@@ -67,6 +82,7 @@ class UtilityYAMLHandoffNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.native_value, old_value + Decimal('5'))
         self.assertIs(sensors()['p3_foreign_meter'], foreign)
         self.assertEqual(intent, [('p3_meter','p3_second_meter')]*2)
+        self.assertTrue(binding.check_prefix(frozenset()))
 
         # Exercise the durable sidecar on the same native actors, including
         # live postimage inspection and refusal after an orphaned intent.
