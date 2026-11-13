@@ -150,6 +150,24 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
                 reasons = report.setdefault('reasons', [])
                 if row not in reasons:
                     reasons.append(row)
+                if code.co_name == '_compare_controlled_powercalc' and str(error) == (
+                        'accepted_candidate_powercalc_native_graph_mismatch'):
+                    locals_ = sys._getframe(1).f_locals
+                    actual_graph = locals_['result']
+                    expected_graph = locals_['expected']
+                    def differences(before, after, path=()):
+                        if type(before) is dict and type(after) is dict and before.keys() == after.keys():
+                            return [item for key in before for item in differences(before[key], after[key], (*path, key))]
+                        if type(before) is list and type(after) is list and len(before) == len(after):
+                            return [item for index, (a, b) in enumerate(zip(before, after, strict=True))
+                                    for item in differences(a, b, (*path, index))]
+                        return [] if before == after else [[path, before, after]]
+                    report['inverse_graph_delta'] = [differences(wanted, actual_graph.get(key))
+                        for key, wanted in zip(('powercalc_sources', 'powercalc_candidate_sources'),
+                                               expected_graph, strict=True)]
+                    report['inverse_checker_status'] = {k: actual_graph.get(k) for k in
+                        ('status', 'errors', 'warnings', 'diagnostic', 'runtime_expected')}
+                    save()
         monitor.register_callback(slot, monitor.events.RAISE, trace)
         monitor.set_events(slot, monitor.events.RAISE)
         def stop():
