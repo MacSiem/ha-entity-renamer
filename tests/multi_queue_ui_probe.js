@@ -23,7 +23,7 @@ const wait = async name => {
     const member = await browser.newContext({viewport:{width:1280,height:900}});
     const memberAccess = fs.readFileSync(dir + '/render-user-token', 'utf8');
     await member.addInitScript(({access,origin}) => localStorage.setItem('hassTokens', JSON.stringify({
-      access_token:access, token_type:'Bearer', expires_in:1800, expires:Date.now()+1700000,
+      access_token:access, token_type:'Bearer', expires_in:18000, expires:Date.now()+17900000,
       hassUrl:origin, clientId:origin+'/'})), {access:memberAccess, origin});
     const memberPage = await member.newPage();
     await memberPage.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
@@ -36,7 +36,7 @@ const wait = async name => {
     await member.close();
     const context = await browser.newContext({viewport:{width:1280,height:900}});
     await context.addInitScript(({access,origin}) => localStorage.setItem('hassTokens', JSON.stringify({
-      access_token:access, token_type:'Bearer', expires_in:1800, expires:Date.now()+1700000,
+      access_token:access, token_type:'Bearer', expires_in:18000, expires:Date.now()+17900000,
       hassUrl:origin, clientId:origin+'/'})), {access, origin});
     const page = await context.newPage();
     await page.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
