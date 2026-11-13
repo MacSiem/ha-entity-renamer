@@ -65,7 +65,7 @@ class MixedPhase(PowercalcColdPhase):
             (root / 'configuration.yaml').write_bytes(b'')
             await self._before_loader(hass, root)
             card = 'www/ha-entity-renamer.js'
-            source = Path(__file__).resolve().parents[1] / 'custom_components/ha_entity_renamer' / card
+            source = Path(__file__).resolve().parents[1] / 'ha-entity-renamer.js'
             target = self.installed_component / card
             target.parent.mkdir()
             shutil.copyfile(source, target)
