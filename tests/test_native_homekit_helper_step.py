@@ -50,7 +50,8 @@ class HomeKitHelperNativeTests(unittest.IsolatedAsyncioTestCase):
                 entry.entry_id, {'entry_id':entry.entry_id, 'state':'loaded'}, auth))
             opposite=lifecycle.RestoreAuthorization('operation', 'f'*64, 'a'*64,
                          'rolled_back' if source == old else 'applied')
-            with self.assertRaises(Exception):
+            refused=importlib.import_module(fixture.PACKAGE+'.transaction').Refused
+            with self.assertRaises(refused):
                 await observer.verify_lifecycle_runtime(
                     entry.entry_id, {'entry_id':entry.entry_id, 'state':'loaded'}, opposite)
             path.write_text(yaml(target))
