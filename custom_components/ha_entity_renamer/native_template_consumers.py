@@ -81,7 +81,7 @@ _BINARY_PINS['2026.11.0'] = {'components/template/binary_sensor.py': 'd999778cef
 
 def native_coordinators(hass):
     from homeassistant.const import __version__
-    if __version__ == '2026.11.0':
+    if __version__ in ('2026.11.0', '2026.11.1'):
         from homeassistant.components.template.helpers import DATA_COORDINATORS
     else:
         from homeassistant.components.template import DATA_COORDINATORS
@@ -131,7 +131,7 @@ def _cleanup_index(native, entity, tracker):
     _need(entity._template_result_info is tracker and type(entity._on_remove) is list,
           'native_cleanup_owner_changed')
     owner, method = ((entity, TemplateEntity._async_remove_template_result_info)
-                     if native.version == '2026.11.0' else
+                     if native.version in ('2026.11.0', '2026.11.1') else
                      (tracker, TrackTemplateResultInfo.async_remove))
     matches = [(i, callback) for i, callback in enumerate(entity._on_remove)
                if _bound(callback, owner, method)]
@@ -163,10 +163,11 @@ class _Native:
         from homeassistant.components.template import template_entity as te, sensor, binary_sensor
         from homeassistant.helpers import template as ht, config_validation as cv
         from .native_utility_setup_audit import _SOURCES
-        _need(type(hass) is HomeAssistant and __version__ in _PINS, 'native_runtime_unverified')
+        pin = '2026.11.0' if __version__ == '2026.11.1' else __version__
+        _need(type(hass) is HomeAssistant and pin in _PINS, 'native_runtime_unverified')
         self.hass, self.version = hass, __version__
         self.root = Path(import_module('homeassistant').__file__).resolve().parent
-        self.pins = {**_SOURCES[__version__], **_PINS[__version__], **_BINARY_PINS[__version__]}
+        self.pins = {**_SOURCES[pin], **_PINS[pin], **_BINARY_PINS[pin]}
         self.binary_module, self.template_module, self.cv = binary_sensor, ht, cv
         self.boolean_module = import_module('homeassistant.helpers.template' if __version__ == '2025.6.0'
                                             else 'homeassistant.helpers.template.helpers')
@@ -206,7 +207,7 @@ class _Native:
             (event, '_async_track_state_change_event'),
             (event, '_async_track_event'), (event, '_remove_listener'),
             (event, '_async_dispatch_entity_id_event'), (ep, 'async_get_platforms')]
-        if __version__ == '2026.11.0':
+        if __version__ in ('2026.11.0', '2026.11.1'):
             self.refs += [(te.TemplateEntity, '_async_remove_template_result_info'),
                           (te.TemplateEntity, 'async_entity_id_changed')]
         if __version__ == '2025.6.0':
@@ -396,7 +397,7 @@ def _live_binary(native, entity):
           and boolean.forgiving_boolean.__globals__ is vars(boolean)
           and native.cv.boolean.__globals__ is vars(native.cv),
           'native_binary_boolean_binding_changed')
-    if native.version in ('2026.10.2', '2026.10.4', '2026.11.0'):
+    if native.version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
         _need(vars(boolean).get('cv') is native.cv,
               'native_binary_boolean_binding_changed')
     else:
@@ -518,7 +519,7 @@ def _source_semantics(native, entity, registry_row, semantic, evidence, document
               and entity.unique_id == entry_id, 'entry_source_identity_unverified')
         options = dict(source['options'])
         options.pop('template_type')
-        if native.version in ('2026.10.2', '2026.10.4', '2026.11.0'):
+        if native.version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
             additional = options.pop('additional_options', None)
             if additional:
                 options.update(additional)
