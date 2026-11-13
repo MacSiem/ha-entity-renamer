@@ -17,7 +17,7 @@ def owned_slot(data, source, target, registry_id, *, required):
         if not value:
             raise Refused('restore_uuid_ownership_unverified')
 
-    need(__version__ == '2026.11.0' and type(data) is RestoreStateData
+    need(__version__ in ('2026.11.0', '2026.11.1') and type(data) is RestoreStateData
          and data.hass.data.get(DATA_RESTORE_STATE) is data
          and type(source) is str and type(target) is str
          and type(registry_id) is str and bool(registry_id)

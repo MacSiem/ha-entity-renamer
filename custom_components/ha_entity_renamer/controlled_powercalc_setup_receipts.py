@@ -32,7 +32,7 @@ def validate_handoff(chain, reference, direction):
                     _event_id(['controlled_pc_population', chain.root_id, direction, 'intent']),
                     'controlled_powercalc_population_intent')
     common = (chain.root_id, chain.operation_id, chain.plan.fingerprint, direction)
-    uuid_restore = chain.original_receipt.version == '2026.11.0'
+    uuid_restore = chain.original_receipt.version in ('2026.11.0', '2026.11.1')
     _need(all((event.get('root'), event.get('operation_id'), event.get('fingerprint'), event.get('direction'))
               == common and type(event.get('schema')) is int
               for event in (handoff, unload))
@@ -111,7 +111,7 @@ def validate_controlled_setup(chain, payload, change):
               == common and type(event.get('schema')) is int
               for event in (setup, intent, handoff, unload))
           and all(event['schema'] == 1 for event in (setup, intent, unload))
-          and handoff['schema'] == (2 if chain.original_receipt.version == '2026.11.0' else 1)
+          and handoff['schema'] == (2 if chain.original_receipt.version in ('2026.11.0', '2026.11.1') else 1)
           and setup.get('phase_index') == intent.get('phase_index') == index
           and setup.get('yaml_intent') == intent.get('yaml_intent') == payload.get('intent')
           and setup.get('handoff') == intent.get('handoff')

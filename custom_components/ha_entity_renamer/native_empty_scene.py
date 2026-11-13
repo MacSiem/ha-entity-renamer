@@ -18,7 +18,7 @@ class NativeEmptySceneFence:
     def __init__(self, hass):
         from homeassistant.core import HomeAssistant, callback
         from homeassistant.const import __version__
-        _need(type(hass) is HomeAssistant and __version__ in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0'))
+        _need(type(hass) is HomeAssistant and __version__ in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'))
         self.hass, self.thread = hass, threading.get_ident()
         self.changed, self.closed = False, False
         self.removers = []

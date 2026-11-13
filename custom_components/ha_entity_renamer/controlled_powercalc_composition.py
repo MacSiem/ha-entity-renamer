@@ -16,6 +16,15 @@ from .yaml_source_binding import OriginalSourceEvidence
 PROFILE = 'template_controlled_powercalc_v1'
 
 
+def registry_population_kind(composition, entity_id, registry_id, version):
+    qualified = {'energy_positive_delta'}
+    if version in ('2026.11.0', '2026.11.1'):
+        qualified |= {'energy_integral', 'profile_fixed', 'profile_linear', 'profile_lut', 'power_sum'}
+    rows = [kind for eid, uid, kind in (composition.descriptors if hasattr(composition, 'descriptors') else composition.population)
+            if (eid, uid) == (entity_id, registry_id) and kind in qualified]
+    return rows[0] if len(rows) == 1 else None
+
+
 @dataclass(frozen=True)
 class ControlledPowercalcComposition(ControlledReloadComposition):
     previous: PowercalcPreviousOriginal | None = None
@@ -74,8 +83,8 @@ class ControlledPowercalcComposition(ControlledReloadComposition):
         groups = {(group.entity_id, group.registry_id) for group in self.previous.groups}
         _need(groups == {(eid, uid) for eid, uid, kind in self.population
                          if kind == 'energy_positive_delta'})
-        _need(all(catalog[uid]['entity_id'] not in dict(self.mapping) or (eid, uid) in groups
-                  for eid, uid, _ in self.population))
+        _need(all(registry_population_kind(self, row['entity_id'], row['id'], baseline.receipt.version)
+                  for row in selected if row.get('platform') == 'powercalc'))
         PowercalcComposition(self.evidence, self.previous, self.prepared_digests,
             self.source_history, self.consumer_history, self.evidence.powercalc_sources.sha256,
             self.energy_original_physical).assert_baseline(baseline, _mixed_template=True)

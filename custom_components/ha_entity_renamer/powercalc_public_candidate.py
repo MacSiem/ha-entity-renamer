@@ -58,12 +58,10 @@ def build_candidate(original, mapping, version, energy=None, *, mixed=False, sou
         _need(old_group.startswith('sensor.') and new_group.startswith('sensor.'),
               'group_sensor_identity')
         entry_id = group.get('config_entry_id')
-        if mixed and entry_id is None:
-            # Native setup resolves the new entity ID by unique ID, then
-            # Core uses its object ID as the native suggested ID.
-            _need(version == '2026.11.0'
-                  and group.get('suggested_object_id') == old_group.removeprefix('sensor.'),
-                  'yaml_group_suggested_identity')
+        if mixed and version in ('2026.11.0', '2026.11.1'):
+            # The pinned vendor resolves every qualified own ID by unique ID.
+            _need(group.get('suggested_object_id') == old_group.removeprefix('sensor.'),
+                  'powercalc_suggested_identity')
             derived_groups[old_group] = new_group.removeprefix('sensor.')
             continue
         _need(group.get('suggested_object_id') == old_group.removeprefix('sensor.'),
@@ -74,6 +72,14 @@ def build_candidate(original, mapping, version, energy=None, *, mixed=False, sou
               'group_entry_metadata')
         matches[0]['data']['_energy_entity'] = new_group
         derived_groups[old_group] = new_group.removeprefix('sensor.')
+    if mixed and version in ('2026.11.0', '2026.11.1'):
+        from .native_config_transition import _projection
+        from .powercalc_group_metadata import controlled_entry_change
+        for row in entries:
+            if row.get('domain') == 'powercalc':
+                change = controlled_entry_change(_projection(row), mapping)
+                if change is not None:
+                    row['data'] = change.after['data']
     ordered = (sorted(selected, key=lambda row: row['entity_id']) if mixed else [source, groups[0]])
     for row in ordered:
         old = row['entity_id']

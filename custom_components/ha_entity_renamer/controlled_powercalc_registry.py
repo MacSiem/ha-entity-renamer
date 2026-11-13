@@ -24,10 +24,12 @@ class ControlledPowercalcRegistryNode:
         source, target = ((change.before['entity_id'], change.after['entity_id'])
                           if handoff.direction == 'forward' else
                           (change.after['entity_id'], change.before['entity_id']))
-        groups = [row for row in handoff.population.counters
-                  if row.kind == 'group' and row.entity_id == source
-                  and row.target_id == target and row.registry_id == change.identity]
-        _need(len(groups) == 1 and root.chain.active is intent)
+        old = change.before['entity_id']
+        from .controlled_powercalc_composition import registry_population_kind
+        kind = registry_population_kind(root.composition, old, change.identity,
+                                        root.chain.original_receipt.version)
+        _need(kind is not None and (source, change.identity, kind) in handoff.population.descriptors
+              and root.chain.active is intent)
         inner = await NativeTemplateStateRegistryEffect.capture(root, io, change, context,
             intent, observations, root.observation_state, guard)
         handoff.require_inactive()

@@ -103,7 +103,7 @@ def _store_writer(store):
     from homeassistant.helpers.storage import Store
     refs = ((Store, 'async_save'), (Store, '_async_handle_write_data'),
             (Store, '_async_write_data'))
-    if __version__ == '2026.11.0':
+    if __version__ in ('2026.11.0', '2026.11.1'):
         from homeassistant.helpers.storage import _FileStoreIO
         io = store._io
         _need(type(io) is _FileStoreIO and io.path == store.path
@@ -646,6 +646,8 @@ class ControlledPowercalcHandoff:
                 if new_member != old_member and old_member in rows:
                     _need(new_member not in target, 'pss_member_target_occupied')
                     state = rows[old_member]
+                    if new == old:
+                        target.pop(old_member)
                     target[new_member] = None if state is None else _clone(state, new_member)
             targets[new] = target
         for name, rows in targets.items():
@@ -657,7 +659,7 @@ class ControlledPowercalcHandoff:
         staged_restore = []
         for uuid, old, new, kind, payload in payloads:
             _need(old not in data.entities and new not in data.entities, 'restore_target_changed')
-            if __version__ == '2026.11.0':
+            if __version__ in ('2026.11.0', '2026.11.1'):
                 from .native_restore_uuid import owned_slot
                 from . import native_restore_state_payload as codec
                 from custom_components.powercalc.sensors.energy import VirtualEnergyExtraStoredData
@@ -670,14 +672,14 @@ class ControlledPowercalcHandoff:
                 _need(new == old or new not in data.last_states
                       or aliases is not None and new in aliases['restore_owned'], 'restore_target_changed')
             clone = materialize_integration_payload(payload) if kind == 'integration' else materialize_group(payload)
-            if __version__ == '2026.11.0':
+            if __version__ in ('2026.11.0', '2026.11.1'):
                 _need(clone.entity_registry_id == uuid, 'restore_uuid_payload_changed')
                 owned_restore.add(new)
             else:
                 owned_restore.update((old, new))
             staged_restore.append((uuid, new, clone))
         for uuid, new, clone in staged_restore:
-            if __version__ == '2026.11.0':
+            if __version__ in ('2026.11.0', '2026.11.1'):
                 data.last_states_by_entity_registry_id[uuid] = clone
             else:
                 data.last_states[new] = clone
@@ -735,7 +737,7 @@ class ControlledPowercalcHandoff:
                         'full_total': payload.full_total, 'precision': payload.precision, 'unit': payload.unit}
             encoded.append({'uuid': uuid, 'before_id': old, 'after_id': new, 'kind': kind, 'payload': body})
         receipt = {'kind': 'controlled_powercalc_population_receipt',
-                   'schema': 2 if __version__ == '2026.11.0' else 1,
+                   'schema': 2 if __version__ in ('2026.11.0', '2026.11.1') else 1,
                    'root': self.chain.root_id, 'operation_id': self.chain.operation_id,
                    'fingerprint': self.chain.plan.fingerprint, 'direction': direction,
                    'intent': list(self.intent), 'source_head': intent['source_head'],

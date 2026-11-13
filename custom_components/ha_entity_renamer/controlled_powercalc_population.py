@@ -100,7 +100,7 @@ def qualify_population(hass, bound, mapping, previous, *, inverse_aliases=None):
             allowed_restore = (inverse_aliases or {}).get('restore_owned', {})
             allowed_pss = (inverse_aliases or {}).get('pss_owned', {})
             from homeassistant.const import __version__
-            if __version__ == '2026.11.0':
+            if __version__ in ('2026.11.0', '2026.11.1'):
                 from .native_restore_uuid import owned_slot
                 owned_slot(restore, identity, target, row.registry_id, required=False)
                 _need(target not in restore.entities, 'restore_target_occupied')
@@ -180,7 +180,7 @@ def snapshot_removed(hass, population, *, allowed_targets=()):
               and entity.registry_entry.id == counter.registry_id
               and entity.registry_entry.config_entry_id == counter.entry_id
               and old not in data.entities, 'inactive_or_target_changed')
-        if __version__ == '2026.11.0':
+        if __version__ in ('2026.11.0', '2026.11.1'):
             from .native_restore_uuid import owned_slot
             stored = owned_slot(data, old, new, counter.registry_id, required=True)
             _need(stored.state.entity_id == old, 'restore_source_id_changed')

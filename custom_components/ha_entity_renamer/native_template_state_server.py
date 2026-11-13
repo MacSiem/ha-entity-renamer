@@ -407,8 +407,20 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         _need(entry_change is not None or not any(row['domain'] == 'template' for row in entries), 'template_entry_unsupported')
         # Other native helper references also require their own lifecycle route.
         rows = documents['core.entity_registry']['data']['entities']
-        _need((_powercalc_group_helper_coverage(tuple(item for item in plans if item not in template_plans), rows, pc_previous, self.mapping) if mixed_powercalc
-               else True), 'helper_dependency_unsupported')
+        if mixed_powercalc and self.receipt.version in ('2026.11.0', '2026.11.1'):
+            from .powercalc_group_metadata import controlled_entry_change
+            for item in plans:
+                if item.before.get('domain') != 'powercalc':
+                    continue
+                metadata = controlled_entry_change(item.before, self.mapping)
+                _need(metadata is not None or not item.changes and not item.markers,
+                      'helper_dependency_unsupported')
+                if metadata is not None:
+                    pc_metadata.append(metadata)
+        else:
+            _need(not mixed_powercalc or _powercalc_group_helper_coverage(
+                tuple(item for item in plans if item not in template_plans), rows, pc_previous, self.mapping),
+                'helper_dependency_unsupported')
         bridge = NativeRegistryBridge(NativeRegistryIO(self.hass), self.recorder)
         registry = []
         for old, new in sorted(self.mapping.items()):
@@ -431,11 +443,19 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 from .helper_native import read_entry
                 group = next((item for item in pc_previous.groups if item.entity_id == old
                               and item.registry_id == source[0]['id']), None)
-                _need(group is not None, 'powercalc_group_scope')
-                prepared = prepare_group_registry(prepared, group, self.receipt.version, controlled=True)
-                if source[0].get('config_entry_id') is not None:
-                    pc_metadata.append(prepare_group_metadata(
-                        read_entry(self.hass, source[0]['config_entry_id']), old, new))
+                if self.receipt.version in ('2026.11.0', '2026.11.1'):
+                    from .powercalc_group_registry_preparation import prepare_derived_registry
+                    from .controlled_powercalc_composition import registry_population_kind
+                    _need(registry_population_kind(
+                        self.powercalc_population, old, source[0]['id'], self.receipt.version,
+                    ) is not None, 'powercalc_owned_id_scope')
+                    prepared = prepare_derived_registry(prepared)
+                else:
+                    _need(group is not None, 'powercalc_group_scope')
+                    prepared = prepare_group_registry(prepared, group, self.receipt.version, controlled=True)
+                    if source[0].get('config_entry_id') is not None:
+                        pc_metadata.append(prepare_group_metadata(
+                            read_entry(self.hass, source[0]['config_entry_id']), old, new))
             if old in owned_script:
                 from .native_own_script_registry_preparation import own_script_registry_preparation
                 service_audit.check()

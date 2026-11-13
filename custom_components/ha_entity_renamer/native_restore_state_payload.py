@@ -15,7 +15,7 @@ import math
 import re
 import sys
 
-PINS = ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0')
+PINS = ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1')
 MAX_BYTES = 1024 * 1024
 MAX_DEPTH = 32
 MAX_NODES = 32768
@@ -131,7 +131,7 @@ def _shape(payload):
 
 def _shape_for_version(payload, version):
     _shape(payload)
-    _require(('entity_registry_id' in payload) is (version == '2026.11.0'),
+    _require(('entity_registry_id' in payload) is (version in ('2026.11.0', '2026.11.1')),
              'stored_state_version_schema')
 
 
@@ -244,7 +244,7 @@ def _native_tree(value, api):
         elif isinstance(item, str):
             # Native JSON encodes the underlying string; never call __str__.
             _tree(str.__str__(item))
-        elif kind is datetime or (api[0] in ('2026.10.2', '2026.10.4', '2026.11.0') and kind in (date, time)):
+        elif kind is datetime or (api[0] in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1') and kind in (date, time)):
             pass
         else:
             _tree(item)  # exact JSON scalar types only; unknown class refused
@@ -285,7 +285,7 @@ def _capture(stored, api, *, powercalc_extra=None):
     # stdlib JSONEncoder, which cannot consume State.json_fragment on these pins.
     raw = {'state': stored.state.json_fragment, 'extra_data': extra,
            'last_seen': stored.last_seen}
-    if api[0] == '2026.11.0':
+    if api[0] in ('2026.11.0', '2026.11.1'):
         raw['entity_registry_id'] = stored.entity_registry_id
     _require(type(stored.last_seen) is datetime, 'native_last_seen_type')
     result = _parse(json_bytes(raw))
@@ -323,7 +323,7 @@ def materialize(payload):
                                          parent_id=context['parent_id']))
     extra = None if row['extra_data'] is None else RestoredExtraData(row['extra_data'])
     args = (native_state, extra, _timestamp(row['last_seen']))
-    clone = StoredState(*args, row['entity_registry_id']) if version == '2026.11.0' else StoredState(*args)
+    clone = StoredState(*args, row['entity_registry_id']) if version in ('2026.11.0', '2026.11.1') else StoredState(*args)
     _require(_canonical(_capture(clone, api)) == payload.after_json,
              'native_clone_not_exact')
     return clone
@@ -358,7 +358,7 @@ class PreparedIntegrationPayload:
                  and capture['entity_id'] == before['state']['entity_id']
                  and capture['before_sha256'] == self.before_digest,
                  'integration_capture_binding')
-        if self.core_version == '2026.11.0':
+        if self.core_version in ('2026.11.0', '2026.11.1'):
             _require(before['entity_registry_id'] == capture['helper_uuid'],
                      'integration_registry_uuid_changed')
         for key in ('full_state_text', 'last_valid_state_text'):
@@ -527,7 +527,7 @@ def materialize_integration_payload(payload):
         context=Context(id=context['id'], user_id=context['user_id'],
                         parent_id=context['parent_id'])),
         RestoredExtraData(row['extra_data']), _timestamp(row['last_seen']),
-        *([row['entity_registry_id']] if version == '2026.11.0' else []))
+        *([row['entity_registry_id']] if version in ('2026.11.0', '2026.11.1') else []))
     _require(_canonical(_capture(clone, api)) == payload.after_json, 'native_clone_not_exact')
     parsed = IntegrationSensorExtraStoredData.from_dict(clone.extra_data.as_dict())
     _require(type(parsed) is IntegrationSensorExtraStoredData

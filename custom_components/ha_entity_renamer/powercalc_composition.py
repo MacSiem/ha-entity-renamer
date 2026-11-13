@@ -96,7 +96,7 @@ def _previous(previous, baseline, evidence):
           and previous.receipt_sha256 == hashlib.sha256(baseline.receipt_json).hexdigest()
           and previous.sources_sha256 == evidence.powercalc_sources.sha256
           and previous.core_version == baseline.receipt.version
-          and previous.core_version in ('2026.10.2', '2026.10.4', '2026.11.0')
+          and previous.core_version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1')
           and type(previous.groups) is tuple and bool(previous.groups))
     _identity(previous.root_identity, True)
     _identity(previous.storage_identity, True)

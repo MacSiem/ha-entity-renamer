@@ -170,6 +170,9 @@ def validate_group_receipt(chain, payload, change):
         ids = (change.before['entity_id'], change.after['entity_id'])
         if direction == 'rollback':
             ids = ids[::-1]
+        from .controlled_powercalc_composition import registry_population_kind
+        kind = registry_population_kind(composition, change.before['entity_id'], change.identity,
+                                        chain.original_receipt.version)
         _need(value.get('schema') == 1 and value.get('root') == chain.root_id
               and value.get('operation_id') == chain.operation_id
               and value.get('fingerprint') == chain.plan.fingerprint
@@ -180,8 +183,11 @@ def validate_group_receipt(chain, payload, change):
               and value.get('registry_uuid') == change.identity
               and value.get('registry_preparation', value.get('prepared_digest')) == prepared_registry_digest(change)
               and value.get('mutation') == payload['mutation']
-              and any((row['uuid'], row['kind'], row['before_id'], row['after_id']) ==
-                      (change.identity, 'group', *ids) for row in handoff['population']),
+              and kind is not None
+              and (kind not in ('energy_positive_delta', 'energy_integral')
+                   or any((row['uuid'], row['kind'], row['before_id'], row['after_id']) ==
+                          (change.identity, 'group' if kind == 'energy_positive_delta' else 'integration', *ids)
+                          for row in handoff['population'])),
               'controlled_group_lineage')
         return
     if (type(change) is not PreparedRegistryChange or change.kind != 'entity'

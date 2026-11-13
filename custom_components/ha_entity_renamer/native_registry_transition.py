@@ -21,7 +21,8 @@ from .native_registry import PreparedRegistryChange
 MAX_DOCUMENT_BYTES = 32 * 1024 * 1024
 _SCHEMAS = {'2025.6.0': {'entity': (1, 17), 'device': (1, 9)},
             '2026.10.2': {'entity': (1, 23), 'device': (3, 4)}, '2026.10.4': {'entity': (1, 23), 'device': (3, 4)},
-            '2026.11.0': {'entity': (1, 24), 'device': (3, 4)}}
+            '2026.11.0': {'entity': (1, 24), 'device': (3, 4)},
+            '2026.11.1': {'entity': (1, 24), 'device': (3, 4)}}
 
 
 class RegistryTransitionError(ValueError):
@@ -145,7 +146,7 @@ def _document(raw, kind, version):
             or type(doc['data']) is not dict):
         _fail('registry_transition_schema_invalid')
     lists = ['entities', 'deleted_entities'] if kind == 'entity' else ['devices', 'deleted_devices']
-    if version in ('2026.10.2', '2026.10.4', '2026.11.0'):
+    if version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
         if kind == 'entity' and type(doc['data'].get('settings')) is not dict:
             _fail('registry_transition_schema_invalid')
         if kind == 'device':
@@ -284,13 +285,13 @@ def validate_registry_transition(source_raw, result_raw, prepared, *, version,
                {'entity_id', 'name'} if prepared.kind == 'entity' else {'name_by_user'})
     group_suggested_move = (_powercalc_group_suggested_move(before, after)
                             and powercalc_group_effect is True
-                            and version in ('2026.10.2', '2026.10.4', '2026.11.0'))
+                            and version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'))
     if group_suggested_move:
         allowed.add('suggested_object_id')
     if script_unique_move and _native_script_default_name_move(before, after):
         allowed.add('original_name')
     if script_unique_move and _native_script_suggested_move(before, after):
-        if version not in ('2026.10.2', '2026.10.4', '2026.11.0'):
+        if version not in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
             _fail('registry_transition_preparation_invalid')
         allowed.add('suggested_object_id')
     if (type(before) is not dict or type(after) is not dict

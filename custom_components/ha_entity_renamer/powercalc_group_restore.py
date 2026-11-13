@@ -95,6 +95,6 @@ def materialize(payload):
         last_reported=native._timestamp(row['last_reported']),
         context=Context(id=context['id'], user_id=context['user_id'], parent_id=context['parent_id']))
     args = (state, RestoredExtraData(after['extra_data']), native._timestamp(after['last_seen']))
-    clone = StoredState(*args, after['entity_registry_id']) if api[0] == '2026.11.0' else StoredState(*args)
+    clone = StoredState(*args, after['entity_registry_id']) if api[0] in ('2026.11.0', '2026.11.1') else StoredState(*args)
     _need(native._canonical(native._capture(clone, api)) == payload.after_json, 'native_clone_changed')
     return clone
