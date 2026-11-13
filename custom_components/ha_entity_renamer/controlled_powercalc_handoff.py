@@ -507,6 +507,9 @@ class ControlledPowercalcHandoff:
         self._scope()
         _need(direction in ('forward', 'rollback') and self.chain.active is None, 'direction')
         entries = tuple(self.hass.config_entries.async_entries('powercalc'))
+        self.original_entities = {name: entity for platform in async_get_platforms(self.hass, 'powercalc')
+                                  for name, entity in platform.entities.items()}
+        _need(set(self.original_entities) == set(self.population.entity_ids), 'original_population_changed')
         _need(all(entry.disabled_by is not None or entry.state is ConfigEntryState.LOADED for entry in entries),
               'unloaded_enabled_entry_unsupported')
         pss = self.hass.data.get('powercalc_group_storage')
@@ -775,6 +778,40 @@ class ControlledPowercalcHandoff:
         self.require_inactive()
         return self.receipt
 
+    def _retire_leaf_indexes(self, vendor):
+        """Retire only exact, removed predecessors from the vendor's live index."""
+        from homeassistant.helpers import entity_registry as er
+        from homeassistant.helpers.entity import EntityPlatformState
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        mapping = (self.root.mapping if self.direction == 'forward' else
+                   {new: old for old, new in self.root.mapping.items()})
+        index = self.hass.data['powercalc'].get('entities')
+        active = {name: entity for platform in async_get_platforms(self.hass, 'powercalc')
+                  for name, entity in platform.entities.items()}
+        registry = er.async_get(self.hass)
+        _need(type(index) is dict, 'leaf_index_unavailable')
+        retired = {}
+        classes = {'energy_integral': 'VirtualEnergySensor', 'profile_fixed': 'VirtualPowerSensor',
+                   'profile_linear': 'VirtualPowerSensor', 'profile_lut': 'VirtualPowerSensor'}
+        for old, uuid, kind in self.population.descriptors:
+            new = mapping.get(old)
+            if new is None or kind not in classes:
+                continue
+            old_entity, new_entity = self.original_entities[old], active.get(new)
+            prior_row = old_entity.registry_entry
+            row = registry.async_get(new)
+            cls = vendor.classes[classes[kind]]
+            _need(type(old_entity) is type(new_entity) is cls
+                  and index.get(old) is old_entity and index.get(new) is new_entity
+                  and old_entity._platform_state is EntityPlatformState.REMOVED
+                  and prior_row is not None and prior_row.id == uuid and prior_row.entity_id == old
+                  and row is not None and row.id == uuid and new_entity.registry_entry is row
+                  and prior_row.unique_id == row.unique_id and prior_row.config_entry_id == row.config_entry_id
+                  and registry.async_get(old) is None and old not in active, 'leaf_index_identity_changed')
+            retired[old] = old_entity
+        for old in retired:
+            del index[old]
+
     async def activate(self, context, yaml_intent, live_state, *, service_context):
         """Perform one vendor reload, then sample its actual rebuilt graph."""
         from dataclasses import replace
@@ -841,8 +878,10 @@ class ControlledPowercalcHandoff:
         candidate.assert_original(self.chain.original_receipt, evidence.powercalc_sources)
         selected = (replace(evidence, powercalc_sources=candidate.sources)
                     if self.direction == 'forward' else evidence)
-        captured = capture_powercalc_runtime(self.hass, guard=check)
         vendor = PowercalcVendor(self.hass, with_profiles=True)
+        if vendor.core_version in ('2026.11.0', '2026.11.1'):
+            self._retire_leaf_indexes(vendor)
+        captured = capture_powercalc_runtime(self.hass, guard=check)
         await _settled_executor(self.hass, vendor.sources)
         check()
         prepared = await _settled_executor(self.hass, _prepare_profiles, self.chain.original_receipt, selected)

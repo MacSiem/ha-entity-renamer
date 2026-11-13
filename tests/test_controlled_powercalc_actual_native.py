@@ -78,6 +78,10 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             path = Path(code.co_filename)
             value = str(error)
             if 'ha_entity_renamer' in path.parts and isinstance(error, (Refused, ValueError)) and len(value) < 160:
+                if code.co_name == 'activate' and value == 'controlled_powercalc_handoff_setup_graph_unverified':
+                    rows = sys._getframe(1).f_locals.get('first', ())
+                    evidence['failed_graph'] = [(r.entity_id, r.relation_kind, r.reason)
+                                                for r in rows if not r.source_verified]
                 row = (path.name, code.co_name, value)
                 reasons = evidence.setdefault('reasons', [])
                 if row not in reasons:
