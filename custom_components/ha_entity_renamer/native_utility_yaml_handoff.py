@@ -40,7 +40,9 @@ def _installed():
         _need(file.resolve() == file and sha256(raw).hexdigest() == expected, 'source_pin')
         compiled[str(file)] = tuple(_code_objects(compile(raw, str(file), 'exec',
                                                           dont_inherit=True, optimize=sys.flags.optimize)))
-    for fn in (sensor.async_setup_platform, entity_platform.EntityPlatform.async_remove_entity,
+    for fn in (sensor.async_setup_platform, sensor.UtilityMeterSensor.async_added_to_hass,
+               sensor.UtilityMeterSensor.async_will_remove_from_hass,
+               entity_platform.EntityPlatform.async_remove_entity,
                entity_platform.EntityPlatform.async_add_entities,
                restore_state.RestoreStateData.async_restore_entity_removed):
         code = fn.__code__
