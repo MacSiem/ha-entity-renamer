@@ -63,6 +63,29 @@ from .native_template_prefix_recovery import acknowledged_registry_prefix as _ac
 
 
 class NativeTemplateStateServer(NativeTemplateYAMLServer):
+    async def apply(self):
+        if getattr(self, 'homekit_yaml_binding', None) is None:
+            return await super().apply()
+        self._scope()
+        _need(asyncio.current_task() is self.task and self.bound and not self.used,
+              'no_replay')
+        _need(set(self.receipt.changed_domains) <= {'template', 'homekit'}
+              and 'homekit' in self.receipt.changed_domains,
+              'homekit_mixed_lifecycle_unsupported')
+        self.used = True
+        await self.refresh()
+        self._scope()
+        await self._fresh_stores(None)
+        await self._common(False, initial=True)
+        from .native_homekit_lifecycle_driver import HomeKitLifecycleDriver
+        return await HomeKitLifecycleDriver(self).apply()
+
+    async def rollback(self):
+        self._scope()
+        if 'homekit' in self.receipt.changed_domains:
+            raise Refused('homekit_native_rollback_lifecycle_required')
+        return await super().rollback()
+
     async def _prefix_current(self, record):
         """Read-only classification of the exact acknowledged physical prefix.
 
@@ -893,6 +916,13 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                                                                    create_adapter(self, resolver))
             else:
                 adapters['helpers'] = powercalc_helper
+        homekit_binding = getattr(self, 'homekit_yaml_binding', None)
+        if homekit_binding is not None:
+            _need('helpers' in self.plan.required_scopes and 'helpers' not in adapters
+                  and not controlled, 'homekit_mixed_helper_scope_unsupported')
+            from .native_homekit_helper_adapter import create_adapter
+            adapters['helpers'] = create_adapter(self, resolver, homekit_binding,
+                                                getattr(self, 'homekit_lease', None))
         if controlled and 'energy' in self.plan.required_scopes:
             from .powercalc_energy_transaction import ReceiptedPowercalcEnergyAdapter
             _need(hasattr(self, 'native_energy'), 'powercalc_energy_not_bound')
