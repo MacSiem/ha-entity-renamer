@@ -142,6 +142,12 @@ class NativeHelperObservers:
 
         require(__version__ in _HELPER_SCHEMA_VERSIONS, 'helper_ha_version_unsupported')
         snapshots = tuple(deepcopy(s) for s in snapshots)
+        if any(s.get('domain') == 'homekit' for s in snapshots):
+            require(all(s.get('domain') == 'homekit' for s in snapshots),
+                    'homekit_mixed_scope_unsupported')
+            from .native_homekit_helper_observers import NativeHomeKitHelperObservers
+            return await NativeHomeKitHelperObservers.capture(
+                hass, snapshots, mapping_proof, activation_lease=activation_lease)
         if any(s.get('domain') == 'utility_meter' for s in snapshots):
             require(all(s.get('domain') == 'utility_meter' for s in snapshots),
                     'utility_mixed_scope_unsupported')
