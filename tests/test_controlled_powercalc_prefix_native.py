@@ -143,7 +143,19 @@ class ControlledPowercalcPrefixTests(ControlledActualGraphTests):
         inspected = await runtime.recovery_inspect(hass, op, fingerprint, guard=lambda: None, refresh=refresh)
         self.assertEqual((inspected['state'], inspected['eligible']), ('recoverable_prefix', True), inspected)
         self.assertEqual(await runtime.journal.load(op), record)
-        result = await runtime.recovery_restore(hass, op, fingerprint, guard=lambda: None, refresh=refresh)
+        registry_adapter = self.module('native_registry_transaction').ReceiptedRegistryTransactionAdapter
+        compensate = registry_adapter.compensate
+        failures = []
+        async def diagnose(adapter, step, guard):
+            try:
+                return await compensate(adapter, step, guard)
+            except Exception as error:
+                failures.append(error)
+                raise
+        with patch.object(registry_adapter, 'compensate', diagnose):
+            result = await runtime.recovery_restore(hass, op, fingerprint, guard=lambda: None, refresh=refresh)
+        if failures:
+            raise failures[0]
         self.assertEqual(result['state'], 'rolled_back', result)
         self.assertEqual(self.package.read_bytes(), package)
         self.assertEqual({entry.entry_id: dict(entry.data) for entry in self.entries}, entries)
