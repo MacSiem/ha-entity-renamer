@@ -892,6 +892,13 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                                                                    create_adapter(self, resolver))
             else:
                 adapters['helpers'] = powercalc_helper
+        homekit_binding = getattr(self, 'homekit_yaml_binding', None)
+        if homekit_binding is not None:
+            _need('helpers' in self.plan.required_scopes and 'helpers' not in adapters
+                  and not controlled, 'homekit_mixed_helper_scope_unsupported')
+            from .native_homekit_helper_adapter import create_adapter
+            adapters['helpers'] = create_adapter(self, resolver, homekit_binding,
+                                                getattr(self, 'homekit_lease', None))
         if controlled and 'energy' in self.plan.required_scopes:
             from .powercalc_energy_transaction import ReceiptedPowercalcEnergyAdapter
             _need(hasattr(self, 'native_energy'), 'powercalc_energy_not_bound')

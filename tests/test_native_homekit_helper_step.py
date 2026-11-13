@@ -49,6 +49,21 @@ class HomeKitHelperNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(changes), 1)
         self.assertEqual(changes[0].before, before)
         self.assertEqual(changes[0].after, observer.after[entry.entry_id])
+        from types import SimpleNamespace
+        lease_module=importlib.import_module(fixture.PACKAGE+'.native_helper_activation_lease')
+        lease=await lease_module.NativeHelperActivationLease.acquire(
+            hass, hass.config_entries, (entry,), guard=lambda:None)
+        try:
+            async def unused(*args): return True
+            owner=SimpleNamespace(hass=hass, receipt=receipt, mapping={old:new}, chain=object(),
+                journal=SimpleNamespace(load=unused), _scope=lambda:None, _observe=unused,
+                _full=unused, plan=SimpleNamespace(steps=()))
+            native_adapter=receipt_adapter.create_adapter(owner, lambda ref:None, binding, lease)
+            self.assertIs(native_adapter.activation_lease, lease)
+            self.assertIs(native_adapter.helper.hass, hass)
+        finally:
+            lease.release()
+            observer.bind_activation_lease(None)
         forward=planner.plan_helper(before,{old:new});self.assertFalse(forward.markers)
         async def settle():await hass.async_block_till_done()
         async def intent(a,b):pass
