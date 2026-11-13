@@ -1,6 +1,8 @@
 """Confirmed registry prefix of one mixed Powercalc plan: fresh recovery."""
 import asyncio
+import importlib
 import json
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -8,6 +10,12 @@ from test_controlled_powercalc_actual_native import ControlledActualGraphTests
 
 
 class ControlledPowercalcPrefixTests(ControlledActualGraphTests):
+    def module(self, name):
+        module = importlib.import_module('custom_components.ha_entity_renamer.' + name)
+        self.assertEqual(Path(module.__file__).resolve(),
+                         (self.installed_component / (name + '.py')).resolve())
+        return module
+
     async def test_store_compensation_is_one_shot_and_preserves_foreign(self):
         self.stage_only = True
         await self.test_two_entry_confirmed_prefix_fresh_inspect_and_inverse()
