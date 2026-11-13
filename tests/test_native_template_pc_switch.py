@@ -26,6 +26,9 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         leaf = self.entities['fixture-meter-10'].entity_id
         mapping = {old_source: 'light.p2_sample_source', leaf: 'sensor.p2_sample_power'}
         target = leaf if use_leaf else old_source
+        foreign_signal = 'sensor.p2_foreign_signal'
+        if not use_leaf:
+            hass.states.async_set(foreign_signal, 'before')
         path, config = root / 'p2_template.yaml', root / 'configuration.yaml'
         config.write_text(config.read_text() + '\ntemplate: !include p2_template.yaml\n')
         templates = [{'sensor': [{'name': 'P2 total', 'unique_id': 'p2_total',
@@ -33,7 +36,9 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
                      "{% for item in items %}{% if states(item) in ['on', '10', '10.0', '10.00'] %}"
                      "{% set ns.total = ns.total + 1 %}"
                      "{% endif %}{% endfor %}{{ ns.total }}",
-            'attributes': {'copy': "{{ states('" + target + "') }}"}}],
+            'attributes': {'copy': "{{ states('" + target + "') }}", **({
+                'power': "{{ states('" + leaf + "') }}",
+                'foreign': "{{ states('" + foreign_signal + "') }}"} if not use_leaf else {})}}],
             'binary_sensor': [{'name': 'P2 delayed', 'unique_id': 'p2_delay',
                 'availability': "{{ states('" + target + "') != 'unavailable' }}",
                 'state': "{{ states('" + target + "') in ['on', '10', '10.0', '10.00'] }}", 'delay_on': '00:30:00'}],
@@ -124,8 +129,28 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
                     yield value
                     yield from nested(value)
         action_code = next(code for code in nested(PowercalcTemplateIngress.install.__func__.__code__) if code.co_name == 'action')
+        reload_code = hass.services.async_services()['powercalc']['reload'].job.target.__code__
+        self.assertEqual(reload_code.co_name, '_reload_config')
+        self.assertIn('custom_components/powercalc', reload_code.co_filename)
+        reload_active = False
+        foreign_events = []
+        if not use_leaf:
+            from homeassistant.core import callback
+            @callback
+            def foreign_observer(event):
+                if event.data.get('entity_id') == foreign_signal:
+                    foreign_events.append((reload_active, event.data.get('new_state')))
+            remove_foreign = hass.bus.async_listen('state_changed', foreign_observer)
+            self.addCleanup(remove_foreign)
+        def fire_foreign():
+            if reload_active:
+                hass.states.async_set(foreign_signal, 'during_reload')
         def state_start(code, offset):
+            nonlocal reload_active
             local = sys._getframe(1).f_locals
+            if code is reload_code and not use_leaf:
+                reload_active = True
+                hass.loop.call_soon(fire_foreign)
             if code is action_code:
                 ev = local['event']
                 delay_events.append(('ingress', ev.data.get('entity_id'), str(ev.data.get('old_state')), str(ev.data.get('new_state')), id(ev.data.get('new_state')) in local['obj'].witnessed))
@@ -133,9 +158,16 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
                 delay_events.append((local.get('result'), hass.loop.time(),
                     None if binary._delay_cancel is None else binary._delay_cancel.__self__.when(),
                     str(hass.states.get(leaf)), str(hass.states.get(mapping[leaf]))))
+        def reload_return(code, offset, value):
+            nonlocal reload_active
+            if code is reload_code:
+                reload_active = False
         monitor.register_callback(slot, monitor.events.PY_START, state_start)
+        monitor.register_callback(slot, monitor.events.PY_RETURN, reload_return)
         monitor.set_local_events(slot, StateBinarySensorEntity._update_state.__code__, monitor.events.PY_START)
         monitor.set_local_events(slot, action_code, monitor.events.PY_START)
+        if not use_leaf:
+            monitor.set_local_events(slot, reload_code, monitor.events.PY_START | monitor.events.PY_RETURN)
         monitor.set_events(slot, monitor.events.RAISE)
         try:
             result = await runtime.native_yaml_apply(hass, op, fingerprint, actor_id='p2-fixture',
@@ -146,18 +178,30 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
             monitor.set_events(slot, 0)
             monitor.set_local_events(slot, StateBinarySensorEntity._update_state.__code__, 0)
             monitor.set_local_events(slot, action_code, 0)
+            if not use_leaf:
+                monitor.set_local_events(slot, reload_code, 0)
             monitor.register_callback(slot, monitor.events.PY_START, None)
+            monitor.register_callback(slot, monitor.events.PY_RETURN, None)
             monitor.register_callback(slot, monitor.events.RAISE, None)
             monitor.free_tool_id(slot)
         self.assertEqual(result['state'], 'applied')
+        if not use_leaf:
+            self.assertEqual(len(foreign_events), 1)
+            self.assertTrue(foreign_events[0][0], 'foreign state must occur inside vendor reload')
+            self.assertEqual(foreign_events[0][1].state, 'during_reload')
+            self.assertTrue(any(row[0] == 'ingress' and row[1] == foreign_signal and not row[4]
+                                for row in delay_events), delay_events)
+            self.assertEqual(hass.states.get(sensor.entity_id).attributes['foreign'], 'during_reload')
         self.assertIs(binary._delay_cancel, token, delay_events)
         self.assertEqual(token.__self__.when(), deadline)
         self.assertIs(rows['p2_foreign'], foreign)
         self.assertEqual({e.unique_id: e.registry_entry.id for e in (sensor, binary, switch, foreign)}, ids)
         for e, state in zip((sensor, binary, switch), before[:3], strict=True):
             current = hass.states.get(e.entity_id)
-            self.assertEqual((current.state, dict(current.attributes)),
-                             (state.state, dict(state.attributes)))
+            attributes = dict(state.attributes)
+            if e is sensor and not use_leaf:
+                attributes['foreign'] = 'during_reload'
+            self.assertEqual((current.state, dict(current.attributes)), (state.state, attributes))
         self.assertIs(hass.states.get(foreign.entity_id), before[3])
         await switch.async_turn_on()
         await switch.async_turn_off()
