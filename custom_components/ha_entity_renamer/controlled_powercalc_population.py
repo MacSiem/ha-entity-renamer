@@ -11,6 +11,11 @@ from decimal import Decimal
 from .transaction import Refused
 
 
+POWER_KINDS = frozenset(('profile_lut', 'profile_fixed', 'profile_linear',
+                         'power_sum', 'power_subtract'))
+COUNTER_KINDS = frozenset(('energy_integral', 'energy_positive_delta'))
+
+
 def _need(value, reason):
     if not value:
         raise Refused('controlled_powercalc_population_' + reason)
@@ -85,7 +90,7 @@ def qualify_population(hass, bound, mapping, previous, *, inverse_aliases=None):
                   'group_counter_unverified')
             kind = 'group'
         else:
-            _need(row.relation_kind in ('profile_lut', 'power_sum', 'power_subtract'),
+            _need(row.relation_kind in POWER_KINDS,
                   'native_family_unqualified')
             continue
         target = mapping.get(identity, identity)

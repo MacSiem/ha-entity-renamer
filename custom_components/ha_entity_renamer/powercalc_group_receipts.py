@@ -152,7 +152,7 @@ def validate_group_receipt(chain, payload, change):
     composition = _composition(chain)
     if type(composition) is ControlledPowercalcComposition:
         from .controlled_powercalc_setup_receipts import validate_handoff
-        from .native_registry_transition import _powercalc_group_suggested_move
+        from .controlled_powercalc_registry import is_group_move
         direction = payload['binding']['direction']
         handoff = validate_handoff(chain, payload.get('controlled_powercalc_handoff'), direction)
         controlled = payload.get('controlled_powercalc_group')
@@ -162,11 +162,14 @@ def validate_group_receipt(chain, payload, change):
         if not is_group:
             _need(controlled is None, 'unexpected_controlled_group_subeffect')
             return
-        _need(_powercalc_group_suggested_move(change.before, change.after)
+        _need(is_group_move(change.before, change.after)
               and type(controlled) is list and len(controlled) == 2, 'controlled_group_scope')
         key = _event_id(['controlled_pc_group', chain.root_id, payload['binding']['index'],
                          direction, 'receipt'])
         value = _event(chain, controlled, key, 'controlled_powercalc_group_receipt')
+        ids = (change.before['entity_id'], change.after['entity_id'])
+        if direction == 'rollback':
+            ids = ids[::-1]
         _need(value.get('schema') == 1 and value.get('root') == chain.root_id
               and value.get('operation_id') == chain.operation_id
               and value.get('fingerprint') == chain.plan.fingerprint
@@ -177,8 +180,9 @@ def validate_group_receipt(chain, payload, change):
               and value.get('registry_uuid') == change.identity
               and value.get('registry_preparation', value.get('prepared_digest')) == prepared_registry_digest(change)
               and value.get('mutation') == payload['mutation']
-              and any(row.get('uuid') == change.identity and row.get('kind') == 'group'
-                      for row in handoff['population']), 'controlled_group_lineage')
+              and any((row['uuid'], row['kind'], row['before_id'], row['after_id']) ==
+                      (change.identity, 'group', *ids) for row in handoff['population']),
+              'controlled_group_lineage')
         return
     if (type(change) is not PreparedRegistryChange or change.kind != 'entity'
             or not change.mapping or change.before.get('platform') != 'powercalc'):

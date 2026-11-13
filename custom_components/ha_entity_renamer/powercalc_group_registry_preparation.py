@@ -8,10 +8,11 @@ from .powercalc_previous_state_original import PowercalcGroupOriginal
 from .transaction import Refused
 
 
-def prepare_group_registry(change, group, version):
+def prepare_group_registry(change, group, version, *, controlled=False):
     """Prepare only the exact current-Core, original-group derived transition."""
     if (type(change) is not PreparedRegistryChange or type(group) is not PowercalcGroupOriginal
-            or version not in ('2026.10.2', '2026.10.4') or change.kind != 'entity'
+            or (version not in ('2026.10.2', '2026.10.4')
+                and not (controlled is True and version == '2026.11.0')) or change.kind != 'entity'
             or change.identity != group.registry_id or change.before.get('entity_id') != group.entity_id
             or not change.mapping):
         raise Refused('powercalc_group_registry_preparation_scope')

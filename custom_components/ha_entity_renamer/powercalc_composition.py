@@ -114,10 +114,20 @@ def _previous(previous, baseline, evidence):
     by_id = {row['id']: row for row in registry}
     _need(len(by_id) == len(registry))
     graph = _loads(evidence.powercalc_sources.closed_graph_json)
-    configured = {group['origin'][6:]: group for group in graph['groups']
-                  if group['origin'].startswith('entry:') and group['config'].get('group_type') == 'custom'}
-    _need(len(configured) == len(graph['groups']) - sum(
-        group['config'].get('group_type') == 'subtract' for group in graph['groups']))
+    configured = {}
+    for cfg in graph['groups']:
+        if cfg['config'].get('group_type') != 'custom':
+            continue
+        origin = cfg['origin']
+        if origin.startswith('entry:'):
+            owner = origin[6:]
+        else:
+            _need(origin == 'yaml:' + cfg['unique_id'] and type(cfg.get('members')) is list)
+            owner = None
+        key = owner, cfg['unique_id'] + '_energy'
+        _need(key not in configured)
+        configured[key] = cfg
+    seen_configured = set()
     seen_groups = set()
     for group in previous.groups:
         _need(type(group) is PowercalcGroupOriginal and type(group.entity_id) is str
@@ -127,9 +137,11 @@ def _previous(previous, baseline, evidence):
               and group.members == tuple(sorted(group.members)))
         row = by_id.get(group.registry_id)
         _need(type(row) is dict and row['entity_id'] == group.entity_id and row['platform'] == 'powercalc'
-              and row.get('config_entry_id') in configured)
-        cfg = configured[row['config_entry_id']]
-        _need(row['unique_id'] == cfg['unique_id'] + '_energy')
+              and row.get('disabled_by') is None)
+        key = row.get('config_entry_id'), row['unique_id']
+        _need(key in configured and key not in seen_configured)
+        seen_configured.add(key)
+        cfg = configured[key]
         seen_groups.add(group.registry_id)
         members = {}
         for pair in group.members:
@@ -139,8 +151,12 @@ def _previous(previous, baseline, evidence):
             _need(name not in members and type(child) is dict and child['entity_id'] == name
                   and child['platform'] == 'powercalc')
             members[name] = uuid
-        _need(set(members) == set(cfg['config'].get('group_energy_entities', []))
-              and set(memory[group.entity_id]) <= set(members))
+        if key[0] is None:
+            expected = {member[2]: member[3] for member in cfg['members']}
+            _need(len(expected) == len(cfg['members']) and members == expected)
+        else:
+            _need(set(members) == set(cfg['config'].get('group_energy_entities', [])))
+        _need(set(memory[group.entity_id]) <= set(members))
         for name, state in memory[group.entity_id].items():
             _need(_owned_state(state, name))
         try:

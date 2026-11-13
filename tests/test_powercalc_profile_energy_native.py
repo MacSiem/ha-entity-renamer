@@ -422,3 +422,89 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, 'native_config_rejected') as error:
             await self.prepare()
         self.assertIn('profile_unresolved', ' '.join(error.exception.__notes__))
+
+    async def test_mixed_yaml_group_controlled_apply_and_fresh_reverse(self):
+        from homeassistant.core import callback
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
+        from homeassistant.setup import async_setup_component
+        import test_receipted_helper_native as recorder_fixture
+
+        hass, root = self.f.hass, self.f.root
+        self.with_yaml = True
+        await recorder_fixture.NativeReceiptedHelperTests._before_start(self, hass, root)
+        self.assertTrue(await async_setup_component(hass, 'homeassistant', {}))
+        await self._flush_documents()
+        backend = importlib.import_module(fixtures.PACKAGE)
+        runtime = backend.Runtime('mixed-powercalc-fixture', None, None)
+        hass.data[backend.DATA_RUNTIME] = runtime
+
+        async def refresh():
+            self.guard()
+
+        from custom_components.powercalc.sensors.group.custom import GroupedEnergySensor
+        from custom_components.powercalc.sensors.energy import VirtualEnergySensor
+
+        def counters():
+            return {obj.registry_entry.id: obj for platform in async_get_platforms(hass, 'powercalc')
+                    for obj in platform.entities.values()
+                    if type(obj) in (GroupedEnergySensor, VirtualEnergySensor)}
+
+        for obj in counters().values():
+            if type(obj) is GroupedEnergySensor:
+                obj._set_native_value(Decimal('1.234567891') if 'first' in obj.unique_id
+                                      else Decimal('2.345678912'))
+                obj.async_write_ha_state()
+        await hass.async_block_till_done()
+        pss = hass.data['powercalc_group_storage']
+        await pss.persist_states()
+        restore = hass.data[DATA_RESTORE_STATE]
+        await restore.async_dump_states()
+        start = {uid: (obj.entity_id, str(obj._native_value_exact)
+                       if type(obj) is GroupedEnergySensor else str(obj._state))
+                 for uid, obj in counters().items()}
+        self.assertEqual(len(start), 6)
+        groups = [self.entities[key].entity_id for key in ('graph-first_energy', 'graph-second_energy')]
+        mapping = {self.yaml_source: 'light.graph_renamed_model',
+                   **{name: 'sensor.renamed_' + name.split('.')[1] for name in groups}}
+        first = {}
+        watch = False
+
+        @callback
+        def published(event):
+            row = event.data.get('new_state')
+            if watch and row is not None:
+                first.setdefault(row.entity_id, row.state)
+
+        remove = hass.bus.async_listen('state_changed', published)
+        self.addCleanup(remove)
+        actor = 'controlled-graph-native'
+        review = await runtime.native_yaml_prepare(hass, mapping, actor_id=actor,
+            guard=self.guard, refresh=refresh)
+        operation, fingerprint = review['operation_id'], review['fingerprint']
+        watch = True
+        result = await runtime.native_yaml_apply(hass, operation, fingerprint, actor_id=actor,
+            guard=self.guard, refresh=refresh)
+        watch = False
+        self.assertEqual(result['state'], 'applied', result)
+        for uid, obj in counters().items():
+            name, expected = start[uid]
+            self.assertEqual(obj.entity_id, mapping.get(name, name))
+            actual = obj._native_value_exact if type(obj) is GroupedEnergySensor else obj._state
+            self.assertEqual(Decimal(expected).as_tuple(), actual.as_tuple())
+            self.assertEqual(Decimal(first[obj.entity_id]), Decimal(hass.states.get(obj.entity_id).state))
+        self.assertEqual(hass.config_entries.async_get_entry(self.entry.entry_id).data, self.entry.data)
+        first.clear()
+        watch = True
+        result = await runtime.native_yaml_reverse(hass, operation, fingerprint,
+            guard=self.guard, refresh=refresh)
+        watch = False
+        self.assertEqual(result['state'], 'rolled_back', result)
+        self.assertEqual((root / 'configuration.yaml').read_text(), self.config)
+        self.assertEqual(set(counters()), set(start))
+        for uid, obj in counters().items():
+            name, expected = start[uid]
+            self.assertEqual(obj.entity_id, name)
+            actual = obj._native_value_exact if type(obj) is GroupedEnergySensor else obj._state
+            self.assertEqual(Decimal(expected).as_tuple(), actual.as_tuple())
+            self.assertEqual(Decimal(first[name]), Decimal(hass.states.get(name).state))

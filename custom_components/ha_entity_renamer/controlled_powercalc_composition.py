@@ -64,16 +64,18 @@ class ControlledPowercalcComposition(ControlledReloadComposition):
                       for row in self.population)
               and len({row[0] for row in self.population}) == len(self.population)
               and len({row[1] for row in self.population}) == len(self.population))
+        from .controlled_powercalc_population import POWER_KINDS, COUNTER_KINDS
         catalog = {row['id']: row for row in rows if row.get('platform') == 'powercalc'}
         _need(all(uuid in catalog and catalog[uuid]['entity_id'] == entity_id
                   and catalog[uuid].get('disabled_by') is None
-                  and kind in ('profile_lut', 'power_sum', 'power_subtract', 'energy_integral', 'energy_positive_delta')
+                  and kind in POWER_KINDS | COUNTER_KINDS
                   for entity_id, uuid, kind in self.population))
-        kinds = [row[2] for row in self.population]
-        _need(kinds.count('profile_lut') == 2 and kinds.count('power_sum') == 1
-              and kinds.count('energy_positive_delta') == 1
-              and (kinds.count('energy_integral'), kinds.count('power_subtract')) in ((2, 0), (3, 1)))
         _need(type(self.previous) is PowercalcPreviousOriginal)
+        groups = {(group.entity_id, group.registry_id) for group in self.previous.groups}
+        _need(groups == {(eid, uid) for eid, uid, kind in self.population
+                         if kind == 'energy_positive_delta'})
+        _need(all(catalog[uid]['entity_id'] not in dict(self.mapping) or (eid, uid) in groups
+                  for eid, uid, _ in self.population))
         PowercalcComposition(self.evidence, self.previous, self.prepared_digests,
             self.source_history, self.consumer_history, self.evidence.powercalc_sources.sha256,
             self.energy_original_physical).assert_baseline(baseline, _mixed_template=True)

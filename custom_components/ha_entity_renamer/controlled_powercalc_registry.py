@@ -8,6 +8,17 @@ from .native_registry_transition import _powercalc_group_suggested_move, prepare
 from .transaction import Refused
 
 
+def is_group_move(before, after):
+    if before.get('config_entry_id') is not None:
+        return _powercalc_group_suggested_move(before, after)
+    old, new = before.get('entity_id'), after.get('entity_id')
+    return (before.get('platform') == after.get('platform') == 'powercalc'
+            and all(type(name) is str and name.startswith('sensor.') for name in (old, new))
+            and old != new and before.keys() == after.keys()
+            and all(before[key] == after[key] for key in before if key not in ('entity_id', 'name')))
+
+
+
 def _need(value):
     if not value:
         raise Refused('controlled_powercalc_group_registry_unconfirmed')
@@ -18,7 +29,7 @@ class ControlledPowercalcRegistryNode:
     async def capture(cls, root, handoff, io, change, context, intent, observations, guard):
         from .native_template_state_registry_effect import NativeTemplateStateRegistryEffect
         _need(change.kind == 'entity' and change.mapping and change.before.get('platform') == 'powercalc'
-              and _powercalc_group_suggested_move(change.before, change.after)
+              and is_group_move(change.before, change.after)
               and handoff.direction == context.record.direction and handoff.receipt is not None)
         handoff.require_inactive()
         source, target = ((change.before['entity_id'], change.after['entity_id'])

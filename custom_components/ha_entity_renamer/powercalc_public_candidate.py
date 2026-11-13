@@ -26,7 +26,7 @@ def build_candidate(original, mapping, version, energy=None, *, mixed=False, sou
           and tuple(row[0] for row in original) == _KEYS
           and all(type(row) is tuple and len(row) == 2 and type(row[1]) is bytes for row in original),
           'full_three_required')
-    _need(type(mixed) is bool and type(mapping) is dict and (len(mapping) >= 2 if mixed else len(mapping) == 2)
+    _need(type(mixed) is bool and type(mapping) is dict and (bool(mapping) if mixed else len(mapping) == 2)
           and all(type(a) is str and type(b) is str and a != b for a, b in mapping.items())
           and len(set(mapping.values())) == len(mapping) and not set(mapping) & set(mapping.values()),
           'source_and_group_mapping_required')
@@ -41,33 +41,43 @@ def build_candidate(original, mapping, version, energy=None, *, mixed=False, sou
     groups = [row for row in selected if row['platform'] == 'powercalc']
     sources = [row for row in selected if row['platform'] not in ('powercalc', 'template', 'automation', 'script')
                and (not mixed or row['entity_id'] == source_id)]
-    _need(len(groups) == len(sources) == 1 and (mixed or source_id is None), 'one_owned_group_required')
-    group, source = groups[0], sources[0]
+    _need(len(sources) == 1 and (mixed or len(groups) == 1 and source_id is None),
+          'owned_source_required')
+    source = sources[0]
     entity_names = {} if entity_names is None else entity_names
     device_names = {} if device_names is None else device_names
     _need(type(entity_names) is dict and type(device_names) is dict
           and all(type(k) is str and type(v) is str for k, v in entity_names.items())
           and all(type(k) is str and type(v) is str for k, v in device_names.items())
           and (mixed or not entity_names and not device_names), 'name_scope')
-    old_group, new_group = group['entity_id'], mapping[group['entity_id']]
-    _need(old_group.startswith('sensor.') and new_group.startswith('sensor.')
-          and group.get('suggested_object_id') == old_group.removeprefix('sensor.'),
-          'group_suggested_identity')
     entries = documents['core.config_entries']['data']['entries']
-    matches = [row for row in entries if row['entry_id'] == group.get('config_entry_id')]
-    _need(len(matches) == 1 and matches[0]['domain'] == 'powercalc'
-          and type(matches[0]['data']) is dict and matches[0]['data'].get('_energy_entity') == old_group,
-          'group_entry_metadata')
-    # One deterministic registry step per UUID. The selected ordinary source
-    # and group keep the established Powercalc lifecycle ordering.
-    ordered = (sorted(selected, key=lambda row: row['entity_id']) if mixed else [source, group])
+    derived_groups = {}
+    for group in groups:
+        old_group = group['entity_id']
+        new_group = mapping[old_group]
+        _need(old_group.startswith('sensor.') and new_group.startswith('sensor.'),
+              'group_sensor_identity')
+        entry_id = group.get('config_entry_id')
+        if mixed and entry_id is None:
+            # A YAML group still derives its suggested ID from its unchanged
+            # name. The native registry move carries only the user entity ID.
+            continue
+        _need(group.get('suggested_object_id') == old_group.removeprefix('sensor.'),
+              'group_suggested_identity')
+        matches = [row for row in entries if row['entry_id'] == entry_id]
+        _need(len(matches) == 1 and matches[0]['domain'] == 'powercalc'
+              and type(matches[0]['data']) is dict and matches[0]['data'].get('_energy_entity') == old_group,
+              'group_entry_metadata')
+        matches[0]['data']['_energy_entity'] = new_group
+        derived_groups[old_group] = new_group.removeprefix('sensor.')
+    ordered = (sorted(selected, key=lambda row: row['entity_id']) if mixed else [source, groups[0]])
     for row in ordered:
         old = row['entity_id']
         row['entity_id'] = mapping[old]
         if old in entity_names:
             row['name'] = entity_names[old]
-        if row is group:
-            row['suggested_object_id'] = new_group.removeprefix('sensor.')
+        if old in derived_groups:
+            row['suggested_object_id'] = derived_groups[old]
         if owned_script is not None and old == owned_script[0]:
             _need(type(owned_script) is tuple and len(owned_script) == 2
                   and type(owned_script[1]) is bool and row['platform'] == 'script'
@@ -96,7 +106,6 @@ def build_candidate(original, mapping, version, energy=None, *, mixed=False, sou
         hits = [row for row in devices if row['id'] == identity]
         _need(len(hits) == 1, 'name_device_scope')
         hits[0]['name_by_user'] = name
-    matches[0]['data']['_energy_entity'] = new_group
     if template_entry is not None:
         from .helper_transaction import PreparedHelper
         from .helper_plan import snapshot_equal

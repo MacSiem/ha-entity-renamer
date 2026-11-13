@@ -31,29 +31,31 @@ def _need(value, reason):
 
 def _powercalc_group_helper_coverage(plans, rows, previous, mapping):
     """Qualify only the metadata of the proven group, never unknown helpers."""
-    if previous is None or len(previous.groups) != 1:
+    if previous is None:
         return False
-    group = previous.groups[0]
-    owners = [row for row in rows if row.get('id') == group.registry_id
-              and row.get('entity_id') == group.entity_id and row.get('platform') == 'powercalc']
-    if len(owners) != 1 or group.entity_id not in mapping:
-        return False
-    entry_id, accepted = owners[0].get('config_entry_id'), 0
+    entries = {row['config_entry_id']: row['entity_id'] for row in rows
+               if row.get('config_entry_id') is not None
+               and (row.get('entity_id'), row.get('id')) in
+                   {(group.entity_id, group.registry_id) for group in previous.groups}
+               and row['entity_id'] in mapping and row.get('platform') == 'powercalc'}
+    accepted = set()
     for plan in plans:
         if not plan.blocked and not plan.changes:
             continue
         before = plan.before
-        if (plan.changes or before.get('domain') != 'powercalc'
-                or before.get('identity', {}).get('entry_id') != entry_id
-                or before.get('data', {}).get('_energy_entity') != group.entity_id
+        entry_id = before.get('identity', {}).get('entry_id')
+        group_id = entries.get(entry_id)
+        if (group_id is None or entry_id in accepted or plan.changes
+                or before.get('domain') != 'powercalc'
+                or before.get('data', {}).get('_energy_entity') != group_id
                 or before.get('data', {}).get('force_calculate_group_energy') is not False
                 or len(plan.markers) != 2
                 or {(marker.path, marker.code) for marker in plan.markers} != {
                     (('data', '_energy_entity'), 'unsupported_helper_reference'),
                     (('data', 'force_calculate_group_energy'), 'powercalc_group_membership_unverified')}):
             return False
-        accepted += 1
-    return accepted == 1
+        accepted.add(entry_id)
+    return accepted == set(entries)
 
 
 from .native_template_prefix_recovery import acknowledged_registry_prefix as _acknowledged_registry_prefix
@@ -380,24 +382,18 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                   or not self.consumers.runtime_sample[0], 'selected_names_dependent_lifecycle_unsupported')
         baseline = await async_capture_native_input_baseline(self.hass, self.receipt, guard=self._scope)
         self._scope()
-        pc_previous = pc_metadata = pc_energy_physical = None
+        pc_previous = pc_energy_physical = None
+        pc_metadata = []
         if mixed_powercalc:
             _need(tuple((row.key, row.raw) for row in baseline.files) == pc_original,
                   'powercalc_original_changed')
             from .powercalc_source_binding import async_bind_powercalc_sources
             bound = await async_bind_powercalc_sources(self.hass, self.receipt, self.evidence,
                                                        self.powercalc_capture, guard=self._scope)
-            kinds = [row.relation_kind for row in bound.rows]
-            _need(all(row.source_verified for row in bound.rows) and kinds.count('profile_lut') == 2
-                  and kinds.count('power_sum') == 1 and kinds.count('energy_positive_delta') == 1
-                  and (kinds.count('energy_integral'), kinds.count('power_subtract')) in ((2, 0), (3, 1)),
-                  'powercalc_graph_unsupported')
             from .powercalc_previous_state_original import async_capture_powercalc_previous_original
             pc_previous = await async_capture_powercalc_previous_original(
                 self.hass, self.receipt, self.evidence, self.powercalc_capture, guard=self._scope,
                 allow_live_progress=True)
-            _need(len(pc_previous.groups) == 1 and pc_previous.groups[0].entity_id in self.mapping,
-                  'powercalc_group_required')
             from .controlled_powercalc_population import qualify_population
             self.powercalc_population = qualify_population(self.hass, bound, self.mapping, pc_previous)
             if pc_energy is not None:
@@ -433,10 +429,13 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 from .powercalc_group_registry_preparation import prepare_group_registry
                 from .powercalc_group_metadata import prepare_group_metadata
                 from .helper_native import read_entry
-                _need(old == pc_previous.groups[0].entity_id, 'powercalc_group_scope')
-                prepared = prepare_group_registry(prepared, pc_previous.groups[0], self.receipt.version)
-                pc_metadata = prepare_group_metadata(read_entry(self.hass, source[0]['config_entry_id']),
-                                                     old, new)
+                group = next((item for item in pc_previous.groups if item.entity_id == old
+                              and item.registry_id == source[0]['id']), None)
+                _need(group is not None, 'powercalc_group_scope')
+                if source[0].get('config_entry_id') is not None:
+                    prepared = prepare_group_registry(prepared, group, self.receipt.version, controlled=True)
+                    pc_metadata.append(prepare_group_metadata(
+                        read_entry(self.hass, source[0]['config_entry_id']), old, new))
             if old in owned_script:
                 from .native_own_script_registry_preparation import own_script_registry_preparation
                 service_audit.check()
@@ -480,7 +479,6 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 registry.append(await bridge.prepare('device', identity, {'name_by_user': name}, self._scope))
                 self._scope()
         if mixed_powercalc:
-            _need(pc_metadata is not None, 'powercalc_metadata_required')
             from .native_template_state_yaml import capture_mixed_powercalc_yaml
             capture = capture_mixed_powercalc_yaml
         elif self.mixed_state:
@@ -500,7 +498,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self.dashboard_changes = () if dashboard_storage is None else dashboard_storage.changes
         effects = ([('registry', c) for c in registry]
                    + ([] if entry_change is None else [('helpers', entry_change)])
-                   + ([] if pc_metadata is None else [('helpers', pc_metadata)])
+                   + [('helpers', item) for item in pc_metadata]
                    + ([] if pc_energy is None else [('energy', pc_energy)])
                    + [('dashboard', c) for c in self.dashboard_changes]
                    + ([] if registry_only else [('yaml', change)]))
@@ -565,7 +563,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         inputs = await self.preparations.create_native_inputs(own + '-original', baseline,
                                                              composition=self.composition)
         self._scope()
-        scopes = ((('registry', 'helpers') + (('energy',) if pc_energy else ())
+        scopes = ((('registry',) + (('helpers',) if pc_metadata or entry_change is not None else ())
+                   + (('energy',) if pc_energy else ())
                    + (('dashboard',) if dashboard_storage is not None else ()) + ('yaml',)) if mixed_powercalc else
                   ('registry', 'dashboard') if registry_only and dashboard_storage is not None else
                   ('registry', 'dashboard', 'yaml') if dashboard_storage is not None and not registry_only else
