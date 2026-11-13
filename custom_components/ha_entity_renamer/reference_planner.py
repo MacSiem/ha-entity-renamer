@@ -341,6 +341,10 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
 
         def expression(node, bindings):
             charge()
+            if (isinstance(node, nodes.Test) and node.name in ('defined', 'undefined', 'list')
+                    and not (node.args or node.kwargs or node.dyn_args or node.dyn_kwargs)
+                    and isinstance(node.node, nodes.Name)):
+                return  # This tests presence/type, independently of the ID.
             if isinstance(node, nodes.Compare) and len(node.ops) == 1:
                 operand = node.ops[0]
                 left, right = node.expr, operand.expr
