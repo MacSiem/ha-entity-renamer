@@ -1079,7 +1079,7 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
     ordinary_template_state = (with_sources and template_state_program
         and template_source_profile == TEMPLATE_STATE_SOURCE_PROFILE
         and type(template_reference_mapping) is dict and dependent_reference_mapping is None
-        and not registry_only_template and not powercalc_profiles and not powercalc_candidate
+        and not powercalc_profiles and not powercalc_candidate
         and not native_helpers and not stable_script_services and not owned_script_services
         and not mixed_powercalc)
     if __version__ == '2026.11.1' and not ordinary_template_state and (

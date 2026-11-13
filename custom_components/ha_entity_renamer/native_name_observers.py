@@ -12,6 +12,17 @@ from .helper_observers import require, registry_identity
 from .helper_native import read_entry
 
 
+def _core11_name_rewrite_unchanged(row, change, strip):
+    if row.compat_name is not None:
+        return False
+    if change.kind != 'device' or row.has_entity_name:
+        return True
+    if row.name is None and row.original_name_unprefixed is not None:
+        return False
+    return all(strip(row.original_name, image.get('name_by_user') or image.get('name'))
+               == row.original_name_unprefixed for image in (change.before, change.after))
+
+
 class NativeNameObserver:
     def __init__(self, io):
         self.io, self.hass = io, io.hass
@@ -145,6 +156,14 @@ class NativeNameObserver:
         device_ids = {row.device_id for row in rows if row.device_id is not None}
         for row in rows:
             entity, state, entry, active = self._sample(row)
+            if version in ('2026.11.0', '2026.11.1'):
+                # Core 11 clears compat_name on an entity-name update and may
+                # rewrite related entity fields in the device-name listener.
+                # Until those side effects have their own receipts and inverse,
+                # admit only rows whose exact native projections stay unchanged.
+                from homeassistant.helpers.entity_registry import _async_strip_prefix_from_entity_name
+                require(_core11_name_rewrite_unchanged(row, change, _async_strip_prefix_from_entity_name),
+                        'name_native_entity_side_effect_unsupported')
             if change.kind == 'device' and active and version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
                 self._device_subscription(entity, row)
             native = next(item for item in document['entities'] if item['id'] == row.id)

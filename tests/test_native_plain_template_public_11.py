@@ -31,8 +31,17 @@ class NativePlainTemplatePublicTests(unittest.IsolatedAsyncioTestCase):
         op, fingerprint = review['operation_id'], review['fingerprint']
         retained = runtime.reviews[op].plan
         self.assertEqual(review['entity_count'], 1)
-        result = await runtime.native_yaml_apply(hass, op, fingerprint, actor_id='ordinary-template-admin',
-                                                 guard=lambda: None, refresh=refresh)
+        from test_native_template_mixed_yaml_server import native_diagnostics
+        with native_diagnostics(self.module):
+            try:
+                result = await runtime.native_yaml_apply(hass, op, fingerprint, actor_id='ordinary-template-admin',
+                                                         guard=lambda: None, refresh=refresh)
+            finally:
+                record = await runtime.journal.load(op)
+                print('ORDINARY_NATIVE_JOURNAL', None if record is None else
+                      (record.status, record.reason, record.direction, record.phases), flush=True)
+                print('ORDINARY_REGISTRY_POSITION', bool(self.f.entity.async_get(old)),
+                      bool(self.f.entity.async_get(new)), flush=True)
         self.assertEqual(result['state'], 'applied', result)
         self.assertEqual((await runtime.journal.load(op)).plan, retained)
         self.assertIsNone(self.f.entity.async_get(old))
