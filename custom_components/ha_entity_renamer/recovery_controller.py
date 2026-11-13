@@ -617,6 +617,25 @@ class RecoveryController:
                 # transition, including inside outer automation lifecycle.
                 return _result(operation_id, fingerprint, 'UNKNOWN',
                     'restore_attempt_unresolved' if record.restore_attempted is True else 'legacy_restore_unproven')
+            # External terminal inspection shares the normal YAML binder and
+            # terminal source/registry admission, but does not authorize rollback.
+            from .native_template_yaml_server import _external_state_plan
+            external_plan = False
+            if type(encoded) is dict and encoded.get('profile') == 'template_external_state_binding_v1':
+                _, composition = preparations.resolve_composition(record.plan.native_inputs)
+                external_plan = _external_state_plan(record.plan, composition)
+            if external_plan:
+                if restore:
+                    return _result(operation_id, fingerprint, 'refused', 'external_rollback_lifecycle_required')
+                from . import _yaml_factory_for_plan
+                factory = _yaml_factory_for_plan(preparations, record.plan)
+                session = await factory.bind_reverse(self.hass, operation_id, fingerprint,
+                    guard=self.check, refresh=self.refresh, inspect_only=True)
+                self.check()
+                result = _result(operation_id, fingerprint, 'applied', 'complete', summary=_yaml_summary(session))
+                result['eligible'] = False
+                result['restore_attempt_available'] = False
+                return result
             from .native_template_prefix_recovery import acknowledged_registry_prefix
             prefix = acknowledged_registry_prefix(record)
             from .native_template_prefix_recovery import complete_forward_unknown

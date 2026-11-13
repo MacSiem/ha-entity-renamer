@@ -228,3 +228,60 @@ class UtilityYAMLRegistryAdapter:
 
     async def verify_rollback(self, plan):
         return await self._verify(plan, 'rollback')
+
+
+def inspect_accepted(handoff, preparations, operation_id, plan, registry_changes):
+    """Validate cutover receipts and current actors without freezing meter values.
+
+    The receipt proves the exact counter/deadline at cutover. Current values may
+    advance after that point; current native source, registry identity, meter
+    configuration, actor population and subscription are independently checked.
+    """
+    _need(type(handoff) is UtilityYAMLHandoff, 'inspection_handoff')
+    handoff.check_population()
+    actors = {row.meter: row for row in handoff.rows}
+    covered = set()
+    changes = {change.identity: change for change in registry_changes}
+    for step in plan.steps:
+        if step.adapter != 'registry':
+            continue
+        change = changes.get(step.identity)
+        _need(change is not None, 'inspection_registry_change')
+        intent_ref = _id(operation_id, plan.fingerprint, step.key, 'forward', 'intent')
+        receipt_ref = _id(operation_id, plan.fingerprint, step.key, 'forward', 'receipt')
+        intent_row = preparations.plans.get(intent_ref)
+        receipt_row = preparations.plans.get(receipt_ref)
+        relevant = {row.meter for row in handoff.rows
+                    if change.mapping.get(row.new) == row.old}
+        if not relevant:
+            _need(intent_row is None and receipt_row is None, 'inspection_unexpected_receipt')
+            continue
+        _need(intent_row is not None and receipt_row is not None, 'inspection_receipt_missing')
+        intent = preparations.resolve(intent_ref, intent_row['digest'])
+        receipt = preparations.resolve(receipt_ref, receipt_row['digest'])
+        expected = {'operation': operation_id, 'fingerprint': plan.fingerprint,
+                    'step': step.key, 'direction': 'forward'}
+        _need(intent.get('kind') == 'utility_yaml_intent'
+              and receipt.get('kind') == 'utility_yaml_receipt'
+              and all(intent.get(k) == v and receipt.get(k) == v for k, v in expected.items())
+              and receipt.get('intent') == [intent_ref, intent_row['digest']]
+              and receipt.get('rows') == intent.get('rows')
+              and type(receipt.get('rows')) is list
+              and type(receipt.get('after')) is list
+              and len(receipt['rows']) == len(receipt['after']), 'inspection_receipt_binding')
+        names = set()
+        for saved, cutover in zip(receipt['rows'], receipt['after'], strict=True):
+            _need(type(saved) is dict and saved.get('meter') in relevant, 'inspection_population')
+            row = actors[saved['meter']]
+            _need(saved['meter'] not in names and saved['meter'] not in covered
+                  and saved.get('source') == row.new and saved.get('target') == row.old
+                  and saved.get('source_uuid') == row.source_uuid
+                  and saved.get('entity_id') == row.entity_id
+                  and saved.get('info') == {**_info(row.info), 'source': row.new}
+                  and saved.get('before') == cutover, 'inspection_cutover')
+            names.add(saved['meter'])
+        _need(names == relevant, 'inspection_population')
+        covered.update(names)
+    _need(covered == set(actors), 'inspection_population')
+    handoff.check_population()
+    return True

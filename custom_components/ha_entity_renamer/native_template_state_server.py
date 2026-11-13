@@ -138,6 +138,57 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             self.utility_yaml_binding = await prepare_utility_binding(
                 self.hass, self.mapping, self.receipt, guard=self._scope)
 
+    async def _inspect_external_consumers(self):
+        """Fresh, read-only terminal proof; it never grants an inverse writer."""
+        from .helper_plan import snapshot_equal
+        from .helper_observers import RegistryMappingProof
+        from .native_template_state_composition import ExternalStateComposition
+        _need(type(self.composition) is ExternalStateComposition
+              and self.record.status == 'applied' and self.record.direction == 'forward',
+              'external_inspection_scope')
+        reverse = {new: old for old, new in self.mapping.items()}
+        seals = tuple((domain, after, before) for domain, before, after in self.receipt.runtime_expected)
+        domains = set(self.receipt.changed_domains)
+        if 'homekit' in domains:
+            from .native_homekit_filter import HomeKitFilterPhase
+            from .native_homekit_helper_observers import NativeHomeKitHelperObservers
+            from .native_homekit_yaml_binding import HomeKitYAMLBinding
+            from .native_homekit_recovery_status import classify
+            from .native_helper_lifecycle import native_helper_lifecycle_store
+            phase = HomeKitFilterPhase(self.hass, reverse, seals)
+            _need(phase.position == 'before', 'homekit_inspection_position')
+            changed = [(before, after) for before, after in zip(
+                phase.capture.entries, phase.capture.expected, strict=True)
+                if not snapshot_equal(before, after)]
+            prepared = [decode_change(self.preparations.resolve(step.prepared_ref,
+                self.digests[step.prepared_ref])) for step in self.plan.steps if step.adapter == 'helpers']
+            _need(len(changed) == len(prepared) and all(any(
+                snapshot_equal(before, item.after) and snapshot_equal(after, item.before)
+                for item in prepared) for before, after in changed), 'homekit_inspection_preparations')
+            proofs = tuple(RegistryMappingProof(new, old, change.identity)
+                           for change in self.registry_changes for old, new in change.mapping.items())
+            await NativeHomeKitHelperObservers.capture(self.hass, [before for before, _ in changed], proofs)
+            binding = object.__new__(HomeKitYAMLBinding)
+            binding.hass, binding.mapping, binding.phase = self.hass, reverse, phase
+            _need(binding.verify('before') is True, 'homekit_inspection_runtime')
+            store = native_helper_lifecycle_store(self.hass, self.preparations)
+            await store.initialize()
+            self._scope()
+            _need(classify(self.preparations, store, self.record) is True,
+                  'homekit_inspection_lifecycle')
+            phase.check()
+        if 'utility_meter' in domains:
+            from .native_utility_yaml_binding import UtilityYAMLBinding
+            from .native_utility_yaml_receipt import inspect_accepted
+            binding = UtilityYAMLBinding.capture(self.hass, reverse, seals)
+            _need(binding.check_prefix(frozenset()) is True, 'utility_inspection_projection')
+            inspect_accepted(binding.handoff, self.preparations, self.operation_id,
+                             self.plan, self.registry_changes)
+        self._scope()
+        _need(await self.journal.load(self.operation_id) == self.record, 'external_inspection_phase_changed')
+        self._scope()
+        return True
+
     async def _prefix_current(self, record):
         """Read-only classification of the exact acknowledged physical prefix.
 

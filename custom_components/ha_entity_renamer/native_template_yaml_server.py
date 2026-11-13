@@ -765,7 +765,7 @@ class NativeTemplateYAMLServer:
         return result
 
     @classmethod
-    async def bind_reverse(cls, hass, operation_id, fingerprint, *, guard, refresh, restored=False):
+    async def bind_reverse(cls, hass, operation_id, fingerprint, *, guard, refresh, restored=False, inspect_only=False):
         """Fresh read-only reopen, actual admission, then a DIFFERENT live chain."""
         from .native_template_state_server import NativeTemplateStateServer
         powercalc_scope = cls is NativeTemplateStateServer and 'powercalc' in hass.config.components
@@ -785,6 +785,7 @@ class NativeTemplateYAMLServer:
                 and 0 < record.phases.count('undone') < len(record.phases)
                 and record.phases == (('undone',) * record.phases.count('undone')
                     + ('pending',) * record.phases.count('pending')))
+            _need(type(inspect_only) is bool and not (inspect_only and restored), 'inspection_scope')
             _need(type(restored) is bool and record is not None and record.operation_id == operation_id
                   and record.plan.fingerprint == fingerprint
                   and ((restored and record.restore_attempted is True and record.direction == 'rollback'
@@ -808,19 +809,21 @@ class NativeTemplateYAMLServer:
             obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
             obj.digests = dict(obj.composition.prepared_digests)
             from .native_template_state_composition import ExternalStateComposition
-            _need(type(obj.composition) is not ExternalStateComposition, 'external_rollback_lifecycle_required')
+            external_plan = _external_state_plan(obj.plan, obj.composition)
+            _need(type(obj.composition) is not ExternalStateComposition or inspect_only and external_plan
+                  and record.status == 'applied', 'external_rollback_lifecycle_required')
             from .controlled_powercalc_composition import ControlledPowercalcComposition
             is_powercalc = type(obj.composition) is ControlledPowercalcComposition
             _need(not is_powercalc or powercalc_scope, 'powercalc_runtime_required')
             registry_only = _registry_only_state_plan(obj.plan, obj.composition, obj.receipt)
             entry_plan = _entry_reload_plan(obj.plan, obj.composition)
             powercalc_plan = _controlled_powercalc_plan(obj.plan, obj.composition)
-            dashboard_plan = _dashboard_plan(obj.plan) or ((entry_plan or powercalc_plan) and 'dashboard' in obj.plan.required_scopes)
+            dashboard_plan = _dashboard_plan(obj.plan) or ((entry_plan or powercalc_plan or external_plan) and 'dashboard' in obj.plan.required_scopes)
             standard = (obj.plan.required_scopes == obj.plan.covered_scopes == obj.plan.verification_adapters == ('registry', 'yaml')
                   and tuple(s.adapter for s in obj.plan.steps) == ('registry',) * (len(obj.plan.steps) - 1) + ('yaml',)
                   and len(obj.plan.steps) >= 2 and not any(s.caused_by for s in obj.plan.steps))
             _need(obj.plan.coverage_evidence == obj.composition.coverage_sha256
-                  and (registry_only or standard or dashboard_plan or entry_plan or powercalc_plan), 'qualified_plan_required')
+                  and (registry_only or standard or dashboard_plan or entry_plan or powercalc_plan or external_plan), 'qualified_plan_required')
             changes = [decode_change(obj.preparations.resolve(s.prepared_ref, obj.digests[s.prepared_ref]))
                        for s in obj.plan.steps]
             obj.registry_changes = tuple(change for step, change in zip(obj.plan.steps, changes, strict=True)
@@ -924,11 +927,17 @@ class NativeTemplateYAMLServer:
                 else:
                     await obj._terminal(record, rollback=restored)
             await admit()
+            if external_plan:
+                await obj._inspect_external_consumers()
             await refresh()
             obj._scope()
             await obj._fresh_stores(record, allow_active=obj.prefix_recovery or obj.complete_unknown_recovery)
             await admit()
+            if external_plan:
+                await obj._inspect_external_consumers()
             state = readonly.reconstruct_inputs()
+            if inspect_only:
+                return obj  # A read-only inspection never creates a writer.
             if restored:
                 return obj  # Terminal proof never installs a writer.
             # Same separated admission pattern as NativeTemplateReverse: the

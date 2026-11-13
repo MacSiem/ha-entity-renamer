@@ -125,11 +125,17 @@ class ExternalCombinedFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual({k: v.entity_id for k, v in meters().items()}, before_ids)
             self.assertIs(meters()['p3_foreign_meter'], foreign)
             self.assertIn(target, config.read_text())
-        await transition(old, new)
+            return review
+        first_review = await transition(old, new)
         before_increment = {name: meters()[name].native_value for name in ('p3_meter', 'p3_second_meter')}
         await emit(15)
         for name, value in before_increment.items():
             self.assertEqual(meters()[name].native_value, value + 5)
+        inspected = await runtime.recovery_inspect(hass, first_review['operation_id'],
+            first_review['fingerprint'], guard=lambda: None, refresh=refresh)
+        self.assertEqual(inspected['state'], 'applied', inspected)
+        self.assertFalse(inspected['eligible'])
+        self.assertFalse(inspected['restore_attempt_available'])
         await transition(new, old)
         before_increment = {name: meters()[name].native_value for name in ('p3_meter', 'p3_second_meter')}
         await emit(20)
