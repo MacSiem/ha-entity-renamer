@@ -55,8 +55,25 @@ class ExternalCombinedFlowTests(unittest.IsolatedAsyncioTestCase):
         async def transition(source, target):
             review = await runtime.native_yaml_prepare(hass, {source: target}, actor_id='external-qa',
                 guard=lambda: None, refresh=refresh)
-            result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
-                actor_id='external-qa', guard=lambda: None, refresh=refresh)
+            try:
+                result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                    actor_id='external-qa', guard=lambda: None, refresh=refresh)
+            finally:
+                # The fixture is disposable; preserve only non-private coordinator
+                # diagnostics before its temporary directory is removed.
+                import json, os
+                from pathlib import Path
+                journal = self.module('journal').native_journal(hass)
+                await journal.initialize()
+                record = await journal.load(review['operation_id'])
+                if record is not None and os.environ.get('RENAMER_BATCH_EVIDENCE'):
+                    path = Path(os.environ['RENAMER_BATCH_EVIDENCE']) / 'external-journal.json'
+                    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, 'w') as output:
+                        json.dump({'status': record.status, 'reason': record.reason,
+                                   'phases': record.phases,
+                                   'adapters': [step.adapter for step in record.plan.steps]}, output)
             self.assertEqual(result['state'], 'applied', result)
             await hass.async_block_till_done()
             self.assertEqual(self.f.entity.async_get(target).id, uuids[old])
