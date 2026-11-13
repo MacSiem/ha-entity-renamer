@@ -54,6 +54,7 @@ _DIAGNOSTIC_REASONS = frozenset({
     'powercalc_profile_selector_variant_unverified',
     'powercalc_profile_source_registry_required',
     'powercalc_profile_source_variant_unverified',
+    'powercalc_profile_profile_unresolved',
     'powercalc_profile_standby_unverified',
     'powercalc_profile_strategy_unverified',
     'powercalc_profile_unsafe_input',
