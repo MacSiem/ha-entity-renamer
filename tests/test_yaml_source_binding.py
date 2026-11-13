@@ -173,7 +173,8 @@ class RuntimeSourceSamplerBindingTests(unittest.TestCase):
         binding, evidence, observed, _ = self.sampler_fixture()
         sampler = binding._RuntimeSourceSampler.bind(evidence, observed)
         seen = []
-        def mutating_reader(hass, current_evidence, rows):
+        def mutating_reader(hass, current_evidence, rows, *, owned_automation=None):
+            self.assertIsNone(owned_automation)
             row, = tuple(rows)
             seen.append(deepcopy(row))
             row['opaque']['nested'].append('reader mutation')
