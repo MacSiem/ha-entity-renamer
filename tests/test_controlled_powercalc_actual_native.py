@@ -45,7 +45,10 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.config_entries import ConfigEntry
         from types import MappingProxyType
-        from homeassistant.core import callback
+        from homeassistant.core import Context, callback
+        from homeassistant.components.conversation import async_handle_sentence_triggers
+        from homeassistant.components.conversation.chat_log import ChatLog
+        from homeassistant.components.conversation.models import ConversationInput
         from homeassistant.components.webhook import async_handle_webhook
         from homeassistant.components.zha.helpers import get_zha_data
         from homeassistant.helpers import event as native_event
@@ -261,16 +264,20 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             def request(method):
                 return MockRequest(b'{}', 'synthetic fixture', method=method, remote='127.0.0.1')
             await async_handle_webhook(hass, 'controlled-synthetic', request('GET'))
-            await hass.services.async_call('conversation', 'process',
-                {'text': 'Report unrelated fixture', 'language': 'en'},
-                blocking=True, return_response=True)
+            async def sentence(text):
+                # Use the actual sentence-trigger ingress without processing
+                # unrelated built-in intents, which initialize exposure
+                # options on every entity and change the fixture's registry.
+                user_input = ConversationInput(text, Context(), None, None, None, 'en',
+                                               'conversation.home_assistant')
+                return await async_handle_sentence_triggers(
+                    hass, user_input, ChatLog(hass, 'synthetic-fixture'))
+            self.assertIsNone(await sentence('Report unrelated fixture'))
             hass.bus.async_fire(ZHA_EVENT, {**zha_payload, 'command': 'unrelated'})
             await hass.async_block_till_done()
             self.assertFalse(any(seen[key] for key in ('webhook', 'conversation', 'device')))
             await async_handle_webhook(hass, 'controlled-synthetic', request('POST'))
-            await hass.services.async_call('conversation', 'process',
-                {'text': 'Report synthetic meter', 'language': 'en'},
-                blocking=True, return_response=True)
+            self.assertIsNotNone(await sentence('Report synthetic meter'))
             hass.bus.async_fire(ZHA_EVENT, zha_payload)
             await hass.async_block_till_done()
 
