@@ -102,6 +102,7 @@ class HomeKitHelperNativeTests(unittest.IsolatedAsyncioTestCase):
             path.write_text(yaml(target))
             await hass.services.async_call('homekit','reload',{},blocking=True);await settle()
             await observer.verify_runtime(plan.after)
+            self.assertTrue(binding.verify('after' if source == old else 'before'))
         await run(forward,old,new)
         reverse=planner.plan_helper(forward.after,{new:old});self.assertFalse(reverse.markers)
         await run(reverse,new,old)

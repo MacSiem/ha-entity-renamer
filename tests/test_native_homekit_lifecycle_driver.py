@@ -88,6 +88,7 @@ class HomeKitLifecycleOrderingTests(unittest.IsolatedAsyncioTestCase):
         fresh = object.__new__(RegistryReceiptStore)
         fresh.preparations, fresh.rows, fresh.initialize = root.preparations, {}, initialize
         binding.phase = SimpleNamespace(check=lambda:None)
+        binding.verify = lambda position: position == 'after'
         binding.observer.bind_activation_lease = lambda lease:None
         binding.observer.settle = done
         binding.observer.verify_inactive = done

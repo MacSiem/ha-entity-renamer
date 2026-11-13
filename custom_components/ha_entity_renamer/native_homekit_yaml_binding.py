@@ -40,3 +40,26 @@ class HomeKitYAMLBinding:
         obj.hass, obj.mapping, obj.receipt = hass, dict(mapping), receipt
         obj.phase, obj.observer = phase, observer
         return obj
+
+    def verify(self, position):
+        """Recheck every loaded bridge, including unaffected bridge identities."""
+        from homeassistant.components.homekit import FILTER_SCHEMA
+        from .helper_native import read_entry
+        from .native_homekit_filter import _bridge_identity
+        _need(position in ('before', 'after'), 'position')
+        captured = self.phase.capture
+        expected = captured.entries if position == 'before' else captured.expected
+        ids = tuple(row['identity']['entry_id'] for row in expected)
+        _need(tuple(sorted(entry.entry_id for entry in self.hass.config_entries.async_entries('homekit'))) == ids,
+              'bridge_population_changed')
+        for snapshot, identity in zip(expected, captured.bridge_identity, strict=True):
+            entry_id = snapshot['identity']['entry_id']
+            entry = self.hass.config_entries.async_get_entry(entry_id)
+            _need(entry is not None and entry.state.value == 'loaded'
+                  and snapshot_equal(read_entry(self.hass, entry_id), snapshot)
+                  and _bridge_identity(entry) == identity, 'bridge_changed')
+            native = entry.runtime_data.homekit._filter.get_filter()
+            expected_filter = FILTER_SCHEMA(snapshot['options'].get('filter', {})).get_filter()
+            _need(all(native(entity_id) == expected_filter(entity_id)
+                      for pair in self.mapping.items() for entity_id in pair), 'runtime_filter_changed')
+        return True

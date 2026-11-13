@@ -131,7 +131,8 @@ class HomeKitLifecycleDriver:
             root._scope(); lease.check()
             await root._terminal(result, rollback=False)
             root._scope(); lease.check()
-            _need(await binding.observer.verify_inventory(root.plan) is True, 'runtime_unconfirmed')
+            _need(await binding.observer.verify_inventory(root.plan) is True
+                  and binding.verify('after') is True, 'runtime_unconfirmed')
             status = life.inspect()
             _need(status['activation_receipts_complete'] and not status['pending'], 'setup_unresolved')
             return result
