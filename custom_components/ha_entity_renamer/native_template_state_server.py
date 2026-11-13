@@ -65,6 +65,7 @@ from .native_template_prefix_recovery import acknowledged_registry_prefix as _ac
 class NativeTemplateStateServer(NativeTemplateYAMLServer):
     async def apply(self):
         if (type(self.composition) is ExternalStateComposition
+                and not self.composition.controlled_reload
                 and getattr(self, 'homekit_yaml_binding', None) is None):
             self._scope()
             _need(asyncio.current_task() is self.task and self.bound and not self.used
@@ -90,7 +91,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         _need(asyncio.current_task() is self.task and self.bound and not self.used,
               'no_replay')
-        _need(set(self.receipt.changed_domains) <= {'template', 'homekit', 'utility_meter'}
+        _need(set(self.receipt.changed_domains) <= {'automation', 'script', 'template', 'homekit', 'utility_meter'}
               and 'homekit' in self.receipt.changed_domains,
               'homekit_mixed_lifecycle_unsupported')
         self.used = True
@@ -98,6 +99,13 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         await self._fresh_stores(None)
         await self._common(False, initial=True)
+        if self.composition.controlled_reload and 'automation' in self.receipt.changed_domains:
+            from .native_automation_transition import NativeAutomationTransition
+            transition = NativeAutomationTransition(self.hass, allow_running=True)
+            await transition.prepare_preserving_enabled()
+            self.controlled_automation = transition
+            self.observer.controlled_automation = transition
+            self._scope()
         from .native_homekit_lifecycle_driver import HomeKitLifecycleDriver
         return await HomeKitLifecycleDriver(self).apply()
 
@@ -460,7 +468,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             # The first bounded profile accepts one original Template program
             # with native HomeKit/Utility YAML, not a controlled PC/A/S reload.
             if (mixed_powercalc or entry_change is not None or not external_domains
-                    or set(domains) - {'template', 'homekit', 'utility_meter'}
+                    or set(domains) - {'automation', 'script', 'template', 'homekit', 'utility_meter'}
                     or 'template' not in domains
                     or bool(homekit_refusal) != ('homekit' in external_domains)
                     or bool(utility_refusal) != ('utility_meter' in external_domains)):
@@ -753,19 +761,20 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         script_prefix = not controlled_reload and self.receipt.changed_domains in (('script',), ('script', 'template'))
         from .controlled_powercalc_composition import ControlledPowercalcComposition
         composition_type = (ControlledPowercalcComposition if mixed_powercalc else
+                            ExternalStateComposition if external_domains else
                             ControlledScriptComposition if controlled_reload and owned_script else
                             ControlledReloadEntryComposition if entry_change is not None else
                             ControlledReloadComposition if controlled_reload else
                             AutomationTemplateStateComposition if automation_prefix else
                             ScriptTemplateStateComposition if script_prefix else
-                            ExternalStateComposition if external_domains else
                             MixedTemplateStateComposition if self.mixed_state else TemplateStateComposition)
         self.composition = composition_type(self.evidence, bundle.original_sources,
             bundle.candidate_sources, self.program, yaml, tuple(sorted(self.mapping.items())),
             tuple(sorted(self.digests.items())), source_history, consumer_history,
             self.program.sha256, physical,
             **({'dependent_config_program': bundle.dependent_config_program} if script_prefix or automation_prefix or controlled_reload and owned_script else {}),
-            **({'external_source_proof': bundle.external_source_proof} if external_domains else {}),
+            **({'external_source_proof': bundle.external_source_proof, 'controlled_reload': controlled_reload}
+               if external_domains else {}),
             **({'previous': pc_previous, 'energy_original_physical': pc_energy_physical,
                 'population': self.powercalc_population.descriptors} if mixed_powercalc else {}))
         inputs = await self.preparations.create_native_inputs(own + '-original', baseline,

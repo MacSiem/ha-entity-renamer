@@ -169,6 +169,7 @@ class MixedTemplateStateComposition(TemplateStateComposition):
 class ExternalStateComposition(MixedTemplateStateComposition):
     """Persist exact external evidence; activation needs live typed bindings."""
     external_source_proof: tuple[tuple[str, bool], ...] = ()
+    controlled_reload: bool = False
 
     def _assert_changed_scope(self, receipt):
         from .yaml_transaction import _assert_external_state_scope
@@ -176,7 +177,9 @@ class ExternalStateComposition(MixedTemplateStateComposition):
         expected = tuple((domain, True) for domain in ('homekit', 'utility_meter')
                          if domain in receipt.changed_domains)
         _need(bool(receipt.proposed_files) and 'template' in receipt.changed_domains
-              and bool(expected) and self.external_source_proof == expected)
+              and bool(expected) and self.external_source_proof == expected
+              and type(self.controlled_reload) is bool
+              and self.controlled_reload == bool({'automation', 'script'} & set(receipt.changed_domains)))
 
 
 @dataclass(frozen=True)
@@ -242,6 +245,8 @@ def _encode_state_composition(value, baseline, cls, profile):
         'physical_consumers': _typed(value.physical_consumers, tuple[tuple[str, str, str], ...], encode=True)}
     if cls is ExternalStateComposition:
         result['external_source_proof'] = _typed(value.external_source_proof, tuple[tuple[str, bool], ...], encode=True)
+        if value.controlled_reload:
+            result['controlled_reload'] = True
     value.assert_baseline(baseline)
     return result
 
@@ -263,9 +268,10 @@ def decode_reload_entry_composition(payload, baseline):
 
 def _decode_state_composition(payload, baseline, cls, profile):
     extra = {'external_source_proof'} if cls is ExternalStateComposition else set()
+    optional = {'controlled_reload'} if cls is ExternalStateComposition and type(payload) is dict and payload.get('controlled_reload') is True else set()
     _need(type(payload) is dict and set(payload) == {'schema', 'profile', 'evidence',
         'original_sources', 'candidate_sources', 'state_config_program', 'yaml_plan', 'mapping', 'prepared_digests',
-        'source_history', 'consumer_history', 'coverage_sha256', 'physical_consumers'} | extra
+        'source_history', 'consumer_history', 'coverage_sha256', 'physical_consumers'} | extra | optional
         and type(payload['schema']) is int and payload['schema'] == 3
         and payload['profile'] == profile)
     value = cls(
@@ -279,7 +285,8 @@ def _decode_state_composition(payload, baseline, cls, profile):
         _history(payload['source_history']), _history(payload['consumer_history']),
         payload['coverage_sha256'],
         _typed(payload['physical_consumers'], tuple[tuple[str, str, str], ...], encode=False),
-        **({'external_source_proof': _typed(payload['external_source_proof'], tuple[tuple[str, bool], ...], encode=False)}
+        **({'external_source_proof': _typed(payload['external_source_proof'], tuple[tuple[str, bool], ...], encode=False),
+            'controlled_reload': bool(optional)}
            if cls is ExternalStateComposition else {}))
     value.assert_baseline(baseline)
     return value

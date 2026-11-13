@@ -40,8 +40,18 @@ class ExternalCombinedFlowTests(unittest.IsolatedAsyncioTestCase):
         new = mappings[old]
         mapping = {old: new}
         foreign_source = self.other.entity_id
+        automation = root / 'external_automations.yaml'
+        script = root / 'external_scripts.yaml'
+        automation.write_text('- id: external_source\n  alias: External source observer\n'
+            '  initial_state: true\n  triggers:\n  - trigger: state\n    entity_id: ' + old + '\n'
+            '  actions:\n  - event: external_automation_result\n'
+            '    event_data:\n      value: "{{ states(\'' + old + '\') }}"\n')
+        script.write_text('external_source:\n  sequence:\n  - event: external_script_result\n'
+            '    event_data:\n      value: "{{ states(\'' + old + '\') }}"\n')
+        original_automation, original_script = automation.read_bytes(), script.read_bytes()
         config = root / 'configuration.yaml'
-        config.write_text(config.read_text() + '\nhomekit:\n- name: Synthetic Bridge\n'
+        config.write_text(config.read_text() + '\nautomation: !include external_automations.yaml\n'
+            'script: !include external_scripts.yaml\nhomekit:\n- name: Synthetic Bridge\n'
             '  port: 21198\n  ip_address: 192.0.2.1\n  advertise_ip: 192.0.2.1\n'
             '  filter:\n    include_entities:\n      - ' + old + '\n'
             '- name: Foreign Bridge\n  port: 21199\n  ip_address: 192.0.2.1\n'
@@ -52,7 +62,7 @@ class ExternalCombinedFlowTests(unittest.IsolatedAsyncioTestCase):
         original = config.read_bytes()
         hass.auth = await auth.auth_manager_from_config(hass, [], [])
         loaded = await async_hass_config_yaml(hass)
-        for domain in ('utility_meter', 'homekit'):
+        for domain in ('automation', 'script', 'utility_meter', 'homekit'):
             self.assertTrue(await async_setup_component(hass, domain, loaded))
         await hass.async_block_till_done()
         await hass.services.async_call('homekit', 'reload', {}, blocking=True)
@@ -72,10 +82,21 @@ class ExternalCombinedFlowTests(unittest.IsolatedAsyncioTestCase):
         def meters():
             return {e._parent_meter: e for p in async_get_platforms(hass, 'utility_meter')
                     for e in p.entities.values() if hasattr(e, '_parent_meter')}
+        events = {'automation': [], 'script': []}
+        for domain in events:
+            remove = hass.bus.async_listen('external_' + domain + '_result',
+                lambda event, kind=domain: events[kind].append(str(event.data['value'])))
+            self.addCleanup(remove)
         async def emit(value):
             self.producer._attr_native_value = value
             self.producer.async_write_ha_state()
             await hass.async_block_till_done()
+        async def stimulus(value):
+            for values in events.values(): values.clear()
+            await emit(value)
+            await hass.services.async_call('script', 'external_source', {}, blocking=True)
+            await hass.async_block_till_done()
+            self.assertEqual(events, {'automation': [str(value)], 'script': [str(value)]})
         await emit(5); await emit(10)
         foreign = meters()['p3_foreign_meter']
         before_ids = {k: v.entity_id for k, v in meters().items()}
@@ -128,7 +149,7 @@ class ExternalCombinedFlowTests(unittest.IsolatedAsyncioTestCase):
             return review
         first_review = await transition(old, new)
         before_increment = {name: meters()[name].native_value for name in ('p3_meter', 'p3_second_meter')}
-        await emit(15)
+        await stimulus(15)
         for name, value in before_increment.items():
             self.assertEqual(meters()[name].native_value, value + 5)
         inspected = await runtime.recovery_inspect(hass, first_review['operation_id'],
@@ -138,8 +159,10 @@ class ExternalCombinedFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(inspected['restore_attempt_available'])
         await transition(new, old)
         before_increment = {name: meters()[name].native_value for name in ('p3_meter', 'p3_second_meter')}
-        await emit(20)
+        await stimulus(20)
         for name, value in before_increment.items():
             self.assertEqual(meters()[name].native_value, value + 5)
         self.assertEqual(config.read_bytes(), original)
         self.assertEqual((root / 'template.yaml').read_bytes(), template_before)
+        self.assertEqual(automation.read_bytes(), original_automation)
+        self.assertEqual(script.read_bytes(), original_script)

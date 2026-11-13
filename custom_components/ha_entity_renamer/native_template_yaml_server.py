@@ -42,10 +42,11 @@ def _mixed_composition(value):
 
 
 def _controlled_reload(value):
-    from .native_template_state_composition import ControlledReloadComposition, ControlledReloadEntryComposition
+    from .native_template_state_composition import ControlledReloadComposition, ControlledReloadEntryComposition, ExternalStateComposition
     from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
     from .controlled_powercalc_composition import ControlledPowercalcComposition
-    return type(value) in (ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ControlledPowercalcComposition)
+    return (type(value) in (ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ControlledPowercalcComposition)
+            or type(value) is ExternalStateComposition and value.controlled_reload)
 
 
 def _script_prefix_composition(value):
