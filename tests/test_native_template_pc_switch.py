@@ -7,7 +7,13 @@ import test_controlled_powercalc_actual_native as base
 
 @unittest.skipUnless(base.actual.fixtures.HAS_HA, 'requires pinned native HA')
 class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
-    async def test_switch_actions_and_pending_binary_forward_inverse(self):
+    async def test_output_forward_inverse(self):
+        await self._exercise(use_leaf=True)
+
+    async def test_input_forward_inverse(self):
+        await self._exercise(use_leaf=False)
+
+    async def _exercise(self, *, use_leaf):
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.helpers.entity_platform import async_get_platforms
         from homeassistant.setup import async_setup_component
@@ -19,21 +25,22 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         old_source = source.entity_id
         leaf = self.entities['fixture-meter-10'].entity_id
         mapping = {old_source: 'light.p2_sample_source', leaf: 'sensor.p2_sample_power'}
+        target = leaf if use_leaf else old_source
         path, config = root / 'p2_template.yaml', root / 'configuration.yaml'
         config.write_text(config.read_text() + '\ntemplate: !include p2_template.yaml\n')
         templates = [{'sensor': [{'name': 'P2 total', 'unique_id': 'p2_total',
-            'state': "{% set items = ['" + old_source + "'] %}{% set ns = namespace(total=0) %}"
-                     "{% for item in items %}{% if states(item) in ['on'] %}"
+            'state': "{% set items = ['" + target + "'] %}{% set ns = namespace(total=0) %}"
+                     "{% for item in items %}{% if states(item) in ['on', '10', '10.0', '10.00'] %}"
                      "{% set ns.total = ns.total + 1 %}"
                      "{% endif %}{% endfor %}{{ ns.total }}",
-            'attributes': {'copy': "{{ states('" + old_source + "') }}"}}],
+            'attributes': {'copy': "{{ states('" + target + "') }}"}}],
             'binary_sensor': [{'name': 'P2 delayed', 'unique_id': 'p2_delay',
-                'availability': "{{ states('" + old_source + "') != 'unavailable' }}",
-                'state': "{{ is_state('" + old_source + "', 'on') }}", 'delay_on': '00:30:00'}],
+                'availability': "{{ states('" + target + "') != 'unavailable' }}",
+                'state': "{{ states('" + target + "') in ['on', '10', '10.0', '10.00'] }}", 'delay_on': '00:30:00'}],
             'switch': [{'name': 'P2 switch', 'unique_id': 'p2_switch',
-                'state': "{{ is_state('" + old_source + "', 'on') }}",
-                'turn_on': [{'action': 'test.capture', 'target': {'entity_id': old_source}}],
-                'turn_off': [{'action': 'test.capture', 'target': {'entity_id': old_source}}]},
+                'state': "{{ states('" + target + "') in ['on', '10', '10.0', '10.00'] }}",
+                'turn_on': [{'action': 'test.capture', 'target': {'entity_id': target}}],
+                'turn_off': [{'action': 'test.capture', 'target': {'entity_id': target}}]},
                 {'name': 'P2 foreign', 'unique_id': 'p2_foreign', 'state': '{{ true }}'}]}]
         path.write_text(yaml.safe_dump(templates, sort_keys=False))
         initial = path.read_bytes()
@@ -139,11 +146,11 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
             self.assertIs(hass.states.get(e.entity_id), state)
         await switch.async_turn_on()
         await switch.async_turn_off()
-        self.assertEqual(events, [[old_source], [mapping[old_source]], [mapping[old_source]]])
+        self.assertEqual(events, [[target], [mapping[target]], [mapping[target]]])
         result = await runtime.recovery_restore(hass, op, fingerprint, guard=lambda: True, refresh=refresh)
         self.assertEqual(result['state'], 'rolled_back')
         self.assertEqual(path.read_bytes(), initial)
         self.assertIs(binary._delay_cancel, token)
         self.assertEqual(token.__self__.when(), deadline)
         await switch.async_turn_off()
-        self.assertEqual(events[-1], [old_source])
+        self.assertEqual(events[-1], [target])
