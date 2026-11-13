@@ -89,7 +89,10 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             path.write_text(yaml.safe_dump(programs[domain], sort_keys=False))
         config = await async_hass_config_yaml(hass)
         for domain in ('template', 'script', 'automation'):
-            self.assertTrue(await async_setup_component(hass, domain, config), domain)
+            if domain in hass.config.components:
+                await hass.services.async_call(domain, 'reload', {}, blocking=True)
+            else:
+                self.assertTrue(await async_setup_component(hass, domain, config), domain)
         await hass.async_block_till_done()
         from homeassistant.helpers.entity_platform import async_get_platforms
         template_entities = [e for p in async_get_platforms(hass, 'template')
