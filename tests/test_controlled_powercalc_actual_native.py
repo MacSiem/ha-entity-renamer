@@ -47,7 +47,9 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         from types import MappingProxyType
         from homeassistant.core import Context, callback
         from homeassistant.components.conversation import async_handle_sentence_triggers
+        from homeassistant.components.conversation.agent_manager import get_agent_manager
         from homeassistant.components.conversation.chat_log import ChatLog
+        from homeassistant.components.conversation.default_agent import DefaultAgent
         from homeassistant.components.conversation.models import ConversationInput
         from homeassistant.components.webhook import async_handle_webhook
         from homeassistant.components.zha.helpers import get_zha_data
@@ -169,7 +171,13 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         for domain, path in files.items():
             path.write_text(yaml.safe_dump(programs[domain], sort_keys=False))
         config = await async_hass_config_yaml(hass)
-        for domain in ('conversation', 'webhook', 'sun', 'template', 'script', 'automation'):
+        # Install the native sentence matcher without the unrelated global
+        # exposure bootstrap that replaces every entity's registry object.
+        agent = DefaultAgent(hass)
+        await agent.async_added_to_hass()
+        self.addAsyncCleanup(agent.async_will_remove_from_hass)
+        await get_agent_manager(hass).async_setup_default_agent(agent)
+        for domain in ('webhook', 'sun', 'template', 'script', 'automation'):
             if domain in hass.config.components:
                 await hass.services.async_call(domain, 'reload', {}, blocking=True)
             else:
