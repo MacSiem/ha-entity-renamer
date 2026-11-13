@@ -429,7 +429,7 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('profile_unresolved', ' '.join(error.exception.__notes__))
 
     async def test_mixed_yaml_group_controlled_apply_and_fresh_reverse(self):
-        from homeassistant.core import callback
+        from homeassistant.core import State, callback
         from homeassistant.components.recorder import get_instance
         from homeassistant.helpers.entity_platform import async_get_platforms
         from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
@@ -461,7 +461,14 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
                 obj.async_write_ha_state()
         await hass.async_block_till_done()
         pss = hass.data['powercalc_group_storage']
+        pss.set_entity_state('sensor.unrelated_group', 'sensor.unrelated_member',
+                             State('sensor.unrelated_member', '41.125'))
         await pss.persist_states()
+        pss_path = root / '.storage' / 'powercalc_group'
+        entry_path = root / '.storage' / 'core.config_entries'
+        foreign_pss = json.loads(pss_path.read_bytes())['data']['sensor.unrelated_group']
+        entry_bytes = entry_path.read_bytes()
+        original_entry = dict(self.entry.data)
         restore = hass.data[DATA_RESTORE_STATE]
         await restore.async_dump_states()
         from homeassistant.util import dt as dt_util
@@ -495,6 +502,21 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         remove = hass.bus.async_listen('state_changed', published)
         self.addCleanup(remove)
         actor = 'controlled-graph-native'
+        selected_source = {self.yaml_source: mapping[self.yaml_source]}
+        source_only = await runtime.native_yaml_prepare(hass, selected_source, actor_id=actor,
+            guard=self.guard, refresh=refresh)
+        self.assertEqual(source_only['entity_count'], 1)
+        self.assertEqual(source_only['dependencies']['config_entries'], [])
+        group = self.entities['graph-second']
+        shared = self.entities['graph-fixed'].entity_id
+        group._entities.remove(shared)
+        try:
+            with self.assertRaises((ValueError, backend.transaction.Refused)):
+                await runtime.native_yaml_prepare(hass, mapping, actor_id=actor,
+                    guard=self.guard, refresh=refresh)
+        finally:
+            group._entities.add(shared)
+        self.assertEqual(entry_path.read_bytes(), entry_bytes)
         review = await runtime.native_yaml_prepare(hass, mapping, actor_id=actor,
             guard=self.guard, refresh=refresh)
         operation, fingerprint = review['operation_id'], review['fingerprint']
@@ -527,7 +549,7 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
             monitor.set_events(tool, monitor.events.RAISE)
             result = await runtime.native_yaml_apply(hass, operation, fingerprint, actor_id=actor,
                 guard=self.guard, refresh=refresh)
-        except Exception as error:
+        except Exception:
             record = await runtime.journal.load(operation)
             print('CONTROLLED_GRAPH_FAILURE', json.dumps({
                 'status': None if record is None else record.status,
@@ -547,7 +569,10 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
             actual = obj._native_value_exact if type(obj) is GroupedEnergySensor else obj._state
             self.assertEqual(Decimal(expected).as_tuple(), actual.as_tuple())
             self.assertEqual(Decimal(first[obj.entity_id]), Decimal(hass.states.get(obj.entity_id).state))
-        self.assertEqual(hass.config_entries.async_get_entry(self.entry.entry_id).data, self.entry.data)
+        self.assertEqual(hass.config_entries.async_get_entry(self.entry.entry_id).data, original_entry)
+        self.assertEqual(entry_path.read_bytes(), entry_bytes)
+        self.assertEqual(json.loads(pss_path.read_bytes())['data']['sensor.unrelated_group'], foreign_pss)
+        await restore.async_dump_states()  # legitimate native refresh before fresh reverse
         first.clear()
         watch = True
         result = await runtime.native_yaml_reverse(hass, operation, fingerprint,
@@ -555,6 +580,8 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         watch = False
         self.assertEqual(result['state'], 'rolled_back', result)
         self.assertEqual((root / 'configuration.yaml').read_text(), self.config)
+        self.assertEqual(entry_path.read_bytes(), entry_bytes)
+        self.assertEqual(json.loads(pss_path.read_bytes())['data']['sensor.unrelated_group'], foreign_pss)
         self.assertEqual(set(counters()), set(start))
         for uid, obj in counters().items():
             name, expected = start[uid]
