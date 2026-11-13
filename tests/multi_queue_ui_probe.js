@@ -21,6 +21,7 @@ const wait = async name => {
   const browser = await chromium.launch({headless:true, executablePath:'/ms-playwright/chromium-1219/chrome-linux/chrome', args:['--no-sandbox']});
   let page, card;
   const wsErrors = [];
+  const connectionEvents = [];
   try {
     const member = await browser.newContext({viewport:{width:1280,height:900}});
     const memberAccess = fs.readFileSync(dir + '/render-user-token', 'utf8');
@@ -41,13 +42,35 @@ const wait = async name => {
       access_token:access, token_type:'Bearer', expires_in:18000, expires:Date.now()+17900000,
       hassUrl:origin, clientId:origin+'/'})), {access, origin});
     page = await context.newPage();
-    page.on('websocket', socket => socket.on('framereceived', event => {
+    page.on('framenavigated', frame => { if (frame === page.mainFrame()) connectionEvents.push({event:'navigation', url:frame.url(), at:Date.now()}); });
+    page.on('websocket', socket => {
+      socket.on('close', () => connectionEvents.push({event:'websocket-close', at:Date.now()}));
+      socket.on('socketerror', error => connectionEvents.push({event:'websocket-error', error:String(error), at:Date.now()}));
+      socket.on('framereceived', event => {
       try {
         const message = JSON.parse(event.payload);
         if (message.type === 'result' && message.success === false)
           wsErrors.push({id:message.id, error:message.error});
       } catch (_) { /* Ignore non-JSON websocket frames. */ }
-    }));
+      });
+    });
+    const snapshot = async label => {
+      try {
+        const state = await card.evaluate(el => ({
+          connected:el.isConnected, authority:el._renameAuthorityAvailable(),
+          hassConnected:el.hass?.connected ?? null,
+          migration:el._migration ? {stage:el._migration.stage, busy:el._migration.busy,
+            review:el._migration.review, error:el._migration.error,
+            operation_id:el._migration.operation_id, applyState:el._migration.applyState,
+            inspection:el._migration.inspection} : null,
+          text:(el.shadowRoot?.innerText || '').slice(0, 30000),
+          applyPresent:!!el.shadowRoot?.querySelector('#applyMigration')
+        }));
+        write(label, {state, url:page.url(), wsErrors, connectionEvents});
+        await page.screenshot({path:dir + '/' + label + '.png'});
+        fs.chmodSync(dir + '/' + label + '.png', 0o600);
+      } catch (error) { write(label, {snapshot_error:String(error), wsErrors, connectionEvents}); }
+    };
     await page.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await page.goto(origin + '/p4-ui/0', {waitUntil:'domcontentloaded'});
     card = page.locator('ha-entity-renamer');
@@ -85,7 +108,9 @@ const wait = async name => {
     fs.chmodSync(dir + '/ui-review.png', 0o600);
     write('review', reviewed);
     await wait('apply');
-    await card.locator('#applyMigration').click();
+    await snapshot('pre-apply-witness');
+    try { await card.locator('#applyMigration').click(); }
+    catch (error) { await snapshot('apply-failure-witness'); throw error; }
     await card.locator('#continueWriteWarning').click();
     await page.waitForFunction(() => {
       const c=document.querySelector('home-assistant')?.shadowRoot;
@@ -148,7 +173,7 @@ const wait = async name => {
         registry:el._migration?.registryMatches, progress:el._migration?.journal?.progress || null
       }));
     } catch (error) { migration = {snapshot_error:String(error)}; }
-    write('terminal-witness', {migration, wsErrors});
+    write('terminal-witness', {migration, wsErrors, connectionEvents});
     await browser.close();
   }
 })().catch(error => {

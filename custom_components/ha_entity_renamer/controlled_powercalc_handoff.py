@@ -795,14 +795,14 @@ class ControlledPowercalcHandoff:
         return self.receipt
 
     def _capture_leaf_domain_indexes(self, direction):
-        """Retain the pre-reload references for only the IDs being moved."""
+        """Retain the exact qualified predecessors unloaded by this handoff."""
         from custom_components.powercalc.sensors.energy import RealEnergySensor, VirtualEnergySensor
         from custom_components.powercalc.sensors.power import RealPowerSensor, VirtualPowerSensor
         selected = (self.root.mapping if direction == 'forward' else
                     {new: old for old, new in self.root.mapping.items()})
         qualified = {'profile_fixed', 'profile_linear', 'profile_lut', 'energy_integral'}
         leaves = {old: self.original_entities[old] for old, _, kind in self.population.descriptors
-                  if old in selected and kind in qualified}
+                  if kind in qualified}
         if not leaves:
             return
         domain = self.hass.data['powercalc'].get('domain_entities')
@@ -817,7 +817,10 @@ class ControlledPowercalcHandoff:
                 wrapper = RealEnergySensor if type(leaf) is VirtualEnergySensor else RealPowerSensor
                 _need(obj is leaf or type(leaf) in (VirtualEnergySensor, VirtualPowerSensor)
                       and type(obj) is wrapper and key == 'sensor', 'leaf_domain_index_foreign')
-                captured.append((key, bucket, obj))
+                # A wrapper for an unchanged ID is not itself an unloaded
+                # population member. Preserve it unless the ID is moved.
+                if obj is leaf or leaf.entity_id in selected:
+                    captured.append((key, bucket, obj))
         _need(all(sum(obj is leaf for _, _, obj in captured) == 1 for leaf in leaves.values())
               and len({id(obj) for _, _, obj in captured}) == len(captured), 'leaf_domain_index_scope')
         self.leaf_domain_indexes = domain, tuple(captured)
@@ -838,21 +841,25 @@ class ControlledPowercalcHandoff:
         classes = {'energy_integral': 'VirtualEnergySensor', 'profile_fixed': 'VirtualPowerSensor',
                    'profile_linear': 'VirtualPowerSensor', 'profile_lut': 'VirtualPowerSensor'}
         for old, uuid, kind in self.population.descriptors:
-            new = mapping.get(old)
-            if new is None or kind not in classes:
+            if kind not in classes:
                 continue
+            new = mapping.get(old, old)
             old_entity, new_entity = self.original_entities[old], active.get(new)
             prior_row = old_entity.registry_entry
             row = registry.async_get(new)
             cls = vendor.classes[classes[kind]]
             _need(type(old_entity) is type(new_entity) is cls
-                  and index.get(old) is old_entity and index.get(new) is new_entity
+                  and old_entity is not new_entity
+                  and index.get(new) is new_entity
+                  and (old == new or index.get(old) is old_entity)
                   and old_entity._platform_state is EntityPlatformState.REMOVED
                   and prior_row is not None and prior_row.id == uuid and prior_row.entity_id == old
                   and row is not None and row.id == uuid and new_entity.registry_entry is row
                   and prior_row.unique_id == row.unique_id and prior_row.config_entry_id == row.config_entry_id
-                  and registry.async_get(old) is None and old not in active, 'leaf_index_identity_changed')
-            retired[old] = old_entity
+                  and (old == new or registry.async_get(old) is None and old not in active),
+                  'leaf_index_identity_changed')
+            if old != new:
+                retired[old] = old_entity
         if self.leaf_domain_indexes is not None:
             domain, captured = self.leaf_domain_indexes
             _need(self.hass.data['powercalc'].get('domain_entities') is domain
