@@ -117,14 +117,25 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         monitor.register_callback(slot, monitor.events.RAISE, trace)
         from homeassistant.components.template.binary_sensor import StateBinarySensorEntity
         delay_events = []
+        from custom_components.ha_entity_renamer.native_template_powercalc_ingress import PowercalcTemplateIngress
+        def nested(code):
+            for value in code.co_consts:
+                if hasattr(value, 'co_consts'):
+                    yield value
+                    yield from nested(value)
+        action_code = next(code for code in nested(PowercalcTemplateIngress.install.__func__.__code__) if code.co_name == 'action')
         def state_start(code, offset):
             local = sys._getframe(1).f_locals
+            if code is action_code:
+                ev = local['event']
+                delay_events.append(('ingress', ev.data.get('entity_id'), str(ev.data.get('old_state')), str(ev.data.get('new_state'))))
             if local.get('self') is binary:
                 delay_events.append((local.get('result'), hass.loop.time(),
                     None if binary._delay_cancel is None else binary._delay_cancel.__self__.when(),
                     str(hass.states.get(leaf)), str(hass.states.get(mapping[leaf]))))
         monitor.register_callback(slot, monitor.events.PY_START, state_start)
         monitor.set_local_events(slot, StateBinarySensorEntity._update_state.__code__, monitor.events.PY_START)
+        monitor.set_local_events(slot, action_code, monitor.events.PY_START)
         monitor.set_events(slot, monitor.events.RAISE)
         try:
             result = await runtime.native_yaml_apply(hass, op, fingerprint, actor_id='p2-fixture',
@@ -134,6 +145,7 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         finally:
             monitor.set_events(slot, 0)
             monitor.set_local_events(slot, StateBinarySensorEntity._update_state.__code__, 0)
+            monitor.set_local_events(slot, action_code, 0)
             monitor.register_callback(slot, monitor.events.PY_START, None)
             monitor.register_callback(slot, monitor.events.RAISE, None)
             monitor.free_tool_id(slot)
