@@ -66,6 +66,33 @@ class MixedCandidateTests(unittest.TestCase):
             with self.subTest(sources=sources), self.assertRaises(Exception):
                 build_candidate(tuple(original), mapping, '2026.10.4', mixed=True, source_ids=sources)
 
+    def test_two_entry_candidate_preserves_each_entry_own_power_energy(self):
+        docs = [json.loads(raw) for _, raw in self.original()]
+        for i, doc in enumerate(docs):
+            doc['version'], doc['minor_version'] = _SCHEMAS['2026.11.1'][i]
+        docs[0]['data']['entities'].append({'id': 'b', 'entity_id': 'sensor.second',
+                                            'platform': 'demo', 'name': None})
+        entries = []
+        for name, source in (('a', 'sensor.producer'), ('b', 'sensor.second')):
+            entries.append({'domain': 'powercalc', 'entry_id': name, 'unique_id': name,
+                'title': name, 'version': 1, 'minor_version': 1, 'source': 'user',
+                'disabled_by': None, 'pref_disable_new_entities': False, 'pref_disable_polling': True,
+                'created_at': '2026-01-01T00:00:00+00:00', 'discovery_keys': {},
+                'data': {'entity_id': source, 'sensor_type': 'virtual_power', 'mode': 'fixed',
+                         'fixed': {'power': 10}, '_power_entity': 'sensor.power_' + name,
+                         '_energy_entity': 'sensor.energy_' + name}, 'options': {}, 'subentries': [],
+                'foreign': {'preserved': True}})
+        docs[2]['data']['entries'] = entries
+        original = tuple((key, json.dumps(doc).encode()) for key, doc in zip(_KEYS, docs))
+        mapping = {'sensor.producer': 'sensor.new_producer', 'sensor.second': 'sensor.new_second'}
+        result = build_candidate(original, mapping, '2026.11.1', mixed=True,
+                                 source_ids=('sensor.producer', 'sensor.second'))
+        after = json.loads(result.documents[2][2])['data']['entries']
+        for before, changed in zip(entries, after):
+            expected = json.loads(json.dumps(before))
+            expected['data']['entity_id'] = mapping[before['data']['entity_id']]
+            self.assertEqual(changed, expected)
+
     def test_energy_preimage_compares_json_scalar_types(self):
         mapping = {'sensor.producer': 'sensor.new_producer', 'sensor.group': 'sensor.new_group'}
         raw = json.dumps({'key': 'energy', 'data': {'foreign': True}}).encode()
