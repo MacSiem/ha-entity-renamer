@@ -66,6 +66,13 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
         slot = next(i for i in range(6) if monitor.get_tool(i) is None)
         monitor.use_tool_id(slot, 'controlled Powercalc leaf diagnosis')
         def trace(code, offset, error):
+            # sys.monitoring reports exceptions from the whole process. Avoid
+            # path parsing and formatting when this event cannot be recorded.
+            filename = code.co_filename
+            if ('ha_entity_renamer' not in filename
+                    and not filename.endswith(('energy_native.py', 'powercalc_energy_transaction.py',
+                                               'powercalc_energy_receipts.py', 'transaction.py'))):
+                return
             from ordinary_energy_diagnostic import energy_exception
             captured = energy_exception(code, error)
             if captured is not None:
