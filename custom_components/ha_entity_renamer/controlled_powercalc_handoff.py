@@ -403,6 +403,7 @@ class ControlledPowercalcHandoff:
         self.direction = None
         self.entries = self.pss_expected = self.restore_expected = None
         self.setup_reference = None
+        self.entry_listeners = None
 
     def _scope(self):
         self.root._scope()
@@ -425,6 +426,8 @@ class ControlledPowercalcHandoff:
                       for entry in self.entries)
               and all(not platform.entities for platform in async_get_platforms(self.hass, 'powercalc')),
               'population_not_inactive')
+        if self.entry_listeners is not None:
+            self.entry_listeners.require_inactive()
         pss = self.hass.data.get('powercalc_group_storage')
         data = self.hass.data.get(DATA_RESTORE_STATE)
         _need(pss is not None and type(data) is RestoreStateData and data.hass is self.hass
@@ -464,14 +467,21 @@ class ControlledPowercalcHandoff:
         refs = ((type(pss), 'persist_states'),)
         _, _, core_refs = _store_writer(pss.store)
         vendor = PowercalcVendor(self.hass, with_profiles=True)
+        if vendor.core_version in ('2026.11.0', '2026.11.1'):
+            from .controlled_powercalc_entry_listeners import ControlledEntryListeners
+            self.entry_listeners = ControlledEntryListeners(
+                self.hass, vendor, tuple(self.hass.config_entries.async_entries('powercalc')))
         def prove():
             return (prove_methods(vendor.root, _pins(vendor.vendor_version), refs),
                     prove_methods(Path(homeassistant.__file__).resolve().parent,
                                   dict(_SOURCES['2026.11.0' if self.chain.original_receipt.version == '2026.11.1'
-                                                else self.chain.original_receipt.version]), core_refs))
-        proof, core_proof = await _drained(self.hass.async_add_executor_job, prove)
+                                                else self.chain.original_receipt.version]), core_refs),
+                    None if self.entry_listeners is None else self.entry_listeners.prove())
+        proof, core_proof, listener_proofs = await _drained(self.hass.async_add_executor_job, prove)
         self._scope()
         _need(_idle(pss), 'native_store_busy')
+        if self.entry_listeners is not None:
+            self.entry_listeners.capture(listener_proofs)
         progress = _NativePSSProgress(pss, proof, refs, core_proof, core_refs)
         try:
             return await self._start(context, progress)
@@ -603,6 +613,8 @@ class ControlledPowercalcHandoff:
         await fence_entries()
         _need(all(not platform.entities for platform in async_get_platforms(self.hass, 'powercalc')),
               'native_population_still_active')
+        if self.entry_listeners is not None:
+            self.entry_listeners.detach()
         payloads = snapshot_removed(self.hass, self.population,
             allowed_targets=() if aliases is None else tuple(aliases['restore_owned']))
         _need(_idle(data) and _idle(pss), 'store_busy_after_unload')
@@ -816,6 +828,8 @@ class ControlledPowercalcHandoff:
         try:
             await self.hass.services.async_call('powercalc', 'reload', {}, blocking=True, context=service_context)
             await _settle_yaml_discovery(self.hass)
+            if self.entry_listeners is not None:
+                self.entry_listeners.verify_activated()
         finally:
             stop_watch()
         _need(set(restored) == {row['after_id'] for row in handoff['population']},
