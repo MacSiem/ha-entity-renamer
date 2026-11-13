@@ -963,6 +963,9 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             _need(actual.position == wanted.value, 'source_identity_or_history_changed')
         state = self.chain.reconstruct_inputs()
         position = await self.observer.position_at_inputs(self.change, state)
+        # Let HA service timers and sockets before the next full graph check.
+        # Scope and the runtime witness are revalidated immediately afterwards.
+        await asyncio.sleep(0.001)
         self._scope()
         _need(position is wanted, 'runtime_unconfirmed')
         witness = self.observer.runtime_check(wanted)

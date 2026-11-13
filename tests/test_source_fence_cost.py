@@ -1,11 +1,13 @@
 """Prepared evidence stays exactly bound on every reconstruction."""
 import ast
+import asyncio
 from copy import deepcopy
 from dataclasses import replace
 import importlib.util
 from pathlib import Path
 import unittest
 from types import SimpleNamespace
+import time
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('_source_fence_mixed',
@@ -16,6 +18,52 @@ receipts = mixed.receipts
 
 
 class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
+    async def test_common_yields_and_rechecks_scope_and_witness(self):
+        server = importlib.import_module(mixed.base.PACKAGE + '.native_template_state_server')
+        registry = importlib.import_module(mixed.base.PACKAGE + '.native_registry')
+        binding = importlib.import_module(mixed.base.PACKAGE + '.native_template_state_binding')
+        class Stop(Exception): pass
+        for changed in ('guard', 'physical', 'prepared', 'native', 'phases', None):
+            with self.subTest(changed=changed):
+                events = []
+                stale = set()
+                class Observer:
+                    async def position_at_inputs(self, *_):
+                        time.sleep(.04)  # Deliberately occupy the loop before yielding.
+                        return server.Position.BEFORE
+                    def runtime_check(self, _wanted):
+                        events.append('witness')
+                        if stale:
+                            raise Stop('witness-drift')
+                        return SimpleNamespace()
+                def scope():
+                    events.append('scope')
+                    if 'guard' in stale:
+                        raise Stop('guard-drift')
+                async def next_observation(*_args, **_kwargs):
+                    events.append('next-observation')
+                    raise Stop('observation-reached')
+                owner = SimpleNamespace(hass=object(), recorder=object(), registry_changes=(),
+                    chain=SimpleNamespace(accepted_documents=lambda: {}, reconstruct_inputs=lambda: object()),
+                    observer=Observer(), change=object(), _scope=scope, composition=object(),
+                    program=object())
+                def competing_callback():
+                    events.append('timer')
+                    if changed is not None:
+                        stale.add(changed)
+                asyncio.get_running_loop().call_later(.02, competing_callback)
+                with patch.object(registry, 'NativeRegistryIO', lambda *_: object()), \
+                     patch.object(registry, 'NativeRegistryBridge', lambda *_a, **_kw: object()), \
+                     patch.object(binding, 'async_observe_accepted_state_bindings', next_observation):
+                    with self.assertRaises(Stop):
+                        await server.NativeTemplateStateServer._check_common(owner, False, initial=True)
+                self.assertEqual(events[0], 'timer')
+                self.assertEqual(events[1], 'scope')
+                if changed is not None:
+                    self.assertNotIn('next-observation', events)
+                else:
+                    self.assertEqual(events, ['timer', 'scope', 'witness', 'next-observation'])
+
     async def test_state_binding_check_fences_once_and_rejects_drift(self):
         # Execute the actual observer check with a real synthetic receipt chain.
         binding = importlib.import_module(mixed.base.PACKAGE + '.native_template_state_binding')
