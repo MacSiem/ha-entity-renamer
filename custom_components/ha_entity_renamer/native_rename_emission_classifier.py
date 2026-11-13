@@ -52,10 +52,12 @@ _EVENT_PINS = {
     '2025.6.0': 'd5e21c38afd9eafe566724b8db34ea2e87eaa8d6dc10c1719a82f5d90d43260e',
     '2026.10.2': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
     '2026.10.4': 'caafbdd2437c4912e21dceca588577f24270a743e80a217e308175818de9e269',
+    '2026.11.0': '35a453cdc015a58ce9e49f2dec4da042babd261930a758eac97a7c2138ba0960',
+    '2026.11.1': '35a453cdc015a58ce9e49f2dec4da042babd261930a758eac97a7c2138ba0960',
 }
 
 
-def _call_offsets(method, attribute, *, forced=False, first_argument=None):
+def _call_offsets(method, attribute, *, forced=False, first_argument=None, occurrence=None):
     """Audit callsites off-loop; callbacks only compare precomputed offsets.
 
     CALL and its inline caches describe a synchronous call; SEND describes a
@@ -77,8 +79,9 @@ def _call_offsets(method, attribute, *, forced=False, first_argument=None):
                               and k.value.value is True for k in node.keywords):
             continue
         calls.append(node)
-    _need(len(calls) == 1, 'callsite_unsupported')
-    node = calls[0]
+    calls.sort(key=lambda node: (node.lineno, node.col_offset))
+    _need(len(calls) == (2 if occurrence is not None else 1), 'callsite_unsupported')
+    node = calls[occurrence if occurrence is not None else 0]
     lo, hi = first + node.lineno - 1, first + node.end_lineno - 1
     offsets = frozenset(i.offset for i in dis.get_instructions(method, show_caches=True)
                         if i.positions.lineno is not None
@@ -92,7 +95,9 @@ def _audit(root, pins, refs, edges):
     methods, codes = prove_methods(Path(root).resolve().parent, pins, list(refs.values()))
     methods, codes = dict(zip(refs, methods, strict=True)), dict(zip(refs, codes, strict=True))
     sites = {name: _call_offsets(methods[parent], attribute, forced=forced,
-                first_argument=('EVENT_STATE_CHANGED' if name in ('remove_fire', 'set_fire') else None))
+                first_argument=('EVENT_STATE_CHANGED' if name in ('remove_fire', 'set_fire') else
+                                'old_entity_id' if name == 'source_inplace_remove' else None),
+                occurrence=(-1 if name == 'source_inplace_write' else None))
              for name, (parent, attribute, forced) in edges.items()}
     # Bind every referenced native global as well as the function's globals
     # dictionary. This does not copy module state or invoke a descriptor.
@@ -340,7 +345,7 @@ class NativeRenameEmissions:
         from homeassistant.helpers.entity_registry import EntityRegistry
 
         _need(sys.implementation.name == 'cpython' and sys.version_info[:2] in ((3, 13), (3, 14))
-              and __version__ in ('2025.6.0', '2026.10.2', '2026.10.4'), 'runtime_unavailable')
+              and __version__ in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'), 'runtime_unavailable')
         self = cls()
         self.io, self.change, self.destination, self.guard = io, change, target, guard
         if automation_graph is not None:
@@ -349,6 +354,8 @@ class NativeRenameEmissions:
                   and source_handoff is not None, 'typed_automation_handoff_required')
         self.automation_graph = automation_graph
         self.source_handoff = source_handoff
+        self.inplace_core = __version__ in ('2026.11.0', '2026.11.1')
+        _need(not self.inplace_core or source_handoff is None, 'inplace_handoff_unsupported')
         self.handoff_state = self.handoff_semantic = None
         self.handoff_methods = self.handoff_codes = self.handoff_sites = None
         self.target_row = deepcopy(target)
@@ -412,6 +419,9 @@ class NativeRenameEmissions:
             self.refs['platform_add_impl'] = (entity_platform.EntityPlatform, '_async_add_entity_impl')
         else:
             self.refs['keyed_soon'] = (event_helper, '_async_dispatch_entity_id_event_soon')
+        if self.inplace_core:
+            self.refs['move_entity_id'] = (Entity, '_async_move_entity_id')
+            self.refs['internal_entity_id_changed'] = (Entity, 'async_internal_entity_id_changed')
         edges = {
             'remove_fire': ('remove_state', 'async_fire_internal', False),
             'set_fire': ('set_state', 'async_fire_internal', False),
@@ -430,9 +440,14 @@ class NativeRenameEmissions:
             'job_target': ('run_job', 'target', False),
             'registry_job': ('registry_keyed', 'async_run_hass_job', False),
         }
+        if self.inplace_core:
+            del edges['source_remove'], edges['source_add']
+            edges['source_inplace_remove'] = ('source', 'async_remove', False)
+            edges['source_inplace_write'] = ('source', 'async_write_ha_state', False)
         # set_state has a second fire for state_reported. Select its own exact
         # state_changed call in the audit, never resolve source in a callback.
-        pins = {**_SOURCES[__version__], 'helpers/event.py': _EVENT_PINS[__version__]}
+        pins = {**_SOURCES['2026.11.0' if __version__ == '2026.11.1' else __version__],
+                'helpers/event.py': _EVENT_PINS[__version__]}
         if automation_graph is not None:
             from homeassistant.components.automation import AutomationEntity
             from homeassistant.helpers.script import Script
@@ -469,6 +484,15 @@ class NativeRenameEmissions:
                     candidates.append((entity, platform))
         _need(len(candidates) == 1, 'source_graph_unavailable')
         self.source, self.platform = candidates[0]
+        if self.inplace_core:
+            from homeassistant.helpers import entity as entity_module
+            self.readd_refs = ((entity_module, '_entity_class_requires_readd'),)
+            self.readd_methods, self.readd_codes = await self.hass.async_add_executor_job(
+                prove_methods, Path(homeassistant.__file__).resolve().parent, pins, self.readd_refs)
+            _need(entity_module._ADD_REMOVE_METHODS == ('async_prepare_to_add_to_hass',
+                  'async_added_to_hass', 'async_will_remove_from_hass')
+                  and not entity_module._entity_class_requires_readd(type(self.source)),
+                  'readd_source_unsupported')
         if source_handoff is not None:
             _need(source_handoff.source is self.source and source_handoff.platform is self.platform
                   and source_handoff.row is self.row and source_handoff.owner is self.owner
@@ -499,6 +523,13 @@ class NativeRenameEmissions:
         _need(vars(self.const).get('EntityStateAttribute') is self.attribute_key,
               'native_attribute_key_changed')
         unchanged(list(self.refs.values()), tuple(self.methods.values()), tuple(self.codes.values()))
+        if self.inplace_core:
+            from homeassistant.helpers import entity as entity_module
+            unchanged(self.readd_refs, self.readd_methods, self.readd_codes)
+            _need(entity_module._ADD_REMOVE_METHODS == ('async_prepare_to_add_to_hass',
+                  'async_added_to_hass', 'async_will_remove_from_hass')
+                  and not entity_module._entity_class_requires_readd(type(self.source)),
+                  'readd_source_unsupported')
         _need(NativeRegistryIO.mutate is self.io_mutate and NativeRegistryIO.settle is self.io_settle
               and self.io_mutate.__code__ is self.io_mutate_code
               and self.io_settle.__code__ is self.io_settle_code
@@ -513,8 +544,9 @@ class NativeRenameEmissions:
             _need(self.methods[key].__globals__ is namespace
                   and all(namespace.get(name) is value for name, value in bindings),
                   'native_global_changed')
-        for key in ('registry_callback', 'source', 'remove', 'remove_impl', 'write',
-                    'write_public', 'finish_add'):
+        for key in (('registry_callback', 'source', 'remove', 'remove_impl', 'write',
+                     'write_public', 'finish_add') +
+                    (('move_entity_id', 'internal_entity_id_changed') if self.inplace_core else ())):
             _need(getattr(getattr(self.source, self.refs[key][1]), '__func__', None)
                   is self.methods[key], 'source_method_changed')
         for key in ('platform_add', 'platform_add_many', 'platform_add_one') + (
@@ -675,6 +707,10 @@ class NativeRenameEmissions:
                     and self.source.registry_entry is h.new_row and self.registry.async_get(self.target_id) is h.new_row
                     and self.hass.states.get(self.target_id) is frame.f_locals.get('state')
                     and self.in_mutate else None)
+            if self.inplace_core:
+                return ('remove' if self._edge(frame, 'source', 'source_inplace_remove', self.source)
+                        and self._source_frame(frame) and frame.f_locals.get('old_entity_id') == self.source_id
+                        else None)
             if not self._edge(frame, 'remove_impl', 'remove_state', self.source):
                 return None
             if frame.f_locals.get('force_remove') is not True:
@@ -703,6 +739,15 @@ class NativeRenameEmissions:
                  ('platform_add_many', 'platform_add_one', self.platform),
                  ('platform_add', 'platform_add_many', self.platform),
                  ('source', 'source_add', self.source))
+        if self.inplace_core:
+            for key, site, obj in chain[:2]:
+                frame = frame.f_back
+                if not self._edge(frame, key, site, obj):
+                    return None
+            frame = frame.f_back
+            return ('add' if self._edge(frame, 'source', 'source_inplace_write', self.source)
+                    and self._source_frame(frame) and frame.f_locals.get('old_entity_id') == self.source_id
+                    else None)
         if self.source_handoff is not None:
             # New ADD is a real write in the SAME native registry handler's
             # same-id branch, without platform add/remove ancestry.
