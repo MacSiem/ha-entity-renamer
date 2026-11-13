@@ -167,7 +167,9 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
                 hass.loop.call_soon(fire_foreign)
             if code is action_code:
                 ev = local['event']
-                delay_events.append(('ingress', ev.data.get('entity_id'), str(ev.data.get('old_state')), str(ev.data.get('new_state')), id(ev.data.get('new_state')) in local['obj'].witnessed))
+                delay_events.append(('ingress', ev.data.get('entity_id'), str(ev.data.get('old_state')),
+                                     str(ev.data.get('new_state')), id(ev.data.get('new_state')) in local['obj'].witnessed,
+                                     id(ev.data.get('new_state'))))
             if local.get('self') is binary:
                 delay_events.append((local.get('result'), hass.loop.time(),
                     None if binary._delay_cancel is None else binary._delay_cancel.__self__.when(),
@@ -204,6 +206,7 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
             self.assertTrue(foreign_events[0][0], 'foreign state must occur inside vendor reload')
             self.assertEqual(foreign_events[0][1].state, 'during_reload')
             self.assertTrue(any(row[0] == 'ingress' and row[1] == foreign_signal and not row[4]
+                                and row[5] == id(foreign_events[0][1])
                                 for row in delay_events), delay_events)
             self.assertEqual(hass.states.get(sensor.entity_id).attributes['foreign'], 'during_reload')
         self.assertIs(binary._delay_cancel, token, delay_events)
