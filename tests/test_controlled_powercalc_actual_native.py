@@ -78,10 +78,16 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             path = Path(code.co_filename)
             value = str(error)
             if 'ha_entity_renamer' in path.parts and isinstance(error, (Refused, ValueError)) and len(value) < 160:
-                if code.co_name == 'activate' and value == 'controlled_powercalc_handoff_setup_graph_unverified':
-                    rows = sys._getframe(1).f_locals.get('first', ())
+                if code.co_name == '_need' and value == 'controlled_powercalc_handoff_setup_graph_unverified':
+                    caller = sys._getframe(1).f_back
+                    rows = caller.f_locals.get('first', ()) if caller else ()
                     evidence['failed_graph'] = [(r.entity_id, r.relation_kind, r.reason)
                                                 for r in rows if not r.source_verified]
+                    capture = caller.f_locals.get('captured') if caller else None
+                    if capture:
+                        evidence['setup_objects'] = [
+                            {k: row[k] for k in ('type', 'entity_id', 'references', 'active_platforms')}
+                            for row in json.loads(capture.payload_json)['objects']]
                 row = (path.name, code.co_name, value)
                 reasons = evidence.setdefault('reasons', [])
                 if row not in reasons:
