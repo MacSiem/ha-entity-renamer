@@ -86,6 +86,15 @@ class TemplateSwitchRootTests(root.NativeTemplateStateRootCoverageTests):
         hass.services.async_register('test', 'capture', capture)
         self.addCleanup(hass.services.async_remove, 'test', 'capture')
         await switch.async_turn_on()
+        from homeassistant.config import async_hass_config_yaml, async_process_component_and_handle_errors
+        from homeassistant.loader import async_get_integration
+        cfg = await async_hass_config_yaml(hass)
+        checked = await async_process_component_and_handle_errors(hass, cfg, await async_get_integration(hass, 'template'))
+        worker = self.module('yaml_validation_worker')
+        for domain, entity in (('sensor', sensor), ('binary_sensor', binary), ('switch', switch)):
+            expected = worker._normal(checked['template'][0][domain][0])
+            actual = worker._normal({k: v for k, v in entity._config.items() if k not in ('raw_configs', 'raw_blueprint_inputs')})
+            self.assertEqual(actual, expected, domain)
         runtime = await self._runtime(self.module)
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
