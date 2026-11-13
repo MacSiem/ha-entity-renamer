@@ -82,3 +82,46 @@ class ReceiptTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Refused):
             await adapter.apply(step, lambda: None)
         self.assertEqual(events, ['detach', 'registry'])
+
+class Journal:
+    def __init__(self): self.records = {}
+    async def load(self, operation): return self.records.get(operation)
+    async def active(self):
+        return tuple(record for record in self.records.values()
+                     if record.status not in ('applied', 'rolled_back'))
+    async def create(self, record): self.records[record.operation_id] = record
+    async def save(self, record): self.records[record.operation_id] = record
+
+
+class CoordinatorReceiptTests(ReceiptTests):
+    async def test_real_coordinator_journals_before_native_handoff(self):
+        from custom_components.ha_entity_renamer.transaction import Coordinator
+        adapter, step, prep, events = self.setup_case()
+        plan = adapter.context.record.plan
+        journal = Journal()
+        original_detach = adapter.handoff.detach_group
+        async def detach(*args, **kwargs):
+            self.assertEqual(journal.records['operation'].phases, ('intent',))
+            await original_detach(*args, **kwargs)
+        adapter.handoff.detach_group = detach
+        adapter._receipt_valid = lambda *args: True
+        coordinator = Coordinator({'registry':adapter}, journal, lambda: None,
+                                  required_scopes=('registry',))
+        with patch('custom_components.ha_entity_renamer.native_utility_yaml_receipt._static',
+                   lambda row: row.before):
+            result = await coordinator.apply(plan, plan.fingerprint, 'operation')
+        self.assertEqual(result.status, 'applied')
+        self.assertEqual(events, ['detach', 'registry', 'attach'])
+        self.assertEqual(len(prep.plans), 2)
+
+    async def test_uncertain_effect_marks_coordinator_unknown_without_replay(self):
+        from custom_components.ha_entity_renamer.transaction import Coordinator
+        adapter, step, prep, events = self.setup_case(fail=True)
+        plan = adapter.context.record.plan
+        journal = Journal()
+        coordinator = Coordinator({'registry':adapter}, journal, lambda: None,
+                                  required_scopes=('registry',))
+        result = await coordinator.apply(plan, plan.fingerprint, 'operation')
+        self.assertEqual(result.status, 'unknown')
+        self.assertEqual((await coordinator.apply(plan, plan.fingerprint, 'operation')).status, 'unknown')
+        self.assertEqual(events, ['detach', 'registry'])
