@@ -134,9 +134,10 @@ async def reload_after_yaml(hass, captured, *, verify_source, guard, record_inte
 def _projection(rows):
     """Same canonical imported-bridge projection as the isolated checker."""
     from homeassistant.components.homekit.const import BRIDGE_NAME, DEFAULT_PORT
+    from .yaml_validation_worker import _canonical_homekit_filter
     return sorted([[row['data'].get('name', BRIDGE_NAME),
                     row['data'].get('port', DEFAULT_PORT),
-                    row['options'].get('filter', {})]
+                    _canonical_homekit_filter(row['options'].get('filter', {}))]
                    for row in rows if row['identity']['source'] == 'import'],
                   key=lambda row: (row[0], row[1]))
 

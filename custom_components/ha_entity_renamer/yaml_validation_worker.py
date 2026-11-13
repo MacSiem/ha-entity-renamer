@@ -180,6 +180,14 @@ def changed_domains(before, after):
 
 
 
+def _canonical_homekit_filter(value):
+    """Filter keys are unordered; preserve every key and list value exactly."""
+    from collections.abc import Mapping
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
+        raise ValueError('invalid_homekit_filter_projection')
+    return {key: value[key] for key in sorted(value)}
+
+
 def _homekit_filter_only(before, after, mapping):
     """True only for exact mapped entity-list edits in the same YAML bridges."""
     from copy import deepcopy
@@ -853,7 +861,7 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
                         # Native schema defaults, stable bridge identity, exact filter.
                         # Activation remains unsupported until a journalled bridge
                         # runtime binder explicitly admits the associated receipt.
-                        projection = sorted([[cfg['name'], cfg['port'], cfg.get('filter', {})]
+                        projection = sorted([[cfg['name'], cfg['port'], _canonical_homekit_filter(cfg.get('filter', {}))]
                                              for cfg in checked[domain]], key=lambda row: (row[0], row[1]))
                     elif domain == 'utility_meter':
                         projection = _source_module('native_utility_yaml_projection').native_projection(checked)

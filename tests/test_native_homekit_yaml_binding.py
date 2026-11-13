@@ -46,3 +46,15 @@ class BindingTests(unittest.TestCase):
             entries['second'].identity='two'
             entries['second'].runtime_data.homekit._filter=Schema({'exclude_entities':[new]})
             with self.assertRaises(Refused): binding.verify('after')
+
+class HomeKitProjectionTests(unittest.TestCase):
+    def test_filter_projection_is_order_independent_but_keeps_values(self):
+        from custom_components.ha_entity_renamer.yaml_validation_worker import _canonical_homekit_filter
+        first = {'include_entities': ['sensor.one'], 'exclude_entities': []}
+        reordered = {'exclude_entities': [], 'include_entities': ['sensor.one']}
+        changed = {'exclude_entities': [], 'include_entities': ['sensor.two']}
+        self.assertEqual(list(_canonical_homekit_filter(first).items()),
+                         list(_canonical_homekit_filter(reordered).items()))
+        self.assertNotEqual(_canonical_homekit_filter(first), _canonical_homekit_filter(changed))
+        with self.assertRaises(ValueError):
+            _canonical_homekit_filter({1: []})
