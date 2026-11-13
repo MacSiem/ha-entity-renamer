@@ -10,6 +10,14 @@ import test_controlled_powercalc_public_native as fixture
 
 @unittest.skipUnless(fixture.cold.backend_fixture.activation.fixtures.HAS_HA, 'actual pinned HA required')
 class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTests):
+    async def _before_loader(self, hass, root):
+        import shutil
+        await super()._before_loader(hass, root)
+        card = Path(__file__).resolve().parent.parent / 'ha-entity-renamer.js'
+        target = root / 'custom_components/ha_entity_renamer/www/ha-entity-renamer.js'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(card, target)
+
     async def _setup_vendor_forward(self):
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.setup import async_setup_component
