@@ -41,7 +41,7 @@ def source_only(before, after, mapping):
 def native_projection(checked):
     """Project already schema-validated meters; the worker owns normalization."""
     meters = checked.get('utility_meter')
-    if type(meters) is not dict or any(type(name) is not str or type(cfg) is not dict
-                                       for name, cfg in meters.items()):
+    if not isinstance(meters, Mapping) or any(not isinstance(name, str) or not isinstance(cfg, Mapping)
+                                               for name, cfg in meters.items()):
         raise ValueError('utility_yaml_native_projection_unavailable')
     return [[name, meters[name]] for name in sorted(meters)]
