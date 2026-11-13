@@ -82,7 +82,7 @@ _TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?=([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![A-Za
 
 
 def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
-                     binding_report=None, output_reference=False):
+                     binding_report=None, output_reference=False, trigger_entities=()):
     """Parse only: return exact replacements and review marker (code, detail) pairs.
 
     Jinja's parser has no columns. Feed its native lexer tokens through a parser
@@ -188,6 +188,9 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
             if isinstance(node, nodes.Name) and node.ctx in ('store', 'param') and node.name in globals_:
                 return original_text, [('unsupported_template_scope', 'HA global shadowed by local binding')]
 
+        if trigger_entities and any(isinstance(node, nodes.Name) and node.name == 'trigger'
+                and node.ctx in ('store', 'param') for node in all_nodes):
+            trigger_entities = ()
         markers = []
         used, unsafe = set(), set()
         replacements = {}
@@ -204,6 +207,14 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
             unsafe.update(bound[1])
 
         # A value is (shape, immutable origins); origin = (start, end, entity).
+        def property_value(bound, key):
+            if bound and bound[0] == 'record':
+                for name, item in bound[2]:
+                    charge()
+                    if name == key:
+                        return item
+            return None
+
         def value(node, bindings):
             charge()
             if isinstance(node, nodes.Const) and type(node.value) is str:
@@ -215,13 +226,21 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                 if bound:
                     charge(len(bound[1]))
                 return bound
-            if isinstance(node, (nodes.Getattr, nodes.Getitem)) and isinstance(node.node, nodes.Name):
-                bound = bindings.get(node.node.name)
+            if isinstance(node, (nodes.Getattr, nodes.Getitem)):
                 attribute = (node.attr if isinstance(node, nodes.Getattr) else
-                             node.arg.value if isinstance(node.arg, nodes.Const)
-                             and type(node.arg.value) is str else None)
+                             node.arg.value if isinstance(node.arg, nodes.Const) else None)
+                bound = value(node.node, bindings)
                 if bound and bound[0] == 'runtime_repeat_item' and attribute == 'item':
                     return ('scalar', bound[1])
+                return property_value(bound, attribute)
+            if (isinstance(node, nodes.Call) and isinstance(node.node, nodes.Getattr)
+                    and node.node.attr == 'get' and 1 <= len(node.args) <= 2
+                    and isinstance(node.args[0], nodes.Const)
+                    and not (node.kwargs or node.dyn_args or node.dyn_kwargs)):
+                bound = value(node.node.node, bindings)
+                if bound and bound[0] == 'record':
+                    return property_value(bound, node.args[0].value) or (
+                        value(node.args[1], bindings) if len(node.args) == 2 else None)
             if (isinstance(node, nodes.Filter) and node.name == 'list'
                     and not (node.args or node.kwargs or node.dyn_args or node.dyn_kwargs)):
                 bound = value(node.node, bindings)
@@ -233,6 +252,16 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                 bound = value(node.node.node, bindings)
                 if bound and bound[0] == 'keys':
                     return ('list' if node.node.attr == 'keys' else 'items', bound[1])
+            if (isinstance(node, nodes.CondExpr) and isinstance(node.test, nodes.Test)
+                    and node.test.name == 'list' and not (node.test.args or node.test.kwargs)
+                    and isinstance(node.test.node, nodes.Name)
+                    and isinstance(node.expr1, nodes.Name)
+                    and isinstance(node.expr2, nodes.List) and len(node.expr2.items) == 1
+                    and isinstance(node.expr2.items[0], nodes.Name)
+                    and node.test.node.name == node.expr1.name == node.expr2.items[0].name):
+                bound = value(node.expr1, bindings)
+                if bound and bound[0] in ('scalar', 'list'):
+                    return ('list', bound[1])
             if isinstance(node, (nodes.List, nodes.Tuple)):
                 values = [value(item, bindings) for item in node.items]
                 if values and all(item is not None and item[0] == 'scalar' for item in values):
@@ -312,6 +341,20 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
 
         def expression(node, bindings):
             charge()
+            if isinstance(node, nodes.Compare) and len(node.ops) == 1:
+                operand = node.ops[0]
+                left, right = node.expr, operand.expr
+                if isinstance(left, nodes.Const):
+                    left, right = right, left
+                if (operand.op in ('eq', 'ne') and isinstance(left, nodes.Getattr)
+                        and left.attr == 'entity_id' and isinstance(left.node, nodes.Name)
+                        and left.node.name == 'trigger' and 'trigger' not in bindings
+                        and isinstance(right, nodes.Const) and type(right.value) is str
+                        and right.value in trigger_entities):
+                    bound = value(right, bindings)
+                    if bound:
+                        consume([bound])
+                        return
             if isinstance(node, nodes.Filter):
                 collection = state_collection(node, bindings)
                 if (collection is None and node.name in ('count', 'length')
@@ -332,6 +375,11 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                         escape(('scalar', bound[1]))
                     elif attribute not in {'index', 'first', 'last'}:
                         mark('unsupported_runtime_repeat', 'Unproven runtime repeat item or access')
+                    return
+            if isinstance(node, (nodes.Getattr, nodes.Getitem, nodes.Call)):
+                bound = value(node, bindings)
+                if bound:
+                    escape(bound)
                     return
             if isinstance(node, nodes.Name):
                 bound = bindings.get(node.name)
@@ -600,7 +648,7 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
         return original_text, [('unsupported_template', 'Native parser rejected template: ' + type(err).__name__)]
 
 
-def analyze_template_alias(text, bindings, *, max_nodes=10000):
+def analyze_template_alias(text, bindings, *, max_nodes=10000, allow_literals=False):
     """Prove a whole native-template scalar/list alias without rendering it.
 
     Only adapter-owned external origins can flow into a later YAML binding.
@@ -617,13 +665,13 @@ def analyze_template_alias(text, bindings, *, max_nodes=10000):
     bound = report.get('output_value')
     if (markers or report.get('unsafe') or not report.get('complete') or not bound
             or bound[0] not in ('scalar', 'list') or not bound[1]
-            or any(origin[0] >= 0 for origin in bound[1])):
+            or not allow_literals and any(origin[0] >= 0 for origin in bound[1])):
         return None
     return bound
 
 
 def analyze_template_bindings(text, mapping, bindings, *, max_nodes=10000,
-                              output_reference=False):
+                              output_reference=False, trigger_entities=()):
     """Parse Jinja with adapter-owned origins, without evaluating any expression.
 
     Bindings use the existing (shape, origins) bounded dataflow representation.
@@ -641,7 +689,7 @@ def analyze_template_bindings(text, mapping, bindings, *, max_nodes=10000,
     report = {}
     value, markers = _syntax_template(
         text, mapping, max_nodes, initial_bindings=bindings,
-        binding_report=report, output_reference=output_reference)
+        binding_report=report, output_reference=output_reference, trigger_entities=trigger_entities)
     used = report.get('used', set()) & origins
     unsafe = report.get('unsafe', set()) & origins
     if not report.get('complete') or markers:

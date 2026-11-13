@@ -353,7 +353,13 @@ class NativeYAMLRuntimeReadback:
                 if type(entity) is not AutomationEntity:
                     raise ValueError('native_automation_type')
                 script = entity.action_script
-                if ((entity._condition if __version__ in ('2026.10.2', '2026.10.4', '2026.11.1') else entity._cond_func) is not None or entity._trigger_variables is not None
+                condition = (entity._condition if __version__ in ('2026.10.2', '2026.10.4', '2026.11.1')
+                             else entity._cond_func)
+                if __version__ == '2026.11.1' and condition is not None:
+                    from homeassistant.components.automation.entity import IfAction
+                    if type(condition) is not IfAction or condition._unloaded:
+                        raise ValueError('native_automation_condition_unavailable')
+                if ((__version__ != '2026.11.1' and condition is not None) or entity._trigger_variables is not None
                         or entity._blueprint_inputs is not None
                         or (script._unloaded if __version__ in ('2026.10.2', '2026.10.4', '2026.11.1') else False)
                         or script._hass is not self.hass or script.domain != domain
@@ -362,9 +368,14 @@ class NativeYAMLRuntimeReadback:
                             is not AutomationEntity.async_write_ha_state):
                     raise ValueError('automation_listener_proof_unavailable')
                 if entity._is_enabled is True:
+                    if __version__ == '2026.11.1' and self.owned_automation is None:
+                        from .native_controlled_yaml_core111 import automation_registration_token
+                        registration = automation_registration_token(entity)
+                    else:
+                        registration = _automation_registrations(
+                            self.hass, entity, owned_automation=self.owned_automation)
                     identities[-1] = (entity.entity_id, id(entity), id(script),
-                        id(entity.raw_config), id(entity.registry_entry),
-                        _automation_registrations(self.hass, entity, owned_automation=self.owned_automation))
+                        id(entity.raw_config), id(entity.registry_entry), registration)
                 elif entity._is_enabled is False and entity._async_detach_triggers is None:
                     identities[-1] = (entity.entity_id, id(entity), id(script),
                         id(entity.raw_config), id(entity.registry_entry), ('disabled',))
@@ -373,6 +384,9 @@ class NativeYAMLRuntimeReadback:
                 rows.append([entity.unique_id, entity.raw_config, entity._trigger_config,
                     script.sequence, script.script_mode, script.max_runs, script._max_exceeded,
                     entity._variables, entity._trace_config])
+                if __version__ == '2026.11.1':
+                    rows[-1].append(None if condition is None else condition.config)
+                    identities[-1] += (id(condition), _fingerprint(rows[-1]))
             elif domain == 'scene':
                 if type(entity) is not HomeAssistantScene or entity.from_service:
                     raise ValueError('dynamic_scene_not_covered')

@@ -773,6 +773,17 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
             from homeassistant.helpers import trigger
             await trigger.async_setup(hass)
         config = await async_hass_config_yaml(hass)
+        if __version__ == '2026.11.1' and set(domains) & {'automation', 'script'}:
+            # Match check_config's registry initialization for native device
+            # triggers and actions, using only the staged config directory.
+            from homeassistant.config_entries import ConfigEntries
+            from homeassistant.helpers import area_registry, device_registry, entity_registry
+            hass.config_entries = ConfigEntries(hass, config)
+            await hass.config_entries.async_initialize()
+            device_registry.async_setup(hass)
+            await area_registry.async_load(hass)
+            await device_registry.async_load(hass)
+            await entity_registry.async_load(hass)
         if template_sources is not None:
             template_sources.update(await _expected_template_sources(
                 hass, config, state_profile=template_state_profile, with_state_program=template_state_program, program_source_paths=template_program_sources))
@@ -824,11 +835,14 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
                             # Enabled static event/state registrations are observed separately.
                             if (not cfg.get('id') or cfg.raw_config is None
                                     or cfg.raw_blueprint_inputs is not None
-                                    or cfg.get('conditions') or cfg.get('trigger_variables')):
+                                    or __version__ != '2026.11.1' and cfg.get('conditions')
+                                    or cfg.get('trigger_variables')):
                                 raise ValueError('automation_not_covered')
                             projection.append([cfg['id'], cfg.raw_config, cfg['triggers'],
                                 cfg['actions'], cfg['mode'], cfg['max'], cfg['max_exceeded'],
                                 cfg.get('variables'), cfg['trace']])
+                            if __version__ == '2026.11.1':
+                                projection[-1].append(cfg.get('conditions'))
                     elif domain == 'scene':
                         for platform, cfg in config_per_platform(checked, domain):
                             if platform != 'homeassistant':

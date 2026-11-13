@@ -132,6 +132,48 @@ class YAMLPlannerTests(unittest.TestCase):
     def codes(self, plan):
         return {issue.code for issue in plan.issues}
 
+    def test_automation_trigger_identity_and_script_argument_flow(self):
+        self.put('configuration.yaml', 'automation: !include automation.yaml\nscript: !include script.yaml\n')
+        automation = """- id: sample
+  triggers:
+    - trigger: state
+      entity_id: sensor.foo
+  conditions:
+    - condition: template
+      value_template: >-
+        {{ trigger.entity_id == 'sensor.foo' }}
+  actions:
+    - action: script.consume
+      data:
+        ids: [sensor.foo, light.old]
+"""
+        self.put('automation.yaml', automation)
+        self.put('script.yaml', """consume:
+  fields:
+    ids:
+      selector:
+        entity:
+          multiple: true
+  sequence:
+    - variables:
+        items: "{{ ids if ids is list else [ids] }}"
+    - repeat:
+        for_each: "{{ items }}"
+        sequence:
+          - action: homeassistant.turn_on
+            target:
+              entity_id: "{{ repeat.item }}"
+""")
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertEqual(plan.patches[0].proposed_bytes,
+                         automation.replace('sensor.foo', 'sensor.new')
+                                   .replace('light.old', 'light.new').encode())
+        caller = automation.replace('script.consume', '"{{ dynamic_service }}"')
+        self.put('automation.yaml', caller)
+        self.assertFalse(self.plan().ready)
+        self.assertEqual((self.root / 'automation.yaml').read_text(), caller)
+
     def test_preserves_source_comments_quotes_crlf_unicode_and_anchor(self):
         source = '# żółć\r\na: &ref sensor.foo # comment\r\nentity_id: *ref\r\nentity: "light.old"\r\n'
         self.put('configuration.yaml', source)

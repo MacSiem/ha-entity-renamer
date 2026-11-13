@@ -37,6 +37,7 @@ def prove_automation_projection():
 
     prove(((AutomationEntity, '_async_trigger_if_enabled'),
            (AutomationEntity, '_async_attach_triggers'),
+           (AutomationEntity, '_async_attach_triggers_for_entity_id'),
            (Entity, 'async_write_ha_state'),
            (trigger, 'async_initialize_triggers'), (trigger, '_trigger_action_wrapper'),
            (event, 'async_attach_trigger'), (state, 'async_attach_trigger'),
@@ -46,6 +47,28 @@ def prove_automation_projection():
     if AutomationEntity.async_write_ha_state is not Entity.async_write_ha_state:
         raise ValueError('native_automation_state_writer_changed')
 
+
+
+def automation_registration_token(entity):
+    """Read HA's native attach result without replaying trigger implementation."""
+    from homeassistant.core import async_noop
+    from homeassistant.helpers import trigger
+    from .yaml_runtime_observer import _closure
+
+    config = entity._trigger_config
+    enabled = [row.get('enabled', True) for row in config]
+    if any(type(value) is not bool for value in enabled):
+        raise ValueError('native_automation_trigger_enable_unverified')
+    detach = entity._async_detach_triggers
+    if detach is async_noop and not any(enabled):
+        return (id(detach),)
+    closure = _closure(detach, trigger.__name__,
+                       'async_initialize_triggers.<locals>.remove_triggers')
+    removes = closure['removes']
+    if type(removes) is not list or len(removes) != sum(enabled) or any(
+            not callable(remove) for remove in removes):
+        raise ValueError('native_automation_attach_incomplete')
+    return (id(detach), id(removes), tuple(map(id, removes)))
 
 def script_reload_token(hass):
     from homeassistant.components.script import services, util

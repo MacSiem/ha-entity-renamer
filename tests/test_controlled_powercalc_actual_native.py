@@ -70,19 +70,51 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             return {'id': key, 'alias': key, 'initial_state': True,
                     'triggers': [trigger], 'actions': actions}
 
+        # One transaction drives native state/duration, numeric and template
+        # triggers plus a static event path and a separately owned actor.
+        state_trigger['for'] = {'milliseconds': 25}
+        state_trigger['entity_id'] = [leaf, 'sensor.controlled_yaml_unused']
+        pulse_conditions = [
+            {'condition': 'template', 'value_template':
+                "{{ trigger.entity_id == '" + leaf + "' }}"},
+            {'condition': 'numeric_state', 'entity_id': leaf, 'above': 5},
+            {'condition': 'state', 'entity_id': old_source, 'state': 'on'},
+        ]
+        def branch_read():
+            return {'choose': [{'conditions': pulse_conditions[1:],
+                'sequence': [{'repeat': {'count': 1, 'sequence': [
+                    {'parallel': [{'action': 'script.' + script,
+                                   'data': {'power_ids': [leaf]}}]}]}}]}],
+                'default': [{'wait_template': '{{ true }}'}]}
+        numeric_trigger = {'trigger': 'numeric_state', 'entity_id': leaf, 'above': 5}
+        template_trigger = {'trigger': 'template', 'value_template':
+            "{{ expand(['" + leaf + "']) | map(attribute='state') | map('float', 0) | sum > 5 }}"}
         programs = {
             'template': [{'sensor': [{'name': 'Controlled YAML readout',
                 'unique_id': 'controlled_yaml_readout',
                 'state': "{{ states('" + leaf + "') | float(-1) * 2 }}"}]}],
-            'automation': [automation('controlled_yaml_on', [
+            'automation': [{**automation('controlled_yaml_on', [
                 {'delay': '{{ 120 if long | default(false) else 0 }}'},
-                {'action': 'script.' + script}, action('controlled_yaml_on_result')]),
+                branch_read(), action('controlled_yaml_on_result')]), 'conditions': pulse_conditions},
+                automation('controlled_yaml_numeric', [action('controlled_yaml_numeric_result')], numeric_trigger),
+                automation('controlled_yaml_template', [action('controlled_yaml_template_result')], template_trigger),
+                automation('controlled_yaml_action_only', [action('controlled_yaml_action_only_result')],
+                           {'trigger': 'event', 'event_type': 'controlled_yaml_read_action'}),
+
                 automation('controlled_yaml_off', [action('controlled_yaml_off_result')]),
                 automation('controlled_yaml_foreign', [{'event': 'controlled_yaml_foreign_result'}],
-                           {'trigger': 'event', 'event_type': 'controlled_yaml_foreign_probe'})],
-            'script': {script: {'sequence': [
+                           {'trigger': 'time_pattern', 'minutes': '/5'})],
+            'script': {script: {'fields': {'power_ids': {'description': 'Optional power input'}}, 'sequence': [
                 {'delay': '{{ 120 if long | default(false) else 0 }}'},
-                action('controlled_yaml_script_result')]},
+                {'variables': {'items': "{{ power_ids if power_ids is list else [power_ids] }}",
+                               'local': {'input': {'power': leaf}, 'label': 'Plain label'}}},
+                {'repeat': {'for_each': '{{ items }}', 'sequence': [
+                    {'if': [{'condition': 'template', 'value_template': "{{ power_ids is defined }}"}],
+                     'then': [{'event': 'controlled_yaml_argument_result', 'event_data':
+                               {'watts': "{{ states(repeat.item) | float(-1) }}"}}]}]}},
+                {'event': 'controlled_yaml_script_result', 'event_data':
+                 {'watts': "{{ states(local.input.power) | float(-1) }}"}}]},
+
                 'controlled_yaml_foreign': {'sequence': [{'event': 'controlled_yaml_foreign_script'}]}},
         }
         for domain, path in files.items():
@@ -126,7 +158,7 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             monitor.free_tool_id(slot)
         self.addCleanup(stop)
 
-        seen = {key: [] for key in ('on', 'off', 'script')}
+        seen = {key: [] for key in ('on', 'off', 'script', 'argument', 'numeric', 'template', 'action_only')}
         for key, events in seen.items():
             @callback
             def collect(event, values=events):
@@ -136,6 +168,8 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         def entity(domain, key):
             return next(e for e in hass.data[domain].entities if e.unique_id == key)
 
+        stable_uuids = {(domain, obj.unique_id): obj.registry_entry.id
+                        for domain in ('automation', 'script') for obj in hass.data[domain].entities}
         foreign = {domain: entity(domain, 'controlled_yaml_foreign') for domain in ('automation', 'script')}
         await entity('automation', 'controlled_yaml_off').async_turn_off()
 
@@ -175,14 +209,20 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             watts = float(hass.states.get(power_id).state)
             self.assertEqual(watts, 10)
             self.assertEqual(float(hass.states.get(sensor).state), watts * 2)
-            self.assertEqual(seen, {'on': [watts], 'off': [], 'script': [watts]})
-            await hass.services.async_call('script', script, {}, blocking=True)
+            hass.bus.async_fire('controlled_yaml_read_action')
+            await wait_for(lambda: len(seen['action_only']) == 1, lambda: seen)
+            self.assertEqual(seen, {'on': [watts], 'off': [], 'script': [watts], 'argument': [watts],
+                                    'numeric': [watts], 'template': [watts], 'action_only': [watts]})
+            await hass.services.async_call('script', script, {'power_ids': power_id}, blocking=True)
             self.assertEqual(seen['script'], [watts, watts])
             self.assertTrue(hass.states.is_state(active_id, 'on'))
             self.assertTrue(entity('automation', 'controlled_yaml_on').is_on)
             self.assertFalse(entity('automation', 'controlled_yaml_off').is_on)
             for domain, obj in foreign.items():
                 self.assertIs(entity(domain, obj.unique_id), obj)
+            self.assertEqual({(domain, obj.unique_id): obj.registry_entry.id
+                              for domain in ('automation', 'script') for obj in hass.data[domain].entities},
+                             stable_uuids)
             report[label] = {'ids': [active_id, power_id], 'template': hass.states.get(sensor).state,
                              'events': {key: list(items) for key, items in seen.items()}}
             save()
@@ -212,12 +252,13 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             return await runtime.native_yaml_prepare(hass, mapping, actor_id='yaml-consumer-fixture',
                                                      guard=lambda: True, refresh=refresh)
 
-        path = files['script']
-        programs['script'][script]['sequence'][-1]['event_data']['watts'] = "{{ states(target_id) }}"
-        path.write_text(yaml.safe_dump(programs['script'], sort_keys=False))
+        path = files['automation']
+        branch = programs['automation'][0]['actions'][1]
+        branch['choose'][0]['sequence'][0]['repeat']['sequence'][0]['parallel'][0]['data']['power_ids'] = '{{ unresolved }}'
+        path.write_text(yaml.safe_dump(programs['automation'], sort_keys=False))
         # Reload real config; a static-disk/live mismatch alone must not
         # be the reason the dynamic reference is refused.
-        await hass.services.async_call('script', 'reload', {}, blocking=True)
+        await hass.services.async_call('automation', 'reload', {}, blocking=True)
         await hass.async_block_till_done()
         dynamic = path.read_bytes()
         with self.assertRaises((ValueError, Refused)) as refusal:
@@ -228,7 +269,7 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         self.assertIs(source.registry_entry, self.f.entity.async_get(old_source))
         report['dynamic_refused'] = str(refusal.exception)
         path.write_bytes(initial[path])
-        await hass.services.async_call('script', 'reload', {}, blocking=True)
+        await hass.services.async_call('automation', 'reload', {}, blocking=True)
         await hass.async_block_till_done()
         await flush()
 

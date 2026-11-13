@@ -321,7 +321,8 @@ def seal_dependent_config_program(receipt, evidence, descriptor, *, plan, mappin
                       and len(row[1]) == 64 and all(c in '0123456789abcdef' for c in row[1])
                       for row in image['files']))
         for domain, rows in image['domains']:
-            _need(type(rows) is list and all(type(row) is list and len(row) == (9 if domain == 'automation' else 11)
+            _need(type(rows) is list and all(type(row) is list and len(row) == ((10 if receipt.version == '2026.11.1' else 9)
+                    if domain == 'automation' else 11)
                   and type(row[0]) is str for row in rows))
             keys = tuple(row[0] for row in rows)
             _need(keys == tuple(sorted(set(keys))))
