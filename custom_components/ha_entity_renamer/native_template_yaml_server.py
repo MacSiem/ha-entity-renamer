@@ -107,7 +107,12 @@ def _controlled_powercalc_plan(plan, composition):
     energy, dashboards = adapters.count('energy'), adapters.count('dashboard')
     scopes = ('registry',) + (('helpers',) if helpers else ()) + (('energy',) if energy else ()) + (
         ('dashboard',) if 'dashboard' in plan.required_scopes else ()) + ('yaml',)
-    return (registry > 0 and helpers <= len(composition.previous.groups) + 1 and energy in (0, 1)
+    if composition.previous.core_version in ('2026.11.0', '2026.11.1'):
+        # Each selected native entry has at most one exact helper preparation.
+        helpers_limit = registry + 1
+    else:
+        helpers_limit = len(composition.previous.groups) + 1
+    return (registry > 0 and helpers <= helpers_limit and energy in (0, 1)
             and plan.required_scopes == scopes
             and adapters == ('registry',) * registry + ('helpers',) * helpers
                 + ('energy',) * energy + ('dashboard',) * dashboards + ('yaml',)
@@ -149,9 +154,10 @@ def _registry_mapping(changes, composition, *, dashboard_plan=False):
             allowed = {'entity_id', 'modified_at'} | ({'name'} if names else set())
             if powercalc and before.get('platform') == 'powercalc' and change.mapping:
                 from .native_registry_transition import _powercalc_group_suggested_move
-                _need(_powercalc_group_suggested_move(before, after) and any(
-                    group.registry_id == change.identity and group.entity_id == before['entity_id']
-                    for group in composition.previous.groups), 'powercalc_group_scope_required')
+                from .controlled_powercalc_composition import registry_population_kind
+                _need(_powercalc_group_suggested_move(before, after) and registry_population_kind(
+                    composition, before['entity_id'], change.identity,
+                    composition.previous.core_version) is not None, 'powercalc_owned_id_scope_required')
                 allowed.add('suggested_object_id')
             if script_move:
                 allowed |= {'unique_id', 'previous_unique_id'}
