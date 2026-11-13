@@ -29,7 +29,7 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
             'attributes': {'copy': "{{ states('" + leaf + "') }}"}}],
             'binary_sensor': [{'name': 'P2 delayed', 'unique_id': 'p2_delay',
                 'availability': "{{ states('" + leaf + "') != 'unavailable' }}",
-                'state': "{{ states('" + leaf + "') | float(0) > 0 }}", 'delay_on': '00:05:00'}],
+                'state': "{{ states('" + leaf + "') | float(0) > 0 }}", 'delay_on': '00:30:00'}],
             'switch': [{'name': 'P2 switch', 'unique_id': 'p2_switch',
                 'state': "{{ states('" + leaf + "') | float(0) > 0 }}",
                 'turn_on': [{'action': 'test.capture', 'target': {'entity_id': leaf}}],
@@ -89,6 +89,14 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
                 row = (Path(code.co_filename).name, code.co_name, str(error))
                 if row not in reasons:
                     reasons.append(row)
+                if code.co_name == '_need' and str(error) == 'template_yaml_server_history_identity_changed':
+                    caller = sys._getframe(1).f_back
+                    loc = caller.f_locals
+                    metadata, snapshot = loc.get('metadata', {}), loc.get('snapshot', {})
+                    reasons.append(('history_ids', loc.get('ids'), snapshot.get('state_ids'),
+                        sorted(v['metadata_id'] for v in metadata.get('states', {}).values()),
+                        snapshot.get('statistic_ids'),
+                        sorted(v['id'] for v in metadata.get('statistics', {}).values())))
         monitor.register_callback(slot, monitor.events.RAISE, trace)
         monitor.set_events(slot, monitor.events.RAISE)
         try:
