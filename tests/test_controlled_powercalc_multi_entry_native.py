@@ -266,6 +266,14 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                         self.assertTrue(await async_setup_component(hass, domain, config), domain)
                 await hass.async_block_till_done()
                 yaml_before = {domain: path.read_bytes() for domain, path in files.items()}
+                from homeassistant.components.energy.data import async_get_manager
+                energy = await async_get_manager(hass)
+                preferences = energy.default_preferences()
+                energy_ids = [names['fixture-meter-10_energy'], names['fixture-meter-11_energy']]
+                preferences['device_consumption'] = [{'stat_consumption': name} for name in energy_ids]
+                await energy.async_update(preferences)
+                await energy._store.async_save(energy.data)
+                energy_before = json.loads((self.f.root / '.storage/energy').read_bytes())['data']
                 client = ClientSession()
                 self.addAsyncCleanup(client.close)
                 async def connect(label, group):
@@ -348,6 +356,10 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                                          (leaf_a,) if domain == 'template' else (leaf_b,)):
                         self.assertNotIn(expected_old, path.read_text())
                         self.assertIn(mapping[expected_old], path.read_text())
+                disk_energy = json.loads((self.f.root / '.storage/energy').read_bytes())['data']
+                self.assertEqual([row['stat_consumption'] for row in disk_energy['device_consumption']],
+                                 [mapping[name] for name in energy_ids])
+                self.assertEqual(energy.data, disk_energy)
             verify_seam(0, mapping)
             verify_ids(mapping)
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, expected_entries)
@@ -384,6 +396,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(self.f.device.async_get(ordinary_device.id).name_by_user,
                                  device_name_before)
                 self.assertEqual({domain: path.read_bytes() for domain, path in files.items()}, yaml_before)
+                self.assertEqual(json.loads((self.f.root / '.storage/energy').read_bytes())['data'], energy_before)
+                self.assertEqual(energy.data, energy_before)
             verify_seam(1, {new: old for old, new in mapping.items()})
             verify_ids({})
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, before_entries)
