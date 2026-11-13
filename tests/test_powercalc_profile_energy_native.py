@@ -430,6 +430,7 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_mixed_yaml_group_controlled_apply_and_fresh_reverse(self):
         from homeassistant.core import callback
+        from homeassistant.components.recorder import get_instance
         from homeassistant.helpers.entity_platform import async_get_platforms
         from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
         hass, root = self.f.hass, self.f.root
@@ -463,6 +464,18 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         await pss.persist_states()
         restore = hass.data[DATA_RESTORE_STATE]
         await restore.async_dump_states()
+        from homeassistant.util import dt as dt_util
+        from homeassistant.components.recorder.tasks import StatisticsTask
+        from custom_components.ha_entity_renamer.recorder_guard import NativeRecorderGuard
+        recorder = get_instance(hass)
+        # Use native compilation so selected groups already own statistics
+        # metadata before the continuity snapshot, regardless of wall-clock phase.
+        history = NativeRecorderGuard(hass)
+        await history.async_synchronize()
+        now = dt_util.utcnow()
+        period = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
+        recorder.queue_task(StatisticsTask(period, False))
+        await history.async_synchronize()
         start = {uid: (obj.entity_id, str(obj._native_value_exact)
                        if type(obj) is GroupedEnergySensor else str(obj._state))
                  for uid, obj in counters().items()}
@@ -500,6 +513,11 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         def observe(code, offset, error):
             if isinstance(error, Refused) and '/custom_components/ha_entity_renamer/' in code.co_filename:
                 trace.append((Path(code.co_filename).name, code.co_name, str(error)))
+                if code.co_name == '_need' and str(error) == 'template_yaml_server_history_identity_changed':
+                    local = sys._getframe(1).f_back.f_locals
+                    snapshot, current = local['snapshot'], local['metadata']
+                    print('CONTROLLED_GRAPH_METADATA', repr((local['ids'], snapshot['state_ids'],
+                          snapshot['statistic_ids'], current)), flush=True)
             else:
                 raised(code, offset, error)
 
