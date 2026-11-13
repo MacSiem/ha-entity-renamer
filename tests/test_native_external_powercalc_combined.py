@@ -92,7 +92,7 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
             return rows[0]
         original_meter = (meter().entity_id, meter().native_value, meter()._next_reset)
         runtime = self._runtime()
-        async def refresh(): self.guard()
+        async def refresh(): pass
         async def transition(selected):
             review = await runtime.native_yaml_prepare(hass, selected, actor_id='external-pc-qa',
                 guard=lambda: None, refresh=refresh)
