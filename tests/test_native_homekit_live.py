@@ -19,7 +19,7 @@ class HomeKitNativeReloadTests(unittest.IsolatedAsyncioTestCase):
         source = root / 'configuration.yaml'
         def config(entity):
             return ('homekit:\n  name: Synthetic Bridge\n  port: 21199\n'
-                    '  ip_address: 127.0.0.1\n  advertise_ip: 127.0.0.1\n'
+                    '  ip_address: 192.0.2.1\n  advertise_ip: 192.0.2.1\n'
                     f'  filter:\n    exclude_entities:\n      - {entity}\n')
         source.write_text(config('sensor.old'))
         self.assertTrue(await async_setup_component(hass, 'homekit', await async_hass_config_yaml(hass)))
