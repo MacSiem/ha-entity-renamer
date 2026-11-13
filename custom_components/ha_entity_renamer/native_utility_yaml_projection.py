@@ -1,6 +1,7 @@
 """Exact Utility YAML source proof, without granting activation authority."""
 from copy import deepcopy
 from collections.abc import Mapping
+import math
 
 
 def _exact(left, right):
@@ -12,7 +13,15 @@ def _exact(left, right):
         return len(left) == len(right) and all(_exact(a, b) for a, b in zip(left, right))
     if isinstance(left, str) and isinstance(right, str):
         return left == right
-    return type(left) is type(right) and type(left) in (type(None), bool, int, float) and left == right
+    if left is None or right is None:
+        return left is right
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) is bool and left == right
+    if isinstance(left, int) and isinstance(right, int):
+        return int(left) == int(right)
+    if isinstance(left, float) and isinstance(right, float):
+        return math.isfinite(left) and math.isfinite(right) and float(left) == float(right)
+    return False
 
 
 def source_only(before, after, mapping):

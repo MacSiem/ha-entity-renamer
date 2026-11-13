@@ -35,3 +35,11 @@ class UtilitySourceTests(unittest.TestCase):
         before = {'utility_meter': {'daily': {'source':'sensor.old', 'net_consumption':False}}}
         after = {'utility_meter': {'daily': {'source':'sensor.new', 'net_consumption':0}}}
         self.assertFalse(source_only(before, after, {'sensor.old':'sensor.new'}))
+
+    def test_native_number_wrappers_preserve_numeric_kind(self):
+        class NativeInt(int): pass
+        before = {'utility_meter': {'daily': {'source':'sensor.old', 'offset':NativeInt(10)}}}
+        after = {'utility_meter': {'daily': {'source':'sensor.new', 'offset':10}}}
+        self.assertTrue(source_only(before, after, {'sensor.old':'sensor.new'}))
+        after['utility_meter']['daily']['offset'] = 10.0
+        self.assertFalse(source_only(before, after, {'sensor.old':'sensor.new'}))
