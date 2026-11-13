@@ -42,13 +42,14 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         data['energy_sources'] = probatio.Schema(ENERGY_SOURCE_SCHEMA)([{'type': 'grid',
             'stat_energy_from': source, 'stat_energy_to': None,
             'stat_cost': None, 'entity_energy_price': None, 'number_energy_price': 0.75,
-            'cost_adjustment_day': 0.0} for source in (self.sum_energy.entity_id, self.static_energy.entity_id)])
+            'cost_adjustment_day': 0.0} for source in (self.sum_energy.entity_id,
+                self.static_energy.entity_id, self.dynamic_energy.entity_id)])
         await manager.async_update(data)
         await manager._store.async_save(manager.data)
         self.assertTrue(await async_setup_component(hass, 'energy', {}))
         await hass.async_block_till_done()
         self.cost_sources = [hass.data['energy']['cost_sensors'][source]
-                             for source in (self.sum_energy.entity_id, self.static_energy.entity_id)]
+                             for source in (self.static_energy.entity_id, self.dynamic_energy.entity_id)]
         from homeassistant.components.energy.sensor import EnergyCostSensor
         from homeassistant.helpers.entity_platform import async_get_platforms
         costs = [entity for platform in async_get_platforms(hass, 'energy') for entity in platform.entities.values()
@@ -113,17 +114,28 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
             self.assertEqual(len(rows), 1)
             return rows[0]
         names = ('external_pc_meter', 'external_pc_meter_second')
+        # Drive both real Powercalc sources, then observe the native
+        # EnergyCost and Utility subscriptions before taking the baseline.
+        import asyncio
+        from decimal import Decimal
+        for _ in range(2):
+            for source in self.sources:
+                await source.async_turn_on(brightness=255)
+            await asyncio.sleep(2)
+            for source in self.sources:
+                await source.async_turn_off()
+            await hass.async_block_till_done()
+        for name in names:
+            self.assertIsNotNone(meter(name).native_value)
+            self.assertGreater(Decimal(str(meter(name).native_value)), Decimal(0))
         original_meters = [(meter(name).entity_id, meter(name).native_value, meter(name)._next_reset)
                            for name in names]
         def check_meter(name, source, baseline):
             from decimal import Decimal
             current = meter(name)
             self.assertEqual((current.entity_id, current._next_reset), (baseline[0], baseline[2]))
-            if baseline[1] is not None:
-                self.assertIsNotNone(current.native_value)
-                self.assertGreaterEqual(Decimal(str(current.native_value)), Decimal(str(baseline[1])))
-            elif current.native_value is not None:
-                self.assertGreaterEqual(Decimal(str(current.native_value)), Decimal(0))
+            self.assertIsNotNone(current.native_value)
+            self.assertGreaterEqual(Decimal(str(current.native_value)), Decimal(str(baseline[1])))
             self.assertEqual(current._sensor_source_id, source)
             self.assertIsNotNone(current._collecting)
         runtime = self._runtime()
