@@ -7,6 +7,7 @@ import asyncio
 from decimal import Decimal
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +16,11 @@ from test_controlled_powercalc_actual_native import ControlledActualGraphTests
 
 
 class ControlledMultiEntryTests(ControlledActualGraphTests):
+    async def test_two_entries_real_ui_one_review_forward_fresh_inverse(self):
+        self.use_public_transport = True
+        self.use_browser_transport = True
+        await self.test_two_entries_one_review_forward_fresh_inverse()
+
     async def test_two_entries_public_websocket_one_review_forward_fresh_inverse(self):
         self.use_public_transport = True
         await self.test_two_entries_one_review_forward_fresh_inverse()
@@ -191,6 +197,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
         try:
             native_dummy_mdns(hass)
             public = getattr(self, 'use_public_transport', False)
+            browser_ui = getattr(self, 'use_browser_transport', False)
             if public:
                 from aiohttp import ClientSession
                 from datetime import timedelta
@@ -284,12 +291,13 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 from copy import deepcopy
                 from homeassistant.components.lovelace.const import LOVELACE_DATA
                 from homeassistant.helpers.storage import Store
-                self.assertNotIn('lovelace', hass.config.components)
                 dashboard_metadata = {'id': 'p4_multi', 'url_path': 'p4-multi', 'mode': 'storage',
                                       'require_admin': True, 'show_in_sidebar': True,
                                       'title': 'Synthetic multi queue', 'icon': 'mdi:home'}
-                await Store(hass, 1, 'lovelace_dashboards').async_save({'items': [dashboard_metadata]})
-                self.assertTrue(await async_setup_component(hass, 'lovelace', await async_hass_config_yaml(hass)))
+                if not browser_ui:
+                    self.assertNotIn('lovelace', hass.config.components)
+                    await Store(hass, 1, 'lovelace_dashboards').async_save({'items': [dashboard_metadata]})
+                    self.assertTrue(await async_setup_component(hass, 'lovelace', await async_hass_config_yaml(hass)))
                 dashboard = hass.data[LOVELACE_DATA].dashboards['p4-multi']
                 dashboard_before = {'views': [{'title': 'Synthetic', 'cards': [
                     {'type': 'entities', 'entities': [leaf_a, leaf_b]},
@@ -323,9 +331,9 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     self.assertEqual((await socket.receive_json(timeout=10))['type'], 'auth_required')
                     await socket.send_json({'type': 'auth', 'access_token': access})
                     self.assertEqual((await socket.receive_json(timeout=10))['type'], 'auth_ok')
-                    return socket
-                admin = await connect('Synthetic multi administrator', GROUP_ID_ADMIN)
-                user = await connect('Synthetic multi nonadministrator', GROUP_ID_USER)
+                    return socket, access
+                admin, admin_access = await connect('Synthetic multi administrator', GROUP_ID_ADMIN)
+                user, _ = await connect('Synthetic multi nonadministrator', GROUP_ID_USER)
                 await hass.auth._store._store.async_save(hass.auth._store._data_to_save())
                 request_id = 0
                 async def request(socket, command, **payload):
@@ -339,6 +347,31 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 denied = await request(user, 'prepare', entities=selected, devices=devices)
                 self.assertFalse(denied['success'])
                 evidence['nonadmin_denied'] = denied.get('error', {}).get('code')
+                if browser_ui:
+                    directory = Path(os.environ['RENAMER_MULTI_UI'])
+                    token = directory / 'render-token'
+                    token.write_text(admin_access); token.chmod(0o600)
+                    entities = []
+                    for old, new in mapping.items():
+                        entity = self.f.entity.async_get(old)
+                        self.assertIsNotNone(entity)
+                        entities.append({'old': old, 'new': new, 'device': entity.device_id})
+                    entities.append({'old': ordinary_id, 'new': ordinary_id,
+                                     'name': 'Synthetic ordinary name', 'device': ordinary.device_id})
+                    browser_request = {'label': 'multi-ui', 'port': hass.http.server_port,
+                                       'entities': entities, 'device': ordinary_device.id,
+                                       'device_name': 'Synthetic ordinary device'}
+                    async def ui_wait(label):
+                        path = directory / (label + '.json')
+                        for _ in range(24000):
+                            if path.is_file():
+                                value = json.loads(path.read_text())
+                                self.assertNotIn('error', value, value)
+                                return value
+                            await asyncio.sleep(.1)
+                        self.fail('browser fixture timed out: ' + label)
+                    def ui_continue(label):
+                        (directory / (label + '.go')).write_text('go')
             await pulse()
             await baseline()
             if public:
@@ -405,7 +438,12 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 foreign_power._standby_power = standby
             self.assertEqual(self.package.read_bytes(), original_package)
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, before_entries)
-            if public:
+            if browser_ui:
+                request_path = directory / 'request.tmp'
+                request_path.write_text(json.dumps(browser_request)); request_path.replace(directory / 'request.json')
+                review = await ui_wait('review')
+                op, fingerprint = review['operation_id'], review['fingerprint']
+            elif public:
                 reply = await request(admin, 'prepare', entities=selected, devices=devices)
                 self.assertTrue(reply.get('success'), reply)
                 review = reply['result']
@@ -423,7 +461,10 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     self.assertTrue(all(g.entity_id not in mapping for g in bound.composition.previous.groups))
                 finally:
                     bound.close()
-            if public:
+            if browser_ui:
+                ui_continue('apply')
+                result = await ui_wait('applied')
+            elif public:
                 reply = await request(admin, 'apply', operation_id=op, fingerprint=fingerprint)
                 self.assertTrue(reply.get('success'), reply)
                 result = reply['result']
@@ -474,7 +515,10 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             evidence['inspect'] = inspected
             save()
             self.assertTrue(inspected['eligible'], inspected)
-            if public:
+            if browser_ui:
+                ui_continue('restore')
+                result = await ui_wait('restored')
+            elif public:
                 reply = await request(admin, 'recovery/restore', operation_id=op, fingerprint=fingerprint)
                 self.assertTrue(reply.get('success'), reply)
                 result = reply['result']
@@ -550,6 +594,43 @@ class ControlledMultiEntryColdPublicTests(ControlledMultiEntryTests):
         self.assertEqual(len(self.boot_actions), 1, 'one real automation start action')
 
 
+class ControlledMultiEntryColdUITests(ControlledMultiEntryColdPublicTests):
+    async def _startup_services(self, hass, root):
+        await super()._startup_services(hass, root)
+        from homeassistant.config import async_hass_config_yaml
+        from homeassistant.setup import async_setup_component
+        from homeassistant.helpers.storage import Store
+        from homeassistant.components.onboarding import OnboardingStorage, STORAGE_KEY, STORAGE_VERSION
+        from homeassistant.components.onboarding.const import DOMAIN, STEPS
+        from homeassistant.components.onboarding.views import _BaseOnboardingStepView
+        self.assertTrue(await async_setup_component(hass, DOMAIN, {}))
+        onboarding = hass.data[DOMAIN]
+        if not onboarding.onboarded:
+            store = OnboardingStorage(hass, STORAGE_VERSION, STORAGE_KEY, private=True)
+            step = _BaseOnboardingStepView(onboarding.steps, store)
+            for name in STEPS:
+                if name not in onboarding.steps['done']:
+                    step.step = name
+                    await step._async_mark_done(hass)
+        dashboards = [
+            {'id': 'p4_multi', 'url_path': 'p4-multi', 'mode': 'storage',
+             'require_admin': True, 'show_in_sidebar': True,
+             'title': 'Synthetic multi queue', 'icon': 'mdi:home'},
+            {'id': 'p4_ui', 'url_path': 'p4-ui', 'mode': 'storage',
+             'require_admin': True, 'show_in_sidebar': True,
+             'title': 'Synthetic Renamer UI', 'icon': 'mdi:test-tube'},
+        ]
+        await Store(hass, 1, 'lovelace_dashboards').async_save({'items': dashboards})
+        self.assertTrue(await async_setup_component(hass, 'lovelace', await async_hass_config_yaml(hass)))
+        self.assertTrue(await async_setup_component(hass, 'frontend', {}))
+        self.assertTrue(await async_setup_component(hass, 'api', {}))
+        from homeassistant.components.lovelace.const import LOVELACE_DATA
+        await hass.data[LOVELACE_DATA].dashboards['p4-ui'].async_save({'views': [
+            {'title': 'Synthetic Renamer', 'cards': [{'type': 'custom:ha-entity-renamer'}]}]})
+
+
 def load_tests(loader, tests, pattern):
     import unittest
+    if os.environ.get('RENAMER_MULTI_UI'):
+        return unittest.TestSuite([ControlledMultiEntryColdUITests('test_two_entries_real_ui_one_review_forward_fresh_inverse')])
     return unittest.TestSuite([ControlledMultiEntryColdPublicTests('test_two_entries_public_websocket_one_review_forward_fresh_inverse')])
