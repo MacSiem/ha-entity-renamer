@@ -175,6 +175,13 @@ class ActualProfileGraphNativeTests(unittest.IsolatedAsyncioTestCase):
             await self.bind()
         owner._entities.add(removed)
         self.assertEqual(await self.bind(), result)
+        linear = self.entities['fixture-meter-0']
+        original_standby = linear._standby_power
+        linear._standby_power = Decimal('0.4')
+        with self.assertRaises(ValueError):
+            await self.bind()
+        linear._standby_power = original_standby
+        self.assertEqual(await self.bind(), result)
         broken = deepcopy(self.groups)
         broken[0]['entities'][0]['energy_sensor_id'] = self.entities['fixture-meter-12_energy'].entity_id
         self.write_package([*self.leaves, *broken])
@@ -184,5 +191,5 @@ class ActualProfileGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         unsupported = deepcopy(self.leaves)
         del unsupported[9]['custom_model_directory']
         self.write_package([*unsupported, *self.groups])
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, 'powercalc_profile_remote_cache_isolation_unverified'):
             await self.prepare()
