@@ -14,7 +14,18 @@ const { chromium } = require('playwright');
     const page = await context.newPage();
     await page.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await page.goto(origin+'/lovelace/0', {waitUntil:'domcontentloaded'});
-    await page.locator('hui-button-card').first().waitFor({state:'attached',timeout:30000});
+    try { await page.locator('hui-button-card').first().waitFor({state:'attached',timeout:30000}); }
+    catch (error) {
+      const diagnostic = await page.evaluate(() => {
+        const tags=[]; function visit(root) { for (const el of root.querySelectorAll('*')) {
+          if (el.localName.includes('-')) tags.push(el.localName); if(el.shadowRoot) visit(el.shadowRoot);
+        }} visit(document); return {path:location.pathname, title:document.title,
+          token:!!localStorage.getItem('hassTokens'), hass:!!document.querySelector('home-assistant')?.hass,
+          tags:[...new Set(tags)].slice(0,100)};
+      });
+      fs.writeFileSync('/qa/diagnostic.json', JSON.stringify(diagnostic));
+      await page.screenshot({path:'/qa/diagnostic.png'}); throw error;
+    }
     await page.locator('button-card').first().waitFor({state:'attached',timeout:30000});
     await page.locator('bubble-card').first().waitFor({state:'attached',timeout:30000});
     await page.waitForFunction(source => document.querySelector('home-assistant')?.hass?.states?.[source],req.source);
