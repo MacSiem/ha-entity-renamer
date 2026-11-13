@@ -77,12 +77,13 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         op, fingerprint = review['operation_id'], review['fingerprint']
         import sys
         from pathlib import Path
+        from custom_components.ha_entity_renamer.transaction import Refused
         monitor = sys.monitoring
         slot = next(i for i in range(6) if monitor.get_tool(i) is None)
         monitor.use_tool_id(slot, 'P2 native diagnostics')
         reasons = []
         def trace(code, offset, error):
-            if 'ha_entity_renamer' in Path(code.co_filename).parts and isinstance(error, (ValueError, AttributeError, KeyError)) and len(str(error)) < 180:
+            if 'ha_entity_renamer' in Path(code.co_filename).parts and isinstance(error, (Refused, ValueError, AttributeError, KeyError)) and len(str(error)) < 180:
                 row = (Path(code.co_filename).name, code.co_name, str(error))
                 if row not in reasons:
                     reasons.append(row)
