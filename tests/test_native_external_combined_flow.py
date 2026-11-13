@@ -23,17 +23,23 @@ class ExternalCombinedFlowTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.const import UnitOfTemperature
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.helpers.entity_platform import async_get_platforms
+        from homeassistant.helpers.entity_component import EntityComponent
+        from unittest.mock import patch
         from homeassistant.setup import async_setup_component
-        runtime, mappings, uuids, template_before = await self.data(multiple=True, variant='sensor')
+        add_entities = EntityComponent.async_add_entities
+        async def add_with_temperature(component, entities, *args, **kwargs):
+            for entity in entities:
+                if getattr(entity, 'unique_id', None) == 'template-runtime-producer':
+                    entity._attr_device_class = SensorDeviceClass.TEMPERATURE
+                    entity._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+            return await add_entities(component, entities, *args, **kwargs)
+        with patch.object(EntityComponent, 'async_add_entities', add_with_temperature):
+            runtime, mappings, uuids, template_before = await self.data(multiple=True, variant='sensor')
         hass, root = self.f.hass, self.f.root
         old = self.source_id
         new = mappings[old]
         mapping = {old: new}
         foreign_source = self.other.entity_id
-        self.producer._attr_device_class = SensorDeviceClass.TEMPERATURE
-        self.producer._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-        self.producer.async_write_ha_state()
-        await hass.async_block_till_done()
         config = root / 'configuration.yaml'
         config.write_text(config.read_text() + '\nhomekit:\n- name: Synthetic Bridge\n'
             '  port: 21198\n  ip_address: 192.0.2.1\n  advertise_ip: 192.0.2.1\n'
