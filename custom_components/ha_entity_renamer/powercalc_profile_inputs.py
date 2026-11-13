@@ -199,8 +199,9 @@ def assert_remote_cache_isolated(inputs, graph, core_version):
     read or used as a model library. Implicit lookup with that cache present
     is outside this proof, as are selector/sub-profile paths.
     """
-    if not inputs is not None and any(path == '.storage' and any(row[0] == 'powercalc_profiles' for row in rows)
-                                     for path, rows, _ in inputs.directories):
+    if inputs is None or not any(
+            path == '.storage' and any(row[0] == 'powercalc_profiles' for row in rows)
+            for path, rows, _ in inputs.directories):
         return
     need(core_version in ('2026.11.0', '2026.11.1')
          and all('strategy' in row or (

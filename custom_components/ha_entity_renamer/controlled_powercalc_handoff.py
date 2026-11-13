@@ -404,6 +404,7 @@ class ControlledPowercalcHandoff:
         self.entries = self.pss_expected = self.restore_expected = None
         self.setup_reference = None
         self.entry_listeners = None
+        self.leaf_domain_indexes = None
 
     def _scope(self):
         self.root._scope()
@@ -510,6 +511,7 @@ class ControlledPowercalcHandoff:
         self.original_entities = {name: entity for platform in async_get_platforms(self.hass, 'powercalc')
                                   for name, entity in platform.entities.items()}
         _need(set(self.original_entities) == set(self.population.entity_ids), 'original_population_changed')
+        self._capture_leaf_domain_indexes(direction)
         _need(all(entry.disabled_by is not None or entry.state is ConfigEntryState.LOADED for entry in entries),
               'unloaded_enabled_entry_unsupported')
         pss = self.hass.data.get('powercalc_group_storage')
@@ -778,6 +780,34 @@ class ControlledPowercalcHandoff:
         self.require_inactive()
         return self.receipt
 
+    def _capture_leaf_domain_indexes(self, direction):
+        """Retain the pre-reload references for only the IDs being moved."""
+        from custom_components.powercalc.sensors.energy import RealEnergySensor, VirtualEnergySensor
+        from custom_components.powercalc.sensors.power import RealPowerSensor, VirtualPowerSensor
+        selected = (self.root.mapping if direction == 'forward' else
+                    {new: old for old, new in self.root.mapping.items()})
+        qualified = {'profile_fixed', 'profile_linear', 'profile_lut', 'energy_integral'}
+        leaves = {old: self.original_entities[old] for old, _, kind in self.population.descriptors
+                  if old in selected and kind in qualified}
+        if not leaves:
+            return
+        domain = self.hass.data['powercalc'].get('domain_entities')
+        _need(type(domain) is dict and all(type(bucket) is list for bucket in domain.values()),
+              'leaf_domain_indexes_unavailable')
+        captured = []
+        for key, bucket in domain.items():
+            for obj in bucket:
+                leaf = leaves.get(getattr(obj, 'entity_id', None))
+                if leaf is None:
+                    continue
+                wrapper = RealEnergySensor if type(leaf) is VirtualEnergySensor else RealPowerSensor
+                _need(obj is leaf or type(leaf) in (VirtualEnergySensor, VirtualPowerSensor)
+                      and type(obj) is wrapper and key == 'sensor', 'leaf_domain_index_foreign')
+                captured.append((key, bucket, obj))
+        _need(all(sum(obj is leaf for _, _, obj in captured) == 1 for leaf in leaves.values())
+              and len({id(obj) for _, _, obj in captured}) == len(captured), 'leaf_domain_index_scope')
+        self.leaf_domain_indexes = domain, tuple(captured)
+
     def _retire_leaf_indexes(self, vendor):
         """Retire only exact, removed predecessors from the vendor's live index."""
         from homeassistant.helpers import entity_registry as er
@@ -809,6 +839,17 @@ class ControlledPowercalcHandoff:
                   and prior_row.unique_id == row.unique_id and prior_row.config_entry_id == row.config_entry_id
                   and registry.async_get(old) is None and old not in active, 'leaf_index_identity_changed')
             retired[old] = old_entity
+        if self.leaf_domain_indexes is not None:
+            domain, captured = self.leaf_domain_indexes
+            _need(self.hass.data['powercalc'].get('domain_entities') is domain
+                  and all(domain.get(key) is bucket and sum(item is obj for item in bucket) == 1
+                          for key, bucket, obj in captured), 'leaf_domain_index_changed')
+            # Preserve every foreign slot and relative order; the pinned reload
+            # appends current wrappers/instances but never prunes these old slots.
+            removals = {id(obj) for _, _, obj in captured}
+            for key in {key for key, _, _ in captured}:
+                bucket = domain[key]
+                bucket[:] = [obj for obj in bucket if id(obj) not in removals]
         for old in retired:
             del index[old]
 
