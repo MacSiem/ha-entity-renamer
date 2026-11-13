@@ -17,7 +17,7 @@ def registry_adapter(root, registry, resolver, controlled):
     from .native_utility_yaml_binding import UtilityYAMLBinding
     if not (type(binding) is UtilityYAMLBinding and binding.hass is root.hass
             and binding.mapping == root.mapping and getattr(binding, 'receipt', None) == root.receipt
-            and not controlled):
+            and (not controlled or bool(getattr(root.composition, 'external_source_proof', ())))):
         raise Refused('utility_yaml_binding_or_powercalc_scope_unsupported')
     return UtilityYAMLRegistryAdapter(registry, binding.handoff, root.preparations,
         resolver, root.operation_id, root.plan.fingerprint, root._scope)

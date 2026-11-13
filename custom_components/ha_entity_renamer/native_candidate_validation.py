@@ -546,16 +546,29 @@ def _compare_controlled_powercalc(result, original, reverse, program, compositio
     expected = (projection(new), projection(old)) if reverse else (projection(old), projection(new))
     if (result.get('powercalc_sources'), result.get('powercalc_candidate_sources')) != expected:
         _fail('powercalc_native_graph_mismatch')
+    external = {'homekit', 'utility_meter'} & set(original.changed_domains)
+    proof = [[domain, True] for domain in ('homekit', 'utility_meter') if domain in external]
+    expected_external = [[domain, new, old] if reverse else [domain, old, new]
+                         for domain, old, new in original.runtime_expected if domain in external]
+    if external and (result.get('external_source_proof') != proof
+            or tuple(tuple(row) for row in proof) != composition.external_source_proof
+            or [row for row in result.get('runtime_expected', []) if row[0] in external] != expected_external):
+        _fail('external_native_source_mismatch')
+    if not external and composition.external_source_proof:
+        _fail('external_native_source_mismatch')
+    excluded = {'powercalc'} | external
+    if not helper_request:
+        excluded.add('template.config_entries')
     def scoped(rows):
-        return [row for row in rows if (row if type(row) is str else row[0])
-                not in (('powercalc',) if helper_request else ('powercalc', 'template.config_entries'))]
+        return [row for row in rows if (row if type(row) is str else row[0]) not in excluded]
     filtered = dict(result, changed_domains=scoped(result.get('changed_domains', [])),
                     unsupported_domains=scoped(result.get('unsupported_domains', [])),
                     runtime_expected=scoped(result.get('runtime_expected', [])))
     receipt = replace(original, changed_domains=tuple(scoped(original.changed_domains)),
                       unsupported_domains=tuple(scoped(original.unsupported_domains)),
                       runtime_expected=tuple(scoped(original.runtime_expected)))
-    return _hash((_compare_state_full(filtered, receipt, reverse, program, receipt.changed_domains, helper_request=helper_request), expected))
+    state = _compare_state_full(filtered, receipt, reverse, program, receipt.changed_domains, helper_request=helper_request)
+    return _hash((state, expected, proof, expected_external) if external else (state, expected))
 
 
 def _compare_state_full(result, original, reverse, program, domains, *, helper_request=()):

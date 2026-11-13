@@ -83,6 +83,9 @@ def _dashboard_plan(plan):
 
 def _external_state_plan(plan, composition):
     from .native_template_state_composition import ExternalStateComposition
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    if type(composition) is ControlledPowercalcComposition:
+        return bool(composition.external_source_proof) and _controlled_powercalc_plan(plan, composition)
     if (type(composition) is not ExternalStateComposition
             or plan.required_scopes != plan.covered_scopes
             or plan.required_scopes != plan.verification_adapters
@@ -126,9 +129,9 @@ def _controlled_powercalc_plan(plan, composition):
         ('dashboard',) if 'dashboard' in plan.required_scopes else ()) + ('yaml',)
     if composition.previous.core_version in ('2026.11.0', '2026.11.1'):
         # Each selected native entry has at most one exact helper preparation.
-        helpers_limit = registry + 1
+        helpers_limit = registry + 1 + (len(composition.external_source_proof) if composition.external_source_proof else 0)
     else:
-        helpers_limit = len(composition.previous.groups) + 1
+        helpers_limit = len(composition.previous.groups) + 1 + (len(composition.external_source_proof) if composition.external_source_proof else 0)
     return (registry > 0 and helpers <= helpers_limit and energy in (0, 1)
             and plan.required_scopes == scopes
             and adapters == ('registry',) * registry + ('helpers',) * helpers
@@ -811,8 +814,8 @@ class NativeTemplateYAMLServer:
             obj.digests = dict(obj.composition.prepared_digests)
             from .native_template_state_composition import ExternalStateComposition
             external_plan = _external_state_plan(obj.plan, obj.composition)
-            _need(type(obj.composition) is not ExternalStateComposition or inspect_only and external_plan
-                  and record.status == 'applied', 'external_rollback_lifecycle_required')
+            _need(not external_plan or inspect_only and record.status == 'applied',
+                  'external_rollback_lifecycle_required')
             from .controlled_powercalc_composition import ControlledPowercalcComposition
             is_powercalc = type(obj.composition) is ControlledPowercalcComposition
             _need(not is_powercalc or powercalc_scope, 'powercalc_runtime_required')

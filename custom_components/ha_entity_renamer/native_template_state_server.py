@@ -91,7 +91,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         _need(asyncio.current_task() is self.task and self.bound and not self.used,
               'no_replay')
-        _need(set(self.receipt.changed_domains) <= {'automation', 'script', 'template', 'homekit', 'utility_meter'}
+        _need(set(self.receipt.changed_domains) <= {'automation', 'script', 'template', 'homekit', 'utility_meter', 'powercalc'}
               and 'homekit' in self.receipt.changed_domains,
               'homekit_mixed_lifecycle_unsupported')
         self.used = True
@@ -99,7 +99,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         await self._fresh_stores(None)
         await self._common(False, initial=True)
-        if self.composition.controlled_reload and 'automation' in self.receipt.changed_domains:
+        from .native_template_yaml_server import _controlled_reload
+        if _controlled_reload(self.composition) and 'automation' in self.receipt.changed_domains:
             from .native_automation_transition import NativeAutomationTransition
             transition = NativeAutomationTransition(self.hass, allow_running=True)
             await transition.prepare_preserving_enabled()
@@ -119,7 +120,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
 
     async def _bind_external_consumers(self):
         """Reopen live consumers against the same immutable original plan."""
-        _need(type(self.composition) is ExternalStateComposition, 'external_composition_required')
+        _need(type(self.composition) in (ExternalStateComposition, ControlledPowercalcComposition)
+              and bool(self.composition.external_source_proof), 'external_composition_required')
         from .helper_observers import RegistryMappingProof
         proofs = tuple(RegistryMappingProof(old, new, change.identity)
                        for change in self.registry_changes for old, new in change.mapping.items())
@@ -151,8 +153,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         from .helper_plan import snapshot_equal
         from .helper_observers import RegistryMappingProof
         from .native_template_state_composition import ExternalStateComposition
-        _need(type(self.composition) is ExternalStateComposition
-              and self.record.status == 'applied' and self.record.direction == 'forward',
+        _need(type(self.composition) in (ExternalStateComposition, ControlledPowercalcComposition)
+              and bool(self.composition.external_source_proof) and self.record.status == 'applied' and self.record.direction == 'forward',
               'external_inspection_scope')
         reverse = {new: old for old, new in self.mapping.items()}
         seals = tuple((domain, after, before) for domain, before, after in self.receipt.runtime_expected)
@@ -467,14 +469,14 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         if homekit_refusal is not None or utility_refusal is not None:
             # The first bounded profile accepts one original Template program
             # with native HomeKit/Utility YAML, not a controlled PC/A/S reload.
-            if (mixed_powercalc or entry_change is not None or not external_domains
+            if (entry_change is not None or not external_domains
                     or set(domains) - {'automation', 'script', 'template', 'homekit', 'utility_meter'}
                     or 'template' not in domains
                     or bool(homekit_refusal) != ('homekit' in external_domains)
                     or bool(utility_refusal) != ('utility_meter' in external_domains)):
                 raise homekit_refusal or utility_refusal
             from .yaml_transaction import _assert_external_state_scope
-            _assert_external_state_scope(self.receipt)
+            _assert_external_state_scope(self.receipt, allow_powercalc=mixed_powercalc)
             if bundle.external_source_proof != tuple((domain, True) for domain in ('homekit', 'utility_meter')
                                                      if domain in external_domains):
                 raise homekit_refusal or utility_refusal
@@ -506,12 +508,12 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             from .mixed_yaml_runtime import MixedYAMLConsumers
             if mixed_powercalc:
                 from dataclasses import replace
-                scoped = replace(self.receipt, changed_domains=domains,
+                scoped = replace(self.receipt, changed_domains=tuple(domain for domain in domains if domain not in external_domains),
                     unsupported_domains=tuple(domain for domain in self.receipt.unsupported_domains
-                                              if domain != 'powercalc'),
+                                              if domain != 'powercalc' and domain not in external_domains),
                     runtime_expected=tuple(row for row in self.receipt.runtime_expected
-                                           if row[0] not in ('powercalc', 'template.config_entries')))
-                if domains not in ((), ('template',)):
+                                           if row[0] not in ('powercalc', 'template.config_entries') and row[0] not in external_domains))
+                if scoped.changed_domains not in ((), ('template',)):
                     _assert_mixed_state_scope(scoped, allow_dependent_only=True)
             elif not external_domains:
                 _assert_mixed_state_scope(self.receipt, allow_dependent_only=dependent_only or controlled_reload,
@@ -773,14 +775,15 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             tuple(sorted(self.digests.items())), source_history, consumer_history,
             self.program.sha256, physical,
             **({'dependent_config_program': bundle.dependent_config_program} if script_prefix or automation_prefix or controlled_reload and owned_script else {}),
-            **({'external_source_proof': bundle.external_source_proof, 'controlled_reload': controlled_reload}
+            **({'external_source_proof': bundle.external_source_proof,
+                **({} if mixed_powercalc else {'controlled_reload': controlled_reload})}
                if external_domains else {}),
             **({'previous': pc_previous, 'energy_original_physical': pc_energy_physical,
                 'population': self.powercalc_population.descriptors} if mixed_powercalc else {}))
         inputs = await self.preparations.create_native_inputs(own + '-original', baseline,
                                                              composition=self.composition)
         self._scope()
-        scopes = ((('registry',) + (('helpers',) if pc_metadata or entry_change is not None else ())
+        scopes = ((('registry',) + (('helpers',) if pc_metadata or entry_change is not None or homekit_changes else ())
                    + (('energy',) if pc_energy else ())
                    + (('dashboard',) if dashboard_storage is not None else ()) + ('yaml',)) if mixed_powercalc else
                   ('registry', 'dashboard') if registry_only and dashboard_storage is not None else
@@ -1078,22 +1081,26 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 or type(self.composition) is ControlledScriptComposition and 'helpers' in self.plan.required_scopes):
             from .controlled_template_entry_adapter import create_adapter
             adapters['helpers'] = create_adapter(self, resolver)
+        homekit_binding = getattr(self, 'homekit_yaml_binding', None)
+        homekit_helper = None
+        if homekit_binding is not None:
+            _need('helpers' in self.plan.required_scopes, 'homekit_helper_scope_required')
+            from .native_homekit_helper_adapter import create_adapter
+            homekit_helper = create_adapter(self, resolver, homekit_binding,
+                                             getattr(self, 'homekit_lease', None))
         if controlled and 'helpers' in self.plan.required_scopes:
             from .controlled_powercalc_helper import ControlledPowercalcHelperAdapter, ControlledMixedHelperAdapter
             powercalc_helper = ControlledPowercalcHelperAdapter(self, handoff, resolver)
+            template_helper = None
             if getattr(self, 'entry_change', None) is not None:
                 from .controlled_template_entry_adapter import create_adapter
-                adapters['helpers'] = ControlledMixedHelperAdapter(resolver, powercalc_helper,
-                                                                   create_adapter(self, resolver))
-            else:
-                adapters['helpers'] = powercalc_helper
-        homekit_binding = getattr(self, 'homekit_yaml_binding', None)
-        if homekit_binding is not None:
-            _need('helpers' in self.plan.required_scopes and 'helpers' not in adapters
-                  and not controlled, 'homekit_mixed_helper_scope_unsupported')
-            from .native_homekit_helper_adapter import create_adapter
-            adapters['helpers'] = create_adapter(self, resolver, homekit_binding,
-                                                getattr(self, 'homekit_lease', None))
+                template_helper = create_adapter(self, resolver)
+            adapters['helpers'] = (ControlledMixedHelperAdapter(resolver, powercalc_helper, template_helper,
+                                                                 homekit=homekit_helper)
+                                   if template_helper is not None or homekit_helper is not None else powercalc_helper)
+        elif homekit_helper is not None:
+            _need('helpers' not in adapters, 'homekit_mixed_helper_scope_unsupported')
+            adapters['helpers'] = homekit_helper
         if controlled and 'energy' in self.plan.required_scopes:
             from .powercalc_energy_transaction import ReceiptedPowercalcEnergyAdapter
             _need(hasattr(self, 'native_energy'), 'powercalc_energy_not_bound')

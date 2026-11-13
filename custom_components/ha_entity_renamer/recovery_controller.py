@@ -621,7 +621,9 @@ class RecoveryController:
             # terminal source/registry admission, but does not authorize rollback.
             from .native_template_yaml_server import _external_state_plan
             external_plan = False
-            if type(encoded) is dict and encoded.get('profile') == 'template_external_state_binding_v1':
+            if (type(encoded) is dict and (encoded.get('profile') == 'template_external_state_binding_v1'
+                    or encoded.get('profile') == 'template_controlled_powercalc_v1'
+                    and encoded.get('external_source_proof'))):
                 _, composition = preparations.resolve_composition(record.plan.native_inputs)
                 external_plan = _external_state_plan(record.plan, composition)
             if external_plan:

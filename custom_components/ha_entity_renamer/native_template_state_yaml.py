@@ -106,7 +106,9 @@ def decode_mixed_powercalc_yaml(data):
         raise ValueError('invalid_prepared_mixed_powercalc_yaml')
     values = tuple(_sha(data[key]) for key in ('source_program_sha256',
                    'powercalc_original_sha256', 'powercalc_candidate_sha256'))
-    base = _decode_yaml({key: data[key] for key in ('receipt', 'files')}, mixed_powercalc_mode=True)
+    external = bool(set(data['receipt']['changed_domains']) & {'homekit', 'utility_meter'})
+    base = _decode_yaml({key: data[key] for key in ('receipt', 'files')},
+                        mixed_powercalc_mode=True, external_state_mode=external)
     return PreparedMixedPowercalcYAML(base.receipt, base.files, *values)
 
 

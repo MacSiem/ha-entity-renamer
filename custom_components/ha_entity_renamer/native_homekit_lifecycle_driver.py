@@ -29,10 +29,10 @@ class HomeKitLifecycleDriver:
         from .prepared import decode_change
         resolved = [decode_change(resolver(step.prepared_ref)) for step in helpers]
         adapters = tuple(step.adapter for step in steps)
-        registries, dashboards = adapters.count('registry'), adapters.count('dashboard')
+        registries, dashboards, energy = adapters.count('registry'), adapters.count('dashboard'), adapters.count('energy')
         _need(bool(registries) and bool(helpers) and len(helpers) == len(changes)
-              and adapters == (('registry',) * registries + ('helpers',) * len(helpers)
-                               + ('dashboard',) * dashboards + ('yaml',))
+              and energy in (0, 1) and adapters == (('registry',) * registries + ('helpers',) * len(helpers)
+                               + ('energy',) * energy + ('dashboard',) * dashboards + ('yaml',))
               and {change.identity for change in resolved} == {change.identity for change in changes}
               and all(change in changes for change in resolved)
               and all((step.identity, step.before_revision, step.after_revision)
