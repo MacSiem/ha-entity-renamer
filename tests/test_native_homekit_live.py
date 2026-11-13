@@ -14,6 +14,8 @@ class HomeKitNativeReloadTests(unittest.IsolatedAsyncioTestCase):
         await fixture.asyncSetUp()
         self.addAsyncCleanup(fixture.asyncTearDown)
         hass, root = fixture.hass, fixture.root
+        from homeassistant import auth
+        hass.auth = await auth.auth_manager_from_config(hass, [], [])
         source = root / 'configuration.yaml'
         def config(entity):
             return ('homekit:\n  name: Synthetic Bridge\n  port: 21199\n'
