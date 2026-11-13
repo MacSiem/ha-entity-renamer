@@ -936,7 +936,8 @@ class ControlledPowercalcHandoff:
         _documents(state, observed)
         vendor.bindings()
         from .controlled_powercalc_population import removed_group_indexes
-        removed = removed_group_indexes(self.hass, captured, handoff, vendor)
+        removed = removed_group_indexes(self.hass, captured, handoff, vendor,
+                                        self.root.composition, self.direction)
         first = _sample(self.hass, vendor, selected, observed, captured, prepared,
                         removed_group_ids=removed)
         _need(first and all(row.source_verified for row in first), 'setup_graph_unverified')
@@ -947,7 +948,8 @@ class ControlledPowercalcHandoff:
         assert_discovery_managers_current(self.hass, observed, guard=check)
         _documents(state, observed)
         vendor.bindings()
-        _need(removed == removed_group_indexes(self.hass, captured, handoff, vendor),
+        _need(removed == removed_group_indexes(self.hass, captured, handoff, vendor,
+                                        self.root.composition, self.direction),
               'removed_group_index_changed')
         rows = _sample(self.hass, vendor, selected, observed, captured, prepared,
                        removed_group_ids=removed)

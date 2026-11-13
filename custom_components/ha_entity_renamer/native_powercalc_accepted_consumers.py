@@ -302,7 +302,7 @@ async def async_observe_accepted_powercalc_consumers(hass, chain, evidence, capt
         saved = chain.store.read(key)
         if saved is not None:
             handoff = validate_handoff(chain, [key, saved['digest']], direction)
-            removed = removed_group_indexes(hass, captured, handoff, vendor)
+            removed = removed_group_indexes(hass, captured, handoff, vendor, composition, direction)
     first = _sample(hass, vendor, selected, observed, captured, prepared,
                     removed_group_ids=removed)
     _need(bool(first) and all(row.source_verified for row in first), 'accepted_runtime_unverified')
@@ -315,7 +315,7 @@ async def async_observe_accepted_powercalc_consumers(hass, chain, evidence, capt
     _documents(state, observed)
     vendor.bindings()
     if removed:
-        _need(removed == removed_group_indexes(hass, captured, handoff, vendor),
+        _need(removed == removed_group_indexes(hass, captured, handoff, vendor, composition, direction),
               'accepted_removed_group_index_changed')
     second = _sample(hass, vendor, selected, observed, captured, prepared,
                      removed_group_ids=removed)

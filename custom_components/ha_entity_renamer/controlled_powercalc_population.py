@@ -119,16 +119,19 @@ def qualify_population(hass, bound, mapping, previous, *, inverse_aliases=None):
         tuple(sorted((row.entity_id, row.registry_id, row.relation_kind) for row in rows)))
 
 
-def removed_group_indexes(hass, captured, handoff, vendor):
+def removed_group_indexes(hass, captured, handoff, vendor, composition, direction):
     """Qualify only a receipted old group object retained by the vendor index."""
     import json
     from homeassistant.helpers import entity_registry as er
     from homeassistant.helpers.entity import EntityPlatformState
     from homeassistant.helpers.entity_platform import async_get_platforms
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
     from .powercalc_runtime_observer import PowercalcRuntimeCapture
     from .powercalc_source_binding import PowercalcVendor
     _need(type(captured) is PowercalcRuntimeCapture and type(handoff) is dict
-          and type(vendor) is PowercalcVendor and type(handoff.get('population')) is list,
+          and type(vendor) is PowercalcVendor and type(handoff.get('population')) is list
+          and type(composition) is ControlledPowercalcComposition
+          and direction in ('forward', 'rollback'),
           'removed_index_evidence_required')
     indexes = hass.data.get('powercalc', {}).get('group_entities')
     _need(type(indexes) is dict, 'removed_group_index_unavailable')
@@ -137,22 +140,33 @@ def removed_group_indexes(hass, captured, handoff, vendor):
               for entity_id, entity in platform.entities.items()}
     registry = er.async_get(hass)
     ignored = set()
-    for item in handoff['population']:
-        if item['kind'] != 'group' or item['before_id'] == item['after_id']:
+    moved = [(item['before_id'], item['after_id'], item['uuid'], 'GroupedEnergySensor')
+             for item in handoff['population'] if item['kind'] == 'group']
+    if vendor.core_version in ('2026.11.0', '2026.11.1'):
+        mapping = dict(composition.mapping)
+        for old, uuid, kind in composition.population:
+            if kind != 'power_sum' or old not in mapping:
+                continue
+            new = mapping[old]
+            source, target = (old, new) if direction == 'forward' else (new, old)
+            moved.append((source, target, uuid, 'GroupedPowerSensor'))
+    for old, new, uuid, kind in moved:
+        if old == new:
             continue
-        old, new, uuid = item['before_id'], item['after_id'], item['uuid']
         ghost = indexes.get(old)
         if ghost is None:
             continue
         current = active.get(new)
         row = registry.async_get(new)
         matches = [row for row in inventory if row['object_id'] == str(id(ghost))]
-        _need(type(ghost) is vendor.classes['GroupedEnergySensor']
+        _need(type(ghost) is type(current) is vendor.classes[kind]
               and ghost._platform_state is EntityPlatformState.REMOVED
               and ghost.entity_id == old and ghost.registry_entry is not None
               and ghost.registry_entry.id == uuid and old not in active
-              and type(current) is vendor.classes['GroupedEnergySensor']
               and current.registry_entry is row and row is not None and row.id == uuid
+              and ghost.unique_id == current.unique_id == row.unique_id
+              and ghost.registry_entry.config_entry_id == row.config_entry_id
+              and registry.async_get(old) is None
               and len(matches) == 1 and matches[0]['entity_id'] == old
               and not matches[0]['active_platforms'] and matches[0]['registry_id'] is None
               and matches[0]['references'] == ['vendor/group_entities/' + old],
