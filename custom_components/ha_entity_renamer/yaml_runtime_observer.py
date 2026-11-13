@@ -356,8 +356,8 @@ class NativeYAMLRuntimeReadback:
                 condition = (entity._condition if __version__ in ('2026.10.2', '2026.10.4', '2026.11.1')
                              else entity._cond_func)
                 if __version__ == '2026.11.1' and condition is not None:
-                    from homeassistant.components.automation.entity import IfAction
-                    if type(condition) is not IfAction or condition._unloaded:
+                    from homeassistant.helpers.condition import ConditionsChecker
+                    if type(condition) is not ConditionsChecker or condition._unloaded:
                         raise ValueError('native_automation_condition_unavailable')
                 if ((__version__ != '2026.11.1' and condition is not None) or entity._trigger_variables is not None
                         or entity._blueprint_inputs is not None
