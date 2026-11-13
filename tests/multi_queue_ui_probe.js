@@ -20,6 +20,20 @@ const wait = async name => {
 (async () => {
   const browser = await chromium.launch({headless:true, executablePath:'/ms-playwright/chromium-1219/chrome-linux/chrome', args:['--no-sandbox']});
   try {
+    const member = await browser.newContext({viewport:{width:1280,height:900}});
+    const memberAccess = fs.readFileSync(dir + '/render-user-token', 'utf8');
+    await member.addInitScript(({access,origin}) => localStorage.setItem('hassTokens', JSON.stringify({
+      access_token:access, token_type:'Bearer', expires_in:1800, expires:Date.now()+1700000,
+      hassUrl:origin, clientId:origin+'/'})), {access:memberAccess, origin});
+    const memberPage = await member.newPage();
+    await memberPage.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await memberPage.goto(origin + '/p4-ui/0', {waitUntil:'domcontentloaded'});
+    const memberCard = memberPage.locator('ha-entity-renamer');
+    await memberCard.waitFor({state:'visible', timeout:30000});
+    await memberPage.waitForFunction(() => document.querySelector('home-assistant')?.hass?.user?.is_admin === false);
+    const memberCanWrite = await memberCard.evaluate(el => el._renameAuthorityAvailable());
+    if (memberCanWrite) throw Error('non-admin card has write authority');
+    await member.close();
     const context = await browser.newContext({viewport:{width:1280,height:900}});
     await context.addInitScript(({access,origin}) => localStorage.setItem('hassTokens', JSON.stringify({
       access_token:access, token_type:'Bearer', expires_in:1800, expires:Date.now()+1700000,
@@ -54,6 +68,7 @@ const wait = async name => {
     const reviewed = await card.evaluate(el => ({operation_id:el._migration.operation_id,
       fingerprint:el._migration.fingerprint, changes:el._migration.review.changes.length,
       domains:el._migration.review.dependencies.domains}));
+    reviewed.nonadmin_card_denied = !memberCanWrite;
     if (reviewed.changes !== request.entities.length + 1) throw Error('incomplete server review');
     for (const domain of ['powercalc','energy','template','automation','script','dashboard','homekit','utility_meter'])
       if (!reviewed.domains.includes(domain)) throw Error('missing reviewed dependency: ' + domain);

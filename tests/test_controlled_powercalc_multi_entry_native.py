@@ -373,7 +373,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     self.assertEqual((await socket.receive_json(timeout=10))['type'], 'auth_ok')
                     return socket, access
                 admin, admin_access = await connect('Synthetic multi administrator', GROUP_ID_ADMIN)
-                user, _ = await connect('Synthetic multi nonadministrator', GROUP_ID_USER)
+                user, user_access = await connect('Synthetic multi nonadministrator', GROUP_ID_USER)
                 await hass.auth._store._store.async_save(hass.auth._store._data_to_save())
                 request_id = 0
                 async def request(socket, command, **payload):
@@ -389,11 +389,14 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 devices = [{'device_id': ordinary_device.id, 'name_by_user': 'Synthetic ordinary device'}]
                 denied = await request(user, 'prepare', entities=selected, devices=devices)
                 self.assertFalse(denied['success'])
+                self.assertEqual(denied.get('error', {}).get('code'), 'unauthorized')
                 evidence['nonadmin_denied'] = denied.get('error', {}).get('code')
                 if browser_ui:
                     directory = Path(os.environ['RENAMER_MULTI_UI'])
                     token = directory / 'render-token'
                     token.write_text(admin_access); token.chmod(0o600)
+                    token = directory / 'render-user-token'
+                    token.write_text(user_access); token.chmod(0o600)
                     entities = []
                     for old, new in mapping.items():
                         entity = self.f.entity.async_get(old)
@@ -708,7 +711,7 @@ class ControlledMultiEntryColdUITests(ControlledMultiEntryColdPublicTests):
              'require_admin': True, 'show_in_sidebar': True,
              'title': 'Synthetic multi queue', 'icon': 'mdi:home'},
             {'id': 'p4_ui', 'url_path': 'p4-ui', 'mode': 'storage',
-             'require_admin': True, 'show_in_sidebar': True,
+             'require_admin': False, 'show_in_sidebar': True,
              'title': 'Synthetic Renamer UI', 'icon': 'mdi:test-tube'},
         ]
         await Store(hass, 1, 'lovelace_dashboards').async_save({'items': dashboards})
