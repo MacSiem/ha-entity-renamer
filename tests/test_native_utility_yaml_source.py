@@ -23,3 +23,10 @@ class UtilitySourceTests(unittest.TestCase):
                                ({'utility_meter': {'daily': {'source':'sensor.new'}}}, {})):
             with self.subTest(after=after):
                 self.assertFalse(source_only(before, after, mapping))
+
+    def test_native_yaml_wrapped_mapping_and_strings_are_supported(self):
+        class NativeMap(dict): pass
+        class NativeString(str): pass
+        before = NativeMap(utility_meter=NativeMap(daily=NativeMap(source=NativeString('sensor.old'))))
+        after = NativeMap(utility_meter=NativeMap(daily=NativeMap(source=NativeString('sensor.new'))))
+        self.assertTrue(source_only(before, after, {'sensor.old':'sensor.new'}))

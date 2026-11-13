@@ -1,25 +1,26 @@
 """Exact Utility YAML source proof, without granting activation authority."""
 from copy import deepcopy
+from collections.abc import Mapping
 
 
 def source_only(before, after, mapping):
     """Match the whole effective configuration, changing only mapped sources."""
-    if (type(before) is not dict or type(after) is not dict
+    if (not isinstance(before, Mapping) or not isinstance(after, Mapping)
             or type(mapping) is not dict or not mapping
             or any(type(k) is not str or type(v) is not str for k, v in mapping.items())
             or len(set(mapping.values())) != len(mapping)
-            or any({key for key in config if type(key) is str and key.split(' ', 1)[0] == 'utility_meter'}
+            or any({key for key in config if isinstance(key, str) and key.split(' ', 1)[0] == 'utility_meter'}
                    != {'utility_meter'} for config in (before, after))):
         return False
     old, new = before.get('utility_meter'), after.get('utility_meter')
-    if type(old) is not dict or type(new) is not dict or not old:
+    if not isinstance(old, Mapping) or not isinstance(new, Mapping) or not old:
         return False
     candidate = deepcopy(old)
     for meter, config in candidate.items():
-        if type(meter) is not str or type(config) is not dict:
+        if not isinstance(meter, str) or not isinstance(config, dict):
             return False
         source = config.get('source')
-        if type(source) is not str:
+        if not isinstance(source, str):
             return False
         config['source'] = mapping.get(source, source)
     return candidate == new and candidate != old
