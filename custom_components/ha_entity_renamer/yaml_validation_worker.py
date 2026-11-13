@@ -1076,7 +1076,13 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
     from homeassistant.scripts.check_config import async_check_config
     if __version__ not in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
         return {'status': 'unsupported_runtime'}
-    if __version__ == '2026.11.1' and (
+    ordinary_template_state = (with_sources and template_state_program
+        and template_source_profile == TEMPLATE_STATE_SOURCE_PROFILE
+        and type(template_reference_mapping) is dict and dependent_reference_mapping is None
+        and not registry_only_template and not powercalc_profiles and not powercalc_candidate
+        and not native_helpers and not stable_script_services and not owned_script_services
+        and not mixed_powercalc)
+    if __version__ == '2026.11.1' and not ordinary_template_state and (
             not powercalc_profiles or native_helpers or owned_script_services
             or not mixed_powercalc and (powercalc_candidate or template_source_profile is not None)):
         return {'status': 'unsupported_runtime'}
