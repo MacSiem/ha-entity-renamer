@@ -107,7 +107,9 @@ class PowercalcTemplateIngress:
                                           and entry.platform == 'powercalc' and len(owners) == 1
                                           and owners[0] is owner and owner.registry_entry is entry,
                                           'powercalc_template_ingress_registry_changed')
-                                    if before is None and after.state in ('unknown', 'unavailable') and key not in obj.ready:
+                                    restored = (before is not None and before.state == 'unavailable'
+                                                and before.attributes.get('restored') is True)
+                                    if (before is None or restored) and after.state in ('unknown', 'unavailable') and key not in obj.ready:
                                         obj.pending[key] = (original, event, owner)
                                         return
                                     if key in obj.pending:

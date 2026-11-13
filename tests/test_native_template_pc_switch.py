@@ -128,7 +128,7 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
             local = sys._getframe(1).f_locals
             if code is action_code:
                 ev = local['event']
-                delay_events.append(('ingress', ev.data.get('entity_id'), str(ev.data.get('old_state')), str(ev.data.get('new_state'))))
+                delay_events.append(('ingress', ev.data.get('entity_id'), str(ev.data.get('old_state')), str(ev.data.get('new_state')), id(ev.data.get('new_state')) in local['obj'].witnessed))
             if local.get('self') is binary:
                 delay_events.append((local.get('result'), hass.loop.time(),
                     None if binary._delay_cancel is None else binary._delay_cancel.__self__.when(),
