@@ -138,7 +138,7 @@ def assert_powercalc_yaml_composition(chain, change):
                 if (type(prepared) not in (PreparedPowercalcGroupMetadata, PreparedHelper)
                         or type(prepared) is PreparedHelper and
                            (type(composition) is not ControlledPowercalcComposition
-                            or prepared.before.get('domain') != 'template')):
+                            or prepared.before.get('domain') not in (('template', 'homekit') if composition.external_source_proof else ('template',)))):
                     raise Refused('powercalc_candidate_native_effect_unprepared')
                 prepared.plan()
                 matches = [row for row in expected_doc['data']['entries']

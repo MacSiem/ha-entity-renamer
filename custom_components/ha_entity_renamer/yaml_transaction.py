@@ -153,11 +153,36 @@ def _assert_mixed_state_scope(receipt, *, allow_dependent_only=False, allow_temp
                 _sha(value)
 
 
+def _assert_external_state_scope(receipt, *, allow_powercalc=False):
+    """Private evidence codec only: external activation remains unsupported."""
+    domains, expected = receipt.changed_domains, receipt.runtime_expected
+    external = set(domains) & {'homekit', 'utility_meter'}
+    powercalc = {'powercalc'} if allow_powercalc else set()
+    if (type(allow_powercalc) is not bool or not external
+            or allow_powercalc and 'powercalc' not in domains or domains != tuple(sorted(set(domains)))
+            or set(domains) - ({'automation', 'script', 'template', 'homekit', 'utility_meter'} | powercalc)
+            or not set(receipt.unsupported_domains) <= set(domains)
+            or set(receipt.unsupported_domains) != external | powercalc | (set(receipt.unsupported_domains) & {'template'})
+            or type(expected) is not tuple
+            or any(type(row) is not tuple or len(row) != 3 or type(row[0]) is not str for row in expected)
+            or tuple(row[0] for row in expected if row[0] != 'template.config_entries') != domains
+            or sum(row[0] == 'template.config_entries' for row in expected) > 1
+            or any(row[0] == 'template.config_entries' for row in expected) and 'template' not in domains):
+        raise ValueError('external_state_scope_required')
+    for domain, before, after in expected:
+        if domain not in ('template', 'powercalc') and (before is None or after is None or before == after):
+            raise ValueError('external_state_runtime_required')
+        for value in (before, after):
+            if value is not None:
+                _sha(value)
+
+
 def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_owner_mode=False,
-                 powercalc_mode=False, mixed_powercalc_mode=False):
+                 powercalc_mode=False, mixed_powercalc_mode=False, external_state_mode=False):
     """Shared bounded file codec, with explicit disjoint selective gates."""
-    if (sum(bool(flag) for flag in (state_mode, mixed_state_mode, powercalc_mode, mixed_powercalc_mode)) > 1
-            or dependent_owner_mode and not mixed_state_mode):
+    combined_external = mixed_powercalc_mode and external_state_mode
+    if (sum(bool(flag) for flag in (state_mode, mixed_state_mode, powercalc_mode, mixed_powercalc_mode, external_state_mode)) > (2 if combined_external else 1)
+            or dependent_owner_mode and not (mixed_state_mode or external_state_mode)):
         raise ValueError('ambiguous_prepared_yaml_mode')
     _keys(data, ('receipt', 'files'))
     raw = data['receipt']
@@ -211,18 +236,26 @@ def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_ow
         if type(row) not in (tuple, list) or len(row) != 2:
             raise ValueError('invalid_prepared_yaml_proposal')
         proposed.append((_path(row[0]), _sha(row[1])))
-    domains = tuple(sequence(raw['changed_domains'], 4))
-    allowed = _SUPPORTED | {'powercalc'} if powercalc_mode or mixed_powercalc_mode else _SUPPORTED
-    unsupported = sequence(raw['unsupported_domains'], 2 if mixed_powercalc_mode else
+    domains = tuple(sequence(raw['changed_domains'], 6 if combined_external else 5 if external_state_mode else 4))
+    allowed = (_SUPPORTED | {'homekit', 'utility_meter', 'powercalc'} if combined_external else
+               _SUPPORTED | {'homekit', 'utility_meter'} if external_state_mode else
+               _SUPPORTED | {'powercalc'} if powercalc_mode or mixed_powercalc_mode else _SUPPORTED)
+    unsupported = sequence(raw['unsupported_domains'], 4 if combined_external else 3 if external_state_mode else 2 if mixed_powercalc_mode else
                            1 if (state_mode or mixed_state_mode or powercalc_mode) else 0)
     if (not domains or any(type(d) is not str or d not in allowed for d in domains)
             or len(set(domains)) != len(domains)
             or (powercalc_mode and (domains != ('powercalc',) or tuple(unsupported) != ('powercalc',)))
             or ((state_mode or mixed_state_mode) and tuple(unsupported) not in ((), ('template',)))
             or (mixed_powercalc_mode and ('powercalc' not in domains
-                or set(unsupported) not in ({'powercalc'}, {'powercalc', 'template'})
+                or (not combined_external and set(unsupported) not in ({'powercalc'}, {'powercalc', 'template'}))
                 or domains != tuple(sorted(domains))))
-            or (not (state_mode or mixed_state_mode or powercalc_mode or mixed_powercalc_mode) and unsupported)):
+            or (external_state_mode and (any(type(value) is not str for value in unsupported)
+                or tuple(unsupported) != tuple(sorted(set(unsupported)))
+                or not set(domains) & {'homekit', 'utility_meter'}
+                or set(unsupported) != ((set(domains) & {'homekit', 'utility_meter'})
+                                        | (set(unsupported) & {'template'}) | ({'powercalc'} if combined_external else set()))
+                or domains != tuple(sorted(domains))))
+            or (not (state_mode or mixed_state_mode or powercalc_mode or mixed_powercalc_mode or external_state_mode) and unsupported)):
         raise ValueError('unsupported_prepared_yaml_activation')
     files, total = [], 0
     for row in sequence(data['files'], 512):
@@ -247,9 +280,9 @@ def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_ow
     if tuple(sorted(proposed)) != tuple(sorted((f.path, _hash(f.after)) for f in files)):
         raise ValueError('prepared_yaml_proposal_mismatch')
     runtime_expected = []
-    for row in sequence(raw.get('runtime_expected', ()), 5 if mixed_powercalc_mode else 4):
+    for row in sequence(raw.get('runtime_expected', ()), 7 if combined_external else 6 if external_state_mode else 5 if mixed_powercalc_mode else 4):
         if (type(row) not in (tuple, list) or len(row) != 3
-                or row[0] not in domains and not ((mixed_powercalc_mode or mixed_state_mode) and row[0] == 'template.config_entries')):
+                or row[0] not in domains and not ((mixed_powercalc_mode or mixed_state_mode or external_state_mode) and row[0] == 'template.config_entries')):
             raise ValueError('invalid_prepared_yaml_runtime')
         domain, before, after = row
         runtime_expected.append((domain, None if before is None else _sha(before),
@@ -258,7 +291,7 @@ def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_ow
         raise ValueError('invalid_prepared_yaml_runtime')
     if state_mode and domains != ('template',):
         raise ValueError('template_state_only_preparation_required')
-    if not state_mode and not mixed_state_mode and not mixed_powercalc_mode and 'template' in domains:
+    if not state_mode and not mixed_state_mode and not mixed_powercalc_mode and not external_state_mode and 'template' in domains:
         # Parsing one aggregate ordinary YAML change does not grant activation.
         # The receipted adapter still requires its exact typed composite observer
         # and ORIGINAL composition. Every changed domain needs checker seals;
@@ -282,12 +315,14 @@ def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_ow
     if mixed_state_mode:
         _assert_mixed_state_scope(receipt, allow_dependent_only=dependent_owner_mode,
                                   allow_template_entry=any(row[0] == 'template.config_entries' for row in runtime_expected))
+    if external_state_mode:
+        _assert_external_state_scope(receipt, allow_powercalc=combined_external)
     if mixed_powercalc_mode:
         from dataclasses import replace
-        scoped = replace(receipt, changed_domains=tuple(d for d in domains if d != 'powercalc'),
-            unsupported_domains=tuple(d for d in unsupported if d != 'powercalc'),
+        scoped = replace(receipt, changed_domains=tuple(d for d in domains if d not in ('powercalc', 'homekit', 'utility_meter')),
+            unsupported_domains=tuple(d for d in unsupported if d not in ('powercalc', 'homekit', 'utility_meter')),
             runtime_expected=tuple(row for row in runtime_expected
-                                   if row[0] not in ('powercalc', 'template.config_entries')))
+                                   if row[0] not in ('powercalc', 'homekit', 'utility_meter', 'template.config_entries')))
         if not scoped.changed_domains:
             if scoped.unsupported_domains or scoped.runtime_expected:
                 raise ValueError('powercalc_only_preparation_required')

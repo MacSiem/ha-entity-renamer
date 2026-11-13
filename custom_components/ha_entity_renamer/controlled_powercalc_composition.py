@@ -31,16 +31,25 @@ class ControlledPowercalcComposition(ControlledReloadComposition):
     energy_original_physical: tuple[str, int, int, int, int, int] | None = None
     population: tuple[tuple[str, str, str], ...] = ()
     dependent_config_program: object | None = None
+    external_source_proof: tuple[tuple[str, bool], ...] = ()
 
     def _assert_changed_scope(self, receipt):
         from .yaml_transaction import _assert_mixed_state_scope
+        external = set(receipt.changed_domains) & {'homekit', 'utility_meter'}
+        if external:
+            from .yaml_transaction import _assert_external_state_scope
+            _assert_external_state_scope(receipt, allow_powercalc=True)
+            _need(self.external_source_proof == tuple((domain, True) for domain in ('homekit', 'utility_meter')
+                                                       if domain in external))
+        else:
+            _need(self.external_source_proof == ())
         _need('powercalc' in receipt.changed_domains
-              and set(receipt.unsupported_domains) <= {'powercalc', 'template'})
+              and set(receipt.unsupported_domains) <= {'powercalc', 'template'} | external)
         scoped = replace(receipt,
-            changed_domains=tuple(d for d in receipt.changed_domains if d != 'powercalc'),
-            unsupported_domains=tuple(d for d in receipt.unsupported_domains if d != 'powercalc'),
+            changed_domains=tuple(d for d in receipt.changed_domains if d not in ('powercalc', 'homekit', 'utility_meter')),
+            unsupported_domains=tuple(d for d in receipt.unsupported_domains if d not in ('powercalc', 'homekit', 'utility_meter')),
             runtime_expected=tuple(row for row in receipt.runtime_expected
-                                   if row[0] not in ('powercalc', 'template.config_entries')))
+                                   if row[0] not in ('powercalc', 'homekit', 'utility_meter', 'template.config_entries')))
         if not scoped.changed_domains:
             _need(not scoped.unsupported_domains and not scoped.runtime_expected)
         elif scoped.changed_domains == ('template',):
@@ -87,7 +96,8 @@ class ControlledPowercalcComposition(ControlledReloadComposition):
                   for row in selected if row.get('platform') == 'powercalc'))
         PowercalcComposition(self.evidence, self.previous, self.prepared_digests,
             self.source_history, self.consumer_history, self.evidence.powercalc_sources.sha256,
-            self.energy_original_physical).assert_baseline(baseline, _mixed_template=True)
+            self.energy_original_physical).assert_baseline(baseline, _mixed_template=True,
+                                                          _external=bool(self.external_source_proof))
 
 
 def encode_controlled_powercalc(value, baseline):
@@ -108,6 +118,8 @@ def encode_controlled_powercalc(value, baseline):
         'previous': _powercalc_typed(value.previous, PowercalcPreviousOriginal, encode=True),
         'energy_original_physical': _powercalc_typed(value.energy_original_physical,
             tuple[str, int, int, int, int, int] | None, encode=True)}
+    if value.external_source_proof:
+        result['external_source_proof'] = _typed(value.external_source_proof, tuple[tuple[str, bool], ...], encode=True)
     if value.dependent_config_program is not None:
         import json
         from .dependent_config_program import encode_dependent_config_program
@@ -121,7 +133,8 @@ def decode_controlled_powercalc(payload, baseline):
             'state_config_program', 'yaml_plan', 'mapping', 'prepared_digests', 'source_history',
             'consumer_history', 'coverage_sha256', 'physical_consumers', 'previous', 'energy_original_physical', 'population'}
     extra = {'dependent_program', 'dependent_program_sha256'}
-    _need(type(payload) is dict and set(payload) in (keys, keys | extra) and type(payload['schema']) is int
+    external = {'external_source_proof'} if type(payload) is dict and 'external_source_proof' in payload else set()
+    _need(type(payload) is dict and set(payload) in (keys | external, keys | extra | external) and type(payload['schema']) is int
           and payload['schema'] == 1 and payload['profile'] == PROFILE)
     result = ControlledPowercalcComposition(
         _powercalc_typed(payload['evidence'], OriginalSourceEvidence, encode=False),
@@ -136,7 +149,8 @@ def decode_controlled_powercalc(payload, baseline):
         _powercalc_typed(payload['previous'], PowercalcPreviousOriginal, encode=False),
         _powercalc_typed(payload['energy_original_physical'],
                          tuple[str, int, int, int, int, int] | None, encode=False),
-        _typed(payload['population'], tuple[tuple[str, str, str], ...], encode=False))
+        _typed(payload['population'], tuple[tuple[str, str, str], ...], encode=False),
+        external_source_proof=_typed(payload['external_source_proof'], tuple[tuple[str, bool], ...], encode=False) if external else ())
     if 'dependent_program' in payload:
         import json
         from .dependent_config_program import decode_dependent_config_program

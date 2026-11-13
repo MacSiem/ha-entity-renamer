@@ -45,6 +45,8 @@ _SOURCES = {'2026.10.2': {'components/utility_meter/sensor.py': 'e70eab00470d875
 _SOURCES['2026.11.0'] = {'components/sensor/__init__.py': 'c32317e129eefa68737de087264f046bfd719475d8761f74646b3dd0ef2c5cf2', 'components/utility_meter/__init__.py': '60be9cdfe7579a04f089a266964a0056b68a228fbe055163dc4d6a02b3f6048a', 'components/utility_meter/sensor.py': 'aec49f34349483053ad0b5d9187ae18330084e3b923e1a51e7196b2d44349f16', 'config_entries.py': '9ab88f7496b2b25f36956887ddb2ef83b54602068e50469c96d538af75f042aa', 'core.py': '5671149ec3405c4ec81eed05f58e3c392dafe0af141ec6ac7ea1a2b4b658d038', 'helpers/device.py': '47cc4afc5d13def0f63fb854a74ae388cb0a877b25c6b717001abae6ca19d4a5', 'helpers/entity.py': 'd1f254d6eeabc2d88b5327151a2cee9ee465d420da3fda61d720e8561b2d9ac3', 'helpers/entity_platform.py': '18014aa32bd7b1f0a80044166d9a88d7250a96120d9a62116de6f13a318121c8', 'helpers/entity_registry.py': 'a16d82bb68ceb680875c9fd8905d7c6f30d0cd39ed7ee7a12ded2c4a9d565088', 'helpers/helper_integration.py': 'eedfca79e0ac213fcf45cd4bcab6fa82ddd0a511e3723485388ab55657fb8972', 'helpers/registry.py': 'a481648fdca6f27cb19a72ea44e0c42b204674a8f5c10ed52bcedb07ec220cae', 'helpers/restore_state.py': '230c1d0568097fdf650142e9a12b631b091083b9a157a9912e8ea9164c94c3ba', 'helpers/storage.py': 'f004ea812a9840a7aae8a1269e482be9361e303424a4a47d2b6bab5c40201064'}
 
 _SOURCES['2026.11.0']['components/sensor/entity.py'] = '5d1e82b6507fd00739eb1063a9df72279fe72bdca3bd520df1ae3f2d5ddb18fb'
+# 11.1's exact files match 11.0 byte for byte.
+_SOURCES['2026.11.1'] = dict(_SOURCES['2026.11.0'])
 
 _COMMON_ARGS = frozenset(('aliases', 'area_id', 'categories', 'capabilities',
     'config_entry_id', 'config_subentry_id', 'device_class', 'device_id',
@@ -226,7 +228,7 @@ def _shape(value):
         _need(type(call['before']) is dict and type(call['after']) is dict, 'call_rows')
         _need(type(call['arguments']) is dict and type(call['undefined']) is list,
               'arguments_layout')
-        args = _COMMON_ARGS | (_EXTRA_ARGS if value['core'] in ('2026.10.2', '2026.10.4', '2026.11.0') else set()) | ({'compat_name'} if value['core'] == '2026.11.0' else set())
+        args = _COMMON_ARGS | (_EXTRA_ARGS if value['core'] in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1') else set()) | ({'compat_name'} if value['core'] in ('2026.11.0', '2026.11.1') else set())
         undefined = call['undefined']
         _need(all(type(k) is str for k in undefined)
               and undefined == sorted(set(undefined))
@@ -235,7 +237,7 @@ def _shape(value):
         path, cause = call['path'], call['cause']
         _need(type(path) is list and all(type(k) is str for k in path)
               and tuple(path) in _PATHS
-              and ('add_impl' not in path or value['core'] in ('2026.10.2', '2026.10.4', '2026.11.0'))
+              and ('add_impl' not in path or value['core'] in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'))
               and (path != ['update', 'get_or_create', 'add']
                    or value['core'] == '2025.6.0'), 'caller_path')
         _need(type(cause) is dict and set(cause) == {'kind', 'call'}, 'cause_layout')
@@ -300,7 +302,7 @@ def validate_setup_audit(baseline, expected_snapshot, source_rows, audit, *,
             _need('original_device_class' in args and 'options' not in args, 'add_arguments')
         else:
             state_args = {'original_device_class', 'capabilities', 'supported_features'}
-            if value['core'] in ('2026.10.2', '2026.10.4', '2026.11.0'):
+            if value['core'] in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
                 state_args.add('original_name')
             _need('original_device_class' in args and set(args) <= state_args,
                   'state_arguments')
@@ -313,7 +315,7 @@ def validate_setup_audit(baseline, expected_snapshot, source_rows, audit, *,
                 # mutation allowance. Other paths must use UNDEFINED.
                 native_state_arg = (call['path'][0] == 'update' and 'state' in call['path']
                     and name in ({'capabilities', 'supported_features', 'original_name'}
-                        if value['core'] in ('2026.10.2', '2026.10.4', '2026.11.0') else {'capabilities', 'supported_features'}))
+                        if value['core'] in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1') else {'capabilities', 'supported_features'}))
                 _need(('get_or_create' in call['path'] or native_state_arg)
                       and name in before and _same(before[name], arg), 'foreign_argument')
         _need(args.keys() & {'original_device_class', 'options'}, 'empty_arguments')
@@ -383,10 +385,10 @@ def _installed_native():
         compiled[relative] = tuple(_code_objects(compile(raw, str(path), 'exec',
                                       dont_inherit=True, optimize=sys.flags.optimize)))
     methods = dict(_METHODS)
-    if version in ('2026.10.2', '2026.10.4', '2026.11.0'):
+    if version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
         methods['add_impl'] = ('helpers.entity_platform', 'EntityPlatform', '_async_add_entity_impl')
         methods['dispatch'] = ('core', 'EventBus', '_async_dispatch')
-    if version == '2026.11.0':
+    if version in ('2026.11.0', '2026.11.1'):
         for name in ('precision', 'sensor_add', 'sensor_update'):
             _, cls, method = methods[name]
             methods[name] = ('components.sensor.entity', cls, method)
@@ -400,7 +402,7 @@ def _installed_native():
         cls = getattr(module, class_name)
         method = getattr(cls, method_name)
         code = getattr(method, '__code__', None)
-        if version == '2026.11.0' and name in ('writer', 'get_or_create'):
+        if version in ('2026.11.0', '2026.11.1') and name in ('writer', 'get_or_create'):
             wrappers = [c for c in compiled['core.py']
                         if c.co_qualname == 'verify_event_loop_thread.<locals>.decorator.<locals>.wrapper']
             _need(len(wrappers) == 1 and code == wrappers[0], 'native_loop_wrapper')
@@ -671,7 +673,7 @@ class NativeUtilitySetupAudit:
               and self._new_entity.platform is self._platform
               and self._platform.hass is self._hass
               and self._platform.config_entry is self._entry, 'entity_binding_lost')
-        names = _COMMON_ARGS | (_EXTRA_ARGS if self._core in ('2026.10.2', '2026.10.4', '2026.11.0') else set()) | ({'compat_name'} if self._core == '2026.11.0' else set())
+        names = _COMMON_ARGS | (_EXTRA_ARGS if self._core in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1') else set()) | ({'compat_name'} if self._core in ('2026.11.0', '2026.11.1') else set())
         _need(set(local) == names | {'self', 'entity_id'}, 'writer_arguments_layout')
         defined, undefined = {}, []
         for name in sorted(names):

@@ -177,8 +177,9 @@ class PowercalcComposition:
     coverage_sha256: str
     energy_original_physical: tuple[str, int, int, int, int, int] | None = None
 
-    def assert_baseline(self, baseline, *, _mixed_template=False):
-        _need(type(_mixed_template) is bool and type(baseline) is NativeInputBaseline
+    def assert_baseline(self, baseline, *, _mixed_template=False, _external=False):
+        _need(type(_mixed_template) is bool and type(_external) is bool
+              and (not _external or _mixed_template) and type(baseline) is NativeInputBaseline
               and type(self.evidence) is OriginalSourceEvidence)
         evidence, receipt = self.evidence, baseline.receipt
         evidence.assert_receipt(receipt)
@@ -187,8 +188,8 @@ class PowercalcComposition:
               and type(evidence.powercalc_candidate_sources) is CandidatePowercalcSources
               and evidence.powercalc_sources.receipt_json == baseline.receipt_json
               and evidence.powercalc_sources.closed_graph_json is not None
-              and set(receipt.unsupported_domains) <= ({'powercalc', 'template'} if _mixed_template else {'powercalc'})
-              and set(receipt.changed_domains) <= ({'powercalc', 'template', 'automation', 'script'}
+              and set(receipt.unsupported_domains) <= (({'powercalc', 'template'} | ({'homekit', 'utility_meter'} if _external else set())) if _mixed_template else {'powercalc'})
+              and set(receipt.changed_domains) <= (({'powercalc', 'template', 'automation', 'script'} | ({'homekit', 'utility_meter'} if _external else set()))
                                                      if _mixed_template else {'powercalc'})
               and (not _mixed_template or 'powercalc' in receipt.changed_domains))
         template = evidence.template_sources

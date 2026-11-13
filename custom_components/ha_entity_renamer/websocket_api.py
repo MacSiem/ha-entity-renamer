@@ -249,6 +249,12 @@ async def ws_prepare(hass, connection, message):
     except _InvalidSelection:
         connection.send_error(message['id'], 'invalid_selection', 'The rename selection is invalid')
     except Refused as error:
+        from .native_utility_yaml_guard import UtilityYAMLActivationUnavailable
+        if type(error) is UtilityYAMLActivationUnavailable:
+            import json
+            connection.send_error(message['id'], 'unsupported_utility_yaml',
+                json.dumps({'sources': error.sources}, ensure_ascii=True, separators=(',', ':')))
+            return
         from .helper_native import UnsupportedEntryReferences
         if type(error) is UnsupportedEntryReferences:
             import json

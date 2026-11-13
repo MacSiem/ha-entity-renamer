@@ -64,6 +64,7 @@ class TemplateStateSourceValidation:
     candidate_sources: CandidateTemplateStateSources
     state_config_program: object = None
     dependent_config_program: object = None
+    external_source_proof: tuple = ()
 
     @property
     def migration_ready(self):
@@ -689,7 +690,15 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                             result['template_state_config_program'],
                             result['template_candidate_state_config_program'],
                             mapping=template_reference_mapping, plan=plan)
-                    return TemplateStateSourceValidation(receipt, evidence, original, candidate, program, dependent_program)
+                    external = result.get('external_source_proof', [])
+                    if (type(external) is not list or any(type(row) is not list or len(row) != 2
+                            or row[0] not in ('homekit', 'utility_meter') or type(row[1]) is not bool
+                            for row in external)
+                            or tuple(row[0] for row in external) != tuple(
+                                domain for domain in ('homekit', 'utility_meter') if domain in receipt.changed_domains)):
+                        raise YAMLValidationError('external_source_proof_invalid')
+                    return TemplateStateSourceValidation(receipt, evidence, original, candidate, program,
+                                                         dependent_program, tuple(tuple(row) for row in external))
                 if dependent_program is not None:
                     return DependentConfigValidation(receipt, evidence, dependent_program)
                 return receipt, evidence

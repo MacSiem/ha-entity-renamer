@@ -23,6 +23,7 @@ from .helper_plan import plan_helper, snapshot_equal
 _HELPER_SCHEMA_VERSIONS = {
     '2025.6.0': {'threshold': (1, 1), 'min_max': (1, 1), 'group': (1, 1)},
     '2026.11.0': {},  # Utility has a separate, source-audited observer.
+    '2026.11.1': {},
     '2026.10.2': {'threshold': (1, 2), 'min_max': (1, 1), 'group': (1, 1)}, '2026.10.4': {'threshold': (1, 2), 'min_max': (1, 1), 'group': (1, 1)},
 }
 
@@ -141,6 +142,12 @@ class NativeHelperObservers:
 
         require(__version__ in _HELPER_SCHEMA_VERSIONS, 'helper_ha_version_unsupported')
         snapshots = tuple(deepcopy(s) for s in snapshots)
+        if any(s.get('domain') == 'homekit' for s in snapshots):
+            require(all(s.get('domain') == 'homekit' for s in snapshots),
+                    'homekit_mixed_scope_unsupported')
+            from .native_homekit_helper_observers import NativeHomeKitHelperObservers
+            return await NativeHomeKitHelperObservers.capture(
+                hass, snapshots, mapping_proof, activation_lease=activation_lease)
         if any(s.get('domain') == 'utility_meter' for s in snapshots):
             require(all(s.get('domain') == 'utility_meter' for s in snapshots),
                     'utility_mixed_scope_unsupported')

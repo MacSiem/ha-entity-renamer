@@ -106,7 +106,9 @@ def decode_mixed_powercalc_yaml(data):
         raise ValueError('invalid_prepared_mixed_powercalc_yaml')
     values = tuple(_sha(data[key]) for key in ('source_program_sha256',
                    'powercalc_original_sha256', 'powercalc_candidate_sha256'))
-    base = _decode_yaml({key: data[key] for key in ('receipt', 'files')}, mixed_powercalc_mode=True)
+    external = bool(set(data['receipt']['changed_domains']) & {'homekit', 'utility_meter'})
+    base = _decode_yaml({key: data[key] for key in ('receipt', 'files')},
+                        mixed_powercalc_mode=True, external_state_mode=external)
     return PreparedMixedPowercalcYAML(base.receipt, base.files, *values)
 
 
@@ -198,7 +200,10 @@ def assert_state_yaml_composition(chain, change):
     from .native_automation_program_composition import AutomationTemplateStateComposition
     from .controlled_script_composition import ControlledScriptComposition
     from .controlled_powercalc_composition import ControlledPowercalcComposition
-    expected = {PreparedTemplateStateYAML: (TemplateStateComposition,),
+    from .native_external_yaml import PreparedExternalStateYAML
+    from .native_template_state_composition import ExternalStateComposition
+    expected = {PreparedExternalStateYAML: (ExternalStateComposition,),
+                PreparedTemplateStateYAML: (TemplateStateComposition,),
                 PreparedMixedTemplateStateYAML: (MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition),
                 PreparedMixedPowercalcYAML: (ControlledPowercalcComposition,)}
     if type(change) not in expected:
@@ -266,7 +271,7 @@ class NativeTemplateStateYAMLRuntimeReadback:
     """
     def __init__(self, hass, chain, composition, *, guard, entry_witness=None):
         from .native_registry_receipts import RegistryReceiptChain
-        from .native_template_state_composition import TemplateStateComposition, MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition
+        from .native_template_state_composition import TemplateStateComposition, MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition
         from .native_template_mixed_state_yaml import NativeMixedTemplateStateYAMLRuntimeReadback
         from .native_template_state_binding import _StateRuntime
         from .native_script_program_composition import ScriptTemplateStateComposition
@@ -274,7 +279,7 @@ class NativeTemplateStateYAMLRuntimeReadback:
         from .controlled_script_composition import ControlledScriptComposition
         from .controlled_powercalc_composition import ControlledPowercalcComposition
         expected = {NativeTemplateStateYAMLRuntimeReadback: (TemplateStateComposition,),
-                    NativeMixedTemplateStateYAMLRuntimeReadback: (MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition, ControlledPowercalcComposition)}
+                    NativeMixedTemplateStateYAMLRuntimeReadback: (MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition, ControlledPowercalcComposition)}
         _need(type(chain) is RegistryReceiptChain and type(self) in expected
               and type(composition) in expected[type(self)], 'template_state_original_chain_required')
         composition.assert_baseline(chain.baseline)

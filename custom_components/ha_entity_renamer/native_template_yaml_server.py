@@ -33,19 +33,20 @@ def _need(value, reason):
 
 
 def _mixed_composition(value):
-    from .native_template_state_composition import MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition
+    from .native_template_state_composition import MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition
     from .native_script_program_composition import ScriptTemplateStateComposition
     from .native_automation_program_composition import AutomationTemplateStateComposition
     from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
     from .controlled_powercalc_composition import ControlledPowercalcComposition
-    return type(value) in (MixedTemplateComposition, MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ControlledPowercalcComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)
+    return type(value) in (MixedTemplateComposition, MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ControlledPowercalcComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)
 
 
 def _controlled_reload(value):
-    from .native_template_state_composition import ControlledReloadComposition, ControlledReloadEntryComposition
+    from .native_template_state_composition import ControlledReloadComposition, ControlledReloadEntryComposition, ExternalStateComposition
     from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
     from .controlled_powercalc_composition import ControlledPowercalcComposition
-    return type(value) in (ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ControlledPowercalcComposition)
+    return (type(value) in (ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ControlledPowercalcComposition)
+            or type(value) is ExternalStateComposition and value.controlled_reload)
 
 
 def _script_prefix_composition(value):
@@ -80,6 +81,25 @@ def _dashboard_plan(plan):
     return False
 
 
+def _external_state_plan(plan, composition):
+    from .native_template_state_composition import ExternalStateComposition
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    if type(composition) is ControlledPowercalcComposition:
+        return bool(composition.external_source_proof) and _controlled_powercalc_plan(plan, composition)
+    if (type(composition) is not ExternalStateComposition
+            or plan.required_scopes != plan.covered_scopes
+            or plan.required_scopes != plan.verification_adapters
+            or any(step.caused_by for step in plan.steps)):
+        return False
+    adapters = tuple(step.adapter for step in plan.steps)
+    registries, helpers, dashboards = (adapters.count(key) for key in ('registry', 'helpers', 'dashboard'))
+    external = dict(composition.external_source_proof)
+    scopes = ('registry',) + (('helpers',) if helpers else ()) + (('dashboard',) if dashboards else ()) + ('yaml',)
+    return (bool(registries) and bool(helpers) == ('homekit' in external)
+            and plan.required_scopes == scopes and adapters == (('registry',) * registries
+                + ('helpers',) * helpers + ('dashboard',) * dashboards + ('yaml',)))
+
+
 def _entry_reload_plan(plan, composition):
     from .native_template_state_composition import ControlledReloadEntryComposition
     from .controlled_script_composition import ControlledScriptComposition
@@ -109,9 +129,9 @@ def _controlled_powercalc_plan(plan, composition):
         ('dashboard',) if 'dashboard' in plan.required_scopes else ()) + ('yaml',)
     if composition.previous.core_version in ('2026.11.0', '2026.11.1'):
         # Each selected native entry has at most one exact helper preparation.
-        helpers_limit = registry + 1
+        helpers_limit = registry + 1 + (len(composition.external_source_proof) if composition.external_source_proof else 0)
     else:
-        helpers_limit = len(composition.previous.groups) + 1
+        helpers_limit = len(composition.previous.groups) + 1 + (len(composition.external_source_proof) if composition.external_source_proof else 0)
     return (registry > 0 and helpers <= helpers_limit and energy in (0, 1)
             and plan.required_scopes == scopes
             and adapters == ('registry',) * registry + ('helpers',) * helpers
@@ -521,7 +541,8 @@ class NativeTemplateYAMLServer:
     async def _install_dashboard_fence(self):
         from .dashboard_phase import DashboardPhase, DashboardConsumerFence
         observed = self.consumers.dashboard_observed
-        _need((_dashboard_plan(self.plan) or _controlled_powercalc_plan(self.plan, self.composition))
+        _need((_dashboard_plan(self.plan) or _controlled_powercalc_plan(self.plan, self.composition)
+               or _external_state_plan(self.plan, self.composition))
               and observed is not None, 'dashboard_evidence_required')
         phase = await DashboardPhase.capture(self.hass, observed, self.chain, guard=self._scope)
         self._scope()
@@ -748,7 +769,7 @@ class NativeTemplateYAMLServer:
         return result
 
     @classmethod
-    async def bind_reverse(cls, hass, operation_id, fingerprint, *, guard, refresh, restored=False):
+    async def bind_reverse(cls, hass, operation_id, fingerprint, *, guard, refresh, restored=False, inspect_only=False):
         """Fresh read-only reopen, actual admission, then a DIFFERENT live chain."""
         from .native_template_state_server import NativeTemplateStateServer
         powercalc_scope = cls is NativeTemplateStateServer and 'powercalc' in hass.config.components
@@ -770,6 +791,7 @@ class NativeTemplateYAMLServer:
                 and 0 < record.phases.count('undone') < len(record.phases)
                 and record.phases == (('undone',) * record.phases.count('undone')
                     + ('pending',) * record.phases.count('pending')))
+            _need(type(inspect_only) is bool and not (inspect_only and restored), 'inspection_scope')
             _need(type(restored) is bool and record is not None and record.operation_id == operation_id
                   and record.plan.fingerprint == fingerprint
                   and ((restored and record.restore_attempted is True and record.direction == 'rollback'
@@ -800,18 +822,22 @@ class NativeTemplateYAMLServer:
                       'prefix_profile_unsupported')
             obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
             obj.digests = dict(obj.composition.prepared_digests)
+            from .native_template_state_composition import ExternalStateComposition
+            external_plan = _external_state_plan(obj.plan, obj.composition)
+            _need(not external_plan or inspect_only and record.status == 'applied',
+                  'external_rollback_lifecycle_required')
             from .controlled_powercalc_composition import ControlledPowercalcComposition
             is_powercalc = type(obj.composition) is ControlledPowercalcComposition
             _need(not is_powercalc or powercalc_scope, 'powercalc_runtime_required')
             registry_only = _registry_only_state_plan(obj.plan, obj.composition, obj.receipt)
             entry_plan = _entry_reload_plan(obj.plan, obj.composition)
             powercalc_plan = _controlled_powercalc_plan(obj.plan, obj.composition)
-            dashboard_plan = _dashboard_plan(obj.plan) or ((entry_plan or powercalc_plan) and 'dashboard' in obj.plan.required_scopes)
+            dashboard_plan = _dashboard_plan(obj.plan) or ((entry_plan or powercalc_plan or external_plan) and 'dashboard' in obj.plan.required_scopes)
             standard = (obj.plan.required_scopes == obj.plan.covered_scopes == obj.plan.verification_adapters == ('registry', 'yaml')
                   and tuple(s.adapter for s in obj.plan.steps) == ('registry',) * (len(obj.plan.steps) - 1) + ('yaml',)
                   and len(obj.plan.steps) >= 2 and not any(s.caused_by for s in obj.plan.steps))
             _need(obj.plan.coverage_evidence == obj.composition.coverage_sha256
-                  and (registry_only or standard or dashboard_plan or entry_plan or powercalc_plan), 'qualified_plan_required')
+                  and (registry_only or standard or dashboard_plan or entry_plan or powercalc_plan or external_plan), 'qualified_plan_required')
             changes = [decode_change(obj.preparations.resolve(s.prepared_ref, obj.digests[s.prepared_ref]))
                        for s in obj.plan.steps]
             obj.registry_changes = tuple(change for step, change in zip(obj.plan.steps, changes, strict=True)
@@ -937,11 +963,17 @@ class NativeTemplateYAMLServer:
                 else:
                     await obj._terminal(record, rollback=restored)
             await admit()
+            if external_plan:
+                await obj._inspect_external_consumers()
             await refresh()
             obj._scope()
             await obj._fresh_stores(record, allow_active=obj.prefix_recovery or obj.complete_unknown_recovery)
             await admit()
+            if external_plan:
+                await obj._inspect_external_consumers()
             state = readonly.reconstruct_inputs()
+            if inspect_only:
+                return obj  # A read-only inspection never creates a writer.
             if restored:
                 return obj  # Terminal proof never installs a writer.
             # Same separated admission pattern as NativeTemplateReverse: the
@@ -987,13 +1019,17 @@ class NativeTemplateYAMLServer:
             registry_only = _registry_only_state_plan(plan, obj.composition, obj.receipt)
             entry_plan = _entry_reload_plan(plan, obj.composition)
             powercalc_plan = _controlled_powercalc_plan(plan, obj.composition)
-            dashboard_plan = _dashboard_plan(plan) or ((entry_plan or powercalc_plan) and 'dashboard' in plan.required_scopes)
+            external_plan = _external_state_plan(plan, obj.composition)
+            from .native_template_state_composition import ExternalStateComposition
+            _need(type(obj.composition) is not ExternalStateComposition or external_plan,
+                  'external_plan_scope_required')
+            dashboard_plan = _dashboard_plan(plan) or ((entry_plan or powercalc_plan or external_plan) and 'dashboard' in plan.required_scopes)
             standard = (plan.required_scopes == plan.covered_scopes == plan.verification_adapters == ('registry', 'yaml')
                   and len(plan.steps) >= 2
                   and tuple(s.adapter for s in plan.steps) == ('registry',) * (len(plan.steps) - 1) + ('yaml',)
                   and not any(s.caused_by for s in plan.steps))
             _need(plan.coverage_evidence == obj.composition.coverage_sha256
-                  and (registry_only or standard or dashboard_plan or entry_plan or powercalc_plan)
+                  and (registry_only or standard or dashboard_plan or entry_plan or powercalc_plan or external_plan)
                   and set(obj.digests) == {s.prepared_ref for s in plan.steps}, 'qualified_plan_required')
             changes = [decode_change(obj.preparations.resolve(s.prepared_ref, obj.digests[s.prepared_ref]))
                        for s in plan.steps]
@@ -1029,6 +1065,9 @@ class NativeTemplateYAMLServer:
             _need(not readonly.writable and readonly.active is None
                   and state.head == readonly.root_digest, 'pristine_review_required')
             obj.chain = readonly
+            if external_plan:
+                await obj._bind_external_consumers()
+                obj._scope()
             if powercalc_plan:
                 from .powercalc_runtime_observer import capture_powercalc_runtime
                 from .powercalc_source_binding import async_bind_powercalc_sources

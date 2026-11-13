@@ -18,6 +18,7 @@ NATIVE_FIELDS = {
     'utility_meter': ('source', 'one'), 'threshold': ('entity_id', 'one'),
     'min_max': ('entity_ids', 'many'), 'filter': ('entity_id', 'one'),
     'statistics': ('entity_id', 'one'), 'derivative': ('source', 'one'),
+    'homekit': ('filter', 'homekit'),
 }
 # These helper_integration listeners update options and schedule reload themselves.
 NATIVE_LISTENERS = frozenset({'integration', 'utility_meter', 'threshold', 'statistics', 'derivative'})
@@ -85,7 +86,26 @@ def plan_helper(snapshot: dict, mapping: dict[str, str]) -> HelperPlan:
             return
         scopes.append(Scope(path, Syntax.ENTITY_TREE))
 
-    if domain in NATIVE_FIELDS:
+    if domain == 'homekit':
+        if before['identity'].get('source') != 'import':
+            markers.append(Marker(('identity', 'source'), 'homekit_import_required', 'Only native YAML imports are qualified'))
+        filter_value = before['options'].get('filter', {})
+        if type(filter_value) is not dict:
+            markers.append(Marker(('options', 'filter'), 'invalid_homekit_filter', 'Native filter mapping required'))
+        else:
+            for field in ('include_entities', 'exclude_entities'):
+                if field not in filter_value: continue
+                value = filter_value[field]
+                path = ('options', 'filter', field)
+                if type(value) is not list or any(type(item) is not str or not re.fullmatch(r'[a-z_][a-z0-9_]*\.[a-z0-9_]+', item) for item in value):
+                    markers.append(Marker(path, 'invalid_homekit_filter', 'Entity ID list required'))
+                    continue
+                projected = [mapping.get(item, item) for item in value]
+                if len(set(projected)) != len(projected):
+                    markers.append(Marker(path, 'homekit_filter_collision', 'Filter ID collision'))
+                    continue
+                scopes.append(Scope(path, Syntax.ENTITY_TREE))
+    elif domain in NATIVE_FIELDS:
         field, kind = NATIVE_FIELDS[domain]
         if field in before['options']:
             path = ('options', field)

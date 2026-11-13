@@ -68,23 +68,29 @@ class ControlledPowercalcHelperAdapter(ReceiptedHelperTransactionAdapter):
 
 class ControlledMixedHelperAdapter:
     """Dispatch typed helper steps to their existing receipt adapters."""
-    def __init__(self, resolver, powercalc, template):
-        self.resolver, self.powercalc, self.template = resolver, powercalc, template
+    def __init__(self, resolver, powercalc, template, *, homekit=None):
+        self.resolver, self.powercalc, self.template, self.homekit = resolver, powercalc, template, homekit
         # Both typed helpers write ConfigEntry receipts on the same PC chain.
         # The native population handoff must therefore accompany either one.
-        self.template.bind_controlled_powercalc(self.powercalc.handoff)
+        if self.template is not None:
+            self.template.bind_controlled_powercalc(self.powercalc.handoff)
+        if self.homekit is not None:
+            self.homekit.bind_controlled_powercalc(self.powercalc.handoff)
 
     def bind_phase_context(self, context):
         self.powercalc.bind_phase_context(context)
-        self.template.bind_phase_context(context)
+        if self.template is not None: self.template.bind_phase_context(context)
+        if self.homekit is not None: self.homekit.bind_phase_context(context)
 
     def _adapter(self, step):
         from .helper_transaction import PreparedHelper
         change = self.resolver(step.prepared_ref)
         if type(change) is PreparedPowercalcGroupMetadata:
             return self.powercalc
-        if type(change) is PreparedHelper and change.before.get('domain') == 'template':
+        if type(change) is PreparedHelper and change.before.get('domain') == 'template' and self.template is not None:
             return self.template
+        if type(change) is PreparedHelper and change.before.get('domain') == 'homekit' and self.homekit is not None:
+            return self.homekit
         raise Refused('controlled_mixed_helper_type_unqualified')
 
     async def inspect(self, step):
@@ -97,7 +103,9 @@ class ControlledMixedHelperAdapter:
         return await self._adapter(step).compensate(step, guard)
 
     async def verify(self, plan):
-        return await self.powercalc.verify(plan)
+        return (await self.powercalc.verify(plan) and
+                (self.homekit is None or await self.homekit.verify(plan)))
 
     async def verify_rollback(self, plan):
-        return await self.powercalc.verify_rollback(plan)
+        return (await self.powercalc.verify_rollback(plan) and
+                (self.homekit is None or await self.homekit.verify_rollback(plan)))

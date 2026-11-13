@@ -420,10 +420,31 @@ class RecoveryController:
                              or _dashboard_yaml_plan(record))):
                     # Snapshot inventory is never full native/source admission.
                     # Only explicit inspect may qualify this terminal plan.
+                    # A HomeKit helper plan additionally requires its durable
+                    # unload AND setup receipts, not just journal=applied.
+                    if 'helpers' in record.plan.required_scopes:
+                        try:
+                            if preparations is None:
+                                preparations = native_prepared_store(self.hass)
+                                await preparations.initialize()
+                                self.check()
+                                store = native_helper_lifecycle_store(self.hass, preparations)
+                                await store.initialize()
+                                self.check()
+                            from .native_homekit_recovery_status import classify
+                            homekit = classify(preparations, store, record)
+                            if homekit is True:
+                                need = False
+                            elif homekit is False:
+                                reason = 'homekit_setup_unresolved'
+                        except Exception:
+                            # Preserve recovery_required on every unproven graph.
+                            pass
                     operations.append({'operation_id': record.operation_id,
                         'fingerprint': record.plan.fingerprint, 'status': record.status,
                         'direction': record.direction, 'recovery_required': need,
-                        'reason': 'inspection_available', 'eligible': False})
+                        'reason': 'homekit_setup_unresolved' if reason == 'homekit_setup_unresolved' else 'inspection_available',
+                        'eligible': False})
                     required = required or need
                     continue
                 if preparations is None:
@@ -596,6 +617,27 @@ class RecoveryController:
                 # transition, including inside outer automation lifecycle.
                 return _result(operation_id, fingerprint, 'UNKNOWN',
                     'restore_attempt_unresolved' if record.restore_attempted is True else 'legacy_restore_unproven')
+            # External terminal inspection shares the normal YAML binder and
+            # terminal source/registry admission, but does not authorize rollback.
+            from .native_template_yaml_server import _external_state_plan
+            external_plan = False
+            if (type(encoded) is dict and (encoded.get('profile') == 'template_external_state_binding_v1'
+                    or encoded.get('profile') == 'template_controlled_powercalc_v1'
+                    and encoded.get('external_source_proof'))):
+                _, composition = preparations.resolve_composition(record.plan.native_inputs)
+                external_plan = _external_state_plan(record.plan, composition)
+            if external_plan:
+                if restore:
+                    return _result(operation_id, fingerprint, 'refused', 'external_rollback_lifecycle_required')
+                from . import _yaml_factory_for_plan
+                factory = _yaml_factory_for_plan(preparations, record.plan)
+                session = await factory.bind_reverse(self.hass, operation_id, fingerprint,
+                    guard=self.check, refresh=self.refresh, inspect_only=True)
+                self.check()
+                result = _result(operation_id, fingerprint, 'applied', 'complete', summary=_yaml_summary(session))
+                result['eligible'] = False
+                result['restore_attempt_available'] = False
+                return result
             from .native_template_prefix_recovery import acknowledged_registry_prefix
             from .native_template_prefix_recovery import acknowledged_powercalc_registry_prefix
             prefix = (acknowledged_registry_prefix(record)

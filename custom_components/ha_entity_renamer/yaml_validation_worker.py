@@ -180,6 +180,43 @@ def changed_domains(before, after):
 
 
 
+def _canonical_homekit_filter(value):
+    """Filter keys are unordered; preserve every key and list value exactly."""
+    from collections.abc import Mapping
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
+        raise ValueError('invalid_homekit_filter_projection')
+    return {key: value[key] for key in sorted(value)}
+
+
+def _homekit_filter_only(before, after, mapping):
+    """True only for exact mapped entity-list edits in the same YAML bridges."""
+    from copy import deepcopy
+    from collections.abc import Mapping
+    if type(mapping) is not dict or not mapping:
+        return False
+    old, new = before.get('homekit'), after.get('homekit')
+    old = list(old) if isinstance(old, list) else [old]
+    new = list(new) if isinstance(new, list) else [new]
+    if len(old) != len(new) or not old or any(not isinstance(v, Mapping) for v in old + new):
+        return False
+    projected = deepcopy(old)
+    for bridge in projected:
+        filt = bridge.get('filter', {})
+        if not isinstance(filt, Mapping):
+            return False
+        for key in ('include_entities', 'exclude_entities'):
+            if key not in filt:
+                continue
+            values = filt[key]
+            if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+                return False
+            filt[key] = [mapping.get(v, v) for v in values]
+            if len(set(filt[key])) != len(filt[key]):
+                return False
+    exact = _source_module('native_utility_yaml_projection')._exact
+    return exact(projected, new) and not exact(old, new)
+
+
 def _normal(value):
     """Bounded, typed native config encoding; never render templates or use repr."""
     from collections.abc import Mapping
@@ -820,7 +857,15 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
                     if checked is None:
                         raise ValueError('native_projection_rejected')
                     projection = []
-                    if domain == 'template':
+                    if domain == 'homekit':
+                        # Native schema defaults, stable bridge identity, exact filter.
+                        # Activation remains unsupported until a journalled bridge
+                        # runtime binder explicitly admits the associated receipt.
+                        projection = sorted([[cfg['name'], cfg['port'], _canonical_homekit_filter(cfg.get('filter', {}))]
+                                             for cfg in checked[domain]], key=lambda row: (row[0], row[1]))
+                    elif domain == 'utility_meter':
+                        projection = _source_module('native_utility_yaml_projection').native_projection(checked)
+                    elif domain == 'template':
                         projection = qualified_template_state_projection(checked, hass.config.config_dir)
                     elif domain == 'script':
                         for key, cfg in checked[domain].items():
@@ -1179,10 +1224,19 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
             and new_runtime.get('template') is not None
             and old_runtime['template'] != new_runtime['template']):
         unsupported = [domain for domain in unsupported if domain != 'template']
+    external_proof = []
+    for domain in ('homekit', 'utility_meter'):
+        if domain not in changed:
+            continue
+        mapping = template_reference_mapping
+        verified = bool(mapping) and (_homekit_filter_only(before, after, mapping)
+            if domain == 'homekit' else _source_module('native_utility_yaml_projection').source_only(before, after, mapping))
+        external_proof.append([domain, bool(verified)])
     result = {'status': 'valid', 'version': __version__, 'changed_domains': changed,
               'unsupported_domains': unsupported,
               'runtime_expected': [(domain, old_runtime.get(domain), new_runtime.get(domain))
-                                   for domain in changed]}
+                                   for domain in changed],
+              'external_source_proof': external_proof}
     if dependent_proof is not None:
         result['dependent_config_program'] = await program_module.native_prefix_images(
             before_root, dependent_reference_mapping, dependent_proof, old_dependent, new_dependent,

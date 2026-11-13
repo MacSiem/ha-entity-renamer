@@ -20,7 +20,7 @@ def _need(value, reason):
 
 
 def build_candidate(original, mapping, version, energy=None, *, mixed=False, source_id=None, source_ids=None, entity_names=None, device_names=None,
-                    template_entry=None, owned_script=None):
+                    template_entry=None, owned_script=None, homekit_entries=()):
     """Build full proposed documents from exact immutable bytes only."""
     _need(type(original) is tuple and len(original) == len(_KEYS)
           and tuple(row[0] for row in original) == _KEYS
@@ -139,6 +139,18 @@ def build_candidate(original, mapping, version, energy=None, *, mixed=False, sou
         _need(len(matching) == 1 and snapshot_equal(_template_entry_projection(matching[0]),
                                                    template_entry.before), 'template_entry_original')
         matching[0]['options'] = template_entry.after['options'].copy()
+    from .helper_transaction import PreparedHelper
+    from .helper_plan import snapshot_equal
+    from .native_config_transition import _projection
+    _need(type(homekit_entries) is tuple and (not homekit_entries or mixed), 'homekit_scope')
+    for prepared in homekit_entries:
+        _need(type(prepared) is PreparedHelper and prepared.before.get('domain') == 'homekit'
+              and set(prepared.mapping.items()) <= set(mapping.items()), 'homekit_scope')
+        planned = prepared.plan()
+        _need(not planned.blocked and bool(planned.changes), 'homekit_scope')
+        matches = [row for row in entries if row.get('entry_id') == prepared.before['identity']['entry_id']]
+        _need(len(matches) == 1 and snapshot_equal(_projection(matches[0]), prepared.before), 'homekit_original')
+        matches[0]['options'] = prepared.after['options'].copy()
     planned_energy = None
     if energy is not None:
         from .native_registry_receipts import _exact_json_equal, _freeze_json

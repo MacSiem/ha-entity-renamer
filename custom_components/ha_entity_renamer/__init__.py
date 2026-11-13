@@ -34,7 +34,7 @@ def _yaml_factory_for_plan(preparations, plan):
     if profile == 'powercalc_source_own_binding_v1':
         from .powercalc_public_server import PowercalcPublicServer
         return PowercalcPublicServer
-    if profile in ('template_state_binding_v3', 'template_mixed_state_binding_v1', 'template_controlled_reload_v1', 'template_controlled_reload_entry_v1', 'template_controlled_script_reload_v1', 'template_script_prefix_binding_v1', 'template_automation_prefix_binding_v1', 'template_controlled_powercalc_v1'):
+    if profile in ('template_state_binding_v3', 'template_mixed_state_binding_v1', 'template_external_state_binding_v1', 'template_controlled_reload_v1', 'template_controlled_reload_entry_v1', 'template_controlled_script_reload_v1', 'template_script_prefix_binding_v1', 'template_automation_prefix_binding_v1', 'template_controlled_powercalc_v1'):
         return NativeTemplateStateServer
     if profile == 'template_numeric_entry_reverse_v1' and plan.required_scopes == ('registry', 'helpers'):
         from .native_template_forward import NativeTemplateForward
@@ -226,6 +226,12 @@ class Runtime:
                     'template_consumer_count': 0 if type(composition) is PowercalcComposition else (1 if is_entry else sum(
                         row.domain in ('template.sensor', 'template.binary_sensor')
                         for row in session.evidence.template_sources.ledger.definitions))}
+                from .native_template_state_composition import ExternalStateComposition
+                if (type(composition) is ExternalStateComposition
+                        or type(composition) is ControlledPowercalcComposition
+                        and composition.external_source_proof):
+                    dependencies['domains'] = sorted(set(dependencies['domains']) |
+                        (set(receipt.changed_domains) & {'homekit', 'utility_meter'}))
                 if powercalc:
                     from .dependency_review import dependency_powercalc_groups
                     from .prepared import decode_change

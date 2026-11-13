@@ -15,13 +15,14 @@ from .transaction import Refused, Plan, Step, Position
 from .native_template_yaml_server import NativeTemplateYAMLServer, _registry_history_mapping
 from .native_template_forward import _UnchangedConsumers
 from .native_input_baseline import _drained
-from .native_template_state_composition import TemplateStateComposition, MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition
+from .native_template_state_composition import TemplateStateComposition, MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition
 from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
 from .native_registry_receipts import RegistryReceiptChain, RegistryRawObservation, native_registry_receipt_store
 from .prepared import encode_change, decode_change
 from .native_script_program_composition import ScriptTemplateStateComposition
 from .native_automation_program_composition import AutomationTemplateStateComposition
 from .controlled_powercalc_composition import ControlledPowercalcComposition
+from .native_utility_yaml_wiring import registry_adapter as _utility_registry_adapter
 
 
 def _need(value, reason):
@@ -62,6 +63,148 @@ from .native_template_prefix_recovery import acknowledged_registry_prefix as _ac
 
 
 class NativeTemplateStateServer(NativeTemplateYAMLServer):
+    async def apply(self):
+        if (type(self.composition) is ExternalStateComposition
+                and not self.composition.controlled_reload
+                and getattr(self, 'homekit_yaml_binding', None) is None):
+            self._scope()
+            _need(asyncio.current_task() is self.task and self.bound and not self.used
+                  and set(self.receipt.changed_domains) == {'template', 'utility_meter'}
+                  and getattr(self, 'utility_yaml_binding', None) is not None,
+                  'utility_external_scope_unqualified')
+            self.used = True
+            await self.refresh()
+            self._scope()
+            await self._fresh_stores(None)
+            await self._common(False, initial=True)
+            coordinator = self._coordinator()
+            result = await coordinator.apply(self.plan, self.plan.fingerprint, self.operation_id)
+            self._scope()
+            _need(result.status == 'applied', 'utility_apply_unresolved')
+            await self._terminal(result, rollback=False)
+            _need(await coordinator.adapters['registry'].verify(self.plan) is True,
+                  'utility_terminal_readback_unconfirmed')
+            self._scope()
+            return result
+        if getattr(self, 'homekit_yaml_binding', None) is None:
+            return await super().apply()
+        self._scope()
+        _need(asyncio.current_task() is self.task and self.bound and not self.used,
+              'no_replay')
+        _need(set(self.receipt.changed_domains) <= {'automation', 'script', 'template', 'homekit', 'utility_meter', 'powercalc'}
+              and 'homekit' in self.receipt.changed_domains,
+              'homekit_mixed_lifecycle_unsupported')
+        self.used = True
+        await self.refresh()
+        self._scope()
+        await self._fresh_stores(None)
+        await self._common(False, initial=True)
+        from .native_template_yaml_server import _controlled_reload
+        if _controlled_reload(self.composition) and 'automation' in self.receipt.changed_domains:
+            from .native_automation_transition import NativeAutomationTransition
+            transition = NativeAutomationTransition(self.hass, allow_running=True)
+            await transition.prepare_preserving_enabled()
+            self.controlled_automation = transition
+            self.observer.controlled_automation = transition
+            self._scope()
+        from .native_homekit_lifecycle_driver import HomeKitLifecycleDriver
+        return await HomeKitLifecycleDriver(self).apply()
+
+    async def rollback(self):
+        self._scope()
+        if 'homekit' in self.receipt.changed_domains:
+            raise Refused('homekit_native_rollback_lifecycle_required')
+        if 'utility_meter' in self.receipt.changed_domains:
+            raise Refused('utility_yaml_rollback_lifecycle_required')
+        return await super().rollback()
+
+    async def _bind_external_consumers(self):
+        """Reopen live consumers against the same immutable original plan."""
+        _need(type(self.composition) in (ExternalStateComposition, ControlledPowercalcComposition)
+              and bool(self.composition.external_source_proof), 'external_composition_required')
+        from .helper_observers import RegistryMappingProof
+        proofs = tuple(RegistryMappingProof(old, new, change.identity)
+                       for change in self.registry_changes for old, new in change.mapping.items())
+        _need({(proof.old, proof.new) for proof in proofs} == set(self.mapping.items()),
+              'external_registry_proof_required')
+        domains = set(self.receipt.changed_domains)
+        if 'homekit' in domains:
+            from .native_homekit_yaml_binding import HomeKitYAMLBinding
+            from .native_homekit_helper_adapter import prepare_entries
+            self.homekit_yaml_binding = await HomeKitYAMLBinding.capture(
+                self.hass, self.mapping, self.receipt, proofs, guard=self._scope)
+            expected = prepare_entries(self.homekit_yaml_binding)
+            from .helper_transaction import PreparedHelper
+            helpers = tuple(decode_change(self.preparations.resolve(step.prepared_ref,
+                self.digests[step.prepared_ref])) for step in self.plan.steps if step.adapter == 'helpers')
+            actual = tuple(change for change in helpers if type(change) is PreparedHelper
+                           and change.before.get('domain') == 'homekit')
+            _need(len(actual) == len(expected) and set(change.identity for change in actual)
+                  == set(change.identity for change in expected)
+                  and all(change in expected for change in actual), 'homekit_helper_preparation_changed')
+            from .native_helper_lifecycle import native_helper_lifecycle_store
+            self.homekit_lifecycle_store = native_helper_lifecycle_store(self.hass, self.preparations)
+            await self.homekit_lifecycle_store.initialize()
+            self._scope()
+        if 'utility_meter' in domains:
+            from .native_utility_yaml_binding import prepare_utility_binding
+            self.utility_yaml_binding = await prepare_utility_binding(
+                self.hass, self.mapping, self.receipt, guard=self._scope)
+
+    async def _inspect_external_consumers(self):
+        """Fresh, read-only terminal proof; it never grants an inverse writer."""
+        from .helper_plan import snapshot_equal
+        from .helper_observers import RegistryMappingProof
+        from .native_template_state_composition import ExternalStateComposition
+        _need(type(self.composition) in (ExternalStateComposition, ControlledPowercalcComposition)
+              and bool(self.composition.external_source_proof) and self.record.status == 'applied' and self.record.direction == 'forward',
+              'external_inspection_scope')
+        reverse = {new: old for old, new in self.mapping.items()}
+        seals = tuple((domain, after, before) for domain, before, after in self.receipt.runtime_expected)
+        domains = set(self.receipt.changed_domains)
+        if 'homekit' in domains:
+            from .native_homekit_filter import HomeKitFilterPhase
+            from .native_homekit_helper_observers import NativeHomeKitHelperObservers
+            from .native_homekit_yaml_binding import HomeKitYAMLBinding
+            from .native_homekit_recovery_status import classify
+            from .native_helper_lifecycle import native_helper_lifecycle_store
+            phase = HomeKitFilterPhase(self.hass, reverse, seals)
+            _need(phase.position == 'before', 'homekit_inspection_position')
+            changed = [(before, after) for before, after in zip(
+                phase.capture.entries, phase.capture.expected, strict=True)
+                if not snapshot_equal(before, after)]
+            from .helper_transaction import PreparedHelper
+            helpers = [decode_change(self.preparations.resolve(step.prepared_ref,
+                self.digests[step.prepared_ref])) for step in self.plan.steps if step.adapter == 'helpers']
+            prepared = [item for item in helpers if type(item) is PreparedHelper
+                        and item.before.get('domain') == 'homekit']
+            _need(len(changed) == len(prepared) and all(any(
+                snapshot_equal(before, item.after) and snapshot_equal(after, item.before)
+                for item in prepared) for before, after in changed), 'homekit_inspection_preparations')
+            proofs = tuple(RegistryMappingProof(new, old, change.identity)
+                           for change in self.registry_changes for old, new in change.mapping.items())
+            await NativeHomeKitHelperObservers.capture(self.hass, [before for before, _ in changed], proofs)
+            binding = object.__new__(HomeKitYAMLBinding)
+            binding.hass, binding.mapping, binding.phase = self.hass, reverse, phase
+            _need(binding.verify('before') is True, 'homekit_inspection_runtime')
+            store = native_helper_lifecycle_store(self.hass, self.preparations)
+            await store.initialize()
+            self._scope()
+            _need(classify(self.preparations, store, self.record) is True,
+                  'homekit_inspection_lifecycle')
+            phase.check()
+        if 'utility_meter' in domains:
+            from .native_utility_yaml_binding import UtilityYAMLBinding
+            from .native_utility_yaml_receipt import inspect_accepted
+            binding = UtilityYAMLBinding.capture(self.hass, reverse, seals)
+            _need(binding.check_prefix(frozenset()) is True, 'utility_inspection_projection')
+            inspect_accepted(binding.handoff, self.preparations, self.operation_id,
+                             self.plan, self.registry_changes)
+        self._scope()
+        _need(await self.journal.load(self.operation_id) == self.record, 'external_inspection_phase_changed')
+        self._scope()
+        return True
+
     async def _prefix_current(self, record):
         """Read-only classification of the exact acknowledged physical prefix.
 
@@ -224,9 +367,18 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         from .helper_native import inventory as helper_inventory
         from .controlled_template_entry_preparation import prepare_controlled_template_entry
         plans = helper_inventory(self.hass, self.mapping)
+        from .native_utility_yaml_guard import assert_utility_yaml_not_affected, UtilityYAMLActivationUnavailable
+        utility_refusal = None
+        try:
+            assert_utility_yaml_not_affected(self.hass, self.mapping)
+        except UtilityYAMLActivationUnavailable as error:
+            utility_refusal = error
         template_plans = [item for item in plans if item.before.get('domain') == 'template']
         from .helper_native import UnsupportedEntryReferences, partition_entry_coverage
-        other_plans = tuple(item for item in plans if item not in template_plans
+        homekit_plans = tuple(item for item in plans if item.before.get('domain') == 'homekit'
+                              and item.changes and not item.blocked)
+        homekit_refusal = UnsupportedEntryReferences(homekit_plans, self.mapping) if homekit_plans else None
+        other_plans = tuple(item for item in plans if item not in template_plans and item not in homekit_plans
                             and not (mixed_powercalc and item.before.get('domain') == 'powercalc'))
         blocked, self.config_entry_limitations = partition_entry_coverage(other_plans, self.mapping)
         if blocked:
@@ -255,11 +407,15 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             bind_source_consumer(discovered, plans)
             self._scope()
         root = Path(self.hass.config.config_dir).resolve()
+        provisional_homekit = ()
+        if mixed_powercalc and homekit_plans:
+            from .helper_transaction import prepare_helper
+            provisional_homekit = tuple(prepare_helper(item.before, self.mapping) for item in homekit_plans)
         if mixed_powercalc:
             pc_candidate = build_candidate(pc_original, self.mapping, __version__,
                 None if pc_energy is None else (energy_raw, pc_energy), mixed=True,
                 source_ids=pc_sources, entity_names=self.entity_names, device_names=self.device_names,
-                template_entry=entry_change,
+                template_entry=entry_change, homekit_entries=provisional_homekit,
                 owned_script=None if not owned_script else (owned_script[0], inventory.default_name))
         yaml = await _drained(self.hass.async_add_executor_job,
             lambda: plan_yaml(root, self.mapping, owned_script_services=owned_script,
@@ -334,6 +490,23 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self.receipt, self.evidence, self.program = bundle.receipt, bundle.evidence, bundle.state_config_program
         self._scope()
         domains = tuple(domain for domain in self.receipt.changed_domains if domain != 'powercalc')
+        external_domains = set(domains) & {'homekit', 'utility_meter'}
+        if homekit_refusal is not None or utility_refusal is not None:
+            # The first bounded profile accepts one original Template program
+            # with native HomeKit/Utility YAML, not a controlled PC/A/S reload.
+            if (entry_change is not None or not external_domains
+                    or set(domains) - {'automation', 'script', 'template', 'homekit', 'utility_meter'}
+                    or 'template' not in domains
+                    or bool(homekit_refusal) != ('homekit' in external_domains)
+                    or bool(utility_refusal) != ('utility_meter' in external_domains)):
+                raise homekit_refusal or utility_refusal
+            from .yaml_transaction import _assert_external_state_scope
+            _assert_external_state_scope(self.receipt, allow_powercalc=mixed_powercalc)
+            if bundle.external_source_proof != tuple((domain, True) for domain in ('homekit', 'utility_meter')
+                                                     if domain in external_domains):
+                raise homekit_refusal or utility_refusal
+        elif external_domains:
+            raise Refused('external_yaml_native_consumer_unbound')
         selected_owners = [row for row in source_rows if row.get('entity_id') in self.mapping
                            and row.get('platform') in ('template', 'automation', 'script')]
         dependent_only = bool(domains) and 'template' not in domains and len(selected_owners) == 1
@@ -358,14 +531,14 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             from .mixed_yaml_runtime import MixedYAMLConsumers
             if mixed_powercalc:
                 from dataclasses import replace
-                scoped = replace(self.receipt, changed_domains=domains,
+                scoped = replace(self.receipt, changed_domains=tuple(domain for domain in domains if domain not in external_domains),
                     unsupported_domains=tuple(domain for domain in self.receipt.unsupported_domains
-                                              if domain != 'powercalc'),
+                                              if domain != 'powercalc' and domain not in external_domains),
                     runtime_expected=tuple(row for row in self.receipt.runtime_expected
-                                           if row[0] not in ('powercalc', 'template.config_entries')))
-                if domains not in ((), ('template',)):
+                                           if row[0] not in ('powercalc', 'template.config_entries') and row[0] not in external_domains))
+                if scoped.changed_domains not in ((), ('template',)):
                     _assert_mixed_state_scope(scoped, allow_dependent_only=True)
-            else:
+            elif not external_domains:
                 _assert_mixed_state_scope(self.receipt, allow_dependent_only=dependent_only or controlled_reload,
                                           allow_template_entry=entry_change is not None)
             self.consumers = await MixedYAMLConsumers.capture(self.hass, self.mapping, guard=self._scope,
@@ -482,6 +655,36 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 service_recipients.check()
                 prepared = own_script_registry_preparation(prepared, inventory)
             registry.append(prepared)
+        homekit_changes = ()
+        if external_domains:
+            from .helper_observers import RegistryMappingProof
+            proofs = tuple(RegistryMappingProof(old, new, change.identity)
+                           for change in registry for old, new in change.mapping.items())
+            _need({(proof.old, proof.new) for proof in proofs} == set(self.mapping.items()),
+                  'external_registry_proof_required')
+            if homekit_refusal is not None:
+                try:
+                    from .native_homekit_yaml_binding import HomeKitYAMLBinding
+                    from .native_homekit_helper_adapter import prepare_entries
+                    self.homekit_yaml_binding = await HomeKitYAMLBinding.capture(
+                        self.hass, self.mapping, self.receipt, proofs, guard=self._scope)
+                    homekit_changes = prepare_entries(self.homekit_yaml_binding)
+                    _need(not mixed_powercalc or (len(homekit_changes) == len(provisional_homekit)
+                          and all(item in provisional_homekit for item in homekit_changes)),
+                          'homekit_candidate_preparation_changed')
+                    from .native_helper_lifecycle import native_helper_lifecycle_store
+                    self.homekit_lifecycle_store = native_helper_lifecycle_store(self.hass, self.preparations)
+                    await self.homekit_lifecycle_store.initialize()
+                    self._scope()
+                except (Refused, ValueError):
+                    raise homekit_refusal from None
+            if utility_refusal is not None:
+                try:
+                    from .native_utility_yaml_binding import prepare_utility_binding
+                    self.utility_yaml_binding = await prepare_utility_binding(
+                        self.hass, self.mapping, self.receipt, guard=self._scope)
+                except (Refused, ValueError):
+                    raise utility_refusal from None
         own_template = [change for change in registry if change.before.get('platform') == 'template']
         own_dependent = [change for change in registry if change.before.get('platform') in ('automation', 'script')]
         if own_template or own_dependent:
@@ -521,6 +724,9 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         if mixed_powercalc:
             from .native_template_state_yaml import capture_mixed_powercalc_yaml
             capture = capture_mixed_powercalc_yaml
+        elif external_domains:
+            from .native_external_yaml import capture_external_state_yaml
+            capture = capture_external_state_yaml
         elif self.mixed_state:
             from .native_template_state_yaml import capture_mixed_template_state_yaml
             capture = capture_mixed_template_state_yaml
@@ -538,6 +744,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self.dashboard_changes = () if dashboard_storage is None else dashboard_storage.changes
         effects = ([('registry', c) for c in registry]
                    + ([] if entry_change is None else [('helpers', entry_change)])
+                   + [('helpers', item) for item in homekit_changes]
                    + [('helpers', item) for item in pc_metadata]
                    + ([] if pc_energy is None else [('energy', pc_energy)])
                    + [('dashboard', c) for c in self.dashboard_changes]
@@ -587,6 +794,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         script_prefix = not controlled_reload and self.receipt.changed_domains in (('script',), ('script', 'template'))
         from .controlled_powercalc_composition import ControlledPowercalcComposition
         composition_type = (ControlledPowercalcComposition if mixed_powercalc else
+                            ExternalStateComposition if external_domains else
                             ControlledScriptComposition if controlled_reload and owned_script else
                             ControlledReloadEntryComposition if entry_change is not None else
                             ControlledReloadComposition if controlled_reload else
@@ -598,18 +806,21 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             tuple(sorted(self.digests.items())), source_history, consumer_history,
             self.program.sha256, physical,
             **({'dependent_config_program': bundle.dependent_config_program} if script_prefix or automation_prefix or controlled_reload and owned_script else {}),
+            **({'external_source_proof': bundle.external_source_proof,
+                **({} if mixed_powercalc else {'controlled_reload': controlled_reload})}
+               if external_domains else {}),
             **({'previous': pc_previous, 'energy_original_physical': pc_energy_physical,
                 'population': self.powercalc_population.descriptors} if mixed_powercalc else {}))
         inputs = await self.preparations.create_native_inputs(own + '-original', baseline,
                                                              composition=self.composition)
         self._scope()
-        scopes = ((('registry',) + (('helpers',) if pc_metadata or entry_change is not None else ())
+        scopes = ((('registry',) + (('helpers',) if pc_metadata or entry_change is not None or homekit_changes else ())
                    + (('energy',) if pc_energy else ())
                    + (('dashboard',) if dashboard_storage is not None else ()) + ('yaml',)) if mixed_powercalc else
                   ('registry', 'dashboard') if registry_only and dashboard_storage is not None else
                   ('registry', 'dashboard', 'yaml') if dashboard_storage is not None and not registry_only else
                   ('registry',) if registry_only else ('registry', 'yaml'))
-        if entry_change is not None and not mixed_powercalc:
+        if (entry_change is not None or homekit_changes) and not mixed_powercalc:
             scopes = tuple(scope for scope in ('registry', 'helpers', 'dashboard', 'yaml')
                            if scope in scopes or scope == 'helpers')
         self.plan = Plan(own, scopes, scopes, tuple(steps), self.program.sha256, scopes, inputs)
@@ -640,7 +851,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
 
     def _new_observer(self):
         from .native_template_state_yaml import NativeTemplateStateYAMLRuntimeReadback
-        _need(type(self.composition) in (TemplateStateComposition, MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition, ControlledPowercalcComposition), 'state_composition_required')
+        _need(type(self.composition) in (TemplateStateComposition, MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition, ControlledPowercalcComposition), 'state_composition_required')
         self.program = self.composition.state_config_program
         if (type(self.composition) in (ControlledReloadEntryComposition, ControlledPowercalcComposition)
                 or type(self.composition) is ControlledScriptComposition and 'helpers' in self.plan.required_scopes):
@@ -723,7 +934,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         if not self.receipt.proposed_files:
             from .native_own_id_registry_readback import NativeOwnIDRegistryReadback
             return NativeOwnIDRegistryReadback(self.hass, self.chain, self.composition, guard=self._scope)
-        if type(self.composition) in (MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition, ControlledPowercalcComposition):
+        if type(self.composition) in (MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition, ControlledPowercalcComposition):
             from .native_template_mixed_state_yaml import NativeMixedTemplateStateYAMLRuntimeReadback
             return NativeMixedTemplateStateYAMLRuntimeReadback(self.hass, self.chain,
                 self.composition, self.consumers, guard=self._scope,
@@ -755,7 +966,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         _need(position is wanted, 'runtime_unconfirmed')
         witness = self.observer.runtime_check(wanted)
-        if type(self.composition) in (MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition, ControlledPowercalcComposition):
+        if type(self.composition) in (MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition, ControlledPowercalcComposition):
             self.observer.assert_dependents_position(wanted)
         actual = await async_observe_accepted_state_bindings(self.hass, self.chain,
             self.program, guard=self._scope, entry_witness=getattr(self, 'entry_witness', None))
@@ -888,7 +1099,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             from .transaction import Coordinator
             registry.full_verify = lambda _: self._full(False)
             registry.full_verify_rollback = lambda _: self._full(True)
-            adapters = {'registry': registry}
+            adapters = {'registry': _utility_registry_adapter(self, registry, resolver, controlled)}
             if hasattr(self, 'dashboard_phase'):
                 from .dashboard_transaction import ReceiptedDashboardAdapter
                 adapters['dashboard'] = ReceiptedDashboardAdapter(
@@ -898,7 +1109,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             return Coordinator(adapters, self.journal, self._scope,
                                required_scopes=self.plan.required_scopes, record_admission=record_admission)
         adapter_type, compose = ReceiptedTemplateStateYAMLTransactionAdapter, compose_template_state_yaml_coordinator
-        if type(self.composition) in (MixedTemplateStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition, ControlledPowercalcComposition):
+        if type(self.composition) in (MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition, ControlledPowercalcComposition):
             from .native_template_mixed_state_yaml import (ReceiptedMixedTemplateStateYAMLTransactionAdapter,
                 compose_mixed_template_state_yaml_coordinator)
             adapter_type, compose = ReceiptedMixedTemplateStateYAMLTransactionAdapter, compose_mixed_template_state_yaml_coordinator
@@ -910,20 +1121,31 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             full_verify=lambda _: self._full(False), full_verify_rollback=lambda _: self._full(True),
             **({'handoff': handoff} if controlled else {}))
         admission = {} if record_admission is None else {'record_admission': record_admission}
-        adapters = {'registry': registry, 'yaml': yaml}
+        adapters = {'registry': _utility_registry_adapter(self, registry, resolver, controlled), 'yaml': yaml}
         if (type(self.composition) is ControlledReloadEntryComposition
                 or type(self.composition) is ControlledScriptComposition and 'helpers' in self.plan.required_scopes):
             from .controlled_template_entry_adapter import create_adapter
             adapters['helpers'] = create_adapter(self, resolver)
+        homekit_binding = getattr(self, 'homekit_yaml_binding', None)
+        homekit_helper = None
+        if homekit_binding is not None:
+            _need('helpers' in self.plan.required_scopes, 'homekit_helper_scope_required')
+            from .native_homekit_helper_adapter import create_adapter
+            homekit_helper = create_adapter(self, resolver, homekit_binding,
+                                             getattr(self, 'homekit_lease', None))
         if controlled and 'helpers' in self.plan.required_scopes:
             from .controlled_powercalc_helper import ControlledPowercalcHelperAdapter, ControlledMixedHelperAdapter
             powercalc_helper = ControlledPowercalcHelperAdapter(self, handoff, resolver)
+            template_helper = None
             if getattr(self, 'entry_change', None) is not None:
                 from .controlled_template_entry_adapter import create_adapter
-                adapters['helpers'] = ControlledMixedHelperAdapter(resolver, powercalc_helper,
-                                                                   create_adapter(self, resolver))
-            else:
-                adapters['helpers'] = powercalc_helper
+                template_helper = create_adapter(self, resolver)
+            adapters['helpers'] = (ControlledMixedHelperAdapter(resolver, powercalc_helper, template_helper,
+                                                                 homekit=homekit_helper)
+                                   if template_helper is not None or homekit_helper is not None else powercalc_helper)
+        elif homekit_helper is not None:
+            _need('helpers' not in adapters, 'homekit_mixed_helper_scope_unsupported')
+            adapters['helpers'] = homekit_helper
         if controlled and 'energy' in self.plan.required_scopes:
             from .powercalc_energy_transaction import ReceiptedPowercalcEnergyAdapter
             _need(hasattr(self, 'native_energy'), 'powercalc_energy_not_bound')
