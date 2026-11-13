@@ -85,6 +85,7 @@ async def prepare_utility_binding(hass, mapping, receipt, *, guard):
     await _drained(hass.async_add_executor_job, lambda: assert_validation_current(receipt))
     guard()
     binding = UtilityYAMLBinding.capture(hass, selected, receipt.runtime_expected)
+    binding.receipt = receipt
     binding.check_prefix(frozenset())
     guard()
     await _drained(hass.async_add_executor_job, lambda: assert_validation_current(receipt))
