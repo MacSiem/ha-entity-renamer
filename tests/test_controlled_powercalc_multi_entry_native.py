@@ -194,13 +194,34 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 from aiohttp import ClientSession
                 from datetime import timedelta
                 from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_USER
-                ordinary_id = self.sources[0].entity_id
-                ordinary = self.f.entity.async_get(ordinary_id)
-                self.assertIsNotNone(ordinary)
-                ordinary_name_before = ordinary.name
+                from homeassistant.components.sensor import SensorEntity
+                from homeassistant.helpers.entity_component import DATA_INSTANCES
+                class OrdinarySensor(SensorEntity):
+                    _attr_unique_id = 'synthetic-multi-ordinary'
+                    _attr_name = 'Measurement'
+                    _attr_has_entity_name = True
+                    _attr_native_value = 1
+                    _attr_should_poll = False
+                    _attr_device_info = {'identifiers': {('synthetic-multi-queue', 'ordinary-device')},
+                                         'name': 'Synthetic ordinary device'}
                 ordinary_device = self.f.device.async_get_or_create(
                     config_entry_id=self.entries[2].entry_id,
                     identifiers={('synthetic-multi-queue', 'ordinary-device')})
+                component = hass.data[DATA_INSTANCES]['sensor']
+                ordinary_entity = OrdinarySensor()
+                await component.async_add_entities([ordinary_entity])
+                ordinary_id = ordinary_entity.entity_id
+                platform = ordinary_entity.platform
+                await platform.async_remove_entity(ordinary_id)
+                platform.config_entry = self.entries[2]
+                ordinary_entity = OrdinarySensor()
+                await platform.async_add_entities([ordinary_entity])
+                await hass.async_block_till_done()
+                ordinary = self.f.entity.async_get(ordinary_id)
+                self.assertIsNotNone(ordinary)
+                self.assertEqual(ordinary.device_id, ordinary_device.id)
+                self.assertIs(ordinary_entity.device_entry, self.f.device.async_get(ordinary_device.id))
+                ordinary_name_before = ordinary.name
                 device_name_before = ordinary_device.name_by_user
                 client = ClientSession()
                 self.addAsyncCleanup(client.close)
