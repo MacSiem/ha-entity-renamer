@@ -38,28 +38,57 @@ class DashboardCustomRender(unittest.IsolatedAsyncioTestCase):
             for name in STEPS:
                 if name not in onboarding.steps['done']:
                     step.step = name; await step._async_mark_done(hass)
-        self.assertTrue(await async_setup_component(hass, 'input_boolean', {'input_boolean': {'sample':{'name':'Synthetic Toggle'}}}))
+        self.assertTrue(await async_setup_component(hass, 'switch', {}))
+        from homeassistant.components.switch import SwitchEntity
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        class SyntheticSwitch(SwitchEntity):
+            _attr_name = 'Synthetic Toggle'
+            _attr_unique_id = 'p3-synthetic-toggle'
+            _attr_should_poll = False
+            _attr_is_on = False
+            async def async_turn_on(self, **kwargs):
+                self._attr_is_on = True; self.async_write_ha_state()
+            async def async_turn_off(self, **kwargs):
+                self._attr_is_on = False; self.async_write_ha_state()
+        switch = SyntheticSwitch()
+        await hass.data[DATA_INSTANCES]['switch'].async_add_entities([switch])
         await hass.async_block_till_done()
+        self.assertEqual(switch.entity_id, 'switch.synthetic_toggle')
+        self.assertIsNotNone(hass.states.get(switch.entity_id))
         from homeassistant.helpers.storage import Store
         metadata = {'id':'p3_test', 'url_path':'p3-test', 'mode':'storage',
                     'require_admin':False, 'show_in_sidebar':True,
                     'title':'Synthetic dashboard', 'icon':'mdi:toggle-switch'}
         await Store(hass, 1, 'lovelace_dashboards').async_save({'items':[metadata]})
         self.assertTrue(await async_setup_component(hass, 'lovelace', await async_hass_config_yaml(hass)))
-        self.assertTrue(await async_setup_component(hass, 'frontend', {}))
-        self.assertTrue(await async_setup_component(hass, 'api', {}))
         www = root / 'www'; www.mkdir(exist_ok=True)
         for name in ('button-card.js','bubble-card.js'):
             shutil.copyfile(Path('/assets') / name, www / name)
+        self.assertTrue(await async_setup_component(hass, 'frontend', {}))
+        self.assertTrue(await async_setup_component(hass, 'api', {}))
+        from homeassistant.components.http.config import DATA_STORE
+        http_store = hass.data[DATA_STORE]
+        if http_store._pending is not None: await http_store.async_promote_pending()
+        self.assertIsNone(http_store._pending)
+        from aiohttp import ClientSession
+        import hashlib
+        async with ClientSession() as client:
+            for name in ('button-card.js','bubble-card.js'):
+                async with client.get(f'http://127.0.0.1:{port}/local/{name}') as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(hashlib.sha256(await response.read()).digest(),
+                                     hashlib.sha256((Path('/assets') / name).read_bytes()).digest())
         native = hass.data[LOVELACE_DATA]
         await native.resources.async_get_info()
         for name in ('button-card.js','bubble-card.js'):
             await native.resources.async_create_item({'res_type':'module','url':'/local/' + name})
-        old, new = 'input_boolean.sample', 'input_boolean.renamed_sample'
+        self.assertEqual({(r['url'],r['type']) for r in native.resources.async_items()},
+                         {('/local/button-card.js','module'),('/local/bubble-card.js','module')})
+        old, new = 'switch.synthetic_toggle', 'switch.renamed_toggle'
         config = {'views':[{'title':'Synthetic', 'cards':[
             {'type':'button','entity':old},
             {'type':'custom:button-card','entity':old,'triggers_update':[old],
-             'variables':{'entity_ids':[old]}, 'label':"[[[ return states['input_boolean.sample'].state; ]]]",
+             'variables':{'entity_ids':[old]}, 'label':"[[[ return states['switch.synthetic_toggle'].state; ]]]",
              'show_label':True, 'tap_action':{'action':'toggle'}},
             {'type':'custom:bubble-card','card_type':'button','entity':old,
              'sub_button':[{'entity':old,'visibility':[{'condition':'state','entity':old,'state':'on'}]}],

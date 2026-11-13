@@ -30,10 +30,13 @@ const { chromium } = require('playwright');
       await page.screenshot({path:'/qa/diagnostic.png'}); throw error;
     }
     try {
+      await page.waitForFunction(() => customElements.get('button-card') && customElements.get('bubble-card'), null, {timeout:30000});
       await page.locator('button-card').first().waitFor({state:'attached',timeout:30000});
       await page.locator('bubble-card').first().waitFor({state:'attached',timeout:30000});
     } catch(error) {
-      fs.writeFileSync('/qa/resources-diagnostic.json', JSON.stringify({responses,messages}));
+      const runtime = await page.evaluate(() => ({buttonDefined:!!customElements.get('button-card'),
+        bubbleDefined:!!customElements.get('bubble-card'), hass:!!document.querySelector('home-assistant')?.hass}));
+      fs.writeFileSync('/qa/resources-diagnostic.json', JSON.stringify({responses,messages,runtime}));
       await page.screenshot({path:'/qa/resources-diagnostic.png'}); throw error;
     }
     await page.waitForFunction(source => document.querySelector('home-assistant')?.hass?.states?.[source],req.source);
