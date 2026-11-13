@@ -64,6 +64,12 @@ class MixedPhase(PowercalcColdPhase):
         if self.phase == 'forward':
             (root / 'configuration.yaml').write_bytes(b'')
             await self._before_loader(hass, root)
+            card = 'www/ha-entity-renamer.js'
+            source = Path(__file__).resolve().parents[1] / 'custom_components/ha_entity_renamer' / card
+            target = self.installed_component / card
+            target.parent.mkdir()
+            shutil.copyfile(source, target)
+            self.public_source_sha256[card] = hashlib.sha256(target.read_bytes()).hexdigest()
             shutil.copytree(os.environ['POWERCALC_COMPONENT_DIR'], root / 'custom_components/powercalc',
                             ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.git'))
         loader.async_setup(hass)
@@ -167,7 +173,7 @@ class MixedPhase(PowercalcColdPhase):
         for domain, flow, options in (
             ('integration', IntegrationConfigFlow, {'source': power, 'name': 'Graph integral',
              'unit_prefix': 'k', 'unit_time': 'h', 'method': 'left', 'round': 9}),
-            ('utility_meter', UtilityMeterConfigFlow, {'source': groups[0], 'name': 'Graph utility',
+            ('utility_meter', UtilityMeterConfigFlow, {'source': groups[1], 'name': 'Graph utility',
              'cycle': 'none', 'offset': 0, 'tariffs': [], 'net_consumption': False,
              'delta_values': False, 'periodically_resetting': False, 'always_available': False}),
         ):
