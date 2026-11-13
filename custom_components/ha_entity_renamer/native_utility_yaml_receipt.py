@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import timedelta
 
 from .native_utility_yaml_handoff import UtilityYAMLHandoff, _static
 from .transaction import PhaseContext, Position, Refused
@@ -25,10 +26,22 @@ def _id(operation, fingerprint, step_key, direction, kind):
     return 'utility-yaml-' + hashlib.sha256(raw).hexdigest()
 
 
+def _info(value):
+    # Core's validated YAML schema supplies offset as timedelta; preserve its
+    # exact integer components instead of stringifying an arbitrary object.
+    _need(type(value) is dict, 'info')
+    result = dict(value)
+    offset = result.get('offset')
+    if isinstance(offset, timedelta):
+        result['offset'] = {'days': offset.days, 'seconds': offset.seconds,
+                            'microseconds': offset.microseconds}
+    return _plain(result)
+
+
 def _rows(rows):
     return [{'meter':row.meter, 'source':row.old, 'target':row.new,
              'source_uuid':row.source_uuid, 'entity_id':row.entity_id,
-             'before':_plain(row.before), 'info':_plain(row.info)} for row in rows]
+             'before':_plain(row.before), 'info':_info(row.info)} for row in rows]
 
 
 class UtilityYAMLRegistryAdapter:
@@ -87,7 +100,7 @@ class UtilityYAMLRegistryAdapter:
                   and entity._sensor_source_id == saved['target'] and entity._collecting is not None
                   and type(info) is dict and info.get('source') == saved['target']
                   and info.get(DATA_TARIFF_SENSORS) == [entity]
-                  and _plain({k:v for k,v in info.items() if k != DATA_TARIFF_SENSORS})
+                  and _info({k:v for k,v in info.items() if k != DATA_TARIFF_SENSORS})
                       == {**saved['info'], 'source': saved['target']}
                   and _plain(_static(entity)) == after == saved['before'], 'receipt_readback')
         return True
