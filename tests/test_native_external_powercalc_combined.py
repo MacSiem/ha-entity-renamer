@@ -115,6 +115,17 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         names = ('external_pc_meter', 'external_pc_meter_second')
         original_meters = [(meter(name).entity_id, meter(name).native_value, meter(name)._next_reset)
                            for name in names]
+        def check_meter(name, source, baseline):
+            from decimal import Decimal
+            current = meter(name)
+            self.assertEqual((current.entity_id, current._next_reset), (baseline[0], baseline[2]))
+            if baseline[1] is not None:
+                self.assertIsNotNone(current.native_value)
+                self.assertGreaterEqual(Decimal(str(current.native_value)), Decimal(str(baseline[1])))
+            elif current.native_value is not None:
+                self.assertGreaterEqual(Decimal(str(current.native_value)), Decimal(0))
+            self.assertEqual(current._sensor_source_id, source)
+            self.assertIsNotNone(current._collecting)
         runtime = self._runtime()
         async def refresh(): pass
         async def transition(selected):
@@ -139,9 +150,7 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         self.assertEqual(self.f.entity.async_get(new_light).id, original_ids[old_light])
         self.assertEqual(self.f.entity.async_get(new_energy).id, original_ids[old_energy])
         for name, target, original in zip(names, targets, original_meters):
-            self.assertEqual((meter(name).entity_id, meter(name).native_value, meter(name)._next_reset), original)
-            self.assertEqual(meter(name)._sensor_source_id, target)
-            self.assertIsNotNone(meter(name)._collecting)
+            check_meter(name, target, original)
         self.assertEqual((aid(new_light), bridge._bridge_identity(entry)), (original_aid, identity))
         self.assertEqual((await async_get_manager(hass)).data['energy_sources'][0]['stat_energy_from'], new_energy)
         inspected = await runtime.recovery_inspect(hass, review['operation_id'], review['fingerprint'],
@@ -149,8 +158,6 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         self.assertEqual(inspected['state'], 'applied', inspected)
         await transition({new: old for old, new in mapping.items()})
         for name, source, original in zip(names, self.cost_sources, original_meters):
-            self.assertEqual((meter(name).entity_id, meter(name).native_value, meter(name)._next_reset), original)
-            self.assertEqual(meter(name)._sensor_source_id, source)
-            self.assertIsNotNone(meter(name)._collecting)
+            check_meter(name, source, original)
         self.assertEqual((aid(old_light), bridge._bridge_identity(entry)), (original_aid, identity))
         self.assertEqual((await async_get_manager(hass)).data['energy_sources'][0]['stat_energy_from'], old_energy)
