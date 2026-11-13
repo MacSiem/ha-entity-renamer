@@ -633,8 +633,7 @@ class NativeTemplateYAMLServer:
         from homeassistant.components.recorder import get_instance
         from homeassistant.components.recorder.util import session_scope
         from .history_guard import _read_session as read_history
-        from .recorder_guard import (_read_session as read_metadata, verify, verify_rollback,
-                                     history_metadata_matches)
+        from .recorder_guard import _read_session as read_metadata, verify, verify_rollback
         await self.recorder.async_synchronize()
         self._scope()
         managers = _Managers(self.hass, self.receipt)
@@ -669,9 +668,9 @@ class NativeTemplateYAMLServer:
                     _need(read_history(sql, snapshot['state_ids'], snapshot['statistic_ids'],
                                        snapshot['content']) == snapshot['content'], 'history_changed')
                     metadata = read_metadata(sql, ids)
-                    changes = tuple((change.mapping, json.loads(change.recorder_before_json))
-                                    for change in self.registry_changes if change.mapping)
-                    _need(history_metadata_matches(snapshot, metadata, changes, ids), 'history_identity_changed')
+                    _need(sorted({r['metadata_id'] for r in metadata['states'].values()}) == snapshot['state_ids']
+                          and sorted({r['id'] for r in metadata['statistics'].values()}) == snapshot['statistic_ids'],
+                          'history_identity_changed')
                 for change in self.registry_changes:
                     if not change.mapping:
                         continue

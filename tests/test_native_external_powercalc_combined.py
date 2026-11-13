@@ -115,8 +115,9 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         for name in names:
             self.assertIsNotNone(meter(name).native_value)
             self.assertGreater(Decimal(str(meter(name).native_value)), Decimal(0))
-        # Compile from native events only after both producers have run; the
-        # current period can still create a new native series after Prepare.
+        # Compile the completed native five-minute period containing the real
+        # producer events, then prove its metadata exists before Prepare.
+        from datetime import timedelta
         from homeassistant.components.recorder import get_instance
         from homeassistant.components.recorder.tasks import StatisticsTask
         from homeassistant.util import dt as dt_util
@@ -124,9 +125,13 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         history = NativeRecorderGuard(hass)
         await history.async_synchronize()
         now = dt_util.utcnow()
-        period = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
+        period = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0) + timedelta(minutes=5)
+        await asyncio.sleep(max(0, (period - dt_util.utcnow()).total_seconds()))
         get_instance(hass).queue_task(StatisticsTask(period, False))
         await history.async_synchronize()
+        selected_series = {old_energy, *self.cost_sources}
+        metadata = await history.snapshot({entity_id: entity_id for entity_id in selected_series})
+        self.assertTrue(selected_series <= set(metadata['statistics']), metadata['statistics'])
         original_meters = [(meter(name).entity_id, meter(name).native_value, meter(name)._next_reset)
                            for name in names]
         def check_meter(name, source, baseline):
@@ -160,6 +165,9 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         review = await transition(mapping)
         self.assertEqual(self.f.entity.async_get(new_light).id, original_ids[old_light])
         self.assertEqual(self.f.entity.async_get(new_energy).id, original_ids[old_energy])
+        group_index = hass.data['powercalc']['group_entities']
+        self.assertNotIn(old_energy, group_index)
+        self.assertEqual(group_index[new_energy].registry_entry.id, original_ids[old_energy])
         for name, target, original in zip(names, targets, original_meters):
             check_meter(name, target, original)
         self.assertEqual((aid(new_light), bridge._bridge_identity(entry)), (original_aid, identity))
@@ -168,6 +176,8 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
             guard=lambda: None, refresh=refresh)
         self.assertEqual(inspected['state'], 'applied', inspected)
         await transition({new: old for old, new in mapping.items()})
+        self.assertNotIn(new_energy, group_index)
+        self.assertEqual(group_index[old_energy].registry_entry.id, original_ids[old_energy])
         for name, source, original in zip(names, self.cost_sources, original_meters):
             check_meter(name, source, original)
         self.assertEqual((aid(old_light), bridge._bridge_identity(entry)), (original_aid, identity))

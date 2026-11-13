@@ -64,23 +64,6 @@ class RecorderGuardTests(unittest.TestCase):
         foreign['statistics']['sensor.old']['source'] = 'external'
         self.assertFalse(guard.verify_rollback(self.mapping, original, foreign))
 
-    def test_history_identity_accepts_only_new_native_selected_series(self):
-        original = self.baseline(); original['statistics'] = {}
-        snapshot = {'state_ids': [42], 'statistic_ids': []}
-        change = (self.mapping, original)
-        current = self.migrated()
-        self.assertTrue(guard.history_metadata_matches(snapshot, current, (change,)))
-        reverse = self.baseline()
-        self.assertTrue(guard.history_metadata_matches(snapshot, reverse, (change,)))
-        for mutate in ('foreign', 'extra', 'lost', 'changed'):
-            with self.subTest(mutate=mutate):
-                value = copy.deepcopy(current)
-                if mutate == 'foreign': value['statistics']['sensor.new']['source'] = 'external'
-                if mutate == 'extra': value['statistics']['sensor.foreign'] = {'id': 9, 'source': 'recorder'}
-                if mutate == 'lost': value['states'].clear()
-                if mutate == 'changed': value['states']['sensor.new']['metadata_id'] = 99
-                self.assertFalse(guard.history_metadata_matches(snapshot, value, (change,)))
-
     def test_reverse_retains_original_metadata_and_rejects_alias_or_foreign_baseline(self):
         self.assertTrue(guard.verify_rollback(self.mapping, self.baseline(), self.baseline()))
         for kind, field, value in [('states', 'metadata_id', 99),

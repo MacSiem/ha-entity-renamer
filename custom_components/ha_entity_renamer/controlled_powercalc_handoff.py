@@ -853,6 +853,20 @@ class ControlledPowercalcHandoff:
         for old in retired:
             del index[old]
 
+    def _retire_group_indexes(self, removed):
+        """Detach only predecessors proven by the current reload receipt."""
+        index = self.hass.data['powercalc'].get('group_entities')
+        _need(type(index) is dict, 'group_index_unavailable')
+        retired = {key: entity for key, entity in index.items() if str(id(entity)) in removed}
+        _need({str(id(entity)) for entity in retired.values()} == set(removed)
+              and all(self.original_entities.get(key) is entity and self.hass.states.get(key) is None
+                      for key, entity in retired.items()), 'group_index_predecessor_changed')
+        foreign = {key: entity for key, entity in index.items() if key not in retired}
+        for key in retired:
+            del index[key]
+        _need(set(index) == set(foreign) and all(index[key] is entity for key, entity in foreign.items()),
+              'group_index_foreign_changed')
+
     async def activate(self, context, yaml_intent, live_state, *, service_context):
         """Perform one vendor reload, then sample its actual rebuilt graph."""
         from dataclasses import replace
@@ -985,6 +999,10 @@ class ControlledPowercalcHandoff:
             _need(type(value) is Decimal and value.is_finite(), 'setup_counter_invalid')
             totals.append({'uuid': row['uuid'], 'entity_id': row['after_id'], 'kind': row['kind'],
                            'value': str(value), 'last_valid': None if last_valid is None else str(last_valid)})
+        # removed_group_indexes already bound each stale slot to the removed
+        # predecessor, the replacement UUID and its sole native index reference.
+        # Keep the next fresh capture free of those inactive objects.
+        self._retire_group_indexes(removed)
         result = {'kind': 'controlled_powercalc_setup_receipt', 'schema': 1,
                   'root': self.chain.root_id, 'operation_id': self.chain.operation_id,
                   'fingerprint': self.chain.plan.fingerprint, 'direction': self.direction,
