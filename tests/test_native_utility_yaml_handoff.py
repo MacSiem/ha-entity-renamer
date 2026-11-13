@@ -67,3 +67,43 @@ class UtilityYAMLHandoffNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.native_value, old_value + Decimal('5'))
         self.assertIs(sensors()['p3_foreign_meter'], foreign)
         self.assertEqual(intent, [('p3_meter','p3_second_meter')]*2)
+
+        # Exercise the durable sidecar on the same native actors, including
+        # live postimage inspection and refusal after an orphaned intent.
+        from hashlib import sha256
+        import json
+        tx = importlib.import_module(fixture.PACKAGE + '.transaction')
+        sidecar = importlib.import_module(fixture.PACKAGE + '.native_utility_yaml_receipt')
+        class Prepared:
+            def __init__(self): self.plans = {}
+            async def create(self, key, payload):
+                digest = sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+                self.plans[key] = {'digest':digest, 'payload':payload}
+                return digest
+            def resolve(self, key, digest):
+                row = self.plans[key]
+                assert row['digest'] == digest
+                return row['payload']
+        class Inner:
+            def bind_phase_context(self, value): pass
+            async def apply(self, step, guard):
+                base.entity.async_update_entity(old, new_entity_id=new)
+                await hass.async_block_till_done()
+            async def inspect(self, step):
+                return tx.Position.AFTER if base.entity.async_get(new) else tx.Position.BEFORE
+        prepared = Prepared()
+        h = adapter.UtilityYAMLHandoff.capture(hass, {old:new})
+        step = tx.Step('source', 'registry', 'uuid', 'before', 'after', 'prepared')
+        plan = tx.Plan('plan', ('registry',), ('registry',), (step,), 'covered', ('registry',))
+        wrapper = sidecar.UtilityYAMLRegistryAdapter(Inner(), h, prepared, lambda ref:None,
+                                                      'operation', plan.fingerprint, guard)
+        wrapper._mapping = lambda step, reverse: {old:new}
+        wrapper.bind_phase_context(tx.PhaseContext(tx.Record('operation', plan, phases=('intent',)), 0))
+        await wrapper.apply(step, guard)
+        self.assertEqual(await wrapper.inspect(step), tx.Position.AFTER)
+        self.assertIs(sensors()['p3_foreign_meter'], foreign)
+        intent_key, receipt_key = wrapper._refs(step, 'forward')
+        del prepared.plans[receipt_key]
+        self.assertEqual(await wrapper.inspect(step), tx.Position.UNKNOWN)
+        with self.assertRaises(tx.Refused):
+            await wrapper.apply(step, guard)
