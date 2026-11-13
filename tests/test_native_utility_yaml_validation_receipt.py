@@ -23,6 +23,11 @@ class UtilityValidationReceiptTests(unittest.IsolatedAsyncioTestCase):
         config = self.f.root / 'configuration.yaml'
         config.write_text(config.read_text() + '\nutility_meter:\n  test_meter:\n    source: '
                           + old + '\n    cycle: daily\n')
+        from homeassistant.config import async_hass_config_yaml
+        from homeassistant.setup import async_setup_component
+        self.assertTrue(await async_setup_component(
+            self.f.hass, 'utility_meter', await async_hass_config_yaml(self.f.hass)))
+        await self.f.hass.async_block_till_done()
         planner, validation = self.module('yaml_plan'), self.module('yaml_validation')
         plan = planner.plan_yaml(self.f.root, mapping)
         self.assertTrue(plan.ready, plan.issues)
@@ -37,3 +42,8 @@ class UtilityValidationReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 1)
         self.assertNotEqual(rows[0][1], rows[0][2])
         self.assertTrue(all(len(value) == 64 for value in rows[0][1:]))
+        binding_module = self.module('native_utility_yaml_binding')
+        binding = await binding_module.prepare_utility_binding(
+            self.f.hass, mapping, receipt, guard=lambda: None)
+        self.assertTrue(binding.check_prefix(frozenset()))
+        self.assertFalse(receipt.ready_for_apply)

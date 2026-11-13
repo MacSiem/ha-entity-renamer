@@ -68,3 +68,26 @@ class UtilityYAMLBinding:
         self.handoff.check_population()
         _need(_projection(self.hass) == expected, 'runtime_projection_changed')
         return True
+
+
+async def prepare_utility_binding(hass, mapping, receipt, *, guard):
+    """Read-only preflight against the retained ORIGINAL receipt and live HA."""
+    from pathlib import Path
+    from .native_input_baseline import _drained
+    from .yaml_plan import _mapping
+    from .yaml_validation import ValidationReceipt, assert_validation_current
+    _need(type(receipt) is ValidationReceipt and receipt.version == '2026.11.1'
+          and receipt.config_root == str(Path(hass.config.config_dir).resolve())
+          and 'utility_meter' in receipt.changed_domains
+          and 'utility_meter' in receipt.unsupported_domains, 'original_receipt')
+    selected = _mapping(mapping)
+    guard()
+    await _drained(hass.async_add_executor_job, lambda: assert_validation_current(receipt))
+    guard()
+    binding = UtilityYAMLBinding.capture(hass, selected, receipt.runtime_expected)
+    binding.check_prefix(frozenset())
+    guard()
+    await _drained(hass.async_add_executor_job, lambda: assert_validation_current(receipt))
+    guard()
+    binding.check_prefix(frozenset())
+    return binding
