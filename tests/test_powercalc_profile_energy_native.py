@@ -485,10 +485,43 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         review = await runtime.native_yaml_prepare(hass, mapping, actor_id=actor,
             guard=self.guard, refresh=refresh)
         operation, fingerprint = review['operation_id'], review['fingerprint']
+        import sys
+        trace = []
+        monitor = sys.monitoring
+        tool = next(i for i in range(6) if monitor.get_tool(i) is None)
+        monitor.use_tool_id(tool, 'controlled graph fixture exceptions')
+
+        def raised(code, offset, error):
+            if ('/custom_components/ha_entity_renamer/' in code.co_filename
+                    and isinstance(error, (ValueError, RuntimeError, AttributeError, KeyError))):
+                trace.append((Path(code.co_filename).name, code.co_name, str(error)))
+
+        from custom_components.ha_entity_renamer.transaction import Refused
+        def observe(code, offset, error):
+            if isinstance(error, Refused) and '/custom_components/ha_entity_renamer/' in code.co_filename:
+                trace.append((Path(code.co_filename).name, code.co_name, str(error)))
+            else:
+                raised(code, offset, error)
+
         watch = True
-        result = await runtime.native_yaml_apply(hass, operation, fingerprint, actor_id=actor,
-            guard=self.guard, refresh=refresh)
-        watch = False
+        try:
+            monitor.register_callback(tool, monitor.events.RAISE, observe)
+            monitor.set_events(tool, monitor.events.RAISE)
+            result = await runtime.native_yaml_apply(hass, operation, fingerprint, actor_id=actor,
+                guard=self.guard, refresh=refresh)
+        except Exception as error:
+            record = await runtime.journal.load(operation)
+            print('CONTROLLED_GRAPH_FAILURE', json.dumps({
+                'status': None if record is None else record.status,
+                'reason': None if record is None else record.reason,
+                'phases': None if record is None else record.phases,
+                'trace': list(dict.fromkeys(trace))[-40:]}), flush=True)
+            raise error
+        finally:
+            watch = False
+            monitor.set_events(tool, 0)
+            monitor.register_callback(tool, monitor.events.RAISE, None)
+            monitor.free_tool_id(tool)
         self.assertEqual(result['state'], 'applied', result)
         for uid, obj in counters().items():
             name, expected = start[uid]
