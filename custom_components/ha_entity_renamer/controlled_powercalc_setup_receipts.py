@@ -165,6 +165,68 @@ def validate_registry_handoff(chain, reference, binding):
           and all(phase == 'pending' for phase in binding['phases'][count:]))
     return handoff
 
+
+def validate_restored_prefix(chain, record):
+    """Read-only proof of the already completed, partial inverse and setup."""
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    from .transaction import Record
+    baseline, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
+    _need(type(record) is Record and type(composition) is ControlledPowercalcComposition
+          and baseline == chain.baseline and not chain.writable and chain.active is None
+          and record.plan == chain.plan and record.operation_id == chain.operation_id
+          and record.status == 'rolled_back' and record.direction == 'rollback'
+          and record.restore_attempted is True)
+    count = record.phases.count('undone')
+    _need(0 < count < len(record.plan.steps)
+          and record.phases == ('undone',) * count + ('pending',) * (len(record.phases) - count)
+          and all(step.adapter == 'registry' for step in record.plan.steps[:count]))
+    state = chain.reconstruct_inputs()
+    _need(chain._setup_positions.get(state.head) == {i: 'rollback' for i in range(count)})
+    rollbacks = [payload for _, payload in chain._setup_history
+                 if payload.get('kind') == 'registry_receipt'
+                 and payload.get('binding', {}).get('direction') == 'rollback']
+    _need(len(rollbacks) == count)
+    handoff_ref = rollbacks[-1].get('controlled_powercalc_handoff')
+    handoff = validate_registry_handoff(chain, handoff_ref, rollbacks[-1]['binding'])
+    intent_key = _event_id(['controlled_pc_prefix_setup', chain.root_id, 'intent'])
+    receipt_key = _event_id(['controlled_pc_prefix_setup', chain.root_id, 'receipt'])
+    intent_row, receipt_row = chain.store.read(intent_key), chain.store.read(receipt_key)
+    _need(intent_row is not None and receipt_row is not None)
+    intent = _event(chain, [intent_key, intent_row['digest']], intent_key,
+                    'controlled_powercalc_prefix_setup_intent')
+    receipt = _event(chain, [receipt_key, receipt_row['digest']], receipt_key,
+                     'controlled_powercalc_prefix_setup_receipt')
+    inverse_key = _event_id(['controlled_pc_prefix_store_inverse', chain.root_id, 'receipt'])
+    inverse = chain.store.read(inverse_key)
+    _need(inverse is not None and inverse['digest'] == _digest(inverse['payload'])
+          and intent.get('schema') == receipt.get('schema') == 1
+          and intent.get('root') == receipt.get('root') == chain.root_id
+          and intent.get('operation_id') == record.operation_id
+          and intent.get('fingerprint') == record.plan.fingerprint
+          and intent.get('source_head') == receipt.get('source_head') == state.head
+          and intent.get('store_inverse') == [inverse_key, inverse['digest']]
+          and intent.get('handoff') == handoff_ref and intent.get('phases') == list(record.phases)
+          and receipt.get('intent') == [intent_key, intent_row['digest']]
+          and receipt.get('population') == [list(row) for row in composition.population])
+    restored, rows = receipt.get('restored'), handoff['population']
+    _need(type(restored) is list and len(restored) == len(rows))
+    for seen, row in zip(restored, rows, strict=True):
+        _need(type(seen) is dict and set(seen) == {'uuid', 'entity_id', 'kind', 'value', 'last_valid'}
+              and (seen['uuid'], seen['entity_id'], seen['kind']) ==
+                  (row['uuid'], row['before_id'], row['kind']))
+        try:
+            expected = (row['payload']['full_total'] if row['kind'] == 'group'
+                        else row['payload']['capture']['full_state_text'])
+            value = Decimal(seen['value'])
+            _need(value.is_finite() and value.as_tuple() == Decimal(expected).as_tuple())
+            if row['kind'] != 'group':
+                last = Decimal(seen['last_valid'])
+                _need(last.is_finite() and last.as_tuple() ==
+                      Decimal(row['payload']['capture']['last_valid_state_text']).as_tuple())
+        except (InvalidOperation, TypeError, ValueError, KeyError):
+            _need(False)
+    return state
+
 def validate_controlled_setup(chain, payload, change):
     from .controlled_powercalc_composition import ControlledPowercalcComposition
     from .native_template_state_yaml import PreparedMixedPowercalcYAML, assert_state_yaml_composition

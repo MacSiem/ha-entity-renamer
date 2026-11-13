@@ -910,8 +910,12 @@ class NativeTemplateYAMLServer:
             if dashboard_plan:
                 await obj._install_dashboard_fence()
             if restored_partial:
-                from .native_template_prefix_recovery import unstarted_rollback_complete
-                _need(unstarted_rollback_complete(readonly, record), 'restored_prefix_unqualified')
+                if is_powercalc:
+                    from .controlled_powercalc_setup_receipts import validate_restored_prefix
+                    validate_restored_prefix(readonly, record)
+                else:
+                    from .native_template_prefix_recovery import unstarted_rollback_complete
+                    _need(unstarted_rollback_complete(readonly, record), 'restored_prefix_unqualified')
             if obj.complete_unknown_recovery:
                 _need(complete_forward_unknown_scope(readonly, record), 'complete_unknown_profile_unsupported')
             obj._install()
@@ -921,6 +925,15 @@ class NativeTemplateYAMLServer:
             async def admit():
                 if obj.prefix_recovery:
                     await obj._prefix_current(record)
+                elif restored_partial and is_powercalc:
+                    from .controlled_powercalc_setup_receipts import validate_restored_prefix
+                    state = validate_restored_prefix(readonly, record)
+                    await obj._common(True)
+                    observed = await obj._observe()
+                    readonly.expected(PhaseContext(record, len(record.plan.steps) - 1), tuple(
+                        RegistryRawObservation(row.key, row.raw, row.identity) for row in observed.files))
+                    _need(await obj.journal.load(operation_id) == record
+                          and state.same_evidence(readonly.reconstruct_inputs()), 'restored_prefix_changed')
                 else:
                     await obj._terminal(record, rollback=restored)
             await admit()

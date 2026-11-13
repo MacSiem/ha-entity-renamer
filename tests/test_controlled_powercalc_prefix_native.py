@@ -182,6 +182,13 @@ class ControlledPowercalcPrefixTests(ControlledActualGraphTests):
         await pss.persist_states()
         self.assertEqual(json.loads((self.f.root / '.storage/powercalc_group').read_bytes())['data'][
             'sensor.foreign_fixture_group'], foreign_before)
+        final_record = await runtime.journal.load(op)
+        with patch.object(server, 'bind_reverse', classmethod(diagnose_bind)):
+            final = await runtime.recovery_inspect(hass, op, fingerprint, guard=lambda: None, refresh=refresh)
+        if bind_failures:
+            raise bind_failures[0]
+        self.assertEqual((final['state'], final['eligible']), ('rolled_back', False), final)
+        self.assertEqual(await runtime.journal.load(op), final_record)
 
 
 def load_tests(loader, tests, pattern):
