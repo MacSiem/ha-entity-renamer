@@ -21,7 +21,7 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
 
     async def asyncSetUp(self):
         directory = tempfile.TemporaryDirectory(prefix='controlled-pc-leaf-',
-                                                dir=os.environ['RENAMER_TEST_SCRATCH'])
+                                                dir=os.environ.get('RENAMER_TEST_SCRATCH', tempfile.gettempdir()))
         self.addCleanup(directory.cleanup)
         self.enterContext(patch.dict(os.environ, {'RENAMER_POWER_COLD_PHASE': 'forward',
             'RENAMER_POWER_COLD_MODE': 'migration', 'RENAMER_POWER_COLD_CONFIG': directory.name,
@@ -33,6 +33,7 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         from homeassistant.core import State, callback
         from homeassistant.helpers.entity_platform import async_get_platforms
         from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
+        from custom_components.ha_entity_renamer.transaction import Refused
         from custom_components.ha_entity_renamer.native_template_state_server import NativeTemplateStateServer
         from custom_components.ha_entity_renamer import controlled_powercalc_handoff as handoff
         from ordinary_network_scope import native_dummy_mdns
@@ -171,7 +172,7 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             standby = foreign_power._standby_power
             foreign_power._standby_power = Decimal('0.4')
             try:
-                with self.assertRaises((ValueError, RuntimeError)):
+                with self.assertRaises((ValueError, Refused)):
                     await runtime.native_yaml_prepare(hass, mapping, actor_id=actor, guard=guard, refresh=refresh)
             finally:
                 foreign_power._standby_power = standby

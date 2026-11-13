@@ -105,14 +105,14 @@ def dependency_powercalc_groups(changes, *, controlled=False):
     for change in changes:
         if type(change) is not PreparedPowercalcGroupMetadata:
             continue
-        change.plan()
-        before = change.before['data']['_energy_entity']
-        after = change.after['data']['_energy_entity']
-        if (type(before) is not str or type(after) is not str or before == after
-                or change.mapping != {before: after}):
-            raise Refused('review_powercalc_group_unavailable')
-        rows.append({'kind': 'powercalc', 'entity_id': before, 'before': before, 'after': after})
-    if (len({row["before"] for row in rows}) != len(rows)
-            or controlled is not True and len(rows) != 1):
+        plan = change.plan()
+        for edit in plan.changes:
+            field = edit.path[-1]
+            if not controlled and (field != '_energy_entity' or len(plan.changes) != 1):
+                raise Refused('review_powercalc_group_unavailable')
+            owner = change.before['data'].get('_energy_entity', edit.before)
+            rows.append({'kind': 'powercalc', 'entity_id': owner,
+                         'before': edit.before, 'after': edit.after})
+    if controlled is not True and len(rows) != 1:
         raise Refused('review_powercalc_group_unavailable')
     return rows
