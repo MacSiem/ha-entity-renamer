@@ -15,7 +15,6 @@ import test_native_template_yaml_server as server
 class OrdinaryRegistryPublicTests(unittest.IsolatedAsyncioTestCase):
     with_yaml = True
     asyncSetUp = backend_fixture.NativeBackendLifecycleTests.asyncSetUp
-    _before_loader = backend_fixture.NativeBackendLifecycleTests._before_loader
     _before_start = backend_fixture.NativeBackendLifecycleTests._before_start
     _loaded_backend = backend_fixture.NativeBackendLifecycleTests._loaded_backend
     _flush_documents = server.NativeTemplateYAMLServerTests._flush_documents
@@ -25,6 +24,13 @@ class OrdinaryRegistryPublicTests(unittest.IsolatedAsyncioTestCase):
     _connection = auth.NativeQueuePrepareAuthTests._connection
     _transport = auth.NativeQueuePrepareAuthTests._transport
     _request = auth.NativeQueuePrepareAuthTests._request
+
+    async def _before_loader(self, hass, root):
+        import shutil
+        await backend_fixture.NativeBackendLifecycleTests._before_loader(self, hass, root)
+        target = self.installed_component / 'www/ha-entity-renamer.js'
+        target.parent.mkdir(exist_ok=True)
+        shutil.copyfile(Path(__file__).resolve().parents[1] / 'ha-entity-renamer.js', target)
 
     def module(self, name):
         return backend_fixture.installed_module(name)
