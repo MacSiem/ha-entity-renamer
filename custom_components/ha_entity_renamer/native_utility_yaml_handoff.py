@@ -116,57 +116,69 @@ class UtilityYAMLHandoff:
                   and {k:v for k,v in self.data[meter].items() if k != DATA_TARIFF_SENSORS} == info,
                   'foreign_changed')
 
-    async def detach_one(self, row, *, guard, record_intent):
-        """Detach BEFORE registry rename, letting RestoreSensor retain last data."""
-        _need(not self.uncertain and self.pending is None and row in self.rows, 'ownership')
+    async def detach_group(self, old, *, guard, record_intent):
+        """Detach all consumers of one source BEFORE its registry rename."""
+        _need(not self.uncertain and self.pending is None, 'ownership')
         from homeassistant.components.utility_meter.const import DATA_TARIFF_SENSORS
         from homeassistant.helpers import entity_registry as er
         _installed(); guard(); self.check_foreign()
-        source = self.hass.states.get(row.old)
+        rows = tuple(row for row in self.rows if row.old == old)
+        _need(bool(rows), 'source_scope')
+        source = self.hass.states.get(old)
         registry = er.async_get(self.hass)
-        native = registry.async_get(row.old)
-        _need(source is not None and native is not None and native.id == row.source_uuid
-              and registry.async_get(row.new) is None, 'original_source_unavailable')
-        _need(row.platform.entities.get(row.entity_id) is row.entity and _static(row.entity) == row.before
-              and self.data[row.meter][DATA_TARIFF_SENSORS] == [row.entity], 'meter_changed')
-        await record_intent(row)
+        native = registry.async_get(old)
+        _need(source is not None and native is not None and registry.async_get(rows[0].new) is None
+              and all(native.id == row.source_uuid and row.new == rows[0].new for row in rows),
+              'original_source_unavailable')
+        for row in rows:
+            _need(row.platform.entities.get(row.entity_id) is row.entity and _static(row.entity) == row.before
+                  and self.data[row.meter][DATA_TARIFF_SENSORS] == [row.entity], 'meter_changed')
+        await record_intent(rows)
         guard(); self.check_foreign()
-        _need(self.hass.states.get(row.old) is source and _static(row.entity) == row.before, 'source_changed')
+        _need(self.hass.states.get(old) is source and all(_static(row.entity) == row.before for row in rows),
+              'source_changed')
         self.uncertain = True
-        await row.platform.async_remove_entity(row.entity_id)
-        guard(); self.check_foreign()
-        _need(self.hass.states.get(row.old) is source and row.entity_id not in row.platform.entities,
-              'source_changed_during_detach')
-        self.pending = row
+        for row in rows:
+            await row.platform.async_remove_entity(row.entity_id)
+            guard(); self.check_foreign()
+            _need(self.hass.states.get(old) is source and row.entity_id not in row.platform.entities,
+                  'source_changed_during_detach')
+        self.pending = (old, rows, source.state, dict(source.attributes))
 
-    async def attach_one(self, row, *, guard):
-        """Native factory/add AFTER registry rename, then independently compare."""
+    async def attach_group(self, old, *, guard):
+        """Native factory/add AFTER rename; require one unchanged source sample."""
         from homeassistant.components.utility_meter.const import DATA_TARIFF_SENSORS, CONF_METER
         from homeassistant.helpers import entity_registry as er
-        _need(self.uncertain and self.pending is row, 'detach_required')
+        _need(self.uncertain and self.pending is not None and self.pending[0] == old, 'detach_required')
+        _, rows, prior_value, prior_attributes = self.pending
         sensor = _installed(); guard(); self.check_foreign()
-        source = self.hass.states.get(row.new)
+        source = self.hass.states.get(rows[0].new)
         registry = er.async_get(self.hass)
-        native = registry.async_get(row.new)
-        _need(source is not None and native is not None and native.id == row.source_uuid
-              and registry.async_get(row.old) is None, 'renamed_source_unavailable')
-        info = self.data[row.meter]
-        _need({k:v for k,v in info.items() if k != DATA_TARIFF_SENSORS} == row.info
-              and info[DATA_TARIFF_SENSORS] == [row.entity], 'meter_info_changed')
-        info['source'] = row.new
-        info[DATA_TARIFF_SENSORS].clear()
-        made = []
-        await sensor.async_setup_platform(self.hass, {}, lambda entities: made.extend(entities),
-                                          {row.meter: {CONF_METER: row.meter}})
-        guard(); _need(len(made) == 1 and info[DATA_TARIFF_SENSORS] == made, 'factory')
-        await row.platform.async_add_entities(made)
-        await asyncio.sleep(0)
-        guard(); self.check_foreign()
-        new_entity = made[0]
-        _need(self.hass.states.get(row.new) is source and new_entity.entity_id == row.entity_id
-              and row.platform.entities.get(row.entity_id) is new_entity
-              and new_entity._sensor_source_id == row.new and new_entity._collecting is not None
-              and _static(new_entity) == row.before, 'runtime_readback')
+        native = registry.async_get(rows[0].new)
+        _need(source is not None and source.state == prior_value and dict(source.attributes) == prior_attributes
+              and native is not None and all(native.id == row.source_uuid for row in rows)
+              and registry.async_get(old) is None, 'renamed_source_unavailable')
+        result = []
+        for row in rows:
+            _need(self.hass.states.get(row.new) is source, 'source_changed_during_attach')
+            info = self.data[row.meter]
+            _need({k:v for k,v in info.items() if k != DATA_TARIFF_SENSORS} == row.info
+                  and info[DATA_TARIFF_SENSORS] == [row.entity], 'meter_info_changed')
+            info['source'] = row.new
+            info[DATA_TARIFF_SENSORS].clear()
+            made = []
+            await sensor.async_setup_platform(self.hass, {}, lambda entities: made.extend(entities),
+                                              {row.meter: {CONF_METER: row.meter}})
+            guard(); _need(len(made) == 1 and info[DATA_TARIFF_SENSORS] == made, 'factory')
+            await row.platform.async_add_entities(made)
+            await asyncio.sleep(0)
+            guard(); self.check_foreign()
+            new_entity = made[0]
+            _need(self.hass.states.get(row.new) is source and new_entity.entity_id == row.entity_id
+                  and row.platform.entities.get(row.entity_id) is new_entity
+                  and new_entity._sensor_source_id == row.new and new_entity._collecting is not None
+                  and _static(new_entity) == row.before, 'runtime_readback')
+            result.append(new_entity)
         self.pending = None
         self.uncertain = False
-        return new_entity
+        return tuple(result)

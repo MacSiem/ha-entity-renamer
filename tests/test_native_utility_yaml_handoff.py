@@ -30,12 +30,13 @@ class UtilityYAMLHandoffNativeTests(unittest.IsolatedAsyncioTestCase):
         await component.async_add_entities([source, foreign_source])
         old, new = source.entity_id, 'sensor.p3_source_renamed'
         config = {'utility_meter': {'p3_meter': {'source':old, 'cycle':'daily'},
+                                    'p3_second_meter': {'source':old, 'cycle':'weekly'},
                                     'p3_foreign_meter': {'source':foreign_source.entity_id, 'cycle':'daily'}}}
         self.assertTrue(await async_setup_component(hass, 'utility_meter', config))
         await hass.async_block_till_done()
         sensors = lambda: {entity._parent_meter:entity for platform in async_get_platforms(hass, 'utility_meter')
                            for entity in platform.entities.values() if hasattr(entity, '_parent_meter')}
-        self.assertEqual(set(sensors()), {'p3_meter','p3_foreign_meter'})
+        self.assertEqual(set(sensors()), {'p3_meter','p3_second_meter','p3_foreign_meter'})
         async def emit(value):
             source._attr_native_value=Decimal(value); source.async_write_ha_state(); await hass.async_block_till_done()
         await emit('105'); await emit('110')
@@ -44,23 +45,25 @@ class UtilityYAMLHandoffNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(old_value)
         adapter = importlib.import_module(fixture.PACKAGE + '.native_utility_yaml_handoff')
         intent=[]
-        async def record(row): intent.append(row.meter)
+        async def record(rows): intent.append(tuple(sorted(row.meter for row in rows)))
         def guard(): pass
         forward = adapter.UtilityYAMLHandoff.capture(hass, {old:new})
-        await forward.detach_one(forward.rows[0], guard=guard, record_intent=record)
+        await forward.detach_group(old, guard=guard, record_intent=record)
         base.entity.async_update_entity(old, new_entity_id=new)
         await hass.async_block_till_done()
-        changed = await forward.attach_one(forward.rows[0], guard=guard)
+        changed_rows = await forward.attach_group(old, guard=guard)
+        changed = next(e for e in changed_rows if e._parent_meter == 'p3_meter')
         await hass.async_block_till_done()
         self.assertEqual(changed.native_value, old_value)
         self.assertIs(sensors()['p3_foreign_meter'], foreign)
         await emit('115'); self.assertEqual(changed.native_value, old_value + Decimal('5'))
         reverse = adapter.UtilityYAMLHandoff.capture(hass, {new:old})
-        await reverse.detach_one(reverse.rows[0], guard=guard, record_intent=record)
+        await reverse.detach_group(new, guard=guard, record_intent=record)
         base.entity.async_update_entity(new, new_entity_id=old)
         await hass.async_block_till_done()
-        restored = await reverse.attach_one(reverse.rows[0], guard=guard)
+        restored_rows = await reverse.attach_group(new, guard=guard)
+        restored = next(e for e in restored_rows if e._parent_meter == 'p3_meter')
         await hass.async_block_till_done()
         self.assertEqual(restored.native_value, old_value + Decimal('5'))
         self.assertIs(sensors()['p3_foreign_meter'], foreign)
-        self.assertEqual(intent, ['p3_meter','p3_meter'])
+        self.assertEqual(intent, [('p3_meter','p3_second_meter')]*2)
