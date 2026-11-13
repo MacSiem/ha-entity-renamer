@@ -209,6 +209,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         from .helper_native import inventory as helper_inventory
         from .controlled_template_entry_preparation import prepare_controlled_template_entry
         plans = helper_inventory(self.hass, self.mapping)
+        from .native_utility_yaml_guard import assert_utility_yaml_not_affected
+        assert_utility_yaml_not_affected(self.hass, self.mapping)
         template_plans = [item for item in plans if item.before.get('domain') == 'template']
         from .helper_native import UnsupportedEntryReferences, partition_entry_coverage
         other_plans = tuple(item for item in plans if item not in template_plans
