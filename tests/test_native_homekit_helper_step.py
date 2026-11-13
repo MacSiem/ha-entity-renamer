@@ -44,6 +44,13 @@ class HomeKitHelperNativeTests(unittest.IsolatedAsyncioTestCase):
             binding=await homekit_binding.HomeKitYAMLBinding.capture(hass,{old:new},receipt,
                 [proofs.RegistryMappingProof(old,new,f.row.id)],guard=lambda:None)
         observer=binding.observer
+        from unittest.mock import patch
+        from homeassistant.components.homekit import services
+        refused=importlib.import_module(fixture.PACKAGE+'.transaction').Refused
+        async def foreign_reload(service): pass
+        with patch.object(services, '_handle_homekit_reload', foreign_reload):
+            with self.assertRaises(refused): obsmod._installed()
+        obsmod._installed()
         receipt_adapter=importlib.import_module(fixture.PACKAGE+'.native_homekit_helper_adapter')
         changes=receipt_adapter.prepare_entries(binding)
         self.assertEqual(len(changes), 1)

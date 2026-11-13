@@ -24,6 +24,7 @@ def _need(value, reason):
 def _installed():
     import homeassistant
     from homeassistant.components import homekit
+    from homeassistant.components.homekit import aidmanager, services
     from .native_utility_setup_audit import _code_objects
     import sys
     root = Path(homeassistant.__file__).resolve().parent
@@ -40,7 +41,11 @@ def _installed():
         compiled[str(path)] = tuple(_code_objects(compile(raw, str(path), 'exec',
                                                           dont_inherit=True, optimize=sys.flags.optimize)))
     for method in (homekit.async_setup_entry, homekit.async_unload_entry,
-                   homekit.HomeKit.async_start, homekit.HomeKit.async_stop):
+                   homekit.HomeKit.async_start, homekit.HomeKit.async_stop,
+                   aidmanager._generate_aids, aidmanager.get_system_unique_id,
+                   aidmanager.AccessoryAidStorage.get_or_allocate_aid_for_entity_id,
+                   aidmanager.AccessoryAidStorage.get_or_allocate_aid,
+                   services._handle_homekit_reload):
         code = method.__code__
         _need(code.co_filename in compiled and any(code == item for item in compiled[code.co_filename]), 'native_code')
 
