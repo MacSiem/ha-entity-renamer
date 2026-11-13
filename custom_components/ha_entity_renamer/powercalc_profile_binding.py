@@ -29,6 +29,10 @@ def extend_vendor(vendor):
             '_create_matcher', 'select_sub_profile', 'get_tracking_entities')),
         ('power_profile.sub_profile_selector', 'EntityStateMatcher',
             ('__init__', 'match', 'get_tracking_entities')),
+        ('strategy.linear', 'LinearStrategy', ('__init__', 'initialize', 'calculate',
+            'is_enabled', 'get_entities_to_track', 'can_calculate_standby', 'get_calibration_segment',
+            'apply_curve', 'get_current_state_value', 'get_initialized_value_entity',
+            'get_attribute', 'get_value_from_attribute')),
         ('strategy.lut', 'LutStrategy', ('__init__', 'initialize', 'calculate', 'validate_config',
             'get_selected_color_mode', 'create_light_setting', 'lookup_power',
             'lookup_power_for_brightness', 'get_nearest', '_nearest_key', '_interpolate',
@@ -37,7 +41,8 @@ def extend_vendor(vendor):
             '_cache_key', '_load_lut_entry', 'get_lut_file')),
         ('strategy.lut', '_LutEntry', ()),
         ('strategy.lut', 'LookupMode', ('from_color_mode',)),
-        ('strategy.factory', 'PowerCalculatorStrategyFactory', ('__init__', 'create', '_prepare', '_create_lut')),
+        ('strategy.factory', 'PowerCalculatorStrategyFactory', ('__init__', 'create', '_prepare',
+            '_create_lut', '_create_fixed', '_create_linear', '_get_linear_config', '_get_strategy_config')),
         ('sensors.group.subtract', 'SubtractGroupSensor', ('__init__', 'get_summed_state')),
         ('sensors.group.custom', 'GroupedEnergySensor', ('__init__', 'async_added_to_hass',
             'calculate_initial_state', 'calculate_new_state', 'calculate_delta', 'restore_last_state')),
@@ -207,6 +212,67 @@ def assert_custom_profile_locator(entity, profile, root):
              'custom_locator_changed')
 
 
+def _bind_manual(hass, cls, entity, profile, source):
+    from .powercalc_source_binding import _dispatch_token
+
+    mode, settings = profile['strategy'], profile['settings']
+    strategy = entity._strategy_instance
+    need(str(entity._calculation_strategy) == mode and strategy._source_entity is source
+         and entity._power_profile is None and entity._sub_profile_selector is None
+         and entity._sensor_config.get('entity_id') == profile['source']
+         and entity._sensor_config.get(mode) == settings
+         and entity._track_entities == {profile['source']}
+         and entity.native_unit_of_measurement == 'W'
+         and entity._ignore_unavailable_state is False
+         and entity._rounding_digits == hass.data['powercalc']['config'].get('power_sensor_precision', 2)
+         and entity._standby_sensors is hass.data['powercalc']['standby_power_sensors']
+         and entity._calculation_enabled_condition is None and entity._multiply_factor is None
+         and entity._standby_power == 0 and entity._standby_power_on == 0
+         and entity._availability_entity is None and not entity._sensor_config.get('sleep_power')
+         and not entity._sensor_config.get('unavailable_power'), 'manual_semantics_changed')
+    from custom_components.powercalc.sensors.power import OFF_STATES, OFF_STATES_BY_DOMAIN
+    need(entity._off_states == OFF_STATES | OFF_STATES_BY_DOMAIN.get(source.domain, set()),
+         'manual_off_states_changed')
+    factory = entity.calculation_strategy_factory
+    native_factory = cls['PowerCalculatorStrategyFactory']
+    need(type(factory) is native_factory and factory._hass is hass
+         and hass.data.get('powercalc_strategy_factory') is factory
+         and factory._prepare is native_factory._prepare
+         and factory._get_strategy_config is native_factory._get_strategy_config
+         and factory._get_linear_config is native_factory._get_linear_config, 'manual_factory_changed')
+    factory_ids = _dispatch_token(factory, native_factory, ('create', '_create_' + mode))
+    common = ('calculate', 'can_calculate_standby', 'is_enabled', 'get_entities_to_track')
+    if mode == 'fixed':
+        native = cls['FixedStrategy']
+        need(type(strategy) is native and strategy._per_state_power is None
+             and type(strategy._power) in (int, float)
+             and strategy._power == settings['power'], 'fixed_settings_changed')
+        return (id(strategy), *factory_ids, *_dispatch_token(strategy, native, common))
+    need(mode == 'linear', 'manual_strategy_unverified')
+    native = cls['LinearStrategy']
+    need(type(strategy) is native and strategy._hass is hass and strategy._value_entity is source
+         and strategy._config == settings and strategy._standby_power in (None, 0)
+         and strategy._calibration == [(0, float(settings.get('min_power', 0))),
+                                       (255, float(settings['max_power']))]
+         and strategy._power_curve is None and
+         ((strategy._initialized is True and strategy._attribute == 'brightness') or
+          (strategy._initialized is False and strategy._attribute is None)), 'linear_settings_changed')
+    return (id(strategy), *factory_ids, *_dispatch_token(strategy, native, (*common, 'get_calibration_segment',
+        'apply_curve', 'get_current_state_value', 'get_initialized_value_entity', 'get_attribute',
+        'get_value_from_attribute')))
+
+
+def _virtual_power_dispatch(entity, native):
+    from .powercalc_source_binding import _dispatch_token
+    return _dispatch_token(entity, native, (
+        '_handle_source_entity_state_change', 'calculate_power', '_resolve_calculation_state',
+        '_switch_sub_profile_dynamically', '_select_new_sub_profile', 'ensure_strategy_instance',
+        '_apply_power_adjustments', '_update_power_and_write_state', '_calculate_state_standby_power',
+        'calculate_standby_power', '_apply_multiply_factor', '_apply_standby_multiply_factor',
+        'is_calculation_enabled', '_schedule_sleep_power', '_track_standby_power', '_clear_standby_power',
+        '_has_valid_state', '_update_power_sensor'))
+
+
 def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity, listeners, global_ok, prepared):
     from .powercalc_source_binding import PowercalcBoundRow, _dispatch_token
     # No filesystem read or gzip/CSV decoding in this event-loop suffix.
@@ -244,8 +310,27 @@ def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity
             source = entity._source_entity
             need(type(source) is cls['SourceEntity'] and source.entity_id == profile['source']
                  and source.entity_entry is producer.registry_entry and source.unique_id == source_row['unique_id']
-                 and source.object_id == profile['source'].split('.')[1] and source.domain == 'light',
-                 'profile_producer_changed')
+                 and source.object_id == profile['source'].split('.', 1)[1]
+                 and source.domain == profile['source'].split('.', 1)[0], 'profile_producer_changed')
+            if 'source_registry' in profile:
+                need([source_row['id'], source_row['unique_id'], source_row['platform']] ==
+                     profile['source_registry'], 'profile_source_registry_changed')
+            if 'strategy' in profile:
+                mode = profile['strategy']
+                if profile['origin'].startswith('entry:'):
+                    need(entries[entry_id]['data'].get('_power_entity') == entity.entity_id,
+                         'manual_entry_power_changed')
+                native_ids = _bind_manual(hass, cls, entity, profile, source)
+                eid = entity.entity_id
+                by_id[eid] = PowercalcBoundRow(eid, row['id'], True, mode + '_source_bound',
+                    profile['source'], source_row['id'], profile['origin'], digest(profile),
+                    ((profile['source'], eid, 1),),
+                    (id(entity), id(producer), id(source), *native_ids,
+                     *_virtual_power_dispatch(entity, cls['VirtualPowerSensor']),
+                     *listeners(entity, {profile['source']}, virtual=True)), 'profile_' + mode)
+                powers.add(eid)
+                energy_specs.append((entity, None, 'profile:' + profile['origin']))
+                continue
             actual = entity._power_profile
             need(type(actual) is cls['PowerProfile'] and actual._hass is hass
                  and actual.manufacturer == profile['manufacturer'] and actual.model == profile['model']
@@ -328,13 +413,7 @@ def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity
             strategy_ids = _dispatch_token(strategy, cls['LutStrategy'], ('calculate', 'is_enabled',
                 'get_entities_to_track', 'can_calculate_standby', 'lookup_power', 'get_selected_color_mode',
                 'create_light_setting', 'lookup_power_for_brightness', 'get_nearest', '_calculate_effect_power'))
-            entity_ids = _dispatch_token(entity, cls['VirtualPowerSensor'], (
-                '_handle_source_entity_state_change', 'calculate_power', '_resolve_calculation_state',
-                '_switch_sub_profile_dynamically', '_select_new_sub_profile', 'ensure_strategy_instance',
-                '_apply_power_adjustments', '_update_power_and_write_state', '_calculate_state_standby_power',
-                'calculate_standby_power', '_apply_multiply_factor', '_apply_standby_multiply_factor',
-                'is_calculation_enabled', '_schedule_sleep_power', '_track_standby_power', '_clear_standby_power',
-                '_has_valid_state', '_update_power_sensor'))
+            entity_ids = _virtual_power_dispatch(entity, cls['VirtualPowerSensor'])
             eid = entity.entity_id
             by_id[eid] = PowercalcBoundRow(eid, row['id'], True,
                 'dynamic_lut_source_bound' if selector is not None else 'lut_source_bound',
@@ -351,13 +430,35 @@ def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity
     for group in sorted(groups, key=lambda r: r['config'].get('group_type') != 'custom'):
         try:
             cfg = group['config']
-            entry_id = group['origin'][6:]
-            need(digest(entries[entry_id]['data']) == group['config_sha256'], 'group_original_changed')
-            candidates = [e for eid, e in entities.items() if rows.get(eid, {}).get('config_entry_id') == entry_id
-                and type(e) is (cls['GroupedPowerSensor'] if cfg['group_type'] == 'custom' else cls['SubtractGroupSensor'])]
+            yaml = group['origin'].startswith('yaml:')
+            native_type = cls['GroupedPowerSensor'] if cfg['group_type'] == 'custom' else cls['SubtractGroupSensor']
+            if yaml:
+                entry_id = None
+                candidates = [e for eid, e in entities.items()
+                              if type(e) is native_type and e.unique_id == group['unique_id']
+                              and rows.get(eid, {}).get('config_entry_id') is None]
+                cfg = {**cfg,
+                       'group_power_entities': [member[0] for member in group['members']],
+                       'group_energy_entities': [member[2] for member in group['members']]}
+                for power_id, power_uuid, energy_id, energy_uuid in group['members']:
+                    need(row_identity(power_id)[0]['id'] == power_uuid
+                         and row_identity(energy_id)[0]['id'] == energy_uuid,
+                         'yaml_group_member_registry_changed')
+            else:
+                entry_id = group['origin'][6:]
+                need(digest(entries[entry_id]['data']) == group['config_sha256'], 'group_original_changed')
+                candidates = [e for eid, e in entities.items()
+                              if rows.get(eid, {}).get('config_entry_id') == entry_id and type(e) is native_type]
             need(len(candidates) == 1, 'group_power_membership')
             entity = candidates[0]
             row, _ = row_identity(entity.entity_id)
+            if yaml:
+                native_config = entity._sensor_config
+                need(native_config.get('create_group') == cfg['create_group']
+                     and native_config.get('unique_id') == group['unique_id']
+                     and native_config.get('create_energy_sensor') is True
+                     and hass.data['powercalc']['group_entities'].get(entity.entity_id) is entity,
+                     'yaml_group_origin_changed')
             if cfg['group_type'] == 'custom':
                 members = cfg.get('group_power_entities', [])
                 need(type(members) is list and bool(members) and len(members) == len(set(members)), 'sum_members')
@@ -396,6 +497,14 @@ def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity
             entity = candidates[0]
             row, _ = row_identity(entity.entity_id)
             need(row['config_entry_id'] == rows[parent.entity_id]['config_entry_id'], 'energy_entry_changed')
+            if origin.startswith('profile:entry:') and by_id[parent.entity_id].relation_kind in (
+                    'profile_fixed', 'profile_linear'):
+                need(entries[origin.removeprefix('profile:entry:')]['data'].get('_energy_entity')
+                     == entity.entity_id, 'manual_entry_energy_changed')
+            if group_cfg is not None and origin.startswith('yaml:'):
+                need(entity._sensor_config is parent._sensor_config
+                     and hass.data['powercalc']['group_entities'].get(entity.entity_id) is entity,
+                     'yaml_energy_group_origin_changed')
             if group_cfg is None:
                 native = vendor.integration.IntegrationSensor
                 config = entity._sensor_config

@@ -205,7 +205,7 @@ def assert_profile_cache_directories(profiles):
     """The official LUT key omits directory: refuse ambiguous input identity."""
     directories = {}
     for profile in profiles:
-        for variant in profile['variants']:
+        for variant in profile.get('variants', ()):
             for mode in variant['modes']:
                 key = (profile['manufacturer'], profile['model'], mode, variant['name'])
                 previous = directories.setdefault(key, profile['directory'])
@@ -230,6 +230,68 @@ def source_config(cfg):
     if 'custom_model_directory' in cfg:
         result['custom_model_directory'] = custom_profile_locator(cfg['custom_model_directory'])
     return result
+
+
+def manual_source_config(cfg):
+    """Finite, unadjusted manual strategies whose native dispatch can be bound."""
+    allowed = {'name', 'entity_id', 'unique_id', 'sensor_type', 'mode',
+               'create_energy_sensor', '_power_entity', '_energy_entity', 'fixed', 'linear'}
+    mode = 'fixed' if 'fixed' in cfg else 'linear'
+    need(not set(cfg) - allowed and ('fixed' in cfg) != ('linear' in cfg)
+         and cfg.get('sensor_type', 'virtual_power') == 'virtual_power'
+         and cfg.get('mode', mode) == mode and cfg.get('create_energy_sensor') is True
+         and isinstance(cfg.get('entity_id'), str) and '.' in cfg['entity_id'],
+         'manual_source_unverified')
+    values = cfg[mode]
+    need(isinstance(values, dict), 'manual_config_unverified')
+    if mode == 'fixed':
+        need(set(values) == {'power'}, 'fixed_config_unverified')
+    else:
+        need(set(values) in ({'max_power'}, {'min_power', 'max_power'})
+             and cfg['entity_id'].startswith('light.'), 'linear_config_unverified')
+    need(all(type(value) in (int, float) and math.isfinite(value) and value >= 0
+             for value in values.values()), 'manual_value_unverified')
+    if mode == 'linear':
+        need(values.get('min_power', 0) < values['max_power'], 'linear_range_unverified')
+    return {'strategy': mode, 'settings': dict(values), 'entity_id': str(cfg['entity_id'])}
+
+
+def yaml_sources(configs):
+    """Collect declared leaf origins and exact, explicit YAML bucket references."""
+    originals, groups = [], []
+    for cfg in configs:
+        uid = cfg.get('unique_id')
+        need(isinstance(uid, str) and uid, 'yaml_unique_id_required')
+        if 'create_group' not in cfg:
+            originals.append(('yaml:' + uid, cfg, uid))
+            continue
+        allowed = {'create_group', 'entities', 'unique_id', 'create_energy_sensor', 'group_type',
+                   'force_calculate_group_energy', 'energy_sensor_precision'}
+        members = cfg.get('entities')
+        need(not set(cfg) - allowed and isinstance(cfg['create_group'], str)
+             and cfg.get('group_type', 'custom') == 'custom'
+             and cfg.get('force_calculate_group_energy', False) is False
+             and cfg.get('create_energy_sensor', True) is True
+             and isinstance(members, list) and members, 'yaml_group_variant_unverified')
+        if 'energy_sensor_precision' in cfg:
+            precision = cfg['energy_sensor_precision']
+            need(type(precision) is int and 0 <= precision <= 6, 'yaml_group_precision_unverified')
+        refs = []
+        for leaf in members:
+            need(isinstance(leaf, dict) and isinstance(leaf.get('entity_id'), str),
+                 'yaml_group_member_unverified')
+            source = str(leaf['entity_id'])
+            leaf_uid = leaf.get('unique_id')
+            if set(leaf) != {'entity_id'}:
+                need(isinstance(leaf_uid, str) and leaf_uid, 'yaml_leaf_unique_id_required')
+                originals.append(('yaml:' + leaf_uid, leaf, leaf_uid))
+            refs.append((source, leaf_uid))
+        groups.append({'origin': 'yaml:' + uid, 'config_sha256': digest(cfg),
+                       'config': {'group_type': 'custom', 'create_group': str(cfg['create_group']),
+                                  **({'energy_sensor_precision': cfg['energy_sensor_precision']}
+                                     if 'energy_sensor_precision' in cfg else {})},
+                       'unique_id': str(uid), 'references': refs})
+    return originals, groups
 
 
 def profile_json(value):
@@ -340,6 +402,7 @@ def read_bundle(root):
 
 async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
     """Called ONLY by the isolated ORIGINAL worker, never by live observers."""
+    from custom_components.powercalc.power_profile.error import LibraryError
     from custom_components.powercalc.power_profile.library import ProfileLibrary, ModelInfo
     from homeassistant.helpers import entity_registry as er, device_registry as dr
     pc = checked.get('powercalc', {})
@@ -374,8 +437,7 @@ async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
     from custom_components.powercalc.common import create_source_entity
     entries_path = Path(root) / '.storage/core.config_entries'
     entries = json.loads(entries_path.read_bytes())['data']['entries']
-    originals = [(('yaml:' + cfg['unique_id']), cfg, cfg.get('unique_id')) for cfg in pc.get('sensors', [])]
-    groups = []
+    originals, groups = yaml_sources(pc.get('sensors', []))
     for entry in entries:
         if entry['domain'] != 'powercalc':
             continue
@@ -398,29 +460,38 @@ async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
             originals.append((origin, cfg, cfg.get('unique_id') or entry['unique_id']))
     profiles, bindings = [], []
     for origin, cfg, configured_unique_id in originals:
-        semantic = source_config(cfg)
+        manual = 'fixed' in cfg or 'linear' in cfg
+        semantic = manual_source_config(cfg) if manual else source_config(cfg)
         source = create_source_entity(semantic['entity_id'], hass)
-        need(source.entity_entry is er.async_get(hass).async_get(semantic['entity_id']),
+        need(source.entity_entry is not None
+             and source.entity_entry is er.async_get(hass).async_get(semantic['entity_id']),
              'source_registry_required')
-        locator = semantic.get('custom_model_directory')
-        # read_bundle already walked every component no-follow, rejecting links,
-        # non-regular inputs and membership drift. No alternate loader root.
-        if locator is not None:
-            need(locator + '/model.json' in bundle, 'custom_model_json_missing')
-            profile = await library.get_profile(
-                ModelInfo(semantic['manufacturer'], semantic['model']), source, str(Path(root) / locator))
+        profile = None
+        if manual:
+            data = {key: semantic[key] for key in ('strategy', 'settings')}
         else:
-            profile = await library.get_profile(ModelInfo(semantic['manufacturer'], semantic['model']), source)
-        directory = Path(profile.get_model_directory(root_only=True)).relative_to(root).as_posix()
-        need(directory.startswith('powercalc/profiles/'), 'profile_loader_unverified')
-        if locator is not None:
-            need(directory == locator, 'custom_native_directory_changed')
-        data = compile_profile(directory, profile._base_json_data, profile._sub_profiles, bundle)
-        if locator is not None:
-            data['custom_model_directory'] = locator
-        data.update(origin=origin, source=semantic['entity_id'], manufacturer=profile.manufacturer,
-                    model=profile.model, config_sha256=digest(cfg),
+            locator = semantic.get('custom_model_directory')
+            if locator is not None:
+                need(locator + '/model.json' in bundle, 'custom_model_json_missing')
+            try:
+                profile = await library.get_profile(ModelInfo(semantic['manufacturer'], semantic['model']),
+                    source, None if locator is None else str(Path(root) / locator))
+            except LibraryError:
+                need(False, 'profile_unresolved')
+            need(profile is not None, 'profile_unresolved')
+            directory = Path(profile.get_model_directory(root_only=True)).relative_to(root).as_posix()
+            need(directory.startswith('powercalc/profiles/'), 'profile_loader_unverified')
+            if locator is not None:
+                need(directory == locator, 'custom_native_directory_changed')
+            data = compile_profile(directory, profile._base_json_data, profile._sub_profiles, bundle)
+            if locator is not None:
+                data['custom_model_directory'] = locator
+            data.update(manufacturer=profile.manufacturer, model=profile.model)
+        data.update(origin=origin, source=semantic['entity_id'], config_sha256=digest(cfg),
                     unique_id=configured_unique_id or source.unique_id)
+        if manual or origin.startswith('yaml:') and any('references' in group for group in groups):
+            row = source.entity_entry
+            data['source_registry'] = [row.id, row.unique_id, row.platform]
         profiles.append(data)
         if with_bindings:
             # Actual native rows loaded from this isolated staged image. Never
@@ -428,7 +499,7 @@ async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
             source_row = source.entity_entry
             need(source_row is not None, 'source_registry_required')
             dependencies = [('source', semantic['entity_id'], source_row)]
-            selector = profile._base_json_data.get('sub_profile_select')
+            selector = profile._base_json_data.get('sub_profile_select') if profile is not None else None
             if selector is not None:
                 sid = selector['matchers'][0]['entity_id'].replace(
                     '{{source_object_id}}', source.object_id)
@@ -439,6 +510,37 @@ async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
                 for role, eid, row in dependencies]])
     need(bool(profiles) and len({r['origin'] for r in profiles}) == len(profiles), 'profile_membership')
     assert_profile_cache_directories(profiles)
+    identities = [row['unique_id'] for row in profiles + groups]
+    need(all(isinstance(uid, str) and uid for uid in identities)
+         and len(set(identities + [uid + '_energy' for uid in identities])) == 2 * len(identities),
+         'graph_unique_ids_ambiguous')
+    yaml_leaves = [row for row in profiles if row['origin'].startswith('yaml:')]
+    registry = er.async_get(hass)
+    for group in groups:
+        if 'references' not in group:
+            continue
+        members = {}
+        for source, unique_id in group.pop('references'):
+            matches = [row for row in yaml_leaves if row['source'] == source
+                       and (unique_id is None or row['unique_id'] == unique_id)]
+            need(len(matches) == 1, 'yaml_group_reference_unresolved')
+            member = matches[0]
+            uid = member['unique_id']
+            power_id = registry.async_get_entity_id('sensor', 'powercalc', uid)
+            energy_id = registry.async_get_entity_id('sensor', 'powercalc', uid + '_energy')
+            need(power_id is not None and energy_id is not None, 'yaml_group_registry_member_missing')
+            power, energy = registry.async_get(power_id), registry.async_get(energy_id)
+            need(power.config_entry_id is None and energy.config_entry_id is None,
+                 'yaml_group_member_origin_changed')
+            members[uid] = [power_id, power.id, energy_id, energy.id]
+        group['members'] = [members[key] for key in sorted(members)]
+        if with_bindings:
+            group_bindings = []
+            for power_id, _, energy_id, _ in group['members']:
+                for role, eid in (('power_member', power_id), ('energy_member', energy_id)):
+                    row = registry.async_get(eid)
+                    group_bindings.append([role, eid, row.id, row.unique_id, row.platform])
+            bindings.append([group['origin'], group_bindings])
     energy_path = Path(root) / '.storage/energy'
     settings = None if not energy_path.exists() else json.loads(energy_path.read_bytes())['data']
     refs = []

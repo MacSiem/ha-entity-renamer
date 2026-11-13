@@ -370,7 +370,6 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
                          for entity in platform.entities.values()}
 
     async def test_mixed_yaml_group_graph_reopens_and_refuses_drift(self):
-        from dataclasses import replace
         original = importlib.import_module(fixtures.PACKAGE + '.yaml_source_binding')
         codec = importlib.import_module(fixtures.PACKAGE + '.powercalc_composition')
         before = await self.prepare()
@@ -409,5 +408,6 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         (self.f.root / 'configuration.yaml').write_text(
             self.config.replace('model: LWA001', 'model: unknown-model')
                        .replace('          custom_model_directory: powercalc/profiles/signify/LWA001\n', ''))
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, 'native_config_rejected') as error:
             await self.prepare()
+        self.assertIn('profile_unresolved', ' '.join(error.exception.__notes__))
