@@ -420,7 +420,7 @@ class ControlledPowercalcHandoff:
         saved = self.chain.store.read(self.receipt[0])
         _need(saved is not None and saved['digest'] == self.receipt[1] == _digest(saved['payload'])
               and saved['payload']['root'] == self.chain.root_id
-              and saved['payload']['direction'] == self.direction,
+              and saved['payload']['direction'] == ('forward' if getattr(self, 'prefix_inverse', False) else self.direction),
               'completed_receipt_changed')
         _need(tuple(self.hass.config_entries.async_entries('powercalc')) == self.entries
               and all(entry.disabled_by is not None or entry.state is ConfigEntryState.NOT_LOADED

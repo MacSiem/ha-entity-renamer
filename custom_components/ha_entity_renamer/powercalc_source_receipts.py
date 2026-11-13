@@ -61,8 +61,8 @@ def validate_source_receipt(chain, payload, change):
     from .controlled_powercalc_composition import ControlledPowercalcComposition
     if type(composition) is ControlledPowercalcComposition:
         _need(reference is None, 'foreign_live_source_subeffect')
-        from .controlled_powercalc_setup_receipts import validate_handoff
-        validate_handoff(chain, payload.get('controlled_powercalc_handoff'), payload['binding']['direction'])
+        from .controlled_powercalc_setup_receipts import validate_registry_handoff
+        validate_registry_handoff(chain, payload.get('controlled_powercalc_handoff'), payload['binding'])
         return
     if composition is None:
         _need(reference is None, 'foreign_subeffect')

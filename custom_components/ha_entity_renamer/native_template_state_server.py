@@ -73,14 +73,27 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         from .native_template_state_binding import async_observe_accepted_state_bindings
         from .native_template_state_composition import TemplateStateComposition
         from .transaction import PhaseContext
-        _need(type(self.composition) in (TemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)
-              and _acknowledged_registry_prefix(record) and record.plan == self.plan
+        pc_prefix = getattr(self, 'powercalc_prefix_recovery', False)
+        _need(type(self.composition) in (TemplateStateComposition, ScriptTemplateStateComposition,
+                                         AutomationTemplateStateComposition, ControlledPowercalcComposition)
+              and (_acknowledged_registry_prefix(record) or pc_prefix) and record.plan == self.plan
               and await self.journal.load(self.operation_id) == record,
               'acknowledged_prefix_required')
         self._scope()
         bridge = NativeRegistryBridge(NativeRegistryIO(self.hass), self.recorder,
                                        native_images=self.chain.accepted_documents)
+        if pc_prefix:
+            from .controlled_powercalc_prefix_readback import observe_inactive_prefix
+            reader = self.chain
+            if reader.writable:
+                reader = RegistryReceiptChain.reopen(self.receipt_store, self.operation_id,
+                    self.plan, self.receipt, self.digests)
+            await observe_inactive_prefix(self.hass, reader, record, guard=self._scope)
         for index, change in enumerate(self.registry_changes):
+            # Inactive Powercalc entities cannot supply ordinary live runtime
+            # probes; the complete registry documents and handoff cover them.
+            if pc_prefix and change.before.get('platform') == 'powercalc':
+                continue
             actual = await bridge.inspect(change)
             self._scope()
             wanted = 'after' if record.phases[index] == 'verified' else 'before'
@@ -809,6 +822,20 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         if controlled:
             from .controlled_powercalc_handoff import ControlledPowercalcHandoff
             handoff = ControlledPowercalcHandoff(self, self.powercalc_population)
+            if getattr(self, 'powercalc_prefix_recovery', False):
+                from .native_registry_receipts import _event_id
+                from .powercalc_pss_handoff import _snapshot
+                from .controlled_powercalc_handoff import _native_restore_rows
+                from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
+                key = _event_id(['controlled_pc_population', self.chain.root_id, 'forward', 'receipt'])
+                saved = self.chain.store.read(key)
+                _need(saved is not None and getattr(self, 'prefix_store_receipt', None) is not None,
+                      'prefix_store_receipt_required')
+                handoff.receipt, handoff.direction, handoff.prefix_inverse = (key, saved['digest']), 'rollback', True
+                handoff.entries = tuple(self.hass.config_entries.async_entries('powercalc'))
+                handoff.pss_expected = _snapshot(self.hass.data['powercalc_group_storage'])
+                handoff.restore_expected = _native_restore_rows(self.hass.data[DATA_RESTORE_STATE])
+                handoff.require_inactive()
         io = NativeRegistryIO(self.hass)
         def runtime_probe(change, target):
             if (controlled and handoff.receipt is not None and handoff.setup_reference is None
@@ -916,6 +943,9 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             from .controlled_powercalc_driver import attach, inverse
             coordinator = attach(coordinator, handoff)
             self.powercalc_handoff = handoff
-            if hasattr(self, 'record'):
+            if getattr(self, 'powercalc_prefix_recovery', False):
+                from .controlled_powercalc_prefix_driver import prefix_inverse
+                coordinator = prefix_inverse(coordinator, self, handoff)
+            elif hasattr(self, 'record'):
                 coordinator = inverse(coordinator, self, handoff)
         return coordinator

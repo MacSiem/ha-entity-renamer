@@ -500,9 +500,11 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 'registry': 'registry_digest', 'energy': 'energy_digest',
                 'dashboard': 'dashboard_digest'}[context.step.adapter]
         result[name] = binding[name]
-        if direction == 'rollback' and self._script_reverse_order() is not None:
+        prefix_key = _event_id(['controlled_pc_prefix_store_inverse', self.root_id, 'receipt'])
+        prefix_reverse = direction == 'rollback' and self.store.read(prefix_key) is not None
+        if direction == 'rollback' and (self._script_reverse_order() is not None or prefix_reverse):
             if context.record.restore_attempted is not True:
-                _fail('script_reverse_admission_required')
+                _fail('reverse_admission_required')
             result['restore_attempted'] = True
         return result
 
@@ -614,9 +616,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         from .controlled_powercalc_composition import ControlledPowercalcComposition
         composition = _composition(self)
         if type(composition) is ControlledPowercalcComposition:
-            from .controlled_powercalc_setup_receipts import validate_handoff
-            validate_handoff(self, payload.get('controlled_powercalc_handoff'),
-                             payload['binding']['direction'])
+            from .controlled_powercalc_setup_receipts import validate_registry_handoff
+            validate_registry_handoff(self, payload.get('controlled_powercalc_handoff'), payload['binding'])
         elif payload.get('controlled_powercalc_handoff') is not None:
             _fail('foreign_controlled_powercalc_handoff')
         from .native_helper_placeholder_receipts import validate_placeholder_receipt

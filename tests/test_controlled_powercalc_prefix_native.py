@@ -2,6 +2,8 @@
 import asyncio
 import importlib
 import json
+import os
+import shutil
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -21,6 +23,24 @@ class ControlledPowercalcPrefixTests(ControlledActualGraphTests):
         await self.test_two_entry_confirmed_prefix_fresh_inspect_and_inverse()
 
     async def test_two_entry_confirmed_prefix_fresh_inspect_and_inverse(self):
+        try:
+            await self._confirmed_prefix_scenario()
+        finally:
+            # Preserve the actual native journal and sidecars before fixture
+            # cleanup, including failed or cancelled scenarios. Local-only.
+            evidence = os.environ.get('RENAMER_BATCH_EVIDENCE')
+            if evidence and hasattr(self, 'f'):
+                storage = self.f.root / '.storage'
+                target = Path(evidence) / 'prefix-storage'
+                if storage.is_dir():
+                    target.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    for source in storage.iterdir():
+                        if source.is_file() and 'renamer' in source.name:
+                            destination = target / source.name
+                            shutil.copyfile(source, destination)
+                            destination.chmod(0o600)
+
+    async def _confirmed_prefix_scenario(self):
         from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
         from homeassistant.core import State
         from ordinary_network_scope import native_dummy_mdns

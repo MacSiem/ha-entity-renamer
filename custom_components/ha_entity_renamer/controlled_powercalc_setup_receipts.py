@@ -119,6 +119,52 @@ def validate_handoff(chain, reference, direction):
     return handoff
 
 
+
+def validate_registry_handoff(chain, reference, binding):
+    """Validate the forward handoff reused by a claimed prefix compensation.
+
+    The original unload and store inverse have separate durable receipts.  A
+    rollback can use this lineage only for an actually acknowledged registry
+    prefix; this never authorizes a pending or uncertain forward effect.
+    """
+    direction = binding['direction']
+    if direction != 'rollback':
+        return validate_handoff(chain, reference, direction)
+    reverse_key = _event_id(['controlled_pc_population', chain.root_id, 'rollback', 'receipt'])
+    if reference and reference[0] == reverse_key:
+        return validate_handoff(chain, reference, direction)
+    handoff = validate_handoff(chain, reference, 'forward')
+    key = _event_id(['controlled_pc_prefix_store_inverse', chain.root_id, 'receipt'])
+    receipt = chain.store.read(key)
+    _need(receipt is not None and receipt['digest'] == _digest(receipt['payload']))
+    value = receipt['payload']
+    intent_key = _event_id(['controlled_pc_prefix_store_inverse', chain.root_id, 'intent'])
+    intent = chain.store.read(intent_key)
+    _need(intent is not None and intent['digest'] == _digest(intent['payload'])
+          and value.get('kind') == 'controlled_powercalc_prefix_store_inverse_receipt'
+          and value.get('schema') == 1 and value.get('root') == chain.root_id
+          and value.get('intent') == [intent_key, intent['digest']])
+    claim = intent['payload']
+    positions = chain._setup_positions.get(claim.get('source_head'))
+    count = len(positions) if type(positions) is dict else 0
+    _need(claim.get('kind') == 'controlled_powercalc_prefix_store_inverse_intent'
+          and claim.get('schema') == 1 and claim.get('root') == chain.root_id
+          and claim.get('operation_id') == chain.operation_id
+          and claim.get('fingerprint') == chain.plan.fingerprint
+          and claim.get('handoff') == reference and value.get('source_head') == claim.get('source_head')
+          and 0 < count < len(chain.plan.steps)
+          and positions == {index: 'forward' for index in range(count)}
+          and all(chain.plan.steps[index].adapter == 'registry' for index in range(count))
+          and binding.get('restore_attempted') is True
+          and binding.get('direction') == 'rollback'
+          and binding.get('status') == 'rolling_back'
+          and type(binding.get('index')) is int and 0 <= binding['index'] < count
+          and len(binding.get('phases', ())) == len(chain.plan.steps)
+          and all(binding['phases'][index] in ('verified', 'undone', 'undo_intent')
+                  for index in range(count))
+          and all(phase == 'pending' for phase in binding['phases'][count:]))
+    return handoff
+
 def validate_controlled_setup(chain, payload, change):
     from .controlled_powercalc_composition import ControlledPowercalcComposition
     from .native_template_state_yaml import PreparedMixedPowercalcYAML, assert_state_yaml_composition

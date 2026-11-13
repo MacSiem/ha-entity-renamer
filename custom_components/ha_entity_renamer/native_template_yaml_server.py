@@ -758,7 +758,9 @@ class NativeTemplateYAMLServer:
             record = await obj.journal.load(operation_id)
             obj._scope()
             from .native_template_state_server import _acknowledged_registry_prefix
-            obj.prefix_recovery = _acknowledged_registry_prefix(record)
+            from .native_template_prefix_recovery import acknowledged_powercalc_registry_prefix
+            obj.powercalc_prefix_recovery = acknowledged_powercalc_registry_prefix(record)
+            obj.prefix_recovery = _acknowledged_registry_prefix(record) or obj.powercalc_prefix_recovery
             from .native_template_prefix_recovery import complete_forward_unknown, complete_forward_unknown_scope
             obj.complete_unknown_recovery = complete_forward_unknown(record)
             # Routing shape only. The actual original composition and full
@@ -780,13 +782,21 @@ class NativeTemplateYAMLServer:
                   'terminal_or_acknowledged_prefix_required')
             obj.operation_id, obj.plan, obj.record = operation_id, record.plan, record
             baseline, obj.composition = obj.preparations.resolve_composition(obj.plan.native_inputs)
+            from .controlled_powercalc_composition import ControlledPowercalcComposition
+            obj.powercalc_prefix_recovery = (obj.powercalc_prefix_recovery
+                and type(obj.composition) is ControlledPowercalcComposition)
+            obj.prefix_recovery = _acknowledged_registry_prefix(record) or obj.powercalc_prefix_recovery
             if obj.prefix_recovery or obj.complete_unknown_recovery:
                 from .native_template_state_composition import TemplateStateComposition
                 from .native_template_state_server import NativeTemplateStateServer
                 from .native_script_program_composition import ScriptTemplateStateComposition
                 from .native_automation_program_composition import AutomationTemplateStateComposition
+                from .controlled_powercalc_composition import ControlledPowercalcComposition
                 _need(cls is NativeTemplateStateServer
-                      and type(obj.composition) in (TemplateStateComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition),
+                      and type(obj.composition) in (TemplateStateComposition, ScriptTemplateStateComposition,
+                          AutomationTemplateStateComposition, ControlledPowercalcComposition)
+                      and (not obj.powercalc_prefix_recovery
+                           or type(obj.composition) is ControlledPowercalcComposition),
                       'prefix_profile_unsupported')
             obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
             obj.digests = dict(obj.composition.prepared_digests)
@@ -822,7 +832,7 @@ class NativeTemplateYAMLServer:
                 consumer_type = MixedYAMLConsumers
             obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope,
                 _powercalc_energy=energy[0] if energy else None, _dashboard_effects=dashboard_plan,
-                _powercalc_reverse=is_powercalc and not restored)
+                _powercalc_reverse=is_powercalc and not restored and not obj.powercalc_prefix_recovery)
             obj.consumers.allow_controlled_reload = _controlled_reload(obj.composition)
             from .native_automation_program_composition import AutomationTemplateStateComposition
             if type(obj.composition) is AutomationTemplateStateComposition:
@@ -836,7 +846,16 @@ class NativeTemplateYAMLServer:
                                                    obj.receipt, obj.digests)
             _need(not readonly.writable and readonly.active is None, 'readonly_required')
             obj.chain = readonly
-            if is_powercalc:
+            if is_powercalc and obj.powercalc_prefix_recovery:
+                # Minimal supported prefix: the completed registry effects are
+                # ordinary sources. Powercalc producer IDs remain ORIGINAL.
+                from .controlled_powercalc_population import PowercalcPopulation
+                count = record.phases.count('verified')
+                _need(all(change.kind == 'entity' and change.before.get('platform') != 'powercalc'
+                          for change in obj.registry_changes[:count]), 'prefix_producer_effect_unsupported')
+                obj.powercalc_population = PowercalcPopulation((),
+                    tuple(sorted(row[0] for row in obj.composition.population)), obj.composition.population)
+            if is_powercalc and not obj.powercalc_prefix_recovery:
                 if not restored:
                     from .controlled_powercalc_cold_registry import qualify_projection, _costs
                     from .native_discovery_inputs import async_observe_discovery_inputs, assert_discovery_managers_current
@@ -898,7 +917,7 @@ class NativeTemplateYAMLServer:
             obj._install()
             # Runtime automation/script sources must also match SAME ORIGINAL.
             # Only accepted physical state differs; no replacement receipt is made.
-            await obj._bind_accepted_sources(rollback=restored)
+            await obj._bind_accepted_sources(rollback=restored or obj.powercalc_prefix_recovery)
             async def admit():
                 if obj.prefix_recovery:
                     await obj._prefix_current(record)
@@ -1124,12 +1143,21 @@ class NativeTemplateYAMLServer:
             self.automation_lifecycle = NativeAutomationLifecycle(self, 'rollback')
             self.observer.automation_lifecycle = self.automation_lifecycle
             await self.automation_lifecycle.start()
+        if getattr(self, 'powercalc_prefix_recovery', False):
+            from .controlled_powercalc_prefix_store_inverse import restore_prefix_stores
+            reader = RegistryReceiptChain.reopen(self.receipt_store, self.operation_id,
+                self.plan, self.receipt, self.digests)
+            self.prefix_store_receipt = await restore_prefix_stores(self.hass, self.runtime,
+                self.journal, self.record, reader, guard=self._scope, refresh=self.refresh)
         result = await self._coordinator().rollback(self.operation_id)
         self._scope()
         _need(result.status == 'rolled_back', 'rollback_unresolved')
         if hasattr(self, 'automation_lifecycle'):
             await self.automation_lifecycle.restore()
-        await self._terminal(result, rollback=True)
+        if getattr(self, 'powercalc_prefix_recovery', False):
+            await self._common(True)
+        else:
+            await self._terminal(result, rollback=True)
         if hasattr(self, 'automation_lifecycle'):
             await self.automation_lifecycle.complete(result)
         return result

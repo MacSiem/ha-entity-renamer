@@ -597,12 +597,14 @@ class RecoveryController:
                 return _result(operation_id, fingerprint, 'UNKNOWN',
                     'restore_attempt_unresolved' if record.restore_attempted is True else 'legacy_restore_unproven')
             from .native_template_prefix_recovery import acknowledged_registry_prefix
-            prefix = acknowledged_registry_prefix(record)
+            from .native_template_prefix_recovery import acknowledged_powercalc_registry_prefix
+            prefix = (acknowledged_registry_prefix(record)
+                      or controlled_powercalc and acknowledged_powercalc_registry_prefix(record))
             from .native_template_prefix_recovery import complete_forward_unknown
             uncertain_complete = complete_forward_unknown(record)
             terminal = (record.status == 'applied' and record.direction == 'forward'
                         and record.phases == ('verified',) * len(record.plan.steps))
-            if _dashboard_yaml_plan(record) and not terminal:
+            if _dashboard_yaml_plan(record) and not terminal and not (controlled_powercalc and prefix):
                 return _result(operation_id, fingerprint, 'UNKNOWN', 'unsupported_recovery_state')
             if not terminal and not prefix and not uncertain_complete:
                 return _result(operation_id, fingerprint, 'UNKNOWN', 'unsupported_recovery_state')
