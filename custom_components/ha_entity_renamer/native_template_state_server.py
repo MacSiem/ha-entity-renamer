@@ -419,6 +419,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             if bundle.external_source_proof != tuple((domain, True) for domain in ('homekit', 'utility_meter')
                                                      if domain in external_domains):
                 raise homekit_refusal or utility_refusal
+            # Keep this profile fenced until the end-to-end lifecycle is qualified.
+            raise homekit_refusal or utility_refusal
         elif external_domains:
             raise Refused('external_yaml_native_consumer_unbound')
         selected_owners = [row for row in source_rows if row.get('entity_id') in self.mapping
