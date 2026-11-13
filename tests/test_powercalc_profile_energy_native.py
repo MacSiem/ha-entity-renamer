@@ -489,7 +489,7 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         @callback
         def published(event):
             row = event.data.get('new_state')
-            if watch and row is not None:
+            if watch and row is not None and row.state not in ('unknown', 'unavailable'):
                 first.setdefault(row.entity_id, row.state)
 
         remove = hass.bus.async_listen('state_changed', published)
@@ -534,7 +534,7 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
                 'reason': None if record is None else record.reason,
                 'phases': None if record is None else record.phases,
                 'trace': list(dict.fromkeys(trace))[-40:]}), flush=True)
-            raise error
+            raise
         finally:
             watch = False
             monitor.set_events(tool, 0)
