@@ -392,11 +392,15 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             bind_source_consumer(discovered, plans)
             self._scope()
         root = Path(self.hass.config.config_dir).resolve()
+        provisional_homekit = ()
+        if mixed_powercalc and homekit_plans:
+            from .helper_transaction import prepare_helper
+            provisional_homekit = tuple(prepare_helper(item.before, self.mapping) for item in homekit_plans)
         if mixed_powercalc:
             pc_candidate = build_candidate(pc_original, self.mapping, __version__,
                 None if pc_energy is None else (energy_raw, pc_energy), mixed=True,
                 source_id=pc_source, entity_names=self.entity_names, device_names=self.device_names,
-                template_entry=entry_change,
+                template_entry=entry_change, homekit_entries=provisional_homekit,
                 owned_script=None if not owned_script else (owned_script[0], inventory.default_name))
         yaml = await _drained(self.hass.async_add_executor_job,
             lambda: plan_yaml(root, self.mapping, owned_script_services=owned_script,
@@ -647,6 +651,9 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                     self.homekit_yaml_binding = await HomeKitYAMLBinding.capture(
                         self.hass, self.mapping, self.receipt, proofs, guard=self._scope)
                     homekit_changes = prepare_entries(self.homekit_yaml_binding)
+                    _need(not mixed_powercalc or (len(homekit_changes) == len(provisional_homekit)
+                          and all(item in provisional_homekit for item in homekit_changes)),
+                          'homekit_candidate_preparation_changed')
                     from .native_helper_lifecycle import native_helper_lifecycle_store
                     self.homekit_lifecycle_store = native_helper_lifecycle_store(self.hass, self.preparations)
                     await self.homekit_lifecycle_store.initialize()
