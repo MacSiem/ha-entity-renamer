@@ -108,6 +108,16 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
                         snapshot.get('statistic_ids'),
                         sorted(v['id'] for v in metadata.get('statistics', {}).values())))
         monitor.register_callback(slot, monitor.events.RAISE, trace)
+        from homeassistant.components.template.binary_sensor import StateBinarySensorEntity
+        delay_events = []
+        def state_start(code, offset):
+            local = sys._getframe(1).f_locals
+            if local.get('self') is binary:
+                delay_events.append((local.get('result'), hass.loop.time(),
+                    None if binary._delay_cancel is None else binary._delay_cancel.__self__.when(),
+                    str(hass.states.get(leaf)), str(hass.states.get(mapping[leaf]))))
+        monitor.register_callback(slot, monitor.events.PY_START, state_start)
+        monitor.set_local_events(slot, StateBinarySensorEntity._update_state.__code__, monitor.events.PY_START)
         monitor.set_events(slot, monitor.events.RAISE)
         try:
             result = await runtime.native_yaml_apply(hass, op, fingerprint, actor_id='p2-fixture',
@@ -116,10 +126,12 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
             self.fail(f'{error}: {reasons[-25:]}')
         finally:
             monitor.set_events(slot, 0)
+            monitor.set_local_events(slot, StateBinarySensorEntity._update_state.__code__, 0)
+            monitor.register_callback(slot, monitor.events.PY_START, None)
             monitor.register_callback(slot, monitor.events.RAISE, None)
             monitor.free_tool_id(slot)
         self.assertEqual(result['state'], 'applied')
-        self.assertIs(binary._delay_cancel, token)
+        self.assertIs(binary._delay_cancel, token, delay_events)
         self.assertEqual(token.__self__.when(), deadline)
         self.assertIs(rows['p2_foreign'], foreign)
         self.assertEqual({e.unique_id: e.registry_entry.id for e in (sensor, binary, switch, foreign)}, ids)
