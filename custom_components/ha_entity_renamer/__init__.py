@@ -34,7 +34,7 @@ def _yaml_factory_for_plan(preparations, plan):
     if profile == 'powercalc_source_own_binding_v1':
         from .powercalc_public_server import PowercalcPublicServer
         return PowercalcPublicServer
-    if profile in ('template_state_binding_v3', 'template_mixed_state_binding_v1', 'template_controlled_reload_v1', 'template_controlled_reload_entry_v1', 'template_controlled_script_reload_v1', 'template_script_prefix_binding_v1', 'template_automation_prefix_binding_v1', 'template_controlled_powercalc_v1'):
+    if profile in ('template_state_binding_v3', 'template_mixed_state_binding_v1', 'template_external_state_binding_v1', 'template_controlled_reload_v1', 'template_controlled_reload_entry_v1', 'template_controlled_script_reload_v1', 'template_script_prefix_binding_v1', 'template_automation_prefix_binding_v1', 'template_controlled_powercalc_v1'):
         return NativeTemplateStateServer
     if profile == 'template_numeric_entry_reverse_v1' and plan.required_scopes == ('registry', 'helpers'):
         from .native_template_forward import NativeTemplateForward
