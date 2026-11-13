@@ -140,7 +140,19 @@ class ControlledPowercalcPrefixTests(ControlledActualGraphTests):
             self.assertEqual(await runtime.journal.load(op), claimed)
             self.assertEqual(self.package.read_bytes(), package)
             return
-        inspected = await runtime.recovery_inspect(hass, op, fingerprint, guard=lambda: None, refresh=refresh)
+        server = self.module('native_template_state_server').NativeTemplateStateServer
+        bind = server.bind_reverse.__func__
+        bind_failures = []
+        async def diagnose_bind(cls, *args, **kwargs):
+            try:
+                return await bind(cls, *args, **kwargs)
+            except Exception as error:
+                bind_failures.append(error)
+                raise
+        with patch.object(server, 'bind_reverse', classmethod(diagnose_bind)):
+            inspected = await runtime.recovery_inspect(hass, op, fingerprint, guard=lambda: None, refresh=refresh)
+        if bind_failures:
+            raise bind_failures[0]
         self.assertEqual((inspected['state'], inspected['eligible']), ('recoverable_prefix', True), inspected)
         self.assertEqual(await runtime.journal.load(op), record)
         registry_adapter = self.module('native_registry_transaction').ReceiptedRegistryTransactionAdapter
