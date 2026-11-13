@@ -12,6 +12,9 @@ const { chromium } = require('playwright');
       access_token:access, token_type:'Bearer', expires_in:1800, expires:Date.now()+1700000,
       hassUrl:origin, clientId:origin+'/'})), {access, origin});
     const page = await context.newPage();
+    const responses=[], messages=[];
+    page.on('response', r => { const u=new URL(r.url()); if(u.origin===origin) responses.push([u.pathname,r.status()]); });
+    page.on('console', message => { if(message.type()==='error') messages.push(message.text()); });
     await page.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await page.goto(origin+'/p3-test/0', {waitUntil:'domcontentloaded'});
     try { await page.locator('hui-button-card').first().waitFor({state:'attached',timeout:30000}); }
@@ -26,8 +29,13 @@ const { chromium } = require('playwright');
       fs.writeFileSync('/qa/diagnostic.json', JSON.stringify(diagnostic));
       await page.screenshot({path:'/qa/diagnostic.png'}); throw error;
     }
-    await page.locator('button-card').first().waitFor({state:'attached',timeout:30000});
-    await page.locator('bubble-card').first().waitFor({state:'attached',timeout:30000});
+    try {
+      await page.locator('button-card').first().waitFor({state:'attached',timeout:30000});
+      await page.locator('bubble-card').first().waitFor({state:'attached',timeout:30000});
+    } catch(error) {
+      fs.writeFileSync('/qa/resources-diagnostic.json', JSON.stringify({responses,messages}));
+      await page.screenshot({path:'/qa/resources-diagnostic.png'}); throw error;
+    }
     await page.waitForFunction(source => document.querySelector('home-assistant')?.hass?.states?.[source],req.source);
     const before = await page.evaluate(() => {
       function find(root, tag) { for (const el of root.querySelectorAll('*')) {
