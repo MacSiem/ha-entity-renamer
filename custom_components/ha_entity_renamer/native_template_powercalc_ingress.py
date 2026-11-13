@@ -161,26 +161,40 @@ class PowercalcTemplateIngress:
         _need(self.error is None, 'powercalc_template_ingress_callback_failed')
 
     def close(self):
+        errors = []
+
+        def attempt(operation):
+            try:
+                operation()
+            except BaseException as error:
+                errors.append(error)
+
         try:
             for filtered, original, wrapper, original_jobs in reversed(self.rows):
-                _need(filtered._action is wrapper, 'powercalc_template_ingress_replaced')
-                jobs = NativeTemplateRenameIngress.native_jobs(self.hass, self.event, filtered, wrapper)
-                _need(all(job.target is wrapper for job in original_jobs),
-                      'powercalc_template_ingress_original_job_changed')
-                filtered._action = original
-                for job in (*original_jobs, *jobs):
-                    job.target = original
+                def restore():
+                    _need(filtered._action is wrapper, 'powercalc_template_ingress_replaced')
+                    jobs = NativeTemplateRenameIngress.native_jobs(self.hass, self.event, filtered, wrapper)
+                    _need(all(job.target is wrapper for job in original_jobs),
+                          'powercalc_template_ingress_original_job_changed')
+                    filtered._action = original
+                    for job in (*original_jobs, *jobs):
+                        job.target = original
+                attempt(restore)
             self.rows.clear()
             pending, self.pending = self.pending, {}
             for original, event, _ in pending.values():
-                original(event)
+                attempt(lambda: original(event))
             from .native_unload_code_proof import unchanged
-            unchanged(self.refs, self.methods, self.codes)
-            _need(self.error is None, 'powercalc_template_ingress_callback_failed')
+            attempt(lambda: unchanged(self.refs, self.methods, self.codes))
+            attempt(lambda: _need(self.error is None, 'powercalc_template_ingress_callback_failed'))
         finally:
             if self.monitor_slot is not None:
                 from homeassistant.core import EventBus
-                self.monitor.set_local_events(self.monitor_slot, EventBus.async_fire_internal.__code__, 0)
-                self.monitor.register_callback(self.monitor_slot, self.monitor.events.PY_START, None)
-                self.monitor.free_tool_id(self.monitor_slot)
+                attempt(lambda: self.monitor.set_local_events(self.monitor_slot, EventBus.async_fire_internal.__code__, 0))
+                attempt(lambda: self.monitor.register_callback(self.monitor_slot, self.monitor.events.PY_START, None))
+                attempt(lambda: self.monitor.free_tool_id(self.monitor_slot))
                 self.monitor_slot = None
+        if errors:
+            for error in errors[1:]:
+                errors[0].add_note(f'Additional ingress cleanup error: {error!r}')
+            raise errors[0]
