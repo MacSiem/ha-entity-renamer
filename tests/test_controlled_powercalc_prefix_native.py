@@ -62,6 +62,20 @@ class ControlledPowercalcPrefixTests(ControlledActualGraphTests):
         self.assertEqual(record.phases[0], 'verified')
         self.assertTrue(all(phase == 'pending' for phase in record.phases[1:]))
         self.assertEqual(self.package.read_bytes(), package)
+        preparations = self.module('prepared').native_prepared_store(hass)
+        await preparations.initialize()
+        receipts = self.module('native_registry_receipts')
+        store = receipts.native_registry_receipt_store(hass, preparations)
+        await store.initialize()
+        baseline, composition = preparations.resolve_composition(record.plan.native_inputs)
+        chain = receipts.RegistryReceiptChain.reopen(store, op, record.plan, baseline.receipt,
+                                                     dict(composition.prepared_digests))
+        before_inspection = await runtime.journal.load(op)
+        async with runtime.operation_lock:
+            observed = await self.module('controlled_powercalc_prefix_readback').observe_inactive_prefix(
+                hass, chain, record, guard=lambda: self.assertTrue(runtime.operation_lock.locked()))
+        self.assertTrue(observed['handoff_digest'])
+        self.assertEqual(await runtime.journal.load(op), before_inspection)
         inspected = await runtime.recovery_inspect(hass, op, fingerprint, guard=lambda: None, refresh=refresh)
         self.assertEqual((inspected['state'], inspected['eligible']), ('recoverable_prefix', True), inspected)
         self.assertEqual(await runtime.journal.load(op), record)
