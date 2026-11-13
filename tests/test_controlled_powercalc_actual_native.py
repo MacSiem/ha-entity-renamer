@@ -20,6 +20,10 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
     remote_bytes = actual.ActualProfileGraphNativeTests.remote_bytes
     write_package = actual.ActualProfileGraphNativeTests.write_package
 
+    async def _startup_services(self, hass, root):
+        self.with_yaml = True
+        await cold.receipted.NativeReceiptedHelperTests._before_start(self, hass, root)
+
     async def _before_loader(self, hass, root):
         await super()._before_loader(hass, root)
         target = self.installed_component / 'www/ha-entity-renamer.js'
