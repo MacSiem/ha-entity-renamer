@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from hashlib import sha256
+from pathlib import Path
 
 from .helper_native import read_entry
 from .helper_plan import plan_helper, snapshot_equal
@@ -35,7 +37,7 @@ class NativeHomeKitHelperObservers:
                   for p in mapping_proof), 'registry_identity')
         obj = cls()
         obj.hass, obj.mapping, obj.proofs = hass, mapping, tuple(mapping_proof)
-        obj.before, obj.after, obj.identities = {}, {}, {}
+        obj.before, obj.after, obj.identities, obj.pairing_files = {}, {}, {}, {}
         obj.entry_ids = frozenset(entry.entry_id for entry in hass.config_entries.async_entries())
         for snapshot in snapshots:
             _need(snapshot['domain'] == 'homekit' and snapshot['identity']['source'] == 'import'
@@ -51,6 +53,10 @@ class NativeHomeKitHelperObservers:
             _need(entry is not None and entry.state.value == 'loaded', 'not_loaded')
             obj.before[key], obj.after[key] = deepcopy(snapshot), deepcopy(plan.after)
             obj.identities[key] = _bridge_identity(entry)
+            from homeassistant.components.homekit.util import get_persist_fullpath_for_entry_id
+            path = Path(get_persist_fullpath_for_entry_id(hass, key))
+            _need(path.is_file() and not path.is_symlink(), 'pairing_store_unavailable')
+            obj.pairing_files[key] = (path, sha256(path.read_bytes()).hexdigest())
         obj.lease = activation_lease
         return obj
 
@@ -73,12 +79,13 @@ class NativeHomeKitHelperObservers:
         key = snapshot['identity']['entry_id']
         entry = self.hass.config_entries.async_get_entry(key)
         _need(entry is not None and entry.state.value in ('loaded', 'not_loaded')
-              and snapshot_equal(read_entry(self.hass, key), snapshot)
-              and _bridge_identity(entry) == self.identities[key], 'bridge_identity')
+              and snapshot_equal(read_entry(self.hass, key), snapshot), 'bridge_identity')
         if entry.state.value == 'not_loaded':
-            from homeassistant.components.homekit.const import STATUS_STOPPED
-            _need(entry.runtime_data.homekit.status == STATUS_STOPPED, 'bridge_not_stopped')
+            path, digest = self.pairing_files[key]
+            _need(path.is_file() and not path.is_symlink() and sha256(path.read_bytes()).hexdigest() == digest,
+                  'pairing_store_changed')
             return True
+        _need(_bridge_identity(entry) == self.identities[key], 'bridge_identity')
         native = entry.runtime_data.homekit._filter.get_filter()
         expected = FILTER_SCHEMA(snapshot['options'].get('filter', {})).get_filter()
         _need(all(native(entity_id) == expected(entity_id)
