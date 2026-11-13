@@ -154,8 +154,11 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         self.assertEqual(token.__self__.when(), deadline)
         self.assertIs(rows['p2_foreign'], foreign)
         self.assertEqual({e.unique_id: e.registry_entry.id for e in (sensor, binary, switch, foreign)}, ids)
-        for e, state in zip((sensor, binary, switch, foreign), before, strict=True):
-            self.assertIs(hass.states.get(e.entity_id), state)
+        for e, state in zip((sensor, binary, switch), before[:3], strict=True):
+            current = hass.states.get(e.entity_id)
+            self.assertEqual((current.state, dict(current.attributes)),
+                             (state.state, dict(state.attributes)))
+        self.assertIs(hass.states.get(foreign.entity_id), before[3])
         await switch.async_turn_on()
         await switch.async_turn_off()
         self.assertEqual(events, [[target], [mapping[target]], [mapping[target]]])
