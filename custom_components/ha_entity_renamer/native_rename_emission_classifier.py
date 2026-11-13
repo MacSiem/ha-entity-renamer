@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import dis
 from enum import EnumType
 from functools import partial
+import hashlib
 import inspect
 import math
 from pathlib import Path
@@ -91,9 +92,35 @@ def _call_offsets(method, attribute, *, forced=False, first_argument=None, occur
     return offsets
 
 
-def _audit(root, pins, refs, edges):
-    methods, codes = prove_methods(Path(root).resolve().parent, pins, list(refs.values()))
-    methods, codes = dict(zip(refs, methods, strict=True)), dict(zip(refs, codes, strict=True))
+def _audit(root, pins, refs, edges, inplace_core=False):
+    native_root = Path(root).resolve().parent
+    ordinary_refs = {key: value for key, value in refs.items()
+                     if not (inplace_core and key == 'registry_writer')}
+    methods, codes = prove_methods(native_root, pins, list(ordinary_refs.values()))
+    methods, codes = dict(zip(ordinary_refs, methods, strict=True)), dict(zip(ordinary_refs, codes, strict=True))
+    wrapper = None
+    if inplace_core:
+        # Core 11 wraps this method in its event-loop check. Prove both the
+        # original registry implementation and the actual closure-bound wrapper.
+        from .native_code_cache import compiled_code_objects
+        owner, name = refs['registry_writer']
+        wrapper = getattr(owner, name)
+        inner = getattr(wrapper, '__wrapped__', None)
+        code = getattr(inner, '__code__', None)
+        wrapper_code = getattr(wrapper, '__code__', None)
+        _need(code is not None and wrapper_code is not None, 'registry_wrapper_required')
+        for relative, actual, qualifier in (
+                ('helpers/entity_registry.py', code, 'EntityRegistry._async_update_entity'),
+                ('core.py', wrapper_code, 'verify_event_loop_thread.<locals>.decorator.<locals>.wrapper')):
+            path = native_root / relative
+            raw = path.read_bytes()
+            _need(path.resolve() == path and hashlib.sha256(raw).hexdigest() == pins[relative]
+                  and actual.co_filename == str(path)
+                  and any(item == actual and item.co_qualname == qualifier
+                          for item in compiled_code_objects(raw, str(path), sys.flags.optimize)),
+                  'registry_wrapper_code_unqualified')
+        _check_registry_wrapper(wrapper, inner, wrapper_code)
+        methods['registry_writer'], codes['registry_writer'] = inner, code
     sites = {name: _call_offsets(methods[parent], attribute, forced=forced,
                 first_argument=('EVENT_STATE_CHANGED' if name in ('remove_fire', 'set_fire') else
                                 'old_entity_id' if name == 'source_inplace_remove' else None),
@@ -104,7 +131,15 @@ def _audit(root, pins, refs, edges):
     globals_ = {key: (method.__globals__, tuple((name, method.__globals__[name])
                 for name in codes[key].co_names if name in method.__globals__))
                 for key, method in methods.items()}
-    return methods, codes, sites, globals_
+    return methods, codes, sites, globals_, ordinary_refs, wrapper
+
+
+def _check_registry_wrapper(wrapper, inner, code):
+    _need(getattr(wrapper, '__code__', None) is code and getattr(wrapper, '__wrapped__', None) is inner
+          and type(getattr(wrapper, '__closure__', None)) is tuple, 'registry_wrapper_changed')
+    cells = dict(zip(code.co_freevars, (cell.cell_contents for cell in wrapper.__closure__), strict=True))
+    _need(cells.get('func') is inner and cells.get('what') == 'entity_registry.async_update_entity'
+          and cells.get('first_parameter') == 'self', 'registry_wrapper_binding_changed')
 
 
 @dataclass(frozen=True)
@@ -460,8 +495,10 @@ class NativeRenameEmissions:
             self.refs['automation_action'] = (AutomationEntity, '_async_trigger_if_enabled')
             self.refs['automation_run'] = (AutomationEntity, 'async_trigger')
             self.refs['script_run'] = (Script, 'async_run')
-        self.methods, self.codes, self.sites, self.globals = await self.hass.async_add_executor_job(
-            _audit, homeassistant.__file__, pins, self.refs, edges)
+        (self.methods, self.codes, self.sites, self.globals, self.audit_refs,
+         self.registry_wrapper) = await self.hass.async_add_executor_job(
+            _audit, homeassistant.__file__, pins, self.refs, edges, self.inplace_core)
+        self.registry_wrapper_code = None if self.registry_wrapper is None else self.registry_wrapper.__code__
         if source_handoff is not None:
             from .native_source_handoff import NativeSourceHandoff
             self.handoff_methods = (NativeSourceHandoff.mutate, NativeSourceHandoff._native_check)
@@ -522,9 +559,13 @@ class NativeRenameEmissions:
     def _native_check(self):
         _need(vars(self.const).get('EntityStateAttribute') is self.attribute_key,
               'native_attribute_key_changed')
-        unchanged(list(self.refs.values()), tuple(self.methods.values()), tuple(self.codes.values()))
+        unchanged(list(self.audit_refs.values()), tuple(self.methods[key] for key in self.audit_refs),
+                  tuple(self.codes[key] for key in self.audit_refs))
         if self.inplace_core:
             from homeassistant.helpers import entity as entity_module
+            owner, name = self.refs['registry_writer']
+            _need(getattr(owner, name) is self.registry_wrapper, 'registry_wrapper_changed')
+            _check_registry_wrapper(self.registry_wrapper, self.methods['registry_writer'], self.registry_wrapper_code)
             unchanged(self.readd_refs, self.readd_methods, self.readd_codes)
             _need(entity_module._ADD_REMOVE_METHODS == ('async_prepare_to_add_to_hass',
                   'async_added_to_hass', 'async_will_remove_from_hass')
@@ -661,6 +702,14 @@ class NativeRenameEmissions:
                 and self.registry.async_get(self.target_id) is values.get('new')):
             return False
         frame = frame.f_back
+        if self.inplace_core:
+            if not (frame is not None and frame.f_code is self.registry_wrapper_code
+                    and frame.f_globals is self.registry_wrapper.__globals__
+                    and frame.f_locals.get('func') is self.methods['registry_writer']
+                    and type(frame.f_locals.get('args')) is tuple
+                    and frame.f_locals['args'] and frame.f_locals['args'][0] is self.registry):
+                return False
+            frame = frame.f_back
         if not self.script_suggested_move:
             if not self._frame(frame, 'registry_update', self.registry):
                 return False

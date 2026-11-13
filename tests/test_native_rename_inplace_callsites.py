@@ -3,7 +3,7 @@ import dis
 import unittest
 
 from custom_components.ha_entity_renamer.native_rename_emission_classifier import (
-    NativeRenameEmissionError, _call_offsets,
+    NativeRenameEmissionError, _call_offsets, _check_registry_wrapper,
 )
 
 
@@ -30,3 +30,19 @@ class InplaceCallsitesTest(unittest.TestCase):
         self.assertEqual(len(calls & last), 1)
         self.assertEqual(len(calls & first), 1)
         self.assertEqual(len(calls & removed), 1)
+
+    def test_registry_wrapper_must_keep_the_authenticated_inner_function(self):
+        def writer(*args):
+            return args
+        def make_wrapper(func):
+            first_parameter = 'self'
+            what = 'entity_registry.async_update_entity'
+            def wrapper(*args, **kwargs):
+                return func(first_parameter, what, *args, **kwargs)
+            wrapper.__wrapped__ = func
+            return wrapper
+        wrapper = make_wrapper(writer)
+        _check_registry_wrapper(wrapper, writer, wrapper.__code__)
+        wrapper.__wrapped__ = lambda: None
+        with self.assertRaises(NativeRenameEmissionError):
+            _check_registry_wrapper(wrapper, writer, wrapper.__code__)
