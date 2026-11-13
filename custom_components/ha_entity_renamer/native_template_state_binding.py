@@ -493,7 +493,7 @@ def _graph(runtime, entity):
 def sample_state_bindings(runtime, program, prefix, yaml_position, documents, *, entry_witness=None):
     """Synchronous actual full inventory and native-config bijection sample."""
     from homeassistant.helpers import entity_platform as ep, entity_registry as er
-    from homeassistant.components import template as component
+    from .native_template_consumers import native_coordinators
     from .native_utility_unload_audit import _row
     native, hass = runtime.native, runtime.native.hass
     _need(type(program) is StateConfigProgram and type(prefix) is StateBindingPrefix
@@ -603,7 +603,7 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents, *,
     expected_unsupported = {(r[0], r[1]) for r in unsupported if r[0] != 'template.trigger'}
     _need(matched == set(expected) | expected_unsupported,
           'template_state_full_population_changed')
-    coordinators = hass.data.get(component.DATA_COORDINATORS, ())
+    coordinators = native_coordinators(hass)
     expected_triggers = [r for r in unsupported if r[0] == 'template.trigger']
     _need(len(coordinators) == len(expected_triggers), 'template_state_coordinator_inventory_changed')
     seen = set()

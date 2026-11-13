@@ -78,6 +78,16 @@ _BINARY_PINS = {
 _PINS['2026.11.0'] = {'components/template/__init__.py': '7825d7ed9cac2cc68b841e2f92b2ffdc7fbcf4a920ceaa24c3ed8728b9e132d4', 'components/template/config.py': 'a9b48704ea285990bc0b64c7aa6068b01132f689afcd376292df266df95cf6f0', 'components/template/const.py': 'd4e9815e9b289b3145191c05fa9fce3eccb02b5d8e3bd588e9c5666b05650deb', 'components/template/coordinator.py': '891ea9e02465a391ec9a6a54052a6cb058d27fa5eb3a6ac3daced6b279a40eb4', 'components/template/entity.py': 'b03431e40c9b46995dda5f28e6a78b6f7bf2cd8810887a0a6dd772f7d8048013', 'components/template/helpers.py': '1da6e0b6eb88e8f9ac6f37975aa93345a6429ccba3ae4976014b7e5b6ec011fc', 'components/template/sensor.py': '1ac9fc43f239ea509d349df35bf909abeeaaae4cd8c2fa398cb5701919eb5959', 'components/template/template_entity.py': '112057244c66f84b864c83349786d3ef2c3d5ff073a6985f640948db8489f5fe', 'components/template/trigger_entity.py': 'c8859d37c2401554b4caefab33affad54e8ebff979d990b4540577d2c340f0e4', 'helpers/entity_platform.py': '18014aa32bd7b1f0a80044166d9a88d7250a96120d9a62116de6f13a318121c8', 'helpers/event.py': '35a453cdc015a58ce9e49f2dec4da042babd261930a758eac97a7c2138ba0960', 'helpers/trigger_template_entity.py': '1f9029b673fb03839194a88277a40fd744385a89547825d818de6b0e39771e08'}
 _BINARY_PINS['2026.11.0'] = {'components/template/binary_sensor.py': 'd999778cef40daf158661c2a9c88dae37dff8aacd1af40f2fdac8d013e59f7b8', 'helpers/template/helpers.py': '2f4796b9d35516ab9c39498365d4fcf843ebd3334ac9c1b07000d7811d706c67', 'helpers/config_validation.py': 'ab472221aaac1bb03652ec48f47591580f8f14d0bd0f1e4bc9926bc39b6a6f08'}
 
+
+def native_coordinators(hass):
+    from homeassistant.const import __version__
+    if __version__ == '2026.11.0':
+        from homeassistant.components.template.helpers import DATA_COORDINATORS
+    else:
+        from homeassistant.components.template import DATA_COORDINATORS
+    return hass.data.get(DATA_COORDINATORS, ())
+
+
 class TemplateConsumerError(ValueError):
     pass
 
@@ -583,7 +593,6 @@ def _physical_source_key(semantic, evidence, platform, *, key=None):
 def _sample(native, evidence, observed, *, physical_identities=()):
     from homeassistant.config_entries import ConfigEntry, ConfigEntries
     from homeassistant.helpers import entity_platform as ep, entity_registry as er
-    from homeassistant.components import template as template_component
     from homeassistant.components.template.coordinator import TriggerUpdateCoordinator
     from .native_utility_unload_audit import _row
     hass = native.hass
@@ -683,7 +692,7 @@ def _sample(native, evidence, observed, *, physical_identities=()):
             rows.append(TemplateConsumerRow('entry', row['options'].get('template_type', ''),
                 row['entry_id'], row['entry_id'], reason='entry_inventory_only'))
             tokens.append(('entry', id(entry)))
-    coordinators = hass.data.get(template_component.DATA_COORDINATORS, ())
+    coordinators = native_coordinators(hass)
     _need(type(coordinators) in (list, tuple), 'native_coordinator_inventory_unverified')
     for coordinator in coordinators:
         rows.append(TemplateConsumerRow('coordinator', 'template', None,
