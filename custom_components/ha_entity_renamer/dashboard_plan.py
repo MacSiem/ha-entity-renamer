@@ -57,7 +57,7 @@ def _passive_template(value, mapping):
     # CSS/presentation and source-proven button templates cannot consume an
     # entity ID when neither selected IDs nor dynamic state/target access occur.
     if type(value) is dict:
-        return all(type(k) is str and _passive_template(v, mapping) for k, v in value.items())
+        return all(type(k) is str and _passive_template(k, mapping) and _passive_template(v, mapping) for k, v in value.items())
     if type(value) is list:
         return all(_passive_template(v, mapping) for v in value)
     if type(value) is str:
@@ -69,7 +69,7 @@ def _passive_template(value, mapping):
 
 def _foreign_static(value, mapping):
     if type(value) is dict:
-        return all(type(k) is str and _foreign_static(v, mapping) for k, v in value.items())
+        return all(type(k) is str and _foreign_static(k, mapping) and _foreign_static(v, mapping) for k, v in value.items())
     if type(value) is list:
         return all(_foreign_static(v, mapping) for v in value)
     if type(value) is str:
@@ -242,7 +242,7 @@ def plan_dashboard(config, mapping):
 
     def styles_safe(value, variables):
         if type(value) is dict:
-            return all(type(key) is str and styles_safe(item, variables) for key,item in value.items())
+            return all(type(key) is str and _passive_template(key, mapping) and styles_safe(item, variables) for key,item in value.items())
         if type(value) is list:
             return all(styles_safe(item, variables) for item in value)
         if type(value) is str and '[[[' in value:

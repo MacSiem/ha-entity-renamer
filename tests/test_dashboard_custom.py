@@ -171,3 +171,15 @@ class DashboardStyleSafetyTests(unittest.TestCase):
                 result=plan_dashboard({'views':[{'cards':[{'type':'custom:button-card',**extra}]}]},
                                       {'sensor.old':'sensor.new'})
                 self.assertTrue(result.markers)
+
+
+class ForeignDictionaryKeyTests(unittest.TestCase):
+    def test_selected_source_or_target_as_unknown_key_is_blocked(self):
+        for key in ('sensor.old', 'sensor.new'):
+            for card in ({'type':'custom:mini-graph-card', 'foreign':{key:0}},
+                         {'type':'custom:android-tv-card', 'foreign':{key:0}},
+                         {'type':'custom:button-card', 'styles':{key:0}}):
+                with self.subTest(key=key, kind=card['type']):
+                    result = plan_dashboard({'views':[{'cards':[card]}]}, {'sensor.old':'sensor.new'})
+                    self.assertTrue(result.markers)
+                    self.assertFalse(result.changes)
