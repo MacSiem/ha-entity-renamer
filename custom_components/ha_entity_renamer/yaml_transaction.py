@@ -170,7 +170,7 @@ def _assert_external_state_scope(receipt, *, allow_powercalc=False):
             or any(row[0] == 'template.config_entries' for row in expected) and 'template' not in domains):
         raise ValueError('external_state_scope_required')
     for domain, before, after in expected:
-        if domain != 'template' and (before is None or after is None or before == after):
+        if domain not in ('template', 'powercalc') and (before is None or after is None or before == after):
             raise ValueError('external_state_runtime_required')
         for value in (before, after):
             if value is not None:
