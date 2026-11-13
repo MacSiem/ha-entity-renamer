@@ -420,10 +420,31 @@ class RecoveryController:
                              or _dashboard_yaml_plan(record))):
                     # Snapshot inventory is never full native/source admission.
                     # Only explicit inspect may qualify this terminal plan.
+                    # A HomeKit helper plan additionally requires its durable
+                    # unload AND setup receipts, not just journal=applied.
+                    if 'helpers' in record.plan.required_scopes:
+                        try:
+                            if preparations is None:
+                                preparations = native_prepared_store(self.hass)
+                                await preparations.initialize()
+                                self.check()
+                                store = native_helper_lifecycle_store(self.hass, preparations)
+                                await store.initialize()
+                                self.check()
+                            from .native_homekit_recovery_status import classify
+                            homekit = classify(preparations, store, record)
+                            if homekit is True:
+                                need = False
+                            elif homekit is False:
+                                reason = 'homekit_setup_unresolved'
+                        except Exception:
+                            # Preserve recovery_required on every unproven graph.
+                            pass
                     operations.append({'operation_id': record.operation_id,
                         'fingerprint': record.plan.fingerprint, 'status': record.status,
                         'direction': record.direction, 'recovery_required': need,
-                        'reason': 'inspection_available', 'eligible': False})
+                        'reason': 'homekit_setup_unresolved' if reason == 'homekit_setup_unresolved' else 'inspection_available',
+                        'eligible': False})
                     required = required or need
                     continue
                 if preparations is None:
