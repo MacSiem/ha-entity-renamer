@@ -75,6 +75,7 @@ class StateBindingTransition:
     configured_variables: tuple[ConfiguredVariablePair, ...]
     rendered_variables: tuple[RenderedVariablePair, ...]
     target_semantics: tuple
+    action_pairs: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -129,7 +130,7 @@ class StateConsumerSnapshot:
               and type(target) is frozenset and len(target ^ self.prefix.active) == 1,
               'template_state_single_registry_step_required')
         desired = {(d, k): (cfg, variables) for d, k, cfg, variables in program.rows(target)}
-        result, variables, configured, entities, semantics = [], [], [], [], []
+        result, variables, configured, entities, semantics, actions = [], [], [], [], [], []
         for row in self.rows:
             semantic, static = desired[row.domain, row.source_key]
             target_templates = dict(_templates(_effective_config(semantic)))
@@ -138,6 +139,10 @@ class StateConsumerSnapshot:
                 continue
             entities.append(row.entity)
             semantics.append((row.domain, row.source_key, semantic))
+            if row.domain == 'template.switch':
+                before_cfg, after_cfg = _effective_config(row.semantic), _effective_config(semantic)
+                actions.append((row.entity, tuple((name, _get(before_cfg, name), _get(after_cfg, name))
+                    for name in ('turn_on', 'turn_off'))))
             location = next(value for value in program.source_locations
                             if value[:2] == (row.domain, row.source_key))
             before_config = _get(_effective_config(row.semantic), 'variables')
@@ -188,7 +193,7 @@ class StateConsumerSnapshot:
                   'template_state_shared_variables_collision')
             seen[key] = (pair.before, pair.after)
         return StateBindingTransition(tuple(entities), tuple(result), tuple(configured),
-            tuple(variables), tuple(semantics))
+            tuple(variables), tuple(semantics), tuple(actions))
 
 
 def _state_inputs(chain, input_state=None, *, live_intent=None, live_context=None, live_calls=()):
@@ -330,7 +335,13 @@ def _configuration(runtime, entity, expected):
         # are separately held in tokens and never select the runtime prefix.
         actual = {key: value for key, value in cfg.items()
                   if key not in ('raw_configs', 'raw_blueprint_inputs') or key in expected_values}
-        _need(_normal(actual) == expected, 'template_state_full_native_config_changed')
+        # Core's switch schema can emit top-level action keys in a different
+        # order across validation processes. Nested maps retain their native
+        # order (notably variables and script sequences).
+        normalized = _normal(actual)
+        matches = (dict(_pairs(normalized)) == expected_values
+                   if type(entity) is native.switch else normalized == expected)
+        _need(matches, 'template_state_full_native_config_changed')
     else:
         _need(native.version == '2025.6.0', 'template_state_full_native_config_missing')
         actual = {}
@@ -348,6 +359,25 @@ def _configuration(runtime, entity, expected):
                 _need(False, 'template_state_minimum_config_field_unverified')
         _need(_normal(actual) == expected, 'template_state_full_native_config_changed')
     return actual
+
+
+def _switch_action_binding(runtime, entity):
+    """Pin native switch Script ownership without stopping foreign executions."""
+    if type(entity) is not runtime.native.switch:
+        return ()
+    from homeassistant.helpers.script import Script
+    from .native_script_config_transport import _graph
+    scripts, cfg = entity._action_scripts, entity._config
+    _need(type(scripts) is dict and type(cfg) is dict
+          and set(scripts) == {name for name in ('turn_on', 'turn_off') if cfg.get(name) is not None},
+          'template_state_switch_action_inventory_changed')
+    rows = []
+    for name, script in sorted(scripts.items()):
+        _need(type(script) is Script and script._hass is runtime.native.hass
+              and script.domain == 'template' and script.sequence is cfg[name],
+              'template_state_switch_action_owner_changed')
+        rows.append((name, id(script), id(script.sequence), _graph(script.sequence)))
+    return tuple(rows)
 
 
 def _configured_variables_binding(runtime, entity, expected):
@@ -527,7 +557,7 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents, *,
                   'template_state_entity_identity_changed')
             live.add(entity_id)
             domain = 'template.' + platform.domain
-            if type(entity) not in (native.sensor, native.binary) or platform.config_entry is not None:
+            if type(entity) not in (native.sensor, native.binary, native.switch) or platform.config_entry is not None:
                 # Unrelated trigger/other families stay present and unchanged.
                 # Their full native config/source membership is checked below.
                 cfg = getattr(entity, '_config', None)
@@ -565,6 +595,7 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents, *,
             _need((domain, key) not in matched, 'template_state_full_native_bijection_ambiguous')
             matched.add((domain, key))
             configured_owner = _configured_variables_binding(runtime, entity, _effective_config(semantic))
+            action_owner = _switch_action_binding(runtime, entity)
             entry = registry.async_get(entity_id)
             stored = registry_rows.get(entity_id)
             if entity.unique_id is None:
@@ -595,10 +626,10 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents, *,
                           'template_state_static_rendered_variable_changed')
             rows.append(StateEntityBinding(domain, key, entity, None if entry is None else entry.id,
                 semantic, static, tuple((v[0], tuple(v[1])) for _, v in sorted(template_objects.items())),
-                (id(entity), id(entry), graph_token, _fingerprint(cfg)),
+                (id(entity), id(entry), graph_token, _fingerprint(cfg), action_owner),
                 (id(entity), id(entry), graph_token[:2],
                  tuple(track[:3] for track in graph_token[3]), graph_token[4],
-                 _fingerprint(cfg), configured_owner)))
+                 _fingerprint(cfg), configured_owner, action_owner)))
     _need(set(registry_rows) <= live, 'template_state_missing_registry_consumer')
     expected_unsupported = {(r[0], r[1]) for r in unsupported if r[0] != 'template.trigger'}
     _need(matched == set(expected) | expected_unsupported,

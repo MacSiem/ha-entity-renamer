@@ -178,6 +178,12 @@ class NativeTemplateStateRegistryEffect:
         return obj
 
     async def before_attempt(self):
+        from .native_template_switch_actions import SwitchActionTransfer
+        def action_guard():
+            self.guard()
+            self.root.chain.verify_intent_source(self.intent, self.context, self.before)
+            self.state.assert_current(self.root.receipt)
+        await SwitchActionTransfer.suspend_running(self.root.hass, self.transition.action_pairs, action_guard)
         if self.delivery is not None:
             await self.delivery.drain()
         if self.script_cutover is not None:
@@ -280,7 +286,7 @@ class NativeTemplateStateRegistryEffect:
             self.caller = _BindingCallerContext(self.task, self._fence)
             self.transport = NativeTemplateBindingTransport.capture(self.root.hass,
                 self.transfer_entities, source_pairs=self.transition.source_pairs,
-                caller_context=self.caller,
+                caller_context=self.caller, action_pairs=self.transition.action_pairs,
                 rename_witness=self.witness,
                 own_identity=None if self.own_entity is None else (self.own_entity, self.source, self.target),
                 configured_variable_pairs=tuple(BindingVariablePair(p.container, p.name,
@@ -413,6 +419,8 @@ class NativeTemplateStateRegistryEffect:
         try:
             if self.witness is not None:
                 result = self.witness.mutate()
+                if self.transport is not None:
+                    self.transport.actions.commit()
                 if self.script_phase is not None:
                     self.script_phase.mark_attempt(self)
                 return result
@@ -428,7 +436,10 @@ class NativeTemplateStateRegistryEffect:
                 finally:
                     if getattr(self.io, '_script_service_capability', None) is self.script_cutover:
                         del self.io._script_service_capability
-            return self.io.mutate(self.change, target)
+            result = self.io.mutate(self.change, target)
+            if self.transport is not None:
+                self.transport.actions.commit()
+            return result
         except BaseException:
             if self.witness is not None and not self._registry_attempted():
                 # The final owning guard can refuse after installing bindings
@@ -440,6 +451,8 @@ class NativeTemplateStateRegistryEffect:
                 finally:
                     self.witness.close()
             else:
+                if self.transport is not None and self.transport.actions.phase == 'installed':
+                    self.transport.actions.commit()
                 if self.script_phase is not None:
                     if self.witness is None or not self.witness.failed_handoff:
                         self.script_phase.poison(self)

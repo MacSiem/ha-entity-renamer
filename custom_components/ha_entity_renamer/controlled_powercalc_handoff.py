@@ -908,13 +908,19 @@ class ControlledPowercalcHandoff:
         from .controlled_powercalc_setup_receipts import validate_handoff
         handoff = validate_handoff(self.chain, list(self.receipt), self.direction)
         restored, stop_watch = _watch_restored_counters(self.hass, handoff['population'])
+        from .native_template_powercalc_ingress import PowercalcTemplateIngress
+        template_ingress = PowercalcTemplateIngress.install(self)
         try:
             await self.hass.services.async_call('powercalc', 'reload', {}, blocking=True, context=service_context)
             await _settle_yaml_discovery(self.hass)
+            await template_ingress.settle()
             if self.entry_listeners is not None:
                 self.entry_listeners.verify_activated()
         finally:
-            stop_watch()
+            try:
+                template_ingress.close()
+            finally:
+                stop_watch()
         _need(set(restored) == {row['after_id'] for row in handoff['population']},
               'setup_restore_observation_incomplete')
         check()

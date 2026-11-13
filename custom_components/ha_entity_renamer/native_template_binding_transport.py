@@ -115,6 +115,12 @@ def _callback(native, value, entity, slot=None):
             path.read_bytes(), str(path), sys.flags.optimize)), 'template_binding_callback_code')
     cells = dict(zip(value.__code__.co_freevars,
         (cell.cell_contents for cell in value.__closure__ or ()), strict=True))
+    if (type(entity) is native.switch and value.__module__ == 'homeassistant.components.template.validators'
+            and value.__qualname__ == 'boolean.<locals>.convert'):
+        _need(cells == {'as_false': None, 'as_true': None, 'attribute': 'state',
+                        'entity': entity, 'kwargs': {}},
+              'template_switch_boolean_validator_changed')
+        return
     if '__class__' in cells:
         # Zero-argument super() captures the DEFINING class, not arbitrary
         # per-instance data. These exact pinned native state callbacks are the
@@ -332,9 +338,10 @@ class _Runtime:
 
     def _graph(self, entity, ingress):
         native, event, te = self.native, self.event, self.te
-        _need(type(entity) in (native.sensor, native.binary)
+        _need(type(entity) in (native.sensor, native.binary, native.switch)
               and entity.hass is native.hass and entity._preview_callback is None
-              and not entity._action_scripts and entity._blueprint_inputs is None,
+              and (not entity._action_scripts or type(entity) is native.switch)
+              and entity._blueprint_inputs is None,
               'template_binding_state_entity_required')
         if type(entity) is native.binary:
             self.delay_owner(entity)
@@ -395,7 +402,7 @@ class _Runtime:
                     configured.append(attributes[slot._attribute])
                 configured.extend(declaration.template for declaration in declarations.values()
                                   if declaration.attribute == slot._attribute)
-                fields = {'_attr_native_value': '_template', '_state': '_template',
+                fields = {'_attr_native_value': '_template', '_state': '_template', '_attr_is_on': '_template',
                     '_attr_available': '_availability_template', '_attr_icon': '_icon_template',
                     '_attr_entity_picture': '_entity_picture_template', '_attr_name': '_friendly_name_template',
                     '_attr_last_reset': '_attr_last_reset_template',
@@ -437,10 +444,10 @@ class NativeTemplateBindingTransport:
     @classmethod
     def capture(cls, hass, entities, *, source_pairs, caller_context,
                 configured_variable_pairs=(), rendered_variable_pairs=(), rename_witness=None,
-                own_identity=None):
+                own_identity=None, action_pairs=()):
         _need(type(caller_context) is _BindingCallerContext,
               'template_binding_internal_caller_required')
-        entities, source_pairs = tuple(entities), tuple(source_pairs)
+        entities, source_pairs, action_pairs = tuple(entities), tuple(source_pairs), tuple(action_pairs)
         configured_variable_pairs = tuple(configured_variable_pairs)
         rendered_variable_pairs = tuple(rendered_variable_pairs)
         if own_identity is not None:
@@ -455,7 +462,7 @@ class NativeTemplateBindingTransport:
                   and not rename_witness.attempted and not rename_witness.closed,
                   'template_binding_own_identity_unqualified')
         _need(bool(entities) and len({id(e) for e in entities}) == len(entities)
-              and bool(source_pairs or configured_variable_pairs or rendered_variable_pairs or own_identity)
+              and bool(source_pairs or configured_variable_pairs or rendered_variable_pairs or own_identity or action_pairs)
               and all(type(p) is BindingSourcePair for p in source_pairs),
               'template_binding_qualified_sources_required')
         caller_context.check('capture', source_pairs, entities)
@@ -464,6 +471,8 @@ class NativeTemplateBindingTransport:
         obj.context, obj.runtime = caller_context, _Runtime(hass)
         obj.phase, obj.rows = 'captured', []
         obj.rename_witness = rename_witness
+        from .native_template_switch_actions import SwitchActionTransfer
+        obj.actions = SwitchActionTransfer.capture(hass, action_pairs, entities)
         obj.configured_variables = tuple(configured_variable_pairs)
         obj.rendered_variables = tuple(rendered_variable_pairs)
         from homeassistant.util.yaml.objects import NodeDictClass
@@ -793,6 +802,13 @@ class NativeTemplateBindingTransport:
                 row['installed_cleanup'] = tuple(entity._on_remove)
                 row['installed_graph'] = (_graph(row['installed_bindings']), _graph(row['installed_attrs']))
                 row['installed_holds'] = self._retain_graph((row['installed_bindings'], row['installed_attrs']))
+            self.actions.install()
+            # Action projection changes the copied _config. Refresh the
+            # installed ownership fence only after both groups are installed.
+            from .native_script_config_transport import _graph
+            for row in self.rows:
+                row['installed_graph'] = (_graph(row['installed_bindings']), _graph(row['installed_attrs']))
+                row['installed_holds'] = self._retain_graph((row['installed_bindings'], row['installed_attrs']))
             self.phase = 'installed'
         except BaseException as error:
             # A native factory may fail after constructing its filtered tracker
@@ -877,6 +893,7 @@ class NativeTemplateBindingTransport:
             tracker._time_listeners.clear()
 
     def _restore_before_effect(self):
+        self.actions.restore()
         # Called synchronously only BEFORE registry attempt. Restore the exact
         # old objects and history; native setup recreates its authentic listeners.
         for row in reversed(self.rows):
