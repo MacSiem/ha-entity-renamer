@@ -44,7 +44,7 @@ class TemplateSwitchRootTests(root.NativeTemplateStateRootCoverageTests):
         path = self.f.root / 'template.yaml'
         path.write_text('''- unique_id: scope
   sensor:
-  - unique_id: total
+  - unique_id: value
     name: Total
     state: "{{ states(\'''' + old + '''\') | int(0) }}"
     attributes:
@@ -74,7 +74,7 @@ class TemplateSwitchRootTests(root.NativeTemplateStateRootCoverageTests):
         await self._flush_documents()
         entities = {entity.unique_id: entity for platform in async_get_platforms(hass, 'template')
                     for entity in platform.entities.values()}
-        sensor, binary, switch = (entities[k] for k in ('scope-total', 'scope-delay', 'scope-action'))
+        sensor, binary, switch = (entities[k] for k in ('scope-value', 'scope-delay', 'scope-action'))
         await self.source(5)
         token = binary._delay_cancel
         self.assertIsNotNone(token)
