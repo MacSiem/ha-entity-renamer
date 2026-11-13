@@ -36,12 +36,14 @@ class HomeKitHelperNativeTests(unittest.IsolatedAsyncioTestCase):
         def guard():pass
         async def run(plan, source, target):
             self.assertTrue(await hass.config_entries.async_unload(entry.entry_id));await settle()
+            self.assertTrue(await observer.verify_inactive(entry.entry_id))
             f.entity.async_update_entity(source,new_entity_id=target);await settle()
             result=await helper.apply_entry(hass,plan,guard=guard,settle=settle,record_intent=intent,
                 validate_snapshot=observer.validate_snapshot,verify_runtime=observer.verify_runtime)
             self.assertTrue(result['adapter_write']);self.assertIsNotNone(result['_native_config_mutation'])
             self.assertTrue(await hass.config_entries.async_setup(entry.entry_id));await settle()
             await observer.verify_runtime(plan.after)
+            self.assertTrue(await observer.verify_lifecycle_runtime(entry.entry_id, {'entry_id':entry.entry_id}, None))
             path.write_text(yaml(target))
             await hass.services.async_call('homekit','reload',{},blocking=True);await settle()
             await observer.verify_runtime(plan.after)

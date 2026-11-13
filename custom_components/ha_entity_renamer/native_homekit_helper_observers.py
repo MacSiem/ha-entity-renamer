@@ -21,6 +21,31 @@ def _need(value, reason):
         raise Refused('homekit_helper_' + reason)
 
 
+def _installed():
+    import homeassistant
+    from homeassistant.components import homekit
+    from .native_utility_setup_audit import _code_objects
+    import sys
+    root = Path(homeassistant.__file__).resolve().parent
+    pins = {
+        'components/homekit/__init__.py':'1c6307e46934e438cbe7c2af51004a65eb5886155217c40f07613b1f900f5e4f',
+        'components/homekit/services.py':'c62e2e749c0659b325fd446a36b6e47c9f87b8fa826dc1057f2a87b9a83997bf',
+        'components/homekit/util.py':'0cc8f0941f846f9051d1ed6941b8dd335f03377f5f15f9a021a5fc9345f2e5bd',
+        'components/homekit/aidmanager.py':'8a35b1ef450caa3bc307d3c090ae42ee4224d0813fcefbf1d44e86d79e37edc7',
+    }
+    compiled = {}
+    for relative, digest in pins.items():
+        path = root / relative; raw = path.read_bytes()
+        _need(path.resolve() == path and sha256(raw).hexdigest() == digest, 'native_source')
+        compiled[str(path)] = tuple(_code_objects(compile(raw, str(path), 'exec',
+                                                          dont_inherit=True, optimize=sys.flags.optimize)))
+    for method in (homekit.async_setup_entry, homekit.async_unload_entry,
+                   homekit.HomeKit.async_start, homekit.HomeKit.async_stop):
+        code = method.__code__
+        _need(code.co_filename in compiled and any(code == item for item in compiled[code.co_filename]), 'native_code')
+
+
+
 class NativeHomeKitHelperObservers:
     @classmethod
     async def capture(cls, hass, snapshots, mapping_proof, *, activation_lease=None):
@@ -29,6 +54,7 @@ class NativeHomeKitHelperObservers:
         from homeassistant.helpers import entity_registry as er
         from .helper_observers import RegistryMappingProof
         _need(__version__ == '2026.11.1' and type(snapshots) in (tuple, list) and bool(snapshots), 'scope')
+        _installed()
         _need(all(type(p) is RegistryMappingProof for p in mapping_proof), 'proof_type')
         mapping = {p.old:p.new for p in mapping_proof}
         _need(len(mapping) == len(mapping_proof) and len(set(mapping.values())) == len(mapping), 'mapping')
@@ -66,6 +92,18 @@ class NativeHomeKitHelperObservers:
     async def settle(self):
         await asyncio.sleep(0)
         if self.lease is not None: self.lease.check()
+
+    async def verify_inactive(self, entry_id):
+        _need(entry_id in self.before, 'entry_scope')
+        entry = self.hass.config_entries.async_get_entry(entry_id)
+        _need(entry is not None and entry.state.value == 'not_loaded', 'bridge_not_stopped')
+        current = read_entry(self.hass, entry_id)
+        return await self.verify_activation(current)
+
+    async def verify_lifecycle_runtime(self, entry_id, original, authorization):
+        _need(entry_id in self.before and original.get('entry_id') == entry_id, 'entry_scope')
+        current = read_entry(self.hass, entry_id)
+        return await self.verify_runtime(current)
 
     async def validate_snapshot(self, snapshot):
         key = snapshot['identity']['entry_id']
