@@ -372,7 +372,7 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.setup import async_setup_component
 
         hass = self.f.hass
-        self.assertEqual(self.f.version, '2026.11.0')
+        self.assertIn(self.f.version, ('2026.11.0', '2026.11.1'))
         self.assertTrue(await async_setup_component(hass, 'network', {}))
         self.sources = [ProfileLight(name) for name in ('Graph fixed', 'Graph linear',
                          'Graph model', 'Graph entry')]

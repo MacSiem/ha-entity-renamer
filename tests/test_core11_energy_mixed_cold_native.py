@@ -15,6 +15,7 @@ import sys
 import tempfile
 from types import MappingProxyType
 import unittest
+from unittest.mock import patch
 
 from test_energy_continuity_mixed_cold_native import MixedPowercalcColdPhase
 from test_receipted_helper_native import NativeReceiptedHelperTests
@@ -30,6 +31,7 @@ PSS = 'powercalc_group'
 RESTORE = 'core.restore_state'
 FOREIGN = 'sensor.unrelated_group'
 ACTOR = 'core11-mixed-energy'
+CORE_VERSIONS = ('2026.11.0', '2026.11.1')
 QA = Path('/qa')
 
 
@@ -67,12 +69,13 @@ class MixedPhase(PowercalcColdPhase):
         from homeassistant.setup import async_setup_component
         from types import SimpleNamespace
 
-        self.assertEqual(__version__, '2026.11.0')
+        self.assertIn(__version__, CORE_VERSIONS)
+        self.core111 = __version__ == '2026.11.1'
         self.phase = os.environ['RENAMER_POWER_COLD_PHASE']
         root = Path(os.environ['RENAMER_POWER_COLD_CONFIG']).resolve(strict=True)
         self.meta_path = QA / 'core11-mixed-manifest.json'
         self.meta = json.loads(self.meta_path.read_text()) if self.phase == 'resume' else {}
-        self.evidence = {'pid': os.getpid(), 'phase': self.phase}
+        self.evidence = {'pid': os.getpid(), 'phase': self.phase, 'core': __version__}
         self.addCleanup(self._preserve_report)
         if self.phase == 'resume':
             self.assertNotEqual(self.meta['pid'], os.getpid())
@@ -197,9 +200,11 @@ class MixedPhase(PowercalcColdPhase):
         await hass.config_entries.async_add(entry)
         self.assertEqual(entry.state.value, 'loaded')
         group = groups[0]
+        group_power = graph['graph-first'].entity_id
         (self.f.root / 'graph_scripts.yaml').write_text(
             'graph_consumer:\n  sequence:\n    - event: graph_consumer_read\n'
-            f'      event_data:\n        kwh: "{{{{ states(\'{group}\') }}}}"\n')
+            f'      event_data:\n        kwh: "{{{{ states(\'{group}\') }}}}"\n'
+            + (f'        watts: "{{{{ states(\'{group_power}\') }}}}"\n' if self.core111 else ''))
         with (self.f.root / 'configuration.yaml').open('a') as stream:
             stream.write('\nscript: !include graph_scripts.yaml\n')
 
@@ -293,6 +298,12 @@ class MixedPhase(PowercalcColdPhase):
             await hass.async_block_till_done()
             watts = Decimal(hass.states.get(power).state)
             self.assertEqual(watts, Decimal(5))
+            if self.core111:
+                group_power = self._graph()['graph-first'].entity_id
+                async with asyncio.timeout(10):
+                    while Decimal(hass.states.get(group_power).state) != watts:
+                        await asyncio.sleep(.05)
+                self.assertEqual(Decimal(str((await self._script_read())['watts'])), watts)
             await asyncio.sleep(3)
         finally:
             await fixed.async_turn_off()
@@ -309,6 +320,12 @@ class MixedPhase(PowercalcColdPhase):
             self.assertLess(abs(cost - energy * PRICE), Decimal('0.000000001'))
         self.evidence[label] = {'w': str(watts), 'kwh_cost': deltas, 'tariff': str(PRICE)}
 
+        message = await self._script_read()
+        self.assertEqual(Decimal(str(message['kwh'])), after[0][0])
+        self.evidence[label]['script'] = message
+
+    async def _script_read(self):
+        hass = self.f.hass
         messages = []
         unlisten = hass.bus.async_listen('graph_consumer_read', lambda event: messages.append(event.data))
         try:
@@ -317,7 +334,7 @@ class MixedPhase(PowercalcColdPhase):
         finally:
             unlisten()
         self.assertEqual(len(messages), 1)
-        self.assertEqual(Decimal(str(messages[0]['kwh'])), after[0][0])
+        return messages[0]
 
     async def _point(self, entity_id, after=None):
         from homeassistant.components.recorder import get_instance
@@ -439,6 +456,89 @@ class MixedPhase(PowercalcColdPhase):
         await manager._store.async_save(manager.data)
         self.assertEqual((await native.read()).value, original.value)
 
+    async def _prime_counters(self):
+        # Populate real native integration and group snapshots before any prepare.
+        for source in self.sources:
+            await source.async_turn_on(brightness=255)
+        await self.f.hass.async_block_till_done()
+        await asyncio.sleep(2)
+        for source in self.sources:
+            await source.async_turn_off()
+        await self.f.hass.async_block_till_done()
+
+    def _counter_seam(self):
+        """Observe the actual unload and first publication without changing either."""
+        from homeassistant.core import callback
+        from custom_components.ha_entity_renamer import controlled_powercalc_handoff as handoff
+
+        seam = self.evidence['counter_seam'] = {'removed': {}, 'first_numeric': {}}
+        snapshot = handoff.snapshot_removed
+        watch = handoff._watch_restored_counters
+
+        def removed(hass, population, **kwargs):
+            payload = snapshot(hass, population, **kwargs)
+            for row in population.counters:
+                entity = row.entity
+                group = row.kind == 'group'
+                exact = entity._native_value_exact if group else entity._state
+                last = None if group else str(entity._last_valid_state)
+                self.assertIs(type(exact), Decimal)
+                seam['removed'][row.registry_id] = (str(exact), last)
+            return payload
+
+        def installed(hass, population):
+            observed, stop = watch(hass, population)
+            targets = {row['after_id']: row['uuid'] for row in population}
+
+            @callback
+            def publish(event):
+                state = event.data.get('new_state')
+                if state is not None and state.entity_id in targets:
+                    try:
+                        numeric = Decimal(state.state)
+                    except ArithmeticError:
+                        return
+                    if numeric.is_finite():
+                        seam['first_numeric'].setdefault(targets[state.entity_id], state.state)
+
+            remove = hass.bus.async_listen('state_changed', publish)
+            seam['restored'] = observed
+
+            def cleanup():
+                remove()
+                stop()
+
+            return observed, cleanup
+
+        self.enterContext(patch.object(handoff, 'snapshot_removed', removed))
+        self.enterContext(patch.object(handoff, '_watch_restored_counters', installed))
+
+    def _assert_counter_seam(self):
+        seam = self.evidence['counter_seam']
+        restored = {row['uuid']: (row['value'], row['last_valid']) for row in seam['restored'].values()}
+        self.assertEqual(len(restored), 6)
+        self.assertEqual(restored, seam['removed'])
+        self.assertEqual(set(restored), set(seam['first_numeric']))
+        for uuid, value in seam['first_numeric'].items():
+            self.assertEqual(Decimal(value), round(Decimal(restored[uuid][0]), 6), uuid)
+
+    def _assert_graph_ids(self, original, mapping):
+        graph = self._graph()
+        self.assertEqual(set(graph), set(original))
+        for key, (name, uuid, _) in original.items():
+            entity = graph[key]
+            self.assertEqual((entity.entity_id, entity.registry_entry.id),
+                             (mapping.get(name, name), uuid), key)
+        for group, leaf in (('graph-first', 'graph-model'), ('graph-second', 'graph-linear')):
+            for suffix in ('', '_energy'):
+                self.assertEqual(graph[group + suffix]._entities,
+                                 {graph[key + suffix].entity_id for key in ('graph-fixed', leaf)})
+
+    def _assert_foreign(self, expected):
+        self.assertEqual(self._storage(PSS)[FOREIGN], expected)
+        self.assertEqual({key: row.as_dict() for key, row in
+                          self.f.hass.data['powercalc_group_storage'].states[FOREIGN].items()}, expected)
+
     async def test_flow(self):
         from homeassistant.core import State, callback
         from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
@@ -447,11 +547,26 @@ class MixedPhase(PowercalcColdPhase):
         graph = self._graph()
         restore = hass.data[DATA_RESTORE_STATE]
         pss = hass.data['powercalc_group_storage']
+        if self.core111:
+            from custom_components.ha_entity_renamer.native_automation_transition import NativeAutomationTransition
+            from custom_components.ha_entity_renamer.transaction import Refused
+
+            self.assertIsNone(hass.data.get('automation'))
+            transition = NativeAutomationTransition(hass, allow_running=True)
+            self.assertEqual(transition.original, ())
+            transition.check_native()
+            with self.assertRaises(Refused):
+                await transition.prepare_preserving_enabled()
+            self.evidence['absent_automation'] = 'empty transition; reload refused'
+            self._counter_seam()
         if self.phase == 'forward':
             self.assertEqual(len(graph), 12)
             pss.set_entity_state(FOREIGN, 'sensor.unrelated_member',
                                  State('sensor.unrelated_member', '41.125'))
             await pss.persist_states()
+            foreign = self._storage(PSS)[FOREIGN]
+            if self.core111:
+                await self._prime_counters()
             await self._pulse('baseline_pulse')
             costs = self._costs()
             cost_ids = {key: costs[graph[key].entity_id].entity_id for key in (FIRST, SECOND)}
@@ -461,6 +576,9 @@ class MixedPhase(PowercalcColdPhase):
             price_id = self.tariff.entity_id
             mapping = {self.yaml_source: 'light.graph_model_target', first: 'sensor.graph_energy_target',
                        second: 'sensor.graph_second_energy_target', price_id: 'sensor.graph_price_target'}
+            if self.core111:
+                mapping.update({graph['graph-model'].entity_id: 'sensor.graph_leaf_power_target',
+                                graph['graph-first'].entity_id: 'sensor.graph_group_power_target'})
             await restore.async_dump_states()
             self._assert_cost_restore(costs, stopped=False)
             await self._flush_documents()
@@ -488,11 +606,15 @@ class MixedPhase(PowercalcColdPhase):
             self.evidence['first_publications'] = first_publications
             self.assertEqual(applied['state'], 'applied', applied)
             self._assert_price(mapping[price_id])
+            if self.core111:
+                self._assert_counter_seam()
+                self._assert_graph_ids(start, mapping)
+                self._assert_foreign(foreign)
             after = self._graph()
             for key, (name, uuid, value) in start.items():
                 entity = after[key]
                 self.assertEqual((entity.entity_id, entity.registry_entry.id), (mapping.get(name, name), uuid))
-                if key.endswith('_energy'):
+                if key.endswith('_energy') and not self.core111:
                     actual = getattr(entity, '_native_value_exact', getattr(entity, '_state', None))
                     self.assertEqual(actual.as_tuple(), Decimal(value).as_tuple(), key)
                     self.assertEqual(Decimal(first_publications[entity.entity_id]),
@@ -509,7 +631,7 @@ class MixedPhase(PowercalcColdPhase):
             self._assert_cost_restore(costs, stopped=True)
             self.meta_path.write_text(json.dumps({
                 'pid': os.getpid(), 'files': self._files(root), 'op': op, 'mapping': mapping,
-                'graph': start, 'cost_baseline': cost_baseline, 'cost_ids': cost_ids,
+                'graph': start, 'foreign': foreign, 'cost_baseline': cost_baseline, 'cost_ids': cost_ids,
                 'cost_uuid': {row.entity_id: row.registry_entry.id for row in costs.values()},
                 'first': first, 'second': second, 'group_point': group_point, 'price': price_id,
                 'pc_entry': self.entry.entry_id, 'backend_entry_id': self.backend_entry_id,
@@ -520,6 +642,9 @@ class MixedPhase(PowercalcColdPhase):
         op = meta['op']
         self._assert_price(meta['mapping'][meta['price']])
         await self._capture('cold')
+        if self.core111:
+            self._assert_graph_ids(meta['graph'], meta['mapping'])
+            self._assert_foreign(meta['foreign'])
         self.assertEqual({row.entity_id: row.registry_entry.id for row in self._costs().values()},
                          meta['cost_uuid'])
         for cost in self._costs().values():
@@ -532,6 +657,12 @@ class MixedPhase(PowercalcColdPhase):
         self.evidence['reverse'] = reverse
         self.assertEqual(reverse['state'], 'rolled_back', reverse)
         self._assert_price(meta['price'])
+        if self.core111:
+            self._assert_counter_seam()
+            self._assert_graph_ids(meta['graph'], {})
+            self._assert_foreign(meta['foreign'])
+            self.assertEqual({row.entity_id: row.registry_entry.id for row in self._costs().values()},
+                             meta['cost_uuid'])
         self.assertEqual({key: (entity.entity_id, entity.registry_entry.id)
                           for key, entity in self._graph().items()},
                          {key: tuple(row[:2]) for key, row in meta['graph'].items()})
@@ -554,6 +685,9 @@ class MixedPhase(PowercalcColdPhase):
             evidence = calculate(database, name, baseline, target)
             self.evidence.setdefault('physical_cost', {})[key] = evidence
             self.assertGreater(evidence['valid_states'], 0)
+            if self.core111:
+                self.assertGreater(Decimal(evidence['calculated_sum']), 0)
+                self.assertGreater(evidence['native_resets'], 0)
             self.assertLess(abs(Decimal(evidence['calculated_sum']) - Decimal(evidence['recorder_sum'])),
                             Decimal('0.000000001'))
 

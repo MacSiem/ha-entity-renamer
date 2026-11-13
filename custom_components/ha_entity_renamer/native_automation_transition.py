@@ -253,7 +253,7 @@ class NativeAutomationTransition:
     def check_native(self):
         _need(threading.get_ident() == self.thread and self.path.read_bytes() == self.source
               and self.hass.data.get('automation') is self.component)
-        if self.core111:
+        if self.core111 and self.component is not None:
             from homeassistant.helpers.entity_platform import EntityPlatform
             add = self.component.async_add_entities
             platform = add.__self__
