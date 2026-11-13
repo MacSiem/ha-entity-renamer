@@ -41,6 +41,9 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
 
     async def test_explicit_leaf_forward_fresh_inverse(self):
         from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.tasks import StatisticsTask
+        from homeassistant.util import dt as dt_util
+        from custom_components.ha_entity_renamer.recorder_guard import NativeRecorderGuard
         from homeassistant.core import State, callback
         from homeassistant.helpers.entity_platform import async_get_platforms
         from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
@@ -208,6 +211,12 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             native_dummy_mdns(hass)
             await pulse()
             await baseline()
+            history = NativeRecorderGuard(hass)
+            await history.async_synchronize()
+            now = dt_util.utcnow()
+            period = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
+            get_instance(hass).queue_task(StatisticsTask(period, False))
+            await history.async_synchronize()
             foreign_power = inventory()['fixture-meter-0']
             standby = foreign_power._standby_power
             foreign_power._standby_power = Decimal('0.4')
