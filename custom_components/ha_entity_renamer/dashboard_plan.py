@@ -8,7 +8,8 @@ from __future__ import annotations
 from dataclasses import replace
 import re
 
-from .reference_planner import Consumer, Context, Marker, Scope, Syntax, plan_references
+from .reference_planner import Consumer, Context, Marker, Scope, Syntax, Change, plan_references
+from .dashboard_custom import plan_button_expression
 
 PASSIVE = frozenset('''type title name description label icon theme color unit attribute
 path url url_path navigation_path image alt_text state_image style aspect_ratio
@@ -62,7 +63,7 @@ def plan_dashboard(config, mapping):
     clean = plan_references(config, mapping, Context(Consumer.DASHBOARD, ())).value
     if type(clean) is not dict:
         raise ValueError('invalid_dashboard')
-    scopes, markers = [], []
+    scopes, markers, expressions = [], [], []
 
     def block(path, code='unsupported_dashboard_schema'):
         markers.append(Marker(path, code, 'Dashboard coverage requires a semantic adapter'))
@@ -153,6 +154,57 @@ def plan_dashboard(config, mapping):
             block(path); return
         for i, child in enumerate(value): node(child, path + (i,), role, **kwargs)
 
+    def custom(value, path, kind):
+        # Explicitly owned component slots; unrecognized options are refused.
+        passive = PASSIVE | {'styles', 'show_label', 'show_entity_picture', 'size',
+                             'show_icon', 'show_name', 'show_state', 'button_type',
+                             'card_type', 'scrolling_effect', 'show_attribute'}
+        for key, child in value.items():
+            p = path + (key,)
+            if key == 'type': continue
+            if key == 'entity': ref(child, p)
+            elif key == 'triggers_update' and kind == 'custom:button-card': ref(child, p, many=True)
+            elif key == 'variables' and kind == 'custom:button-card':
+                if type(child) is not dict: block(p); continue
+                # Only source-proven variables whose values are reference trees.
+                for field, item in child.items():
+                    q = p + (field,)
+                    if field not in {'entity_ids', 'floor_entity_ids', 'bound_entity',
+                                     'source_entities', 'cluster_bindings'}:
+                        block(q, 'unsupported_button_variable'); continue
+                    variable_refs(item, q)
+            elif key == 'label' and kind == 'custom:button-card' and type(child) is str and child.startswith('[[['):
+                expressions.append((p, child))
+            elif key in ACTIONS: action(child, p)
+            elif key in {'conditions', 'visibility'}: conditions(child, p)
+            elif key == 'sub_button' and kind == 'custom:bubble-card':
+                if type(child) is not list: block(p); continue
+                for i, button in enumerate(child):
+                    if type(button) is not dict: block(p + (i,)); continue
+                    for field, item in button.items():
+                        q = p + (i, field)
+                        if field == 'entity': ref(item, q)
+                        elif field in {'conditions', 'visibility'}: conditions(item, q)
+                        elif field in ACTIONS: action(item, q)
+                        elif field not in passive: block(q)
+            elif key == 'custom_fields' and kind == 'custom:button-card':
+                if type(child) is not dict: block(p); continue
+                for field, item in child.items():
+                    q = p + (field,)
+                    if type(item) is dict and set(item) == {'card'}: node(item['card'], q + ('card',), 'card')
+                    else: block(q, 'unsupported_button_custom_field')
+            elif key == 'cards' and kind == 'custom:button-card': sequence(child, p, 'card')
+            elif key not in passive: block(p)
+
+    def variable_refs(value, path):
+        if type(value) is str:
+            ref(value, path)
+        elif type(value) is list:
+            for i, item in enumerate(value): variable_refs(item, path + (i,))
+        elif type(value) is dict:
+            for key, item in value.items(): variable_refs(item, path + (key,))
+        else: block(path, 'unsupported_button_variable')
+
     def node(value, path, role, statistic=False):
         if type(value) is str and role in {'row', 'badge', 'graph'}:
             ref(value, path, statistic=statistic); return
@@ -188,6 +240,9 @@ def plan_dashboard(config, mapping):
                         for field, size in child.items()):
                     continue
                 block(p, 'unsupported_renamer_card_config')
+            return
+        if role in {'card', 'element'} and kind in {'custom:button-card', 'custom:bubble-card'}:
+            custom(value, path, kind)
             return
         known = (role in {'root', 'view', 'section'} or
                  role == 'card' and kind in CARDS or
@@ -233,6 +288,16 @@ def plan_dashboard(config, mapping):
             elif key not in PASSIVE: block(p)
     node(clean, (), 'root')
     result = plan_references(clean, mapping, Context(Consumer.DASHBOARD, tuple(scopes)))
-    return replace(result, markers=tuple(m for m in result.markers
+    extra_changes = []
+    for path, original in expressions:
+        updated, error = plan_button_expression(original, mapping)
+        if error:
+            markers.append(Marker(path, error, 'Button JavaScript requires a bounded static expression'))
+        elif updated != original:
+            target = result.value
+            for part in path[:-1]: target = target[part]
+            target[path[-1]] = updated
+            extra_changes.append(Change(path, 'value', original, updated))
+    return replace(result, changes=result.changes + tuple(extra_changes), markers=tuple(m for m in result.markers
                    if m.code != 'no_supported_scopes') + tuple(markers),
                    coverage='native_lovelace_known_schema_frontend_20260930.4')
