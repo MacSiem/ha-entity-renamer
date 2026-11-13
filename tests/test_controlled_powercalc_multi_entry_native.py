@@ -356,6 +356,36 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             period = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
             get_instance(hass).queue_task(StatisticsTask(period, False))
             await history.async_synchronize()
+            if public:
+                # Independent physical Recorder oracle, separate from the
+                # product's history guards. Preserve every preexisting row;
+                # subsequent native samples can append new rows.
+                import sqlite3
+                def history_rows():
+                    result = {}
+                    with sqlite3.connect((self.f.root / 'fixture.db').as_uri() + '?mode=ro', uri=True) as db:
+                        for table, primary, excluded in (
+                            ('states', 'state_id', {'last_reported_ts'}),
+                            ('state_attributes', 'attributes_id', set()),
+                            ('statistics_short_term', 'id', set()),
+                            ('statistics', 'id', set()),
+                            ('states_meta', 'metadata_id', {'entity_id'}),
+                            ('statistics_meta', 'id', {'statistic_id'}),
+                        ):
+                            columns = [row[1] for row in db.execute('PRAGMA table_info(' + table + ')')
+                                       if row[1] not in excluded]
+                            self.assertIn(primary, columns)
+                            rows = db.execute('SELECT ' + ','.join(columns) + ' FROM ' + table).fetchall()
+                            index = columns.index(primary)
+                            result[table] = {row[index]: row for row in rows}
+                    return result
+                original_history = await get_instance(hass).async_add_executor_job(history_rows)
+                self.assertTrue(original_history['states'])
+                async def verify_history():
+                    await history.async_synchronize()
+                    current = await get_instance(hass).async_add_executor_job(history_rows)
+                    for table, rows in original_history.items():
+                        self.assertTrue(all(current[table].get(key) == row for key, row in rows.items()), table)
             foreign_power = inventory()['fixture-meter-0']
             standby = foreign_power._standby_power
             foreign_power._standby_power = Decimal('0.4')
@@ -410,6 +440,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(await dashboard.async_load(False), dashboard_after)
                 self.assertEqual(registry_rows('entity'), expected_entities)
                 self.assertEqual(registry_rows('device'), expected_devices)
+                await verify_history()
                 if hasattr(self, 'boot_automation'):
                     self.assertEqual(len(self.boot_actions), 1, 'forward reload must not synthesize a boot')
             verify_seam(0, mapping)
@@ -454,6 +485,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(await dashboard.async_load(False), dashboard_before)
                 self.assertEqual(registry_rows('entity'), original_entities)
                 self.assertEqual(registry_rows('device'), original_devices)
+                await verify_history()
                 if hasattr(self, 'boot_automation'):
                     self.assertEqual(len(self.boot_actions), 1, 'inverse reload must not synthesize a boot')
             verify_seam(1, {new: old for old, new in mapping.items()})
