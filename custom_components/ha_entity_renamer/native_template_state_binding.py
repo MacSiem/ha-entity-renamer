@@ -361,6 +361,25 @@ def _configuration(runtime, entity, expected):
     return actual
 
 
+def _switch_action_binding(runtime, entity):
+    """Pin native switch Script ownership without stopping foreign executions."""
+    if type(entity) is not runtime.native.switch:
+        return ()
+    from homeassistant.helpers.script import Script
+    from .native_script_config_transport import _graph
+    scripts, cfg = entity._action_scripts, entity._config
+    _need(type(scripts) is dict and type(cfg) is dict
+          and set(scripts) == {name for name in ('turn_on', 'turn_off') if cfg.get(name) is not None},
+          'template_state_switch_action_inventory_changed')
+    rows = []
+    for name, script in sorted(scripts.items()):
+        _need(type(script) is Script and script._hass is runtime.native.hass
+              and script.domain == 'template' and script.sequence is cfg[name],
+              'template_state_switch_action_owner_changed')
+        rows.append((name, id(script), id(script.sequence), _graph(script.sequence)))
+    return tuple(rows)
+
+
 def _configured_variables_binding(runtime, entity, expected):
     """Bind actual constructor variables, separately from rendered snapshots."""
     configured = entity._run_variables
@@ -576,6 +595,7 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents, *,
             _need((domain, key) not in matched, 'template_state_full_native_bijection_ambiguous')
             matched.add((domain, key))
             configured_owner = _configured_variables_binding(runtime, entity, _effective_config(semantic))
+            action_owner = _switch_action_binding(runtime, entity)
             entry = registry.async_get(entity_id)
             stored = registry_rows.get(entity_id)
             if entity.unique_id is None:
@@ -606,10 +626,10 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents, *,
                           'template_state_static_rendered_variable_changed')
             rows.append(StateEntityBinding(domain, key, entity, None if entry is None else entry.id,
                 semantic, static, tuple((v[0], tuple(v[1])) for _, v in sorted(template_objects.items())),
-                (id(entity), id(entry), graph_token, _fingerprint(cfg)),
+                (id(entity), id(entry), graph_token, _fingerprint(cfg), action_owner),
                 (id(entity), id(entry), graph_token[:2],
                  tuple(track[:3] for track in graph_token[3]), graph_token[4],
-                 _fingerprint(cfg), configured_owner)))
+                 _fingerprint(cfg), configured_owner, action_owner)))
     _need(set(registry_rows) <= live, 'template_state_missing_registry_consumer')
     expected_unsupported = {(r[0], r[1]) for r in unsupported if r[0] != 'template.trigger'}
     _need(matched == set(expected) | expected_unsupported,
