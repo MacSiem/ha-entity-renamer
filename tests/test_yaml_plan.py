@@ -1067,6 +1067,60 @@ class YAMLPlannerTests(unittest.TestCase):
         self.put('configuration.yaml', unsafe)
         self.assertFalse(self.plan().ready)
 
+    def test_computed_reference_disjoint_from_selected_rows(self):
+        source = '''automation:
+  - variables:
+      source: "{{ 'switch.unrelated_' ~ trigger.event.data.name }}"
+    conditions:
+      - condition: template
+        value_template: "{{ is_state(source, 'on') }}"
+    actions:
+      - if: []
+        then: []
+      - value_template: "{{ is_state(source, 'on') }}"
+      - target:
+          entity_id: sensor.foo
+'''
+        self.put('configuration.yaml', source)
+        result = self.plan()
+        self.assertTrue(result.ready, result.issues)
+        proposed = result.patches[0].proposed_bytes.decode()
+        self.assertEqual(proposed, source.replace('entity_id: sensor.foo', 'entity_id: sensor.new'))
+        self.put('configuration.yaml', source.replace('switch.unrelated_', 'sensor.'))
+        self.assertFalse(self.plan().ready)
+        self.put('configuration.yaml', source.replace('is_state(source, \'on\')', 'true')
+                 .replace('entity_id: sensor.foo', "entity_id: '{{ source }}'")
+                 .replace('switch.unrelated_', 'sensor.'))
+        self.assertFalse(self.plan().ready)
+        self.put('configuration.yaml', source.replace('then: []', '''then:
+          - variables:
+              source: "{{ trigger.event.data.entity }}"'''))
+        self.assertFalse(self.plan().ready)
+
+    def test_conditional_computed_reference_requires_both_branches_disjoint(self):
+        template = "{{ state_attr('switch.one' if flag else 'switch.two', 'timestamp') }}"
+        source = self.control_source('''
+            - value_template: "EXPRESSION"
+            - target:
+                entity_id: sensor.foo
+        '''.replace('EXPRESSION', template), definitions='flag: 1')
+        self.put('configuration.yaml', source)
+        self.assertTrue(self.plan().ready)
+        self.put('configuration.yaml', source.replace('switch.two', 'sensor.foo'))
+        self.assertFalse(self.plan().ready)
+
+    def test_deep_boolean_expression_still_checks_ha_references(self):
+        expression = ' or '.join(["'text' in trigger.event.data.message"] * 210)
+        source = self.control_source('''
+            - value_template: "{{ EXPRESSION }}"
+            - target:
+                entity_id: sensor.foo
+        '''.replace('EXPRESSION', expression), definitions='flag: 1')
+        self.put('configuration.yaml', source)
+        self.assertTrue(self.plan().ready)
+        self.put('configuration.yaml', source.replace(expression, expression + " or states(opaque)"))
+        self.assertFalse(self.plan().ready)
+
     def test_repeat_runtime_object_shadows_and_restores_outer_same_name(self):
         source = self.control_source('''
             - repeat:

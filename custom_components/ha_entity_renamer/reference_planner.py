@@ -263,7 +263,7 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
         while pending:
             node, depth = pending.pop()
             count += 1
-            if depth > 64 or count > cap:
+            if depth > 512 or count > cap:
                 raise Unsupported('Template AST budget exceeded')
             all_nodes.append(node)
             pending.extend((child, depth + 1) for child in node.iter_child_nodes())
@@ -358,6 +358,45 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                 return join_values(selected)
             return ('metadata', ())
 
+        def pattern(node, bindings):
+            """Overapproximate a string by fixed prefix/suffix; unknown is any text."""
+            charge()
+            if isinstance(node, nodes.Const) and type(node.value) is str:
+                return (node.value, node.value, True)
+            if isinstance(node, nodes.Name):
+                bound = bindings.get(node.name)
+                if bound and bound[0] == 'pattern':
+                    return bound[2]
+                if bound:
+                    escape(bound)
+                return ('', '', False)
+            if isinstance(node, nodes.Concat):
+                parts = [pattern(child, bindings) for child in node.nodes]
+                prefix = ''
+                for start, _, exact in parts:
+                    prefix += start
+                    if not exact:
+                        break
+                suffix = ''
+                for _, end, exact in reversed(parts):
+                    suffix = end + suffix
+                    if not exact:
+                        break
+                return (prefix, suffix, all(part[2] for part in parts))
+            if isinstance(node, nodes.CondExpr):
+                expression(node.test, bindings)
+                left = pattern(node.expr1, bindings)
+                right = pattern(node.expr2, bindings) if node.expr2 is not None else ('', '', False)
+                prefix = left[0]
+                while not right[0].startswith(prefix):
+                    prefix = prefix[:-1]
+                suffix = left[1]
+                while not right[1].endswith(suffix):
+                    suffix = suffix[1:]
+                return (prefix, suffix, left == right and left[2])
+            expression(node, bindings)
+            return ('', '', False)
+
         def value(node, bindings):
             charge()
             if isinstance(node, nodes.Const) and type(node.value) is str:
@@ -369,6 +408,9 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                 if bound:
                     charge(len(bound[1]))
                 return bound
+            if isinstance(node, nodes.Concat):
+                proof = pattern(node, bindings)
+                return ('pattern', (), proof) if proof[0] or proof[1] else None
             if (isinstance(node, nodes.Call) and isinstance(node.node, nodes.Name)
                     and node.node.name not in bindings and len(node.args) == 1
                     and not (node.kwargs or node.dyn_args or node.dyn_kwargs)):
@@ -474,6 +516,9 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                         charge(len(item[1]))
                         origins.update(item[1])
                     return ('list', tuple(sorted(origins)))
+            if isinstance(node, nodes.CondExpr):
+                proof = pattern(node, bindings)
+                return ('pattern', (), proof) if proof[0] or proof[1] else None
             return None
 
         def mark(code, detail):
@@ -553,6 +598,11 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                 if parents is not None and bound is not None and bound[0] == 'scalar':
                     return parents + (bound,)
             return None
+
+        def pattern_disjoint(bound):
+            prefix, suffix, exact = bound[2]
+            return not any(old.startswith(prefix) and old.endswith(suffix)
+                           and (not exact or old == prefix) for old in mapping)
 
         def expression(node, bindings):
             charge()
@@ -694,10 +744,17 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                 if name in globals_:
                     args = node.args if name == 'expand' else node.args[:1]
                     values = [value(arg, bindings) for arg in args]
-                    valid = bool(args) and all(item is not None and item[0] in ('scalar', 'list')
-                                               for item in values)
+                    def reference_arg(item):
+                        if not item:
+                            return False
+                        if item[0] in ('scalar', 'list'):
+                            return True
+                        if item[0] == 'pattern':
+                            return pattern_disjoint(item)
+                        return False
+                    valid = bool(args) and all(reference_arg(item) for item in values)
                     if name != 'expand':
-                        valid = valid and values[0][0] == 'scalar'
+                        valid = valid and values[0][0] in ('scalar', 'pattern')
                     valid = valid and not (node.kwargs or node.dyn_args or node.dyn_kwargs)
                     if valid:
                         consume(values)
@@ -787,8 +844,12 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                                    if not (isinstance(child, nodes.TemplateData)
                                            and not child.data.strip())]
                     bound = value(expressions[0], bindings) if len(expressions) == 1 else None
+                    if bound and bound[0] == 'pattern' and not alias_only:
+                        if not pattern_disjoint(bound):
+                            mark('dynamic_reference', 'Computed output may reference a selected entity')
+                        continue
                     if bound and (bound[0] in ('scalar', 'list') or alias_only
-                                  and bound[0] in ('record', 'record_list')):
+                                  and bound[0] in ('record', 'record_list', 'pattern')):
                         if binding_report is not None:
                             binding_report['output_value'] = bound
                         consume([bound])
@@ -970,6 +1031,9 @@ def analyze_template_alias(text, bindings, *, max_nodes=10000, allow_literals=Fa
                                    binding_report=report, output_reference=True, alias_only=allow_records,
                                    trigger_entities=trigger_entities, strict_trigger_keys=strict_trigger_keys)
     bound = report.get('output_value')
+    if (allow_records and bound and bound[0] == 'pattern' and not markers
+            and report.get('complete') and not report.get('unsafe') and not report.get('used')):
+        return bound
     if (markers or report.get('unsafe') or not report.get('complete') or not bound
             or bound[0] not in (('scalar', 'list', 'record', 'record_list') if allow_records else ('scalar', 'list'))
             or not bound[1]

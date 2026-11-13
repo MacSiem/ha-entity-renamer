@@ -384,7 +384,7 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                     for origin in bound[1]:
                         charge()
                         possible.add(origin)
-            if values[0] and values[0][0] in ('record', 'record_list') and all(value == values[0] for value in values):
+            if values[0] and values[0][0] in ('record', 'record_list', 'pattern') and all(value == values[0] for value in values):
                 result[name] = values[0]
                 continue
             shape = next(iter(shapes)) if len(shapes) == 1 and not shapes & {'record', 'record_list'} else 'unknown'
