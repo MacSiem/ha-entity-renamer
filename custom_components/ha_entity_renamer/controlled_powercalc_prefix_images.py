@@ -8,22 +8,34 @@ from .native_registry_receipts import _exact_json_equal, _freeze_json
 from .transaction import Refused
 
 
+def qualified_pss_keys(handoff, pss):
+    """Check the complete receipted postimage, including absent old slots."""
+    if (type(handoff) is not dict or handoff.get('schema') not in (3, 4)
+            or type(pss) is not dict or type(handoff.get('pss_owned')) is not dict
+            or type(handoff.get('pss_owned_before')) is not dict):
+        raise Refused('controlled_powercalc_prefix_images_unverified')
+    before, after = handoff['pss_owned_before'], handoff['pss_owned']
+    if ((handoff['schema'] == 3 and not set(before) <= set(after))
+            or any(key in pss for key in set(before) - set(after))
+            or any(key not in pss or not _exact_json_equal(pss[key], _freeze_json(value))
+                   for key, value in after.items())):
+        raise Refused('controlled_powercalc_prefix_images_unverified')
+    return set(before) | set(after)
+
+
 def reverse_images(handoff, pss, restore):
     def need(value):
         if not value:
             raise Refused('controlled_powercalc_prefix_images_unverified')
 
-    need(type(handoff) is dict and handoff.get('schema') == 3
+    need(type(handoff) is dict and handoff.get('schema') in (3, 4)
          and type(pss) is dict and type(restore) is dict
          and type(handoff.get('population')) is list
          and type(handoff.get('pss_owned')) is dict
          and type(handoff.get('pss_owned_before')) is dict
          and type(handoff.get('restore_owned')) is dict)
-    owned = handoff['pss_owned']
-    need(all(key in pss and _exact_json_equal(pss[key], _freeze_json(value))
-             for key, value in owned.items())
-         and set(handoff['pss_owned_before']) <= set(owned)
-         and all(key in restore and _exact_json_equal(restore[key], _freeze_json(value))
+    owned = qualified_pss_keys(handoff, pss)
+    need(all(key in restore and _exact_json_equal(restore[key], _freeze_json(value))
                  for key, value in handoff['restore_owned'].items()))
     prior_pss = {key: deepcopy(value) for key, value in pss.items() if key not in owned}
     prior_pss.update(deepcopy(handoff['pss_owned_before']))

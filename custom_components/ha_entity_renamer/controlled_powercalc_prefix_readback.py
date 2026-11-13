@@ -13,6 +13,7 @@ async def observe_inactive_prefix(hass, chain, record, *, guard):
     from homeassistant.helpers.restore_state import DATA_RESTORE_STATE, RestoreStateData
     from .controlled_powercalc_handoff import _native_restore_rows, _read_pinned, _restore_rows, _semantic
     from .controlled_powercalc_setup_receipts import validate_handoff
+    from .controlled_powercalc_prefix_images import qualified_pss_keys
     from .helper_native import read_entry
     from .native_input_baseline import _drained, _loads
     from .native_registry_receipts import _event_id, _exact_json_equal, _freeze_json
@@ -47,6 +48,7 @@ async def observe_inactive_prefix(hass, chain, record, *, guard):
          and _idle(pss) and _idle(restore))
     state = chain.reconstruct_inputs()
     memory_pss, memory_restore = _snapshot(pss), _native_restore_rows(restore)
+    qualified_pss_keys(handoff, memory_pss)
     def physical():
         state.assert_current(chain.original_receipt)
         return (_read_pinned(chain.original_receipt, 'powercalc_group', state),

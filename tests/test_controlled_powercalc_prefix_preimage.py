@@ -77,3 +77,23 @@ class PowercalcPrefixPreimageTests(unittest.TestCase):
         changed['sensor.group']['sensor.foreign'] = None
         with self.assertRaises(Refused):
             reverse_images(handoff, changed, restore)
+
+    def test_schema4_moved_group_requires_absent_old_key(self):
+        stored = {'state': {'entity_id': 'sensor.new_energy', 'state': '1'},
+                  'entity_registry_id': 'uuid'}
+        handoff = {'schema': 4, 'population': [{'uuid': 'uuid', 'before_id': 'sensor.old_energy',
+                    'after_id': 'sensor.new_energy', 'payload': {'after': deepcopy(stored)}}],
+                   'pss_owned_before': {'sensor.old_group': {'sensor.old': None}},
+                   'pss_owned': {'sensor.new_group': {'sensor.new': None}},
+                   'restore_owned': {'sensor.new_energy': deepcopy(stored)}}
+        pss = {'sensor.new_group': {'sensor.new': None}, 'sensor.foreign': {'sensor.x': None}}
+        restore = {'sensor.new_energy': deepcopy(stored)}
+        previous, _, _ = reverse_images(handoff, pss, restore)
+        self.assertEqual(previous, {'sensor.old_group': {'sensor.old': None},
+                                    'sensor.foreign': {'sensor.x': None}})
+        occupied = {**pss, 'sensor.old_group': {'foreign': None}}
+        with self.assertRaises(Refused):
+            reverse_images(handoff, occupied, restore)
+        changed = {**pss, 'sensor.new_group': {'foreign': None}}
+        with self.assertRaises(Refused):
+            reverse_images(handoff, changed, restore)

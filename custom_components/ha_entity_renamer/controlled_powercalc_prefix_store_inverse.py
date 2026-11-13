@@ -81,8 +81,8 @@ async def restore_prefix_stores(hass, runtime, journal, record, chain, *, guard,
          and await observe_inactive_prefix(hass, chain, record, guard=scope) == observed)
     # No await between the final native preimage fence and the bounded in-memory
     # replacement. Foreign groups and Restore UUIDs keep their original objects.
-    owned = set(handoff['pss_owned'])
-    need(set(handoff['pss_owned_before']) <= owned and set(stored) == {
+    owned = set(handoff['pss_owned']) | set(handoff['pss_owned_before'])
+    need(set(stored) == {
         item['uuid'] for item in handoff['population']})
     for group in owned:
         if group in handoff['pss_owned_before']:

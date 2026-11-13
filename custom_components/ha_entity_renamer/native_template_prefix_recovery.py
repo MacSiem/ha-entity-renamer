@@ -91,7 +91,7 @@ def acknowledged_powercalc_prefix_receipts(chain, record):
             return False
         handoff = validate_handoff(chain, [key, stored['digest']], 'forward')
         # Older receipts did not preserve the actual pre-handoff PSS map.
-        return handoff['schema'] == 3
+        return handoff['schema'] in (3, 4)
     except Exception:
         return False
 
