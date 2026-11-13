@@ -598,8 +598,10 @@ class NativeRenameEmissions:
                          ('remove_state', self.hass.states), ('set_state', self.hass.states),
                          ('registry_update', self.registry), ('registry_writer', self.registry),
                          ('create_task', self.hass), ('run_job', self.hass)):
+            expected = (self.registry_wrapper if self.inplace_core and key == 'registry_writer'
+                        else self.methods[key])
             _need(getattr(getattr(obj, self.refs[key][1]), '__func__', None)
-                  is self.methods[key], 'native_instance_binding_changed')
+                  is expected, 'native_instance_binding_changed')
         if self.source_handoff is not None:
             from .native_source_handoff import NativeSourceHandoff
             h = self.source_handoff
