@@ -332,6 +332,24 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 evidence['nonadmin_denied'] = denied.get('error', {}).get('code')
             await pulse()
             await baseline()
+            if public:
+                # Independent physical oracle for every native registry row,
+                # including foreign IDs, device associations, units and labels.
+                # Only HA's audit timestamp is excluded.
+                def registry_rows(kind):
+                    path = self.f.root / ('.storage/core.' + kind + '_registry')
+                    rows = json.loads(path.read_bytes())['data'][{'entity': 'entities', 'device': 'devices'}[kind]]
+                    return {row['id']: {key: value for key, value in row.items() if key != 'modified_at'}
+                            for row in rows}
+                original_entities = registry_rows('entity')
+                original_devices = registry_rows('device')
+                expected_entities = deepcopy(original_entities)
+                for row in expected_entities.values():
+                    row['entity_id'] = mapping.get(row['entity_id'], row['entity_id'])
+                    if row['id'] == ordinary.id:
+                        row['name'] = 'Synthetic ordinary name'
+                expected_devices = deepcopy(original_devices)
+                expected_devices[ordinary_device.id]['name_by_user'] = 'Synthetic ordinary device'
             history = NativeRecorderGuard(hass)
             await history.async_synchronize()
             now = dt_util.utcnow()
@@ -390,6 +408,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(energy.data, disk_energy)
                 self.assertEqual(json.loads(dashboard_path.read_bytes())['data']['config'], dashboard_after)
                 self.assertEqual(await dashboard.async_load(False), dashboard_after)
+                self.assertEqual(registry_rows('entity'), expected_entities)
+                self.assertEqual(registry_rows('device'), expected_devices)
                 if hasattr(self, 'boot_automation'):
                     self.assertEqual(len(self.boot_actions), 1, 'forward reload must not synthesize a boot')
             verify_seam(0, mapping)
@@ -432,6 +452,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(energy.data, energy_before)
                 self.assertEqual(json.loads(dashboard_path.read_bytes())['data']['config'], dashboard_before)
                 self.assertEqual(await dashboard.async_load(False), dashboard_before)
+                self.assertEqual(registry_rows('entity'), original_entities)
+                self.assertEqual(registry_rows('device'), original_devices)
                 if hasattr(self, 'boot_automation'):
                     self.assertEqual(len(self.boot_actions), 1, 'inverse reload must not synthesize a boot')
             verify_seam(1, {new: old for old, new in mapping.items()})
