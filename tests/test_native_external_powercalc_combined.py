@@ -80,19 +80,6 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         await hass.services.async_call('homekit', 'reload', {}, blocking=True)
         await hass.async_block_till_done()
         await self._flush_documents()
-        # Compile native statistics before the reviewed history baseline, as in
-        # the other real Powercalc fixtures. This avoids a clock-dependent first
-        # statistics metadata creation during the transaction.
-        from homeassistant.components.recorder import get_instance
-        from homeassistant.components.recorder.tasks import StatisticsTask
-        from homeassistant.util import dt as dt_util
-        from custom_components.ha_entity_renamer.recorder_guard import NativeRecorderGuard
-        history = NativeRecorderGuard(hass)
-        await history.async_synchronize()
-        now = dt_util.utcnow()
-        period = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
-        get_instance(hass).queue_task(StatisticsTask(period, False))
-        await history.async_synchronize()
         old_light, new_light = self.yaml_source, 'light.external_pc_target'
         old_energy, new_energy = self.sum_energy.entity_id, 'sensor.external_pc_energy_target'
         targets = ('sensor.external_utility_target', 'sensor.external_utility_second_target')
@@ -128,6 +115,18 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         for name in names:
             self.assertIsNotNone(meter(name).native_value)
             self.assertGreater(Decimal(str(meter(name).native_value)), Decimal(0))
+        # Compile from native events only after both producers have run; the
+        # current period can still create a new native series after Prepare.
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.tasks import StatisticsTask
+        from homeassistant.util import dt as dt_util
+        from custom_components.ha_entity_renamer.recorder_guard import NativeRecorderGuard
+        history = NativeRecorderGuard(hass)
+        await history.async_synchronize()
+        now = dt_util.utcnow()
+        period = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
+        get_instance(hass).queue_task(StatisticsTask(period, False))
+        await history.async_synchronize()
         original_meters = [(meter(name).entity_id, meter(name).native_value, meter(name)._next_reset)
                            for name in names]
         def check_meter(name, source, baseline):

@@ -70,6 +70,38 @@ def verify_rollback(mapping: dict[str, str], before: dict, after: dict) -> bool:
     return verify({new: old for old, new in mapping.items()}, migrated_original, after)
 
 
+def history_metadata_matches(snapshot, metadata, changes, ids=None):
+    """Preserve original history IDs while admitting newly born selected series.
+
+    New metadata must belong to a selected registry identity whose ORIGINAL
+    had no such series, and pass the same native ownership checks as migration.
+    """
+    scope = set(ids) if ids is not None else set().union(*(
+        set(mapping) | set(mapping.values()) for mapping, _ in changes))
+    allowed = {'states': set(), 'statistics': set()}
+    for mapping, before in changes:
+        if not (set(mapping) | set(mapping.values())) & scope:
+            continue
+        if len(mapping) != 1 or not (set(mapping) | set(mapping.values())) <= scope:
+            return False
+        selected = {kind: {key: value for key, value in rows.items()
+                           if key in mapping or key in mapping.values()}
+                    for kind, rows in metadata.items()}
+        if not (verify(mapping, before, selected) or verify_rollback(mapping, before, selected)):
+            return False
+        old = next(iter(mapping))
+        for kind, field in (('states', 'metadata_id'), ('statistics', 'id')):
+            if old not in before[kind]:
+                allowed[kind].update(row[field] for row in selected[kind].values())
+    for kind, field, key in (('states', 'metadata_id', 'state_ids'),
+                              ('statistics', 'id', 'statistic_ids')):
+        actual = {row[field] for row in metadata[kind].values()}
+        original = set(snapshot[key])
+        if not original <= actual or actual - original != allowed[kind] - original:
+            return False
+    return True
+
+
 def _read_session(session, ids):
     from sqlalchemy import select
     from homeassistant.components.recorder.db_schema import StatesMeta, StatisticsMeta
