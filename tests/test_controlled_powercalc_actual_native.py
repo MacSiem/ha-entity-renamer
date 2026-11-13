@@ -66,7 +66,7 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         def action(event):
             return {'event': event, 'event_data': {'watts': read}}
 
-        state_trigger = {'trigger': 'state', 'entity_id': old_source, 'from': 'off', 'to': 'on'}
+        state_trigger = {'trigger': 'state', 'entity_id': leaf, 'to': ['10', '10.0']}
         def automation(key, actions, trigger=state_trigger):
             return {'id': key, 'alias': key, 'initial_state': True,
                     'triggers': [trigger], 'actions': actions}
@@ -96,6 +96,25 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         def save():
             Path('/qa/controlled-yaml-consumers.json').write_text(json.dumps(report, sort_keys=True))
         self.addCleanup(save)
+        from custom_components.ha_entity_renamer import transaction
+        monitor = sys.monitoring
+        slot = next(i for i in range(6) if monitor.get_tool(i) is None)
+        monitor.use_tool_id(slot, 'controlled YAML consumers diagnosis')
+        def trace(code, offset, error):
+            path = Path(code.co_filename)
+            if 'ha_entity_renamer' in path.parts and isinstance(error, (transaction.Refused, ValueError,
+                    AttributeError, KeyError)) and len(str(error)) < 180:
+                row = (path.name, code.co_name, str(error))
+                reasons = report.setdefault('reasons', [])
+                if row not in reasons:
+                    reasons.append(row)
+        monitor.register_callback(slot, monitor.events.RAISE, trace)
+        monitor.set_events(slot, monitor.events.RAISE)
+        def stop():
+            monitor.set_events(slot, 0)
+            monitor.register_callback(slot, monitor.events.RAISE, None)
+            monitor.free_tool_id(slot)
+        self.addCleanup(stop)
 
         seen = {key: [] for key in ('on', 'off', 'script')}
         for key, events in seen.items():
@@ -115,26 +134,32 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             await self._flush_documents()
             await get_instance(hass).async_block_till_done()
 
-        async def wait_for(predicate):
+        async def wait_for(predicate, detail=lambda: None):
             for _ in range(500):
                 if predicate():
                     return
                 await asyncio.sleep(.01)
-            self.fail('native consumer stimulus did not settle')
+            self.fail(f'native consumer stimulus did not settle: {detail()}')
 
         async def signal(label, mapping):
             active_id, power_id = (mapping.get(key, key) for key in (old_source, leaf))
             for events in seen.values():
                 events.clear()
-            await source.async_turn_off()
-            def readout_is(expected):
-                state = hass.states.get(sensor)
-                return state is not None and state.state in (str(expected), str(float(expected)))
+            def current():
+                return tuple(None if (state := hass.states.get(key)) is None else state.state
+                             for key in (active_id, power_id, sensor))
 
-            await wait_for(lambda: readout_is(0))
+            await source.async_turn_on(brightness=255)
+            await wait_for(lambda: current()[1] is not None and float(current()[1]) == 10, current)
+            await source.async_turn_off()
+            await wait_for(lambda: current()[0] == 'off' and current()[2] is not None
+                           and float(current()[2]) != 20, current)
+            for events in seen.values():
+                events.clear()
             await source.async_turn_on(brightness=255)
             await wait_for(lambda: len(seen['on']) == 1 and len(seen['script']) == 1
-                           and readout_is(20))
+                           and current()[2] is not None and float(current()[2]) == 20,
+                           lambda: (current(), seen))
             watts = float(hass.states.get(power_id).state)
             self.assertEqual(watts, 10)
             self.assertEqual(float(hass.states.get(sensor).state), watts * 2)
