@@ -158,15 +158,17 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         self.assertIn('custom_components/powercalc', reload_code.co_filename)
         reload_active = False
         foreign_events = []
+        foreign_emission_windows = []
         if use_leaf:
             from homeassistant.core import callback
             @callback
             def foreign_observer(event):
                 if event.data.get('entity_id') == foreign_signal:
-                    foreign_events.append((reload_active, event.data.get('new_state')))
+                    foreign_events.append(event)
             remove_foreign = hass.bus.async_listen('state_changed', foreign_observer)
             self.addCleanup(remove_foreign)
         def fire_foreign():
+            foreign_emission_windows.append(reload_active)
             hass.states.async_set(foreign_signal, 'during_reload')
         def state_start(code, offset):
             nonlocal reload_active
@@ -178,7 +180,7 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
                 ev = local['event']
                 delay_events.append(('ingress', ev.data.get('entity_id'), str(ev.data.get('old_state')),
                                      str(ev.data.get('new_state')), id(ev.data.get('new_state')) in local['obj'].witnessed,
-                                     id(ev.data.get('new_state')), reload_active))
+                                     id(ev.data.get('new_state')), reload_active, id(ev)))
             if local.get('self') is binary:
                 delay_events.append((local.get('result'), hass.loop.time(),
                     None if binary._delay_cancel is None else binary._delay_cancel.__self__.when(),
@@ -212,10 +214,11 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         self.assertEqual(result['state'], 'applied')
         if use_leaf:
             self.assertEqual(len(foreign_events), 1)
-            self.assertTrue(foreign_events[0][0], 'foreign state must occur inside vendor reload')
-            self.assertEqual(foreign_events[0][1].state, 'during_reload')
+            self.assertEqual(foreign_emission_windows, [True], (foreign_emission_windows, delay_events))
+            self.assertEqual(foreign_events[0].data['new_state'].state, 'during_reload')
             self.assertTrue(any(row[0] == 'ingress' and row[1] == foreign_signal and not row[4]
-                                and row[5] == id(foreign_events[0][1]) and row[6]
+                                and row[5] == id(foreign_events[0].data['new_state']) and row[6]
+                                and row[7] == id(foreign_events[0])
                                 for row in delay_events), delay_events)
             self.assertEqual(hass.states.get(sensor.entity_id).attributes['foreign'], 'during_reload')
         self.assertIs(binary._delay_cancel, token, delay_events)
