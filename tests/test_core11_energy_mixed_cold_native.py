@@ -299,11 +299,18 @@ class MixedPhase(PowercalcColdPhase):
             watts = Decimal(hass.states.get(power).state)
             self.assertEqual(watts, Decimal(5))
             if self.core111:
-                group_power = self._graph()['graph-first'].entity_id
+                graph = self._graph()
+                group_power = graph['graph-first'].entity_id
+                # The real LUT member draws standby power with its light off.
+                standby = Decimal(hass.states.get(graph['graph-model'].entity_id).state)
+                expected = watts + standby
                 async with asyncio.timeout(10):
-                    while Decimal(hass.states.get(group_power).state) != watts:
+                    while Decimal(hass.states.get(group_power).state) != expected:
                         await asyncio.sleep(.05)
-                self.assertEqual(Decimal(str((await self._script_read())['watts'])), watts)
+                observed = Decimal(str((await self._script_read())['watts']))
+                self.assertEqual(observed, expected)
+                self.evidence[label + '_script_on'] = {'group_id': group_power, 'watts': str(observed),
+                                                       'leaf_watts': str(watts), 'standby': str(standby)}
             await asyncio.sleep(3)
         finally:
             await fixed.async_turn_off()
