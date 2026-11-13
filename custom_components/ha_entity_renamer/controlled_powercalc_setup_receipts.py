@@ -1,6 +1,7 @@
 """Reconstruct the controlled population setup under the same YAML intent."""
 from __future__ import annotations
 
+from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 
 from .native_registry_receipts import _digest, _event_id, _exact_json_equal, _freeze_json
@@ -20,6 +21,38 @@ def _event(chain, reference, key, kind):
     return row['payload']
 
 
+def _validate_prior_pss(handoff, directional, population, *, direction='forward'):
+    """Prove exact member-key transformation, including target absence."""
+    before, after = handoff.get('pss_owned_before'), handoff.get('pss_owned')
+    groups = {(old, new) for _, old, new, kind in population if kind == 'group'}
+    owned = {name for old, new in groups for name in (old, new)}
+    _need(direction in ('forward', 'rollback') and type(before) is dict and type(after) is dict and set(before) <= owned
+          and {old for old, _ in groups} <= set(before)
+          and set(after) == ({new for _, new in groups} if handoff.get('schema', 3) == 4 else owned)
+          and len({old for old, _ in groups}) == len(groups)
+          and len({new for _, new in groups}) == len(groups))
+    result = deepcopy(before)
+    for old, new in sorted(groups):
+        members = before[old]
+        _need(type(members) is dict and (direction == 'rollback' or new == old or new not in before))
+        target = deepcopy(members)
+        for member, next_member in directional.items():
+            if member not in members or next_member == member:
+                continue
+            _need(next_member not in target)
+            value = deepcopy(members[member])
+            if value is not None:
+                _need(type(value) is dict and value.get('entity_id') == member)
+                value['entity_id'] = next_member
+            if old == new:
+                del target[member]
+            target[next_member] = value
+        result[new] = target
+        if handoff.get('schema', 3) == 4 and old != new:
+            del result[old]
+    _need(_exact_json_equal(result, _freeze_json(after)))
+
+
 def validate_handoff(chain, reference, direction):
     from .controlled_powercalc_composition import ControlledPowercalcComposition
     baseline, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
@@ -36,7 +69,7 @@ def validate_handoff(chain, reference, direction):
     _need(all((event.get('root'), event.get('operation_id'), event.get('fingerprint'), event.get('direction'))
               == common and type(event.get('schema')) is int
               for event in (handoff, unload))
-          and unload['schema'] == 1 and handoff['schema'] in ((2, 3) if uuid_restore else (1,))
+          and unload['schema'] == 1 and handoff['schema'] in ((2, 3, 4) if uuid_restore else (1,))
           and handoff.get('source_head') == unload.get('source_head')
           and unload.get('source_head') in chain._setup_positions
           and type(unload.get('phase_index')) is int
@@ -59,10 +92,12 @@ def validate_handoff(chain, reference, direction):
           and {(row['uuid'], row['before_id'], row['after_id'], row['kind']) for row in rows} == expected)
     owned_restore = ({new for _, _, new, _ in expected} if uuid_restore else
                      {name for _, old, new, _ in expected for name in (old, new)})
-    owned_pss = ({new for _, _, new, kind in expected if kind == 'group'} if handoff['schema'] == 3 else
+    owned_pss = ({new for _, _, new, kind in expected if kind == 'group'} if handoff['schema'] == 4 else
                  {name for _, old, new, kind in expected if kind == 'group' for name in (old, new)})
     _need(type(handoff.get('restore_owned')) is dict and set(handoff['restore_owned']) == owned_restore
           and type(handoff.get('pss_owned')) is dict and set(handoff['pss_owned']) == owned_pss)
+    if handoff['schema'] in (3, 4):
+        _validate_prior_pss(handoff, directional, expected, direction=direction)
     from .native_restore_state_payload import deserialize_integration_payload, _canonical
     from .powercalc_group_restore import PowercalcGroupRestorePayload, materialize
     for row in rows:
@@ -112,7 +147,7 @@ def validate_controlled_setup(chain, payload, change):
               == common and type(event.get('schema')) is int
               for event in (setup, intent, handoff, unload))
           and all(event['schema'] == 1 for event in (setup, intent, unload))
-          and handoff['schema'] in ((2, 3) if chain.original_receipt.version in ('2026.11.0', '2026.11.1') else (1,))
+          and handoff['schema'] in ((2, 3, 4) if chain.original_receipt.version in ('2026.11.0', '2026.11.1') else (1,))
           and setup.get('phase_index') == intent.get('phase_index') == index
           and setup.get('yaml_intent') == intent.get('yaml_intent') == payload.get('intent')
           and setup.get('handoff') == intent.get('handoff')

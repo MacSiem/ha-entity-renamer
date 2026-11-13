@@ -18,6 +18,24 @@ def row(name, value, seen='2026-01-01T00:00:00+00:00'):
 
 
 class ControlledPowercalcHandoffTests(unittest.TestCase):
+    def test_moved_group_receipt_proves_exact_preimage_and_absent_source(self):
+        from copy import deepcopy
+        from custom_components.ha_entity_renamer.controlled_powercalc_setup_receipts import _validate_prior_pss
+        from custom_components.ha_entity_renamer.transaction import Refused
+        before = {'sensor.old': {'sensor.member': {'entity_id': 'sensor.member', 'state': '1'}}}
+        after = {'sensor.new': deepcopy(before['sensor.old'])}
+        receipt = {'schema': 4, 'pss_owned_before': before, 'pss_owned': after}
+        population = {('uuid', 'sensor.old', 'sensor.new', 'group')}
+        _validate_prior_pss(receipt, {}, population)
+        for mutation in ('missing_preimage', 'changed_member', 'retained_source', 'occupied_target'):
+            bad = deepcopy(receipt)
+            if mutation == 'missing_preimage': bad['pss_owned_before'].clear()
+            if mutation == 'changed_member': bad['pss_owned']['sensor.new']['sensor.member']['state'] = '2'
+            if mutation == 'retained_source': bad['pss_owned']['sensor.old'] = deepcopy(before['sensor.old'])
+            if mutation == 'occupied_target': bad['pss_owned_before']['sensor.new'] = {}
+            with self.subTest(mutation=mutation), self.assertRaises(Refused):
+                _validate_prior_pss(bad, {}, population)
+
     def test_live_owned_pss_can_advance_in_both_directions_but_foreign_cannot(self):
         for current_id, alias in (('sensor.old', 'sensor.new'), ('sensor.new', 'sensor.old')):
             before = {current_id: {'sensor.member': {'state': '1'}},
