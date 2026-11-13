@@ -301,6 +301,7 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
     async def _setup_real_vendor(self):
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.config_entries import ConfigEntry
+        from homeassistant.helpers.discovery import async_load_platform
         from homeassistant.helpers.entity_component import EntityComponent
         from homeassistant.helpers.entity_platform import async_get_platforms
         from homeassistant.setup import async_setup_component
@@ -354,8 +355,16 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
             min_power: 2
             max_power: 12
 """
-        (self.f.root / 'configuration.yaml').write_text(self.config)
+        path = self.f.root / 'configuration.yaml'
+        # A reference-only member reuses an already configured native leaf.
+        # Load its owner first so HA's concurrent YAML dispatch cannot skip it.
+        path.write_text(self.config.split('    - create_group: Second graph group', 1)[0])
         self.assertTrue(await async_setup_component(hass, 'powercalc', await async_hass_config_yaml(hass)))
+        await hass.async_block_till_done()
+        path.write_text(self.config)
+        config = await async_hass_config_yaml(hass)
+        second = {**config['powercalc']['sensors'][1], 'discovery_type': 'user_yaml'}
+        await async_load_platform(hass, 'sensor', 'powercalc', second, config)
         await hass.async_block_till_done()
         from custom_components.powercalc.config_flow import PowercalcConfigFlow
         self.entry = ConfigEntry(domain='powercalc', title='Graph entry', unique_id='graph-entry',
@@ -380,7 +389,8 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(self.entities), expected)
         rows = {uid: next(row for row in before.rows if row.entity_id == entity.entity_id)
                 for uid, entity in self.entities.items()}
-        self.assertEqual({uid for uid, row in rows.items() if row.source_verified}, expected, rows)
+        self.assertEqual({uid for uid, row in rows.items() if row.source_verified}, expected,
+                         {uid: row.reason for uid, row in rows.items()})
         self.assertEqual(rows['graph-entry'].origin, 'entry:' + self.entry.entry_id)
         self.assertEqual(rows['graph-fixed'].origin, 'yaml:graph-fixed')
         for uid, row in rows.items():
