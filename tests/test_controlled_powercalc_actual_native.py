@@ -74,7 +74,7 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         programs = {
             'template': [{'sensor': [{'name': 'Controlled YAML readout',
                 'unique_id': 'controlled_yaml_readout',
-                'state': "{{ states('" + old_source + "') ~ ':' ~ states('" + leaf + "') }}"}]}],
+                'state': "{{ states('" + leaf + "') | float(-1) * 2 }}"}]}],
             'automation': [automation('controlled_yaml_on', [
                 {'delay': '{{ 120 if long | default(false) else 0 }}'},
                 {'action': 'script.' + script}, action('controlled_yaml_on_result')]),
@@ -127,14 +127,17 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             for events in seen.values():
                 events.clear()
             await source.async_turn_off()
-            await wait_for(lambda: hass.states.is_state(sensor, 'off:0.0')
-                           or hass.states.is_state(sensor, 'off:0'))
+            def readout_is(expected):
+                state = hass.states.get(sensor)
+                return state is not None and state.state in (str(expected), str(float(expected)))
+
+            await wait_for(lambda: readout_is(0))
             await source.async_turn_on(brightness=255)
             await wait_for(lambda: len(seen['on']) == 1 and len(seen['script']) == 1
-                           and hass.states.get(sensor).state.startswith('on:'))
+                           and readout_is(20))
             watts = float(hass.states.get(power_id).state)
             self.assertEqual(watts, 10)
-            self.assertEqual(float(hass.states.get(sensor).state.split(':')[1]), watts)
+            self.assertEqual(float(hass.states.get(sensor).state), watts * 2)
             self.assertEqual(seen, {'on': [watts], 'off': [], 'script': [watts]})
             await hass.services.async_call('script', script, {}, blocking=True)
             self.assertEqual(seen['script'], [watts, watts])
