@@ -574,7 +574,10 @@ async def compile_closed_graph(hass, checked, root, *, with_bindings=False):
         if 'references' not in group and 'pairs' not in group:
             continue
         members = {}
-        for power_id, energy_id in group.pop('pairs', ()):
+        pairs = group.pop('pairs', ())
+        if pairs:
+            group['explicit_pairs'] = True
+        for power_id, energy_id in pairs:
             power, energy = registry.async_get(power_id), registry.async_get(energy_id)
             need(power is not None and energy is not None
                  and power.platform == energy.platform == 'powercalc'

@@ -466,6 +466,14 @@ def bind_graph(hass, vendor, evidence, observed, captured, results, row_identity
                      and native_config.get('hide_members', False) is False
                      and hass.data['powercalc']['group_entities'].get(entity.entity_id) is entity,
                      'yaml_group_origin_changed')
+            if group.get('explicit_pairs'):
+                declarations = native_config.get('entities')
+                need(isinstance(declarations, list) and len(declarations) == len(group['members'])
+                     and all(isinstance(pair, dict) and set(pair) == {'power_sensor_id', 'energy_sensor_id'}
+                             for pair in declarations)
+                     and {(pair['power_sensor_id'], pair['energy_sensor_id']) for pair in declarations}
+                         == {(p, e) for p, _, e, _ in group['members']},
+                     'yaml_group_pair_config_changed')
             if cfg['group_type'] == 'custom':
                 members = cfg.get('group_power_entities', [])
                 need(type(members) is list and bool(members) and len(members) == len(set(members)), 'sum_members')

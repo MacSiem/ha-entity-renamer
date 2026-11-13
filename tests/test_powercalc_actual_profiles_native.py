@@ -1,5 +1,6 @@
 """Synthetic topology of explicit YAML pairs and local LUT, with real HA/Powercalc."""
 from datetime import timedelta
+from decimal import Decimal
 import gzip
 import importlib
 import json
@@ -152,7 +153,7 @@ class ActualProfileGraphNativeTests(unittest.IsolatedAsyncioTestCase):
                     (self.entities[f'fixture-meter-{i}' + suffix].entity_id, group.entity_id, 1)
                     for i in members)))
         for i, watts in [(0, '0.3'), (3, '0'), (9, '1.2')]:
-            self.assertEqual(str(self.entities[f'fixture-meter-{i}']._standby_power), watts)
+            self.assertEqual(self.entities[f'fixture-meter-{i}']._standby_power, Decimal(watts))
         self.assertEqual(self.remote_bytes(), self.remote_original)
         self.assertFalse(any('/powercalc_profiles/' in row[0] for row in self.receipt.source_files))
         self.assertFalse(result.migration_ready)

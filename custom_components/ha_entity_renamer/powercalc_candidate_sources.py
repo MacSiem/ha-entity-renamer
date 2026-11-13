@@ -123,6 +123,14 @@ def seal_powercalc_candidate(receipt, plan, original, planned, native, document_
     candidate = seal_powercalc_sources(receipt, plan, original.ledger, native)
     import json
     old, new = json.loads(original.closed_graph_json), json.loads(candidate.closed_graph_json)
+    # Read-only recognition of the new shapes has no corresponding lifecycle proof.
+    _need(receipt.version != '2026.11.1'
+          and all(not group.get('explicit_pairs') for graph in (old, new) for group in graph['groups'])
+          and all(not row.get('standby_power') and 'gamma_curve' not in row.get('settings', {})
+                  for graph in (old, new) for row in graph['profiles'])
+          and not any(path == '.storage' and any(row[0] == 'powercalc_profiles' for row in rows)
+                      for path, rows, _ in receipt.source_directories),
+          'recognition_only_graph')
     # This prerequisite changes references, not source identity or profile bytes.
     _need(old['files'] == new['files']
           and [(r['origin'], r['unique_id']) for r in old['profiles']] ==
