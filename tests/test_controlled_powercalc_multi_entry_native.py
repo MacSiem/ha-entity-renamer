@@ -203,9 +203,11 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 from datetime import timedelta
                 from types import MappingProxyType
                 from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_USER
-                from homeassistant.components.sensor import SensorEntity
+                from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
+                from homeassistant.const import UnitOfEnergy
                 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
                 from homeassistant.helpers.entity_component import DATA_INSTANCES
+                from homeassistant.setup import async_setup_component
                 class OrdinarySensor(SensorEntity):
                     _attr_unique_id = 'synthetic-multi-ordinary'
                     _attr_name = 'Measurement'
@@ -214,9 +216,19 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     _attr_should_poll = False
                     _attr_device_info = {'identifiers': {('synthetic-multi-queue', 'ordinary-device')},
                                          'name': 'Synthetic ordinary device'}
-                class UtilitySource(OrdinarySensor):
-                    _attr_unique_id = 'synthetic-multi-utility-source'
-                    _attr_name = 'Utility source'
+                class EnergySourceA(OrdinarySensor):
+                    _attr_unique_id = 'synthetic-multi-energy-source-a'
+                    _attr_name = 'Energy source A'
+                    _attr_device_info = {'identifiers': {('synthetic-multi-queue', 'energy-device-a')},
+                                         'name': 'Synthetic energy device A'}
+                    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+                    _attr_device_class = SensorDeviceClass.ENERGY
+                    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+                class EnergySourceB(EnergySourceA):
+                    _attr_unique_id = 'synthetic-multi-energy-source-b'
+                    _attr_name = 'Energy source B'
+                    _attr_device_info = {'identifiers': {('synthetic-multi-queue', 'energy-device-b')},
+                                         'name': 'Synthetic energy device B'}
                 ordinary_entry = ConfigEntry(domain='threshold', title='Synthetic ordinary owner',
                     data={}, options={'name': 'Synthetic ordinary helper',
                                       'entity_id': self.sources[0].entity_id,
@@ -243,8 +255,8 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 ordinary_entity = OrdinarySensor()
                 await platform.async_add_entities([ordinary_entity])
                 if browser_ui:
-                    utility_entity = UtilitySource()
-                    await platform.async_add_entities([utility_entity])
+                    energy_sources = (EnergySourceA(), EnergySourceB())
+                    await platform.async_add_entities(list(energy_sources))
                 await hass.async_block_till_done()
                 ordinary = self.f.entity.async_get(ordinary_id)
                 self.assertIsNotNone(ordinary)
@@ -253,11 +265,35 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 ordinary_name_before = ordinary.name
                 device_name_before = ordinary_device.name_by_user
                 if browser_ui:
-                    utility_id = utility_entity.entity_id
-                    utility_row = self.f.entity.async_get(utility_id)
-                    self.assertIs(utility_entity.registry_entry, utility_row)
-                    self.assertEqual(utility_row.device_id, ordinary_device.id)
-                    mapping[utility_id] = 'sensor.p4_utility_source'
+                    import probatio
+                    from homeassistant.components.energy.data import async_get_manager, ENERGY_SOURCE_SCHEMA
+                    energy = await async_get_manager(hass)
+                    preferences = energy.default_preferences()
+                    preferences['energy_sources'] = probatio.Schema(ENERGY_SOURCE_SCHEMA)([
+                        {'type': 'grid', 'stat_energy_from': source.entity_id, 'stat_energy_to': None,
+                         'stat_cost': None, 'entity_energy_price': None, 'number_energy_price': 0.75,
+                         'cost_adjustment_day': 0.0} for source in energy_sources])
+                    energy_ids = [names['fixture-meter-10_energy'], names['fixture-meter-11_energy']]
+                    preferences['device_consumption'] = [{'stat_consumption': name} for name in energy_ids]
+                    await energy.async_update(preferences)
+                    await energy._store.async_save(energy.data)
+                    self.assertTrue(await async_setup_component(hass, 'energy', {}))
+                    await hass.async_block_till_done()
+                    cost_index = hass.data['energy']['cost_sensors']
+                    cost_ids = [cost_index[source.entity_id] for source in energy_sources]
+                    self.assertEqual(len(set(cost_ids)), 2)
+                    from homeassistant.components.energy.sensor import EnergyCostSensor
+                    costs = {entity.entity_id: entity for platform in async_get_platforms(hass, 'energy')
+                             for entity in platform.entities.values() if type(entity) is EnergyCostSensor}
+                    self.assertTrue(set(cost_ids) <= set(costs))
+                    cost_uuids = {}
+                    for index, cost_id in enumerate(cost_ids):
+                        row = self.f.entity.async_get(cost_id)
+                        self.assertIsNotNone(row)
+                        self.assertEqual(row.platform, 'energy')
+                        self.assertIs(costs[cost_id].registry_entry, row)
+                        cost_uuids[cost_id] = row.id
+                        mapping[cost_id] = f'sensor.p4_energy_cost_{index}'
                 # Native YAML consumers span both selected producers. They are
                 # loaded through HA before ORIGINAL is captured and checked
                 # independently after forward and inverse.
@@ -290,8 +326,9 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                         stream.write('\nhomekit:\n  name: P4 Synthetic Bridge\n  port: 21198\n'
                             '  ip_address: 192.0.2.1\n  advertise_ip: 192.0.2.1\n'
                             '  filter:\n    include_entities:\n      - ' + sources[0] + '\n'
-                            'utility_meter:\n  p4_meter:\n    source: ' + utility_id +
-                            '\n    cycle: daily\n')
+                            'utility_meter:\n  p4_meter_a:\n    source: ' + cost_ids[0] +
+                            '\n    cycle: daily\n  p4_meter_b:\n    source: ' + cost_ids[1] +
+                            '\n    cycle: weekly\n')
                 config = await async_hass_config_yaml(hass)
                 for domain in programs:
                     if domain in hass.config.components:
@@ -320,23 +357,24 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                         self.assertEqual(len(matches), 1)
                         return matches[0]
                     original_aid = aid(sources[0])
-                    def utility_meter():
-                        rows = [entity for platform in async_get_platforms(hass, 'utility_meter')
+                    def utility_meters():
+                        rows = {entity._parent_meter: entity for platform in async_get_platforms(hass, 'utility_meter')
                                 for entity in platform.entities.values()
-                                if getattr(entity, '_parent_meter', None) == 'p4_meter']
-                        self.assertEqual(len(rows), 1)
-                        return rows[0]
+                                if getattr(entity, '_parent_meter', None) in ('p4_meter_a', 'p4_meter_b')}
+                        self.assertEqual(set(rows), {'p4_meter_a', 'p4_meter_b'})
+                        return rows
                 await hass.async_block_till_done()
                 if hasattr(self, 'boot_automation'):
                     self.assertEqual(len(self.boot_actions), 1, 'automation reload must not synthesize a boot')
                 yaml_before = {domain: path.read_bytes() for domain, path in files.items()}
-                from homeassistant.components.energy.data import async_get_manager
-                energy = await async_get_manager(hass)
-                preferences = energy.default_preferences()
-                energy_ids = [names['fixture-meter-10_energy'], names['fixture-meter-11_energy']]
-                preferences['device_consumption'] = [{'stat_consumption': name} for name in energy_ids]
-                await energy.async_update(preferences)
-                await energy._store.async_save(energy.data)
+                if not browser_ui:
+                    from homeassistant.components.energy.data import async_get_manager
+                    energy = await async_get_manager(hass)
+                    preferences = energy.default_preferences()
+                    energy_ids = [names['fixture-meter-10_energy'], names['fixture-meter-11_energy']]
+                    preferences['device_consumption'] = [{'stat_consumption': name} for name in energy_ids]
+                    await energy.async_update(preferences)
+                    await energy._store.async_save(energy.data)
                 energy_before = json.loads((self.f.root / '.storage/energy').read_bytes())['data']
                 from copy import deepcopy
                 from homeassistant.components.lovelace.const import LOVELACE_DATA
@@ -432,15 +470,16 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 # Supply real numeric samples after Utility subscribes, so the
                 # retained value and native reset deadline have actual inputs.
                 for value in (2, 3):
-                    utility_entity._attr_native_value = value
-                    utility_entity.async_write_ha_state()
+                    for source in energy_sources:
+                        source._attr_native_value = value
+                        source.async_write_ha_state()
                     await hass.async_block_till_done()
             await baseline()
             if browser_ui:
-                meter = utility_meter()
-                self.assertIsNotNone(meter._next_reset)
-                self.assertIsNotNone(meter.native_value)
-                meter_before = (meter.entity_id, meter.native_value, meter._next_reset)
+                meter_before = {name: (meter.entity_id, meter.native_value, meter._next_reset)
+                                for name, meter in utility_meters().items()}
+                self.assertTrue(all(value is not None and deadline is not None
+                                    for _, value, deadline in meter_before.values()))
             if public:
                 # Independent physical oracle for every native registry row,
                 # including foreign IDs, device associations, units and labels.
@@ -559,10 +598,14 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(registry_rows('device'), expected_devices)
                 await verify_history()
                 if browser_ui:
-                    meter = utility_meter()
-                    self.assertEqual((meter.entity_id, meter.native_value, meter._next_reset), meter_before)
-                    self.assertEqual(meter._sensor_source_id, mapping[utility_id])
-                    self.assertIsNotNone(meter._collecting)
+                    for index, name in enumerate(('p4_meter_a', 'p4_meter_b')):
+                        meter = utility_meters()[name]
+                        self.assertEqual((meter.entity_id, meter.native_value, meter._next_reset), meter_before[name])
+                        self.assertEqual(meter._sensor_source_id, mapping[cost_ids[index]])
+                        self.assertIsNotNone(meter._collecting)
+                        self.assertEqual(self.f.entity.async_get(mapping[cost_ids[index]]).id, cost_uuids[cost_ids[index]])
+                        self.assertEqual(hass.data['energy']['cost_sensors'][energy_sources[index].entity_id],
+                                         mapping[cost_ids[index]])
                     self.assertEqual((_bridge_identity(bridge_entry), aid(mapping[sources[0]])),
                                      (bridge_identity, original_aid))
                 if hasattr(self, 'boot_automation'):
@@ -621,10 +664,13 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(registry_rows('device'), original_devices)
                 await verify_history()
                 if browser_ui:
-                    meter = utility_meter()
-                    self.assertEqual((meter.entity_id, meter.native_value, meter._next_reset), meter_before)
-                    self.assertEqual(meter._sensor_source_id, utility_id)
-                    self.assertIsNotNone(meter._collecting)
+                    for index, name in enumerate(('p4_meter_a', 'p4_meter_b')):
+                        meter = utility_meters()[name]
+                        self.assertEqual((meter.entity_id, meter.native_value, meter._next_reset), meter_before[name])
+                        self.assertEqual(meter._sensor_source_id, cost_ids[index])
+                        self.assertIsNotNone(meter._collecting)
+                        self.assertEqual(self.f.entity.async_get(cost_ids[index]).id, cost_uuids[cost_ids[index]])
+                        self.assertEqual(hass.data['energy']['cost_sensors'][energy_sources[index].entity_id], cost_ids[index])
                     self.assertEqual((_bridge_identity(bridge_entry), aid(sources[0])),
                                      (bridge_identity, original_aid))
                     self.assertEqual((self.f.root / 'configuration.yaml').read_bytes(), external_config_before)
