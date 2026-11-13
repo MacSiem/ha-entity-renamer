@@ -186,6 +186,20 @@ class ReferencePlannerTest(unittest.TestCase):
             self.assertEqual(plan.markers[0].code, "external_content")
 
     @requires_jinja
+    def test_actual_template_state_membership_shapes_are_byte_reversible(self):
+        sources = (
+            "{% set meters = ['sensor.a', 'sensor.other'] %}{% set valid = ['on', 'off'] %}{% for item in meters %}{% if states(item) in valid %}{{ states(item) }}{% endif %}{% endfor %}",
+            "{% set meters = ['sensor.a', 'sensor.other'] %}{% set excluded = ['unknown', 'unavailable'] %}{% for item in meters %}{% set reading = states(item) %}{% if reading not in excluded %}{{ state_attr(item, 'unit') }}{% endif %}{% endfor %}",
+        )
+        for source in sources:
+            forward = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
+            self.assertFalse(forward.markers, forward.markers)
+            self.assertEqual(forward.value, source.replace('sensor.a', 'sensor.b'))
+            inverse = plan_references(forward.value, {'sensor.b': 'sensor.a'}, jinja())
+            self.assertFalse(inverse.markers, inverse.markers)
+            self.assertEqual(inverse.value.encode(), source.encode())
+
+    @requires_jinja
     def test_native_registry_discovery_is_dynamic_and_has_no_literal_edit(self):
         source = "{% for entity in integration_entities('demo') %}{% set device = device_id(entity) %}{% for item in expand(device_entities(device)) %}{{ item.state }}{% endfor %}{% endfor %}"
         plan = plan_references(source, {'sensor.a': 'sensor.b'}, jinja())
