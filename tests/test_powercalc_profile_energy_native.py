@@ -306,6 +306,11 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.helpers.entity_platform import async_get_platforms
         from homeassistant.setup import async_setup_component
         hass = self.f.hass
+        if self._testMethodName == 'test_mixed_yaml_group_controlled_apply_and_fresh_reverse':
+            import test_receipted_helper_native as recorder_fixture
+            self.with_yaml = True
+            await recorder_fixture.NativeReceiptedHelperTests._before_start(self, hass, self.f.root)
+            self.assertTrue(await async_setup_component(hass, 'homeassistant', {}))
         self.assertEqual(self.f.version, '2026.11.0')
         self.assertTrue(await async_setup_component(hass, 'network', {}))
         self.sources = [ProfileLight(name) for name in ('Graph fixed', 'Graph linear',
@@ -427,13 +432,7 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.core import callback
         from homeassistant.helpers.entity_platform import async_get_platforms
         from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
-        from homeassistant.setup import async_setup_component
-        import test_receipted_helper_native as recorder_fixture
-
         hass, root = self.f.hass, self.f.root
-        self.with_yaml = True
-        await recorder_fixture.NativeReceiptedHelperTests._before_start(self, hass, root)
-        self.assertTrue(await async_setup_component(hass, 'homeassistant', {}))
         await self._flush_documents()
         backend = importlib.import_module(fixtures.PACKAGE)
         runtime = backend.Runtime('mixed-powercalc-fixture', None, None)
