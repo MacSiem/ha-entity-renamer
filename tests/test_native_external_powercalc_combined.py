@@ -108,6 +108,7 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         async def transition(selected):
             review = await runtime.native_yaml_prepare(hass, selected, actor_id='external-pc-qa',
                 guard=lambda: None, refresh=refresh)
+            self.assertTrue({'homekit', 'utility_meter', 'powercalc', 'energy'} <= set(review['dependencies']['domains']))
             try:
                 result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
                     actor_id='external-pc-qa', guard=lambda: None, refresh=refresh)

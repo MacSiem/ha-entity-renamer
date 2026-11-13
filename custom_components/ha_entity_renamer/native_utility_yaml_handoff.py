@@ -106,8 +106,15 @@ class UtilityYAMLHandoff:
                   and entity._tariff is None and entity._tariff_entity is None
                   and info.get(DATA_TARIFF_SENSORS) == [entity] and entity._collecting is not None,
                   'unsupported_meter')
+            before = _static(entity)
+            snapshot = deepcopy({k:v for k,v in info.items() if k != DATA_TARIFF_SENSORS})
+            # The eventual durable intent must be encodable before any other
+            # consumer lifecycle or registry effect starts.
+            from .native_utility_yaml_receipt import _info
+            from .utility_meter_observers import _plain
+            _info(snapshot); _plain(before)
             rows.append(Row(meter, old, mapping[old], entity.entity_id, sources[old].id, platform, entity,
-                            _static(entity), deepcopy({k:v for k,v in info.items() if k != DATA_TARIFF_SENSORS})))
+                            before, snapshot))
         expected = {key for key, info in data.items() if key not in entries and type(info) is dict and info.get('source') in mapping}
         _need(bool(rows) and {row.meter for row in rows} == expected and len({row.meter for row in rows}) == len(rows), 'population')
         return cls(hass, mapping, tuple(rows), tuple(foreign), data)

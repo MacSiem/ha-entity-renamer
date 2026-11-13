@@ -227,7 +227,9 @@ class Runtime:
                         row.domain in ('template.sensor', 'template.binary_sensor')
                         for row in session.evidence.template_sources.ledger.definitions))}
                 from .native_template_state_composition import ExternalStateComposition
-                if type(composition) is ExternalStateComposition:
+                if (type(composition) is ExternalStateComposition
+                        or type(composition) is ControlledPowercalcComposition
+                        and composition.external_source_proof):
                     dependencies['domains'] = sorted(set(dependencies['domains']) |
                         (set(receipt.changed_domains) & {'homekit', 'utility_meter'}))
                 if powercalc:
