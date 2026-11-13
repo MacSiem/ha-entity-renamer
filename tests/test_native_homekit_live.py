@@ -34,8 +34,15 @@ class HomeKitNativeReloadTests(unittest.IsolatedAsyncioTestCase):
             expected = config(new)
             source.write_text(expected)
             async def verify(): self.assertEqual(source.read_text(), expected)
-            await adapter.reload_after_yaml(hass, captured, verify_source=verify,
-                guard=guard, record_intent=intent, settle=settle)
+            try:
+                await adapter.reload_after_yaml(hass, captured, verify_source=verify,
+                    guard=guard, record_intent=intent, settle=settle)
+            except Exception:
+                from pprint import pformat
+                print('SYNTHETIC_EXPECTED', pformat(captured.expected))
+                print('SYNTHETIC_ACTUAL', pformat(tuple(adapter.read_entry(hass, row['identity']['entry_id'])
+                                                       for row in captured.entries)))
+                raise
             entry = hass.config_entries.async_entries('homekit')[0]
             native = entry.runtime_data.homekit
             self.assertFalse(native._filter.get_filter()(new))
