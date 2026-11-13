@@ -14,6 +14,7 @@ from test_powercalc_profile_inputs import ProfileLight
 
 @unittest.skipUnless(fixtures.HAS_HA, 'requires exact native HA and Powercalc')
 class ActualProfileGraphNativeTests(unittest.IsolatedAsyncioTestCase):
+    namespace_source_bytes = b'# Synthetic Powercalc namespace\n'
     asyncSetUp = existing.PowercalcRuntimeNativeTests.asyncSetUp
     _flush_documents = existing.PowercalcRuntimeNativeTests._flush_documents
     guard = existing.PowercalcRuntimeNativeTests.guard
