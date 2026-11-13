@@ -246,7 +246,8 @@ class _Native:
                           (switch.AbstractTemplateSwitch, '__init__'),
                           (switch.AbstractTemplateSwitch, 'async_turn_on'),
                           (switch.AbstractTemplateSwitch, 'async_turn_off'),
-                          (AbstractTemplateEntity, 'add_script'), (Script, '__init__')]
+                          (AbstractTemplateEntity, 'add_script'), (Script, '__init__'),
+                          (Script, 'async_run'), (Script, '_async_unload')]
         from .native_template_metadata import IconValidatorProof
         self.icon_proof = IconValidatorProof(self)
         self.methods, self.codes = prove_methods(self.root, self.pins, self.refs)

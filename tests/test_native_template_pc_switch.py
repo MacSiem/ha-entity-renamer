@@ -70,6 +70,8 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         deadline = token.__self__.when()
         before = [hass.states.get(e.entity_id) for e in (sensor, binary, switch, foreign)]
         await switch.async_turn_on()
+        from custom_components.ha_entity_renamer.recorder_guard import NativeRecorderGuard
+        await NativeRecorderGuard(hass).async_synchronize()
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
         review = await runtime.native_yaml_prepare(hass, mapping, actor_id='p2-fixture',
