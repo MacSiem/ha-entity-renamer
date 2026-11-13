@@ -234,6 +234,38 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertIs(ordinary_entity.device_entry, self.f.device.async_get(ordinary_device.id))
                 ordinary_name_before = ordinary.name
                 device_name_before = ordinary_device.name_by_user
+                # Native YAML consumers span both selected producers. They are
+                # loaded through HA before ORIGINAL is captured and checked
+                # independently after forward and inverse.
+                import yaml
+                from homeassistant.config import async_hass_config_yaml
+                from homeassistant.setup import async_setup_component
+                leaf_a, leaf_b = names['fixture-meter-10'], names['fixture-meter-11']
+                programs = {
+                    'template': [{'unique_id': 'multi-public-consumer', 'sensor': [{
+                        'name': 'Multi public value', 'unique_id': 'value',
+                        'state': "{{ states('" + leaf_a + "') }}"}]}],
+                    'automation': [{'id': 'multi_public_automation', 'alias': 'Multi public automation',
+                        'triggers': [{'trigger': 'state', 'entity_id': leaf_a}],
+                        'actions': [{'event': 'multi_public_automation_result',
+                                     'event_data': {'value': "{{ states('" + leaf_b + "') }}"}}]}],
+                    'script': {'multi_public_script': {'sequence': [{'event': 'multi_public_script_result',
+                        'event_data': {'value': "{{ states('" + leaf_b + "') }}"}}]}},
+                }
+                files = {domain: self.f.root / ('multi-public-' + domain + '.yaml') for domain in programs}
+                for domain, path in files.items():
+                    path.write_text(yaml.safe_dump(programs[domain], sort_keys=False))
+                with (self.f.root / 'configuration.yaml').open('a') as stream:
+                    for domain, path in files.items():
+                        stream.write('\n' + domain + ': !include ' + path.name + '\n')
+                config = await async_hass_config_yaml(hass)
+                for domain in programs:
+                    if domain in hass.config.components:
+                        await hass.services.async_call(domain, 'reload', {}, blocking=True)
+                    else:
+                        self.assertTrue(await async_setup_component(hass, domain, config), domain)
+                await hass.async_block_till_done()
+                yaml_before = {domain: path.read_bytes() for domain, path in files.items()}
                 client = ClientSession()
                 self.addAsyncCleanup(client.close)
                 async def connect(label, group):
@@ -311,6 +343,11 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(self.f.entity.async_get(ordinary_id).name, 'Synthetic ordinary name')
                 self.assertEqual(self.f.device.async_get(ordinary_device.id).name_by_user,
                                  'Synthetic ordinary device')
+                for domain, path in files.items():
+                    for expected_old in ((leaf_a, leaf_b) if domain == 'automation' else
+                                         (leaf_a,) if domain == 'template' else (leaf_b,)):
+                        self.assertNotIn(expected_old, path.read_text())
+                        self.assertIn(mapping[expected_old], path.read_text())
             verify_seam(0, mapping)
             verify_ids(mapping)
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, expected_entries)
@@ -346,6 +383,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(self.f.entity.async_get(ordinary_id).name, ordinary_name_before)
                 self.assertEqual(self.f.device.async_get(ordinary_device.id).name_by_user,
                                  device_name_before)
+                self.assertEqual({domain: path.read_bytes() for domain, path in files.items()}, yaml_before)
             verify_seam(1, {new: old for old, new in mapping.items()})
             verify_ids({})
             self.assertEqual({e.entry_id: dict(e.data) for e in entries}, before_entries)
