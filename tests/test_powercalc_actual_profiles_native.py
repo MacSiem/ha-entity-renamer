@@ -100,7 +100,7 @@ class ActualProfileGraphNativeTests(unittest.IsolatedAsyncioTestCase):
                 source='user', version=PowercalcConfigFlow.VERSION,
                 minor_version=PowercalcConfigFlow.MINOR_VERSION, subentries_data=[],
                 pref_disable_polling=True)
-            self.assertTrue(await hass.config_entries.async_add(entry))
+            await hass.config_entries.async_add(entry)
             self.assertEqual(entry.state.value, 'loaded')
         self.entities = {e.unique_id: e for p in async_get_platforms(hass, 'powercalc')
                          for e in p.entities.values()}
