@@ -75,6 +75,7 @@ class UtilityYAMLHandoff:
         self.hass, self.mapping, self.rows, self.foreign, self.data = hass, dict(mapping), rows, foreign, data
         self.uncertain = False
         self.pending = None
+        self.data_keys = frozenset(data)
 
     @classmethod
     def capture(cls, hass, mapping):
@@ -118,12 +119,29 @@ class UtilityYAMLHandoff:
                   and {k:v for k,v in self.data[meter].items() if k != DATA_TARIFF_SENSORS} == info,
                   'foreign_changed')
 
+    def check_population(self):
+        """No removed, replaced foreign, or newly discovered YAML actor."""
+        from homeassistant.components.utility_meter.const import DATA_UTILITY
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        sensor = _installed()
+        _need(self.hass.data.get(DATA_UTILITY) is self.data
+              and frozenset(self.data) == self.data_keys, 'population_changed')
+        actual = [(platform, entity) for platform in async_get_platforms(self.hass, 'utility_meter')
+                  for entity in platform.entities.values()
+                  if type(entity) is sensor.UtilityMeterSensor and platform.config_entry is None]
+        expected = {(id(row.platform), row.entity_id) for row in self.rows}
+        expected.update((id(platform), entity.entity_id) for platform, entity, _, _ in self.foreign)
+        _need(len(actual) == len(expected)
+              and {(id(platform), entity.entity_id) for platform, entity in actual} == expected,
+              'population_changed')
+        self.check_foreign()
+
     async def detach_group(self, old, *, guard, record_intent):
         """Detach all consumers of one source BEFORE its registry rename."""
         _need(not self.uncertain and self.pending is None, 'ownership')
         from homeassistant.components.utility_meter.const import DATA_TARIFF_SENSORS
         from homeassistant.helpers import entity_registry as er
-        _installed(); guard(); self.check_foreign()
+        _installed(); guard(); self.check_population()
         rows = tuple(row for row in self.rows if row.old == old)
         _need(bool(rows), 'source_scope')
         source = self.hass.states.get(old)
@@ -183,4 +201,5 @@ class UtilityYAMLHandoff:
             result.append(new_entity)
         self.pending = None
         self.uncertain = False
+        self.check_population()
         return tuple(result)

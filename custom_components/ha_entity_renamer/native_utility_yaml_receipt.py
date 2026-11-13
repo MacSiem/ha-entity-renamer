@@ -88,10 +88,16 @@ class UtilityYAMLRegistryAdapter:
               and len(receipt.get('after', ())) == len(receipt['rows']), 'receipt_binding')
         registry = er.async_get(self.handoff.hass)
         actors = {row.meter: row for row in self.handoff.rows}
-        self.handoff.check_foreign()
+        self.handoff.check_population()
         for saved, after in zip(receipt['rows'], receipt['after'], strict=True):
             row = actors.get(saved['meter'])
             _need(row is not None, 'receipt_population')
+            expected_source, expected_target = ((row.old, row.new) if direction == 'forward'
+                                                else (row.new, row.old))
+            _need(saved['source'] == expected_source and saved['target'] == expected_target
+                  and saved['source_uuid'] == row.source_uuid and saved['entity_id'] == row.entity_id
+                  and saved['info'] == {**_info(row.info), 'source': expected_source}
+                  and (direction != 'forward' or saved == _rows((row,))[0]), 'receipt_original_binding')
             entity = row.platform.entities.get(saved['entity_id'])
             info = self.handoff.data.get(saved['meter'])
             native = registry.async_get(saved['target'])
