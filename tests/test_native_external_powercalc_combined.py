@@ -37,20 +37,6 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         import probatio
         await super()._setup_vendor_forward()
         hass, root = self.f.hass, self.f.root
-        from datetime import timedelta
-        import logging
-        from homeassistant.components.sensor import SensorEntity
-        from homeassistant.helpers.entity_component import EntityComponent
-        class UtilitySource(SensorEntity):
-            _attr_name = 'External Utility source'
-            _attr_unique_id = 'external-utility-source'
-            _attr_should_poll = False
-            _attr_native_value = 100
-            _attr_native_unit_of_measurement = 'kWh'
-        self.utility_source = UtilitySource()
-        component = EntityComponent(logging.getLogger(__name__), 'sensor', hass, timedelta(seconds=60))
-        await component.async_add_entities([self.utility_source])
-        await hass.async_block_till_done()
         manager = await async_get_manager(hass)
         data = deepcopy(manager.data)
         data['energy_sources'] = probatio.Schema(ENERGY_SOURCE_SCHEMA)([{'type': 'grid',
@@ -59,14 +45,23 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
             'cost_adjustment_day': 0.0}])
         await manager.async_update(data)
         await manager._store.async_save(manager.data)
+        self.assertTrue(await async_setup_component(hass, 'energy', {}))
+        await hass.async_block_till_done()
+        self.cost_source = hass.data['energy']['cost_sensors'][self.sum_energy.entity_id]
+        from homeassistant.components.energy.sensor import EnergyCostSensor
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        costs = [entity for platform in async_get_platforms(hass, 'energy') for entity in platform.entities.values()
+                 if entity.entity_id == self.cost_source]
+        self.assertEqual(len(costs), 1)
+        self.assertIs(type(costs[0]), EnergyCostSensor)
         config = root / 'configuration.yaml'
         with config.open('a') as out:
             out.write('\nhomekit:\n  name: Synthetic PC Bridge\n  port: 21198\n'
                 '  ip_address: 192.0.2.1\n  advertise_ip: 192.0.2.1\n'
                 '  filter:\n    include_entities:\n      - ' + self.yaml_source + '\n'
-                'utility_meter:\n  external_pc_meter:\n    source: ' + self.utility_source.entity_id + '\n    cycle: daily\n')
+                'utility_meter:\n  external_pc_meter:\n    source: ' + self.cost_source + '\n    cycle: daily\n')
         loaded = await async_hass_config_yaml(hass)
-        for domain in ('energy', 'utility_meter', 'homekit'):
+        for domain in ('utility_meter', 'homekit'):
             if domain == 'utility_meter' and domain in hass.config.components:
                 from homeassistant.components.utility_meter import CONFIG_SCHEMA, DATA_UTILITY, async_setup
                 self.assertFalse(hass.data[DATA_UTILITY])
@@ -84,7 +79,7 @@ class ExternalPowercalcCombinedTests(fixture.ControlledPowercalcPublicNativeTest
         await self._flush_documents()
         old_light, new_light = self.yaml_source, 'light.external_pc_target'
         old_energy, new_energy = self.sum_energy.entity_id, 'sensor.external_pc_energy_target'
-        old_utility, new_utility = self.utility_source.entity_id, 'sensor.external_utility_target'
+        old_utility, new_utility = self.cost_source, 'sensor.external_utility_target'
         mapping = {old_light: new_light, old_energy: new_energy, old_utility: new_utility}
         original_ids = {old: self.f.entity.async_get(old).id for old in mapping}
         entry = hass.config_entries.async_entries('homekit')[0]
