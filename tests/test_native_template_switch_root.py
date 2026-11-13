@@ -32,4 +32,4 @@ class TemplateSwitchRootTests(root.NativeTemplateStateRootCoverageTests):
                       for entity in platform.entities.values() if entity.unique_id == 'scope-action')
         binding = self.module('native_template_state_binding')
         native = binding._StateRuntime(self.f.hass)
-        self.assertIs(binding._graph(native, switch)[0], switch._template_result_info)
+        self.assertEqual(binding._graph(native, switch)[0], id(switch._template_result_info))

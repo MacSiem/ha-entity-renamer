@@ -184,7 +184,7 @@ def seal_template_state_sources(receipt, ledger, native, *, plan, mapping):
     state_keys = []
     for row in native['states']:
         _need(type(row) is list and len(row) == 4
-              and row[0] in ('template.sensor', 'template.binary_sensor')
+              and row[0] in ('template.sensor', 'template.binary_sensor', 'template.switch')
               and type(row[1]) is str and bool(row[1])
               and type(row[2]) is str and _SHA.fullmatch(row[2]))
         state_keys.append((row[0], row[1]))
@@ -213,7 +213,7 @@ def seal_template_state_sources(receipt, ledger, native, *, plan, mapping):
         _need(len(paths) == len(set(paths)))
     _need(state_keys == sorted(set(state_keys)) and state_keys == sorted(
         (r[0], r[1]) for r in native['families'] if r[2] == 'state'
-        and r[0] in ('template.sensor', 'template.binary_sensor')))
+        and r[0] in ('template.sensor', 'template.binary_sensor', 'template.switch')))
     proof = native['reference_proof']
     _need(type(proof) is dict and set(proof) == {
         'planner', 'mapping', 'files', 'variable_bindings_sha256'})

@@ -388,7 +388,7 @@ def _extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
                         and prefix_text is not None):
                     native_key = (prefix_text + '-' if prefix_text else '') + ids[0][0].node.value
                     keyref = ids[0][1]
-                elif (not ids and mode == 'state' and platform in ('sensor', 'binary_sensor')
+                elif (not ids and mode == 'state' and platform in ('sensor', 'binary_sensor', 'switch')
                       and prefix_text is not None):
                     from .template_physical_identity import physical_template_key
                     native_key = physical_template_key('template.' + platform,

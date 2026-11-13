@@ -632,7 +632,7 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                     raise YAMLValidationError('native_helpers_validation_seal_mismatch')
             if ('template' in result['changed_domains']
                     and (not with_sources or staged[3].findings
-                         or any(row.domain not in ('template.state', 'template.sensor', 'template.binary_sensor')
+                         or any(row.domain not in (('template.state', 'template.sensor', 'template.binary_sensor', 'template.switch') if template_state_program else ('template.state', 'template.sensor', 'template.binary_sensor'))
                                 for row in staged[3].definitions))):
                 result['unsupported_domains'] = sorted(
                     set(result['unsupported_domains']) | {'template'})
