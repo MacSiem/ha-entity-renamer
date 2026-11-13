@@ -52,6 +52,7 @@ const wait = async name => {
       fingerprint:el._migration.fingerprint, changes:el._migration.review.changes.length,
       domains:el._migration.review.dependencies.domains}));
     if (reviewed.changes !== request.entities.length + 1) throw Error('incomplete server review');
+    await page.screenshot({path:dir + '/ui-review.png'});
     write('review', reviewed);
     await wait('apply');
     await card.locator('#applyMigration').click();
@@ -68,6 +69,7 @@ const wait = async name => {
       registry:el._migration.registryMatches, progress:el._migration.journal?.progress || null}));
     if (applied.state !== 'applied' || applied.inspection !== 'applied' || !applied.registry)
       throw Error('UI apply not independently confirmed');
+    await page.screenshot({path:dir + '/ui-applied.png'});
     write('applied', applied);
     await wait('restore');
     await card.locator('#reviewMigrationRestore').click();
@@ -84,6 +86,7 @@ const wait = async name => {
       inspection:el._migration.inspection?.state, registry:el._migration.registryMatches}));
     if (restored.state !== 'rolled_back' || restored.inspection !== 'rolled_back' || !restored.registry)
       throw Error('UI restore not independently confirmed');
+    await page.screenshot({path:dir + '/ui-restored.png'});
     write('restored', restored);
     await context.close();
   } finally { await browser.close(); }
