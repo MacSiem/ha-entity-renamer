@@ -14,6 +14,9 @@ import test_native_template_yaml_server as server
 @unittest.skipUnless(backend_fixture.activation.fixtures.HAS_HA, 'actual pinned HA required')
 class OrdinaryRegistryPublicTests(unittest.IsolatedAsyncioTestCase):
     with_yaml = True
+    # The installed integration loads frontend -> config, which itself
+    # registers the real editors. Do not register a second set in the fixture.
+    native_frontend_config = True
     asyncSetUp = backend_fixture.NativeBackendLifecycleTests.asyncSetUp
     _before_start = backend_fixture.NativeBackendLifecycleTests._before_start
     _loaded_backend = backend_fixture.NativeBackendLifecycleTests._loaded_backend
@@ -115,6 +118,9 @@ class OrdinaryRegistryPublicTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(extra.platform.config_entry, entry)
             self.assertEqual(extra.device_info['identifiers'], {('threshold', 'ordinary-device-' + kind)})
         async with self._transport() as (ws, user):
+            locks = self.module('yaml_editor_locks').NativeYAMLEditorLocks(hass).enumerate()
+            self.assertEqual(len(locks), 3)
+            self.assertEqual(len({name for _, name, _, _ in locks}), 3)
             await self._snapshot('BEFORE')
             entity = {'entity_id': old}
             if kind in ('id', 'combined'):

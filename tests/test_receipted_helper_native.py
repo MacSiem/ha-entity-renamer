@@ -41,9 +41,10 @@ class NativeReceiptedHelperTests(quiescence.NativeHelperQuiescenceTests):
                 port = sock.getsockname()[1]
             self.assertTrue(await async_setup_component(hass, 'http', {'http': {
                 'server_host': '127.0.0.1', 'server_port': port}}))
-            from homeassistant.components.config import automation, script, scene
-            for editor in (automation, script, scene):
-                self.assertTrue(editor.async_setup(hass))
+            if not getattr(self, 'native_frontend_config', False):
+                from homeassistant.components.config import automation, script, scene
+                for editor in (automation, script, scene):
+                    self.assertTrue(editor.async_setup(hass))
 
     async def test_threshold_supported_unload_own_mutations_setup_and_reverse(self):
         self.activation_lease = None
