@@ -41,6 +41,8 @@ def plan_button_expression(text, mapping):
     match = _LOOKUP.fullmatch(text)
     if match:
         old = match.group(3)
+        if old in mapping.values() and old not in mapping:
+            return text, 'target_reference_preexisting'
         return text[:match.start(3)] + mapping.get(old, old) + text[match.end(3):], None
     if hashlib.sha256(text.encode()).hexdigest() in _OBSERVED_UNCHANGED:
         prefixes = _PREFIX.findall(text)

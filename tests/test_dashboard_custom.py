@@ -136,6 +136,12 @@ class DashboardGuardRegressionTests(unittest.TestCase):
         with patch.object(dc, '_COMPUTED_TARGETS', frozenset({hashlib.sha256(target.encode()).hexdigest()})):
             self.assertFalse(dc.unchanged_computed_target(target, {'sensor.other':'sensor.group_a'}))
 
+    def test_direct_foreign_target_reference_is_not_suppressed(self):
+        from custom_components.ha_entity_renamer.dashboard_custom import plan_button_expression
+        _, code = plan_button_expression("[[[ return states['sensor.target'].state; ]]]",
+                                         {'sensor.other':'sensor.target'})
+        self.assertEqual(code, 'target_reference_preexisting')
+
     def test_jinja_target_and_nested_shadow_are_not_suppressed(self):
         from custom_components.ha_entity_renamer.dashboard_custom import unchanged_finite_jinja
         finite = "{% for e, label in [('sensor.target', 'x')] %}{{ states(e) }}{% endfor %}"
