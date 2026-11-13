@@ -97,6 +97,22 @@ def _pss_foreign_unchanged(before, current, active_groups):
     return _exact_json_equal(right, _freeze_json(left))
 
 
+def _store_writer(store):
+    from homeassistant.const import __version__
+    from homeassistant.helpers.storage import Store
+    refs = ((Store, 'async_save'), (Store, '_async_handle_write_data'),
+            (Store, '_async_write_data'))
+    if __version__ == '2026.11.0':
+        from homeassistant.helpers.storage import _FileStoreIO
+        io = store._io
+        _need(type(io) is _FileStoreIO and io.path == store.path
+              and io._key == store.key and io._hass is store.hass, 'native_file_io_changed')
+        return io, _FileStoreIO._write.__code__, refs + (
+            (Store, '_prepare_data'), (_FileStoreIO, 'async_write'), (_FileStoreIO, '_write'))
+    return store, Store._write_prepared_data.__code__, refs + (
+        (Store, '_write_data'), (Store, '_write_prepared_data'))
+
+
 class _NativePSSProgress:
     """Observe native PSS writes only while the qualified population unloads."""
     def __init__(self, owner, proof, refs, core_proof, core_refs):
@@ -106,7 +122,7 @@ class _NativePSSProgress:
         self.proof, self.refs, self.core_proof, self.core_refs = proof, refs, core_proof, core_refs
         self.owner_code = type(owner).persist_states.__code__
         self.save_code = Store.async_save.__code__
-        self.writer_code = Store._write_prepared_data.__code__
+        self.writer, self.writer_code, _ = _store_writer(self.store)
         self.owners, self.saves, self.writing = set(), set(), {}
         self.completed, self.contamination = [], []
         free = [index for index in range(6) if sys.monitoring.get_tool(index) is None]
@@ -135,7 +151,7 @@ class _NativePSSProgress:
             if task not in self.owners or self.saves:
                 self.contamination.append('unowned_save')
             self.saves.add(task)
-        elif code is self.writer_code and instance is self.store:
+        elif code is self.writer_code and instance is self.writer:
             ident = threading.get_ident()
             raw = frame.f_locals.get('json_data')
             if len(self.owners) != 1 or self.saves != self.owners or ident in self.writing:
@@ -155,7 +171,7 @@ class _NativePSSProgress:
             self.owners.discard(asyncio.current_task())
         elif code is self.save_code and instance is self.store:
             self.saves.discard(asyncio.current_task())
-        elif code is self.writer_code and instance is self.store:
+        elif code is self.writer_code and instance is self.writer:
             raw = self.writing.pop(threading.get_ident(), None)
             if raw is None:
                 self.contamination.append('writer_return')
@@ -205,8 +221,7 @@ async def _native_store_write(hass, owner, method_name, receipt, input_state, ke
     _need(isinstance(store, Store) and store.hass is hass and store.key == key and _idle(owner),
           'native_write_store_unavailable')
     refs = ((type(owner), method_name),)
-    core_refs = ((Store, 'async_save'), (Store, '_async_handle_write_data'),
-                 (Store, '_async_write_data'), (Store, '_write_data'), (Store, '_write_prepared_data'))
+    writer, writer_code, core_refs = _store_writer(store)
     vendor = PowercalcVendor(hass, with_profiles=True) if key == 'powercalc_group' else None
     def prove():
         pins = dict(_SOURCES[receipt.version])
@@ -223,7 +238,6 @@ async def _native_store_write(hass, owner, method_name, receipt, input_state, ke
     method_code = getattr(type(owner), method_name).__code__
     save_code = Store.async_save.__code__
     write_code = Store._async_write_data.__code__
-    writer_code = Store._write_prepared_data.__code__
     task, starts, returns, saves, contamination, writes = None, [], [], [], [], []
     write_owner = None
     sys.monitoring.use_tool_id(tool, 'renamer.controlled_native_store_write')
@@ -246,7 +260,7 @@ async def _native_store_write(hass, owner, method_name, receipt, input_state, ke
             # Associate its executor callback with that actual task so a
             # competitor's later write is observed, never blocked by our fence.
             write_owner = asyncio.current_task()
-        elif code is writer_code and instance is store:
+        elif code is writer_code and instance is writer:
             if write_owner is not task:
                 return
             # Runs in the native Store executor immediately before its writer.
@@ -256,7 +270,11 @@ async def _native_store_write(hass, owner, method_name, receipt, input_state, ke
             _need((actual, identity, root, storage) ==
                   (expected_raw, expected_identity, root_sig, storage_sig),
                   'native_write_physical_preimage_changed')
-            writes.append(True)
+            raw = frame.f_locals.get('json_data')
+            if type(raw) is str:
+                raw = raw.encode('utf-8')
+            _need(type(raw) is bytes, 'native_write_payload_unverified')
+            writes.append(raw)
     def returned(code, offset, result):
         frame = sys._getframe(1)
         if code is method_code and frame.f_locals.get('self') is owner:
@@ -283,10 +301,17 @@ async def _native_store_write(hass, owner, method_name, receipt, input_state, ke
         task.result()
         guard()
         _need(starts == [task] and returns == [task] and saves == [task]
-              and writes == [True] and not contamination and _idle(owner),
+              and len(writes) == 1 and not contamination and _idle(owner),
               'native_write_or_competition_uncertain')
         unchanged(refs, *proof[0])
         unchanged(core_refs, *proof[1])
+        actual, _, root, storage = await _drained(hass.async_add_executor_job,
+            lambda: _read_pinned(receipt, key, input_state))
+        guard()
+        _need((root, storage) == (root_sig, storage_sig)
+              and actual == writes[0] and not contamination and _idle(owner),
+              'native_write_physical_readback_changed')
+        return actual
     finally:
         for code in (method_code, save_code, write_code, writer_code):
             sys.monitoring.set_local_events(tool, code, 0)
@@ -411,8 +436,7 @@ class ControlledPowercalcHandoff:
         pss = self.hass.data.get('powercalc_group_storage')
         _need(pss is not None and _idle(pss), 'native_store_busy')
         refs = ((type(pss), 'persist_states'),)
-        core_refs = ((Store, 'async_save'), (Store, '_async_handle_write_data'),
-                     (Store, '_async_write_data'), (Store, '_write_data'), (Store, '_write_prepared_data'))
+        _, _, core_refs = _store_writer(pss.store)
         vendor = PowercalcVendor(self.hass, with_profiles=True)
         def prove():
             return (prove_methods(vendor.root, _pins(vendor.vendor_version), refs),
@@ -651,7 +675,7 @@ class ControlledPowercalcHandoff:
                       for key in owned_restore),
               'restore_source_changed_before_write')
         expected_restore = restore_memory_gate
-        await _native_store_write(self.hass, data, 'async_dump_states', self.chain.original_receipt,
+        restore_written = await _native_store_write(self.hass, data, 'async_dump_states', self.chain.original_receipt,
             self.root.observation_state, 'core.restore_state', restore_gate, restore_gate_id,
             root_sig, storage_sig, self._scope)
         self._scope()
@@ -662,15 +686,16 @@ class ControlledPowercalcHandoff:
             lambda: _read_pinned(self.chain.original_receipt, 'core.restore_state', self.root.observation_state))
         self._scope()
         _need(root3 == root4 == previous.root_identity and storage3 == storage4 == previous.storage_identity
-              and pss_after is not None and restore_after is not None and _idle(data) and _idle(pss),
+              and pss_after is not None and restore_after == restore_written and _idle(data) and _idle(pss),
               'native_readback_uncertain')
         _disk_shape(pss_after)
         _need(_exact_json_equal(_loads(pss_after)['data'], _freeze_json(pss_after_memory)),
               'pss_readback_changed')
         actual_restore = _restore_rows(restore_after)
-        _need(set(actual_restore) == set(expected_restore)
-              and all(_exact_json_equal(_semantic(actual_restore[key]), _freeze_json(_semantic(row)))
-                      for key, row in expected_restore.items()), 'restore_readback_changed')
+        _need(owned_restore <= actual_restore.keys()
+              and all(_exact_json_equal(_semantic(actual_restore[key]),
+                                        _freeze_json(_semantic(expected_restore[key])))
+                      for key in owned_restore), 'restore_readback_changed')
         encoded = []
         for uuid, old, new, kind, payload in payloads:
             if kind == 'integration':
