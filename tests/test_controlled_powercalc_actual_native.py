@@ -56,7 +56,6 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         old_source = source.entity_id
         leaf = self.entities['fixture-meter-10'].entity_id
         mapping = {old_source: 'light.controlled_yaml_source', leaf: 'sensor.controlled_yaml_power'}
-        sensor = 'sensor.controlled_yaml_readout'
         script = 'controlled_yaml_read'
         files = {domain: root / f'{domain}.yaml' for domain in ('automation', 'script', 'template')}
         conf = root / 'configuration.yaml'
@@ -66,7 +65,7 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         def action(event):
             return {'event': event, 'event_data': {'watts': read}}
 
-        state_trigger = {'trigger': 'state', 'entity_id': leaf, 'to': ['10', '10.0']}
+        state_trigger = {'trigger': 'state', 'entity_id': leaf, 'to': ['10', '10.0', '10.00']}
         def automation(key, actions, trigger=state_trigger):
             return {'id': key, 'alias': key, 'initial_state': True,
                     'triggers': [trigger], 'actions': actions}
@@ -92,7 +91,15 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         for domain in ('template', 'script', 'automation'):
             self.assertTrue(await async_setup_component(hass, domain, config), domain)
         await hass.async_block_till_done()
-        report = {}
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        template_entities = [e for p in async_get_platforms(hass, 'template')
+                             for e in p.entities.values()]
+        self.assertEqual(len(template_entities), 1,
+                         [(row.entity_id, row.platform) for row in self.f.entity.entities.values()
+                          if row.platform == 'template'])
+        template_entity, = template_entities
+        sensor = template_entity.entity_id
+        report = {'template_id': sensor}
         def save():
             Path('/qa/controlled-yaml-consumers.json').write_text(json.dumps(report, sort_keys=True))
         self.addCleanup(save)
