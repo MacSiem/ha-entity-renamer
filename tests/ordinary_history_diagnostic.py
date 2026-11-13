@@ -11,7 +11,8 @@ def history_identity_diff(metadata, snapshot):
         expected_ids = sorted(expected)
         result[label] = {'actual': actual_ids, 'expected': expected_ids,
                          'new': sorted(set(actual_ids) - set(expected_ids)),
-                         'missing': sorted(set(expected_ids) - set(actual_ids))}
+                         'missing': sorted(set(expected_ids) - set(actual_ids)),
+                         'rows': rows}
     return result
 
 

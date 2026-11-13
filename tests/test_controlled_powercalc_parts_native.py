@@ -35,7 +35,7 @@ class ControlledPowercalcPartsTests(ControlledActualGraphTests):
                 target = Path(destination) / 'parts-storage'
                 target.mkdir(mode=0o700, parents=True, exist_ok=True)
                 diagnostic = target / 'history-diffs.json'
-                diagnostic.write_text(json.dumps(history_diffs))
+                diagnostic.write_text(json.dumps(history_diffs, default=str))
                 diagnostic.chmod(0o600)
                 for item in storage.iterdir():
                     if item.is_file() and 'ha_entity_renamer' in item.name:
@@ -142,6 +142,24 @@ class ControlledPowercalcPartsTests(ControlledActualGraphTests):
         for light in self.sources:
             await light.async_turn_off()
         await hass.async_block_till_done()
+        # Seal the native series only after real pulses and a completed period;
+        # a later first statistics compilation would change the strict history
+        # identity after review, legitimately making recovery unprovable.
+        from datetime import timedelta
+        from homeassistant.components.recorder.tasks import StatisticsTask
+        from homeassistant.util import dt as dt_util
+        from custom_components.ha_entity_renamer.recorder_guard import NativeRecorderGuard
+        history = NativeRecorderGuard(hass)
+        await history.async_synchronize()
+        now = dt_util.utcnow()
+        period = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0) + timedelta(minutes=5)
+        await asyncio.sleep(max(0, (period - dt_util.utcnow()).total_seconds()))
+        get_instance(hass).queue_task(StatisticsTask(period, False))
+        await history.async_synchronize()
+        series = {names[f'fixture-meter-{i}{suffix}']
+                  for i in (10, 11) for suffix in ('', '_energy')}
+        metadata = await history.snapshot({entity_id: entity_id for entity_id in series})
+        self.assertTrue(series <= set(metadata['statistics']), metadata['statistics'])
         verify({})
         a, b = parts
         await transition(a)
