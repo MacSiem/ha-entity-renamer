@@ -55,6 +55,8 @@ const wait = async name => {
       fingerprint:el._migration.fingerprint, changes:el._migration.review.changes.length,
       domains:el._migration.review.dependencies.domains}));
     if (reviewed.changes !== request.entities.length + 1) throw Error('incomplete server review');
+    for (const domain of ['powercalc','energy','template','automation','script','dashboard','homekit','utility_meter'])
+      if (!reviewed.domains.includes(domain)) throw Error('missing reviewed dependency: ' + domain);
     await page.screenshot({path:dir + '/ui-review.png'});
     write('review', reviewed);
     await wait('apply');
@@ -83,9 +85,12 @@ const wait = async name => {
       ...(row.name ? {name:request.ordinary_original_name} : {})}));
     await queue(reverse, request.original_device_name);
     const inverse = await card.evaluate(el => ({operation_id:el._migration.operation_id,
-      fingerprint:el._migration.fingerprint, changes:el._migration.review.changes.length}));
+      fingerprint:el._migration.fingerprint, changes:el._migration.review.changes.length,
+      domains:el._migration.review.dependencies.domains}));
     if (inverse.operation_id === reviewed.operation_id || inverse.changes !== request.entities.length + 1)
       throw Error('fresh inverse review missing');
+    for (const domain of reviewed.domains)
+      if (!inverse.domains.includes(domain)) throw Error('missing inverse dependency: ' + domain);
     await card.locator('#applyMigration').click();
     await card.locator('#continueWriteWarning').click();
     await page.waitForFunction(() => {
