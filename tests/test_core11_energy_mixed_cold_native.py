@@ -1,5 +1,6 @@
 """Native Core 11 / Powercalc 1.27, normal stop and fresh inverse."""
 import asyncio
+from contextlib import closing
 from datetime import timedelta
 from decimal import Decimal
 import hashlib
@@ -16,6 +17,7 @@ from types import MappingProxyType
 import unittest
 
 from test_energy_continuity_mixed_cold_native import MixedPowercalcColdPhase
+from test_receipted_helper_native import NativeReceiptedHelperTests
 from test_powercalc_profile_energy_native import PowercalcMixedGraphNativeTests
 from test_powercalc_public_cold_native import PowercalcColdPhase
 from test_r9_cost_statistics_oracle import calculate
@@ -34,7 +36,25 @@ QA = Path('/qa')
 class MixedPhase(PowercalcColdPhase):
     _add_graph_lights = PowercalcMixedGraphNativeTests._add_graph_lights
     _load_graph = PowercalcMixedGraphNativeTests._load_graph
-    _startup_services = MixedPowercalcColdPhase._startup_services
+    async def _startup_services(self, hass, root):
+        import socket
+        from homeassistant import auth
+        from homeassistant.components.http.config import async_get_and_load_store
+        from homeassistant.setup import async_setup_component
+
+        self.with_yaml = False
+        await NativeReceiptedHelperTests._before_start(self, hass, root)
+        hass.auth = await auth.auth_manager_from_config(hass, [], [])
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0))
+            port = sock.getsockname()[1]
+        self.assertTrue(await async_setup_component(hass, 'http', {'http': {
+            'server_host': '127.0.0.1', 'server_port': port}}))
+        store = await async_get_and_load_store(hass)
+        if store.pending is not None:
+            await store.async_promote_pending()
+        self.assertTrue(await async_setup_component(hass, 'config', {}))
+
     _flush_documents = PowercalcMixedGraphNativeTests._flush_documents
 
     async def asyncSetUp(self):
@@ -60,7 +80,7 @@ class MixedPhase(PowercalcColdPhase):
             self.installed_component = root / 'custom_components/ha_entity_renamer'
             self.public_source_sha256 = self.meta['component_sha256']
         hass = HomeAssistant(str(root))
-        self.addAsyncCleanup(hass.async_stop, force=True)
+        self.addAsyncCleanup(hass.async_stop)
         if self.phase == 'forward':
             (root / 'configuration.yaml').write_bytes(b'')
             await self._before_loader(hass, root)
@@ -220,8 +240,8 @@ class MixedPhase(PowercalcColdPhase):
         target = QA / f'core11-mixed-{self.phase}-{label}.sqlite'
 
         def backup():
-            with sqlite3.connect((root / 'fixture.db').as_uri() + '?mode=ro', uri=True) as source:
-                with sqlite3.connect(target) as destination:
+            with closing(sqlite3.connect((root / 'fixture.db').as_uri() + '?mode=ro', uri=True)) as source:
+                with closing(sqlite3.connect(target)) as destination:
                     source.backup(destination)
 
         self.evidence[label] = image = {'files': self._files(root)}
@@ -310,7 +330,7 @@ class MixedPhase(PowercalcColdPhase):
 
         def latest():
             path = self.f.root / 'fixture.db'
-            with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as db:
+            with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
                 db.row_factory = sqlite3.Row
                 row = db.execute(
                     'SELECT s.*, m.statistic_id FROM statistics_short_term s '
@@ -412,7 +432,7 @@ class MixedPhase(PowercalcColdPhase):
             await self._pulse('forward_pulse')
             await self._capture('before_stop')
             costs = self._costs()
-            await hass.async_stop(force=True)
+            await hass.async_stop()
             self.evidence['stopped'] = True
             self._assert_cost_restore(costs, stopped=True)
             self.meta_path.write_text(json.dumps({
@@ -480,6 +500,7 @@ class Core11MixedColdNative(unittest.TestCase):
                     (QA / ('core11-mixed-' + phase + '.stdout')).write_text(result.stdout)
                     (QA / ('core11-mixed-' + phase + '.stderr')).write_text(result.stderr)
                     self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                    self.assertIn('Ran 1 test', result.stderr)
                     self.assertNotIn('skipped=', result.stderr)
             finally:
                 shutil.copytree(root, QA / 'core11-mixed-final-config')
