@@ -50,10 +50,16 @@ class UtilityYAMLHandoffNativeTests(unittest.IsolatedAsyncioTestCase):
         binding_module = importlib.import_module(fixture.PACKAGE + '.native_utility_yaml_binding')
         worker = importlib.import_module(fixture.PACKAGE + '.yaml_validation_worker')
         from copy import deepcopy
-        before_projection = binding_module._projection(hass)
-        after_projection = deepcopy(before_projection)
-        for _, cfg in after_projection:
-            if cfg['source'] == old: cfg['source'] = new
+        from homeassistant.components.utility_meter import CONFIG_SCHEMA
+        projection = importlib.import_module(fixture.PACKAGE + '.native_utility_yaml_projection')
+        # Independent native checker inputs, not a seal derived from live data.
+        checked_before = CONFIG_SCHEMA(deepcopy(config))
+        candidate_config = deepcopy(config)
+        candidate_config['utility_meter']['p3_meter']['source'] = new
+        candidate_config['utility_meter']['p3_second_meter']['source'] = new
+        checked_after = CONFIG_SCHEMA(candidate_config)
+        before_projection = projection.native_projection(checked_before)
+        after_projection = projection.native_projection(checked_after)
         seal = ('utility_meter', worker._fingerprint(before_projection), worker._fingerprint(after_projection))
         binding = binding_module.UtilityYAMLBinding.capture(hass, {old:new}, (seal,))
         self.assertTrue(binding.check_prefix(frozenset()))
