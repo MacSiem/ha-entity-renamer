@@ -34,10 +34,17 @@ def create_adapter(root, resolver, binding, lease):
         verify_activation=observer.verify_activation, verify_runtime=observer.verify_runtime,
         verify_inventory=observer.verify_inventory,
         verify_original_inventory=observer.verify_original_inventory)
+    async def verify(plan, rollback):
+        root._scope(); lease.check()
+        if await (observer.verify_original_inventory(plan) if rollback
+                  else observer.verify_inventory(plan)) is not True:
+            return False
+        root._scope(); lease.check()
+        return await root._full(rollback)
     return ReceiptedHelperTransactionAdapter(helper, root.chain, root._observe,
         root.journal.load, root._scope, activation_lease=lease,
-        full_verify=lambda _: root._full(False),
-        full_verify_rollback=lambda _: root._full(True))
+        full_verify=lambda plan: verify(plan, False),
+        full_verify_rollback=lambda plan: verify(plan, True))
 
 
 def prepare_entries(binding):
