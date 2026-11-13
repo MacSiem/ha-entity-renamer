@@ -23,17 +23,17 @@ class ExternalCombinedFlowTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.const import UnitOfTemperature
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.helpers.entity_platform import async_get_platforms
-        from homeassistant.helpers.entity_component import EntityComponent
+        from homeassistant.helpers.entity_platform import EntityPlatform
         from unittest.mock import patch
         from homeassistant.setup import async_setup_component
-        add_entities = EntityComponent.async_add_entities
+        add_entities = EntityPlatform.async_add_entities
         async def add_with_temperature(component, entities, *args, **kwargs):
             for entity in entities:
                 if getattr(entity, 'unique_id', None) == 'template-runtime-producer':
                     entity._attr_device_class = SensorDeviceClass.TEMPERATURE
                     entity._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
             return await add_entities(component, entities, *args, **kwargs)
-        with patch.object(EntityComponent, 'async_add_entities', add_with_temperature):
+        with patch.object(EntityPlatform, 'async_add_entities', add_with_temperature):
             runtime, mappings, uuids, template_before = await self.data(multiple=True, variant='sensor')
         hass, root = self.f.hass, self.f.root
         old = self.source_id
