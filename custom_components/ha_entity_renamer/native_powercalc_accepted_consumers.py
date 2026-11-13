@@ -255,12 +255,16 @@ async def async_observe_accepted_powercalc_consumers(hass, chain, evidence, capt
     _need(type(chain) is RegistryReceiptChain and type(evidence) is OriginalSourceEvidence
           and type(captured) is PowercalcRuntimeCapture,
           'accepted_chain_and_original_capture_required')
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    _, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
+    controlled = type(composition) is ControlledPowercalcComposition
     receipt = chain.original_receipt
     evidence.assert_receipt(receipt)
     _need(type(evidence.powercalc_sources) is OriginalPowercalcSources
           and evidence.powercalc_sources.closed_graph_json is not None
           and captured.version == receipt.version
-          and receipt.version in ('2026.10.2', '2026.10.4'),
+          and (receipt.version in ('2026.10.2', '2026.10.4')
+               or (receipt.version == '2026.11.0' and controlled)),
           'accepted_profile_scope_required')
     state = chain.reconstruct_inputs()  # Pending intent refuses, never sampled away.
 
@@ -289,9 +293,7 @@ async def async_observe_accepted_powercalc_consumers(hass, chain, evidence, capt
     _documents(state, observed)
     vendor.bindings()
     removed = frozenset()
-    from .controlled_powercalc_composition import ControlledPowercalcComposition
-    _, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
-    if type(composition) is ControlledPowercalcComposition:
+    if controlled:
         from .native_registry_receipts import _event_id
         from .controlled_powercalc_setup_receipts import validate_handoff
         from .controlled_powercalc_population import removed_group_indexes
