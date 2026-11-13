@@ -98,7 +98,10 @@ class NativeHomeKitHelperObservers:
         self.lease = lease
 
     async def settle(self):
-        await asyncio.sleep(0)
+        # Setup can schedule bridge startup after ConfigEntry reports loaded.
+        # Drain HA's native task barrier before proving driver identity.
+        async with asyncio.timeout(30):
+            await self.hass.async_block_till_done()
         if self.lease is not None: self.lease.check()
 
     async def verify_inactive(self, entry_id):
