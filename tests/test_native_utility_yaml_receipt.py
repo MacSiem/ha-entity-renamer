@@ -22,6 +22,8 @@ class CounterContinuityTests(unittest.TestCase):
             _last_valid_state=Decimal('12'))
         source = SimpleNamespace(state='12')
         self.assertTrue(_continued(sample('10'), sample('12'), entity, source))
+        entity._sensor_periodically_resetting = True
+        self.assertTrue(_continued(sample('10'), sample('12'), entity, source))
         self.assertFalse(_continued(sample('10'), sample('12', 'changed'), entity, source))
         self.assertFalse(_continued(sample('10'), sample('11'), entity, source))
         self.assertFalse(_continued(sample('13'), sample('12'), entity, source))
@@ -59,7 +61,7 @@ class ReceiptTests(unittest.IsolatedAsyncioTestCase):
         events, prep = [], Preparations()
         row = SimpleNamespace(meter='meter', old='sensor.old', new='sensor.new', source_uuid='uuid',
                               entity_id='sensor.meter', before=('sensor.meter', '12', {}, None, 'kWh'),
-                              platform=object(), entity=object(), info={})
+                              platform=object(), entity=object(), info={}, periodically_resetting=True)
         handoff = object.__new__(UtilityYAMLHandoff)
         handoff.rows = (row,)
         handoff.mapping = {'sensor.old':'sensor.new'}

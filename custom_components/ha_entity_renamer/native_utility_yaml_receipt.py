@@ -108,6 +108,7 @@ class UtilityYAMLRegistryAdapter:
             _need(entity is not None and native is not None and native.id == saved['source_uuid']
                   and registry.async_get(saved['source']) is None
                   and entity._sensor_source_id == saved['target'] and entity._collecting is not None
+                  and entity._sensor_periodically_resetting is row.periodically_resetting
                   and type(info) is dict and info.get('source') == saved['target']
                   and info.get(DATA_TARIFF_SENSORS) == [entity]
                   and _info({k:v for k,v in info.items() if k != DATA_TARIFF_SENSORS})
@@ -180,9 +181,9 @@ class UtilityYAMLRegistryAdapter:
             nonlocal intent_digest, rows
             _need(len(items) == len(rows) and all(
                 (current.meter, current.old, current.new, current.entity_id, current.source_uuid,
-                 current.platform, current.entity, current.info) ==
+                 current.platform, current.entity, current.info, current.periodically_resetting) ==
                 (previous.meter, previous.old, previous.new, previous.entity_id, previous.source_uuid,
-                 previous.platform, previous.entity, previous.info)
+                 previous.platform, previous.entity, previous.info, previous.periodically_resetting)
                 for current, previous in zip(items, rows, strict=True)), 'population')
             rows = tuple(items)
             guard(); self.guard()

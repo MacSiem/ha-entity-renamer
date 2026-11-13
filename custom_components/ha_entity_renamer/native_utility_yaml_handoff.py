@@ -66,7 +66,8 @@ def _continued(before, current, entity, source):
         if (source is None or not entity.available or entity._collecting is None
                 or any(getattr(entity, name) is not False for name in
                        ('_sensor_delta_values', '_sensor_net_consumption',
-                        '_sensor_periodically_resetting', '_sensor_always_available'))
+                        '_sensor_always_available'))
+                or type(entity._sensor_periodically_resetting) is not bool
                 or before[0] != current[0] or before[3:] != current[3:]):
             return False
         old, new = deepcopy(before[2]), deepcopy(current[2])
@@ -98,6 +99,7 @@ class Row:
     entity: object
     before: tuple
     info: dict
+    periodically_resetting: bool
 
 
 class UtilityYAMLHandoff:
@@ -134,6 +136,7 @@ class UtilityYAMLHandoff:
                 continue
             _need(entity._sensor_source_id == old and entity.unique_id is None
                   and entity._tariff is None and entity._tariff_entity is None
+                  and type(entity._sensor_periodically_resetting) is bool
                   and info.get(DATA_TARIFF_SENSORS) == [entity] and entity._collecting is not None,
                   'unsupported_meter')
             before = _static(entity)
@@ -144,7 +147,7 @@ class UtilityYAMLHandoff:
             from .utility_meter_observers import _plain
             _info(snapshot); _plain(before)
             rows.append(Row(meter, old, mapping[old], entity.entity_id, sources[old].id, platform, entity,
-                            before, snapshot))
+                            before, snapshot, entity._sensor_periodically_resetting))
         expected = {key for key, info in data.items() if key not in entries and type(info) is dict and info.get('source') in mapping}
         _need(bool(rows) and {row.meter for row in rows} == expected and len({row.meter for row in rows}) == len(rows), 'population')
         return cls(hass, mapping, tuple(rows), tuple(foreign), data)
@@ -193,6 +196,7 @@ class UtilityYAMLHandoff:
         for row in rows:
             current = _static(row.entity)
             _need(row.platform.entities.get(row.entity_id) is row.entity
+                  and row.entity._sensor_periodically_resetting is row.periodically_resetting
                   and _continued(row.before, current, row.entity, source)
                   and self.data[row.meter][DATA_TARIFF_SENSORS] == [row.entity], 'meter_changed')
         # Bind the intent to the actual native cutover state, after checking
@@ -243,6 +247,7 @@ class UtilityYAMLHandoff:
             new_entity = made[0]
             _need(self.hass.states.get(row.new) is source and new_entity.entity_id == row.entity_id
                   and row.platform.entities.get(row.entity_id) is new_entity
+                  and new_entity._sensor_periodically_resetting is row.periodically_resetting
                   and new_entity._sensor_source_id == row.new and new_entity._collecting is not None
                   and _static(new_entity) == row.before, 'runtime_readback')
             result.append(new_entity)
