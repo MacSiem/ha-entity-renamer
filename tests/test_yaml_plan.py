@@ -292,6 +292,138 @@ class YAMLPlannerTests(unittest.TestCase):
         self.assertTrue(inverse.ready, inverse.issues)
         self.assertEqual(inverse.patches[0].proposed_bytes, source.encode())
 
+    def test_conversation_table_state_and_logged_entity(self):
+        source = """automation:
+- id: conversation
+  triggers:
+  - trigger: conversation
+    command: report
+  variables:
+    table:
+      first: {entity: sensor.foo, label: Friendly}
+      second: {entity: sensor.other, label: Other}
+    selected: "{{ table.get(selection, {}) }}"
+    entity_id: "{{ selected.get('entity', '') }}"
+    label: "{{ selected.get('label', '') }}"
+  actions:
+  - variables:
+      state: "{{ states(entity_id) }}"
+      domain: "{{ entity_id.split('.')[0] }}"
+      detail: "{% for key in ['first', 'second'] %}{{ states(table.get(key, {}).get('entity', '')) }}{% endfor %}"
+  - action: synthetic.log
+    data:
+      event: state_report
+      detail: "Entity {{ entity_id }} label {{ label }}"
+"""
+        path = self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        expected = source.replace('sensor.foo', 'sensor.new').encode()
+        self.assertEqual(plan.patches[0].proposed_bytes, expected)
+        path.write_bytes(expected)
+        inverse = plan_yaml(self.root, {'sensor.new': 'sensor.foo'})
+        self.assertTrue(inverse.ready, inverse.issues)
+        self.assertEqual(inverse.patches[0].proposed_bytes, source.encode())
+        unproven = source.replace("{{ states(entity_id) }}", "unchanged").replace(
+            "{{ entity_id.split('.')[0] }}", "unchanged").replace(
+            "{{ states(table.get(key, {}).get('entity', '')) }}", "unchanged")
+        path.write_text(unproven)
+        self.assertFalse(self.plan().ready)
+        path.write_text(source.replace('label {{ label }}', 'label {{ entity_id }}'))
+        self.assertFalse(self.plan().ready)
+
+    def test_runtime_device_notify_does_not_claim_literal_reference(self):
+        source = """automation:
+- id: dynamic_notify
+  triggers:
+  - trigger: state
+    entity_id: sensor.foo
+  actions:
+  - repeat:
+      for_each: "{{ devices }}"
+      sequence:
+      - action: "notify.{{ device_attr(repeat.item, 'name') | slugify }}"
+"""
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertEqual(plan.patches[0].proposed_bytes, source.replace('sensor.foo', 'sensor.new').encode())
+        self.put('configuration.yaml', source.replace("repeat.item, 'name'", "repeat.item, 'entity_id'"))
+        self.assertFalse(self.plan().ready)
+
+    def test_homekit_entity_filters_are_scoped_and_byte_reversible(self):
+        for homekit in ("homekit:\n  filter:\n    exclude_entities: [sensor.foo, sensor.other]\n",
+                        "homekit:\n- name: Bridge\n  filter:\n    include_entities: [sensor.foo]\n"):
+            source = homekit + "other:\n  filter:\n    exclude_entities: [sensor.foo_label]\n"
+            path = self.put('configuration.yaml', source)
+            plan = self.plan()
+            self.assertTrue(plan.ready, plan.issues)
+            expected = source.replace('sensor.foo,', 'sensor.new,').replace('sensor.foo]', 'sensor.new]').encode()
+            self.assertEqual(plan.patches[0].proposed_bytes, expected)
+            path.write_bytes(expected)
+            inverse = plan_yaml(self.root, {'sensor.new': 'sensor.foo'})
+            self.assertTrue(inverse.ready, inverse.issues)
+            self.assertEqual(inverse.patches[0].proposed_bytes, source.encode())
+        self.put('configuration.yaml', 'homekit:\n  filter:\n    exclude_entities: sensor.foo\n')
+        self.assertIn('homekit_entity_filter_shape_unsupported', self.codes(self.plan()))
+        self.put('configuration.yaml', 'other:\n  homekit:\n    filter:\n      exclude_entities: [sensor.foo]\n')
+        self.assertFalse(self.plan().ready)
+
+    def test_script_response_targets_and_state_records(self):
+        source = """script:
+  sample:
+    sequence:
+    - variables:
+        groups:
+          first: {targets: [sensor.foo, sensor.other]}
+        selected: "{{ groups.get(selection, {}) }}"
+    - variables:
+        records: >-
+          {% set ns = namespace(values=[]) %}
+          {% for item in selected.targets %}
+          {% set ns.values = ns.values + [{'entity_id': item, 'state': states(item)}] %}
+          {% endfor %}{{ ns.values }}
+        response:
+          targets: "{{ selected.targets }}"
+          records: "{{ records }}"
+    - stop: finished
+      response_variable: response
+"""
+        path = self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        expected = source.replace('sensor.foo', 'sensor.new').encode()
+        self.assertEqual(plan.patches[0].proposed_bytes, expected)
+        path.write_bytes(expected)
+        inverse = plan_yaml(self.root, {'sensor.new': 'sensor.foo'})
+        self.assertTrue(inverse.ready, inverse.issues)
+        self.assertEqual(inverse.patches[0].proposed_bytes, source.encode())
+        path.write_text(source.replace("'state': states(item)", "'label': item"))
+        self.assertFalse(self.plan().ready)
+
+    def test_inert_templates_preserved_alongside_exact_rewrite(self):
+        source = """automation:
+- id: inert
+  triggers:
+  - trigger: state
+    entity_id: sensor.foo
+  conditions:
+  - condition: template
+    value_template: "{{ state_attr('https://example.invalid/a', 'value') == 'x' or state_attr('https://example.invalid/b', 'value') == 'y' }}"
+  - condition: template
+    value_template: "{# {% for item in states.sensor %}{{ item.state }}{% endfor %} #}"
+  actions: []
+"""
+        path = self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        expected = source.replace('sensor.foo', 'sensor.new').encode()
+        self.assertEqual(plan.patches[0].proposed_bytes, expected)
+        path.write_bytes(expected)
+        inverse = plan_yaml(self.root, {'sensor.new': 'sensor.foo'})
+        self.assertTrue(inverse.ready, inverse.issues)
+        self.assertEqual(inverse.patches[0].proposed_bytes, source.encode())
+
     def test_preserves_source_comments_quotes_crlf_unicode_and_anchor(self):
         source = '# żółć\r\na: &ref sensor.foo # comment\r\nentity_id: *ref\r\nentity: "light.old"\r\n'
         self.put('configuration.yaml', source)
@@ -883,6 +1015,113 @@ class YAMLPlannerTests(unittest.TestCase):
             result = self.plan()
             self.assertFalse(result.ready)
             self.assertIn('yaml_runtime_repeat_variable_unsupported', self.codes(result))
+
+    def test_numeric_repeat_items_are_metadata_but_not_entity_references(self):
+        for expression, ready in (("repeat.item", True),
+                                  ("states(repeat.item)", False)):
+            source = self.control_source('''
+                - repeat:
+                    for_each: [25, 100, 250]
+                    sequence:
+                    - data:
+                        message: '{{ EXPRESSION }}'
+                - value_template: '{{ states(ref) }}'
+            '''.replace('EXPRESSION', expression))
+            self.put('configuration.yaml', source)
+            result = self.plan()
+            self.assertEqual(result.ready, ready, result.issues)
+            if ready:
+                self.assertIn(b'sensor.new', result.patches[0].proposed_bytes)
+            else:
+                self.assertIn('template_requires_reference_parser', self.codes(result))
+
+    def test_native_trigger_entity_id_requires_complete_state_trigger_scope(self):
+        source = '''automation:
+  - triggers:
+      - trigger: state
+        entity_id: sensor.foo
+    actions:
+      - condition: template
+        value_template: "{{ is_state(trigger.entity_id, 'on') }}"
+'''
+        self.put('configuration.yaml', source)
+        result = self.plan()
+        self.assertTrue(result.ready, result.issues)
+        self.assertIn(b'entity_id: sensor.new', result.patches[0].proposed_bytes)
+        self.assertIn(b'is_state(trigger.entity_id', result.patches[0].proposed_bytes)
+        self.put('configuration.yaml', source.replace('      - trigger: state', '      - trigger: event\n        event_type: example\n      - trigger: state'))
+        self.assertFalse(self.plan().ready)
+
+    def test_static_url_output_does_not_hide_entity_expression(self):
+        source = '''automation:
+  - actions:
+      - data:
+          message: >-
+            {% if is_state('sensor.foo', 'on') %}https://example.invalid/a {% else %}https://example.invalid/b {% endif %}
+'''
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertIn(b"is_state('sensor.new'", plan.patches[0].proposed_bytes)
+        unsafe = source.replace("is_state('sensor.foo', 'on')", "is_state(external, 'on')")
+        self.put('configuration.yaml', unsafe)
+        self.assertFalse(self.plan().ready)
+
+    def test_computed_reference_disjoint_from_selected_rows(self):
+        source = '''automation:
+  - variables:
+      source: "{{ 'switch.unrelated_' ~ trigger.event.data.name }}"
+    conditions:
+      - condition: template
+        value_template: "{{ is_state(source, 'on') }}"
+    actions:
+      - if: []
+        then: []
+      - value_template: "{{ is_state(source, 'on') }}"
+      - target:
+          entity_id: sensor.foo
+'''
+        self.put('configuration.yaml', source)
+        result = self.plan()
+        self.assertTrue(result.ready, result.issues)
+        proposed = result.patches[0].proposed_bytes.decode()
+        self.assertEqual(proposed, source.replace('entity_id: sensor.foo', 'entity_id: sensor.new'))
+        self.put('configuration.yaml', source.replace('switch.unrelated_', 'sensor.'))
+        self.assertFalse(self.plan().ready)
+        self.put('configuration.yaml', source.replace('switch.unrelated_', 'sensor.ne'))
+        self.assertFalse(self.plan().ready)  # Also protect the future target ID.
+        self.put('configuration.yaml', source.replace('is_state(source, \'on\')', 'true')
+                 .replace('entity_id: sensor.foo', "entity_id: '{{ source }}'")
+                 .replace('switch.unrelated_', 'sensor.'))
+        self.assertFalse(self.plan().ready)
+        self.put('configuration.yaml', source.replace('then: []', '''then:
+          - variables:
+              source: "{{ trigger.event.data.entity }}"'''))
+        self.assertFalse(self.plan().ready)
+
+    def test_conditional_computed_reference_requires_both_branches_disjoint(self):
+        template = "{{ state_attr('switch.one' if flag else 'switch.two', 'timestamp') }}"
+        source = self.control_source('''
+            - value_template: "EXPRESSION"
+            - target:
+                entity_id: sensor.foo
+        '''.replace('EXPRESSION', template), definitions='flag: 1')
+        self.put('configuration.yaml', source)
+        self.assertTrue(self.plan().ready)
+        self.put('configuration.yaml', source.replace('switch.two', 'sensor.foo'))
+        self.assertFalse(self.plan().ready)
+
+    def test_deep_boolean_expression_still_checks_ha_references(self):
+        expression = ' or '.join(["'text' in trigger.event.data.message"] * 210)
+        source = self.control_source('''
+            - value_template: "{{ EXPRESSION }}"
+            - target:
+                entity_id: sensor.foo
+        '''.replace('EXPRESSION', expression), definitions='flag: 1')
+        self.put('configuration.yaml', source)
+        self.assertTrue(self.plan().ready)
+        self.put('configuration.yaml', source.replace(expression, expression + " or states(opaque)"))
+        self.assertFalse(self.plan().ready)
 
     def test_repeat_runtime_object_shadows_and_restores_outer_same_name(self):
         source = self.control_source('''
