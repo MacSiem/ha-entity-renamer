@@ -94,7 +94,7 @@ class TemplateSwitchRootTests(root.NativeTemplateStateRootCoverageTests):
         for domain, entity in (('sensor', sensor), ('binary_sensor', binary), ('switch', switch)):
             expected = worker._normal(checked['template'][0][domain][0])
             actual = worker._normal({k: v for k, v in entity._config.items() if k not in ('raw_configs', 'raw_blueprint_inputs')})
-            self.assertEqual(actual, expected, domain)
+            self.assertEqual(dict(actual['$map']), dict(expected['$map']), domain)
         runtime = await self._runtime(self.module)
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())

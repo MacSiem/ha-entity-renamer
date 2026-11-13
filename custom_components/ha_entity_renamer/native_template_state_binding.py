@@ -335,7 +335,13 @@ def _configuration(runtime, entity, expected):
         # are separately held in tokens and never select the runtime prefix.
         actual = {key: value for key, value in cfg.items()
                   if key not in ('raw_configs', 'raw_blueprint_inputs') or key in expected_values}
-        _need(_normal(actual) == expected, 'template_state_full_native_config_changed')
+        # Core's switch schema can emit top-level action keys in a different
+        # order across validation processes. Nested maps retain their native
+        # order (notably variables and script sequences).
+        normalized = _normal(actual)
+        matches = (dict(_pairs(normalized)) == expected_values
+                   if type(entity) is native.switch else normalized == expected)
+        _need(matches, 'template_state_full_native_config_changed')
     else:
         _need(native.version == '2025.6.0', 'template_state_full_native_config_missing')
         actual = {}
