@@ -53,6 +53,13 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         hass.services.async_register('test', 'capture', capture)
         self.addCleanup(hass.services.async_remove, 'test', 'capture')
         native_dummy_mdns(hass)
+        for light in self.sources:
+            await light.async_turn_on(brightness=255)
+        await hass.async_block_till_done()
+        await asyncio.sleep(2)
+        for light in self.sources:
+            await light.async_turn_off()
+        await hass.async_block_till_done()
         await source.async_turn_on(brightness=255)
         for _ in range(100):
             if binary._delay_cancel is not None and hass.states.get(leaf) is not None:
