@@ -263,6 +263,12 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     self.assertTrue(await async_setup_component(hass, 'energy', {}))
                     await hass.async_block_till_done()
                     cost_index = hass.data['energy']['cost_sensors']
+                    for _ in range(200):
+                        if all(source_id in cost_index for source_id in energy_ids):
+                            break
+                        await asyncio.sleep(.05)
+                    self.assertTrue(all(source_id in cost_index for source_id in energy_ids),
+                                    'native Energy cost sensors did not initialize')
                     cost_ids = [cost_index[source_id] for source_id in energy_ids]
                     self.assertEqual(len(set(cost_ids)), 2)
                     from homeassistant.components.energy.sensor import EnergyCostSensor
@@ -449,6 +455,13 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     def ui_continue(label):
                         (directory / (label + '.go')).write_text('go')
             await pulse()
+            if browser_ui:
+                for _ in range(200):
+                    meters = utility_meters()
+                    if all(meter.native_value is not None and meter._next_reset is not None
+                           for meter in meters.values()):
+                        break
+                    await asyncio.sleep(.05)
             await baseline()
             if browser_ui:
                 def capture_costs(moves):
