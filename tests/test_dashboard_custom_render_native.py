@@ -1,0 +1,96 @@
+"""Single synthetic native view, browser-driven controls and exact inverse."""
+import asyncio
+import importlib
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import unittest
+import test_native_input_baseline as fixtures
+
+
+@unittest.skipUnless(fixtures.HAS_HA and os.environ.get('RENAMER_CUSTOM_RENDER'), 'owned browser fixture required')
+class DashboardCustomRender(unittest.IsolatedAsyncioTestCase):
+    async def test_active_store_render_control_and_fresh_inverse(self):
+        from homeassistant import auth
+        from homeassistant.auth.const import GROUP_ID_ADMIN
+        from homeassistant.config import async_hass_config_yaml
+        from homeassistant.setup import async_setup_component
+        from homeassistant.components.lovelace.const import LOVELACE_DATA
+        from homeassistant.components.onboarding import OnboardingStorage, STORAGE_KEY, STORAGE_VERSION
+        from homeassistant.components.onboarding.const import DOMAIN as ONBOARDING, STEPS
+        from homeassistant.components.onboarding.views import _BaseOnboardingStepView
+        fixture = fixtures.NativeBaselineTests(methodName='runTest')
+        await fixture.asyncSetUp()
+        self.addAsyncCleanup(fixture.asyncTearDown)
+        hass, root = fixture.hass, fixture.root
+        hass.auth = await auth.auth_manager_from_config(hass, [], [])
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
+        self.assertTrue(await async_setup_component(hass, 'http', {'http':{'server_host':'127.0.0.1', 'server_port':port}}))
+        self.assertTrue(await async_setup_component(hass, 'config', {}))
+        self.assertTrue(await async_setup_component(hass, ONBOARDING, {}))
+        onboarding = hass.data[ONBOARDING]
+        if not onboarding.onboarded:
+            store = OnboardingStorage(hass, STORAGE_VERSION, STORAGE_KEY, private=True)
+            step = _BaseOnboardingStepView(onboarding.steps, store)
+            for name in STEPS:
+                if name not in onboarding.steps['done']:
+                    step.step = name; await step._async_mark_done(hass)
+        self.assertTrue(await async_setup_component(hass, 'input_boolean', {'input_boolean': {'sample':{'name':'Synthetic Toggle'}}}))
+        await hass.async_block_till_done()
+        self.assertTrue(await async_setup_component(hass, 'lovelace', await async_hass_config_yaml(hass)))
+        self.assertTrue(await async_setup_component(hass, 'frontend', {}))
+        self.assertTrue(await async_setup_component(hass, 'api', {}))
+        www = root / 'www'; www.mkdir(exist_ok=True)
+        for name in ('button-card.js','bubble-card.js'):
+            shutil.copyfile(Path('/assets') / name, www / name)
+        native = hass.data[LOVELACE_DATA]
+        await native.resources.async_get_info()
+        for name in ('button-card.js','bubble-card.js'):
+            await native.resources.async_create_item({'res_type':'module','url':'/local/' + name})
+        old, new = 'input_boolean.sample', 'input_boolean.renamed_sample'
+        config = {'views':[{'title':'Synthetic', 'cards':[
+            {'type':'button','entity':old},
+            {'type':'custom:button-card','entity':old,'triggers_update':[old],
+             'variables':{'entity_ids':[old]}, 'label':"[[[ return states['input_boolean.sample'].state; ]]]",
+             'show_label':True, 'tap_action':{'action':'toggle'}},
+            {'type':'custom:bubble-card','card_type':'button','entity':old,
+             'sub_button':[{'entity':old,'visibility':[{'condition':'state','entity':old,'state':'on'}]}],
+             'tap_action':{'action':'toggle'}},
+        ]}]}
+        manager = native.dashboards[None]
+        await manager.async_save(config)
+        user = await hass.auth.async_create_user('Synthetic Admin', group_ids=[GROUP_ID_ADMIN])
+        refresh = await hass.auth.async_create_refresh_token(user, client_id=f'http://127.0.0.1:{port}/')
+        access = hass.auth.async_create_access_token(refresh, remote_ip='127.0.0.1')
+        directory = Path(os.environ['RENAMER_CUSTOM_RENDER'])
+        token = directory / 'render-token'; token.write_text(access); token.chmod(0o600)
+        async def render(label, entity):
+            request = {'label':label, 'source':entity, 'port':port}
+            temp = directory / 'request.tmp'; temp.write_text(json.dumps(request)); temp.replace(directory / 'request.json')
+            ack = directory / (label + '-done.json')
+            for _ in range(1200):
+                if ack.exists():
+                    result = json.loads(ack.read_text())
+                    self.assertEqual(result.get('error'), None, result)
+                    self.assertTrue(result.get('visible'))
+                    self.assertTrue(result.get('button_toggled'))
+                    self.assertTrue(result.get('bubble_toggled'))
+                    self.assertEqual(result.get('refs'), [entity]*3)
+                    return
+                await asyncio.sleep(.1)
+            self.fail('browser fixture timed out')
+        plan = importlib.import_module(fixtures.PACKAGE + '.dashboard_plan').plan_dashboard
+        await render('before', old)
+        forward = plan(config, {old:new}); self.assertFalse(forward.markers)
+        fixture.entity.async_update_entity(old, new_entity_id=new)
+        await hass.async_block_till_done(); await manager.async_save(forward.value)
+        self.assertEqual(await manager.async_load(False), forward.value)
+        await render('after', new)
+        reverse = plan(forward.value, {new:old}); self.assertFalse(reverse.markers)
+        fixture.entity.async_update_entity(new, new_entity_id=old)
+        await hass.async_block_till_done(); await manager.async_save(reverse.value)
+        self.assertEqual(await manager.async_load(False), config)
+        await render('inverse', old)
