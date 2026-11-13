@@ -782,7 +782,7 @@ class NativeTemplateBindingTransport:
                     slot.template = row['replacements'][id(template)]
                 entity._template_attrs = {row['replacements'][id(t)]: slots for t, slots in row['attrs'].items()}
                 entity._template_result_info = row['new']
-                if self.runtime.native.version != '2026.11.0':
+                if self.runtime.native.version not in ('2026.11.0', '2026.11.1'):
                     entity._on_remove[row['index']] = row['new'].async_remove
                 # Retain the exact installed graph for the final pre-API fence
                 # and for a checked pre-attempt undo. Strong references prevent

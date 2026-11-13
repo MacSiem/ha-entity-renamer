@@ -188,7 +188,8 @@ def _runtime_family(hass, domain, *, owned_automation=None):
     from .yaml_validation_worker import _normal, _fingerprint
     try:
         if (__version__ not in ('2025.6.0', '2026.10.2', '2026.10.4')
-                and (__version__ != '2026.11.0' or domain != 'script')):
+                and (__version__ != '2026.11.0' or domain != 'script')
+                and (__version__ != '2026.11.1' or domain not in ('automation', 'script'))):
             raise ValueError('runtime_unsettled')
         if _pending_native_work(hass, (domain,)):
             raise ValueError('runtime_unsettled')

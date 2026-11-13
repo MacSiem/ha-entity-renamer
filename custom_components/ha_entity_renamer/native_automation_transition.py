@@ -35,7 +35,13 @@ class NativeAutomationTransition:
         from homeassistant.const import __version__
         from homeassistant.core import HomeAssistant
         from homeassistant.helpers.entity_component import EntityComponent
-        _need(type(hass) is HomeAssistant and __version__ in ('2025.6.0', '2026.10.2', '2026.10.4'))
+        _need(type(hass) is HomeAssistant and __version__ in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.1'))
+        self.core111 = __version__ == '2026.11.1'
+        _need(not self.core111 or allow_running is True and targets is None)
+        factory = native
+        if self.core111:
+            from homeassistant.components.automation import util as factory
+        self.factory = factory
         component = hass.data.get('automation')
         _need(component is None or (type(component) is EntityComponent and component.hass is hass))
         self.hass, self.native, self.component = hass, native, component
@@ -57,18 +63,27 @@ class NativeAutomationTransition:
         self.source = path.read_bytes()
         self.path = path
         self.code = tuple(_codes(compile(self.source, str(path), 'exec', dont_inherit=True)))
-        self.functions = tuple((owner, name, getattr(owner, name)) for owner, name in (
-            (native, '_prepare_automation_config'), (native, '_create_automation_entities'),
-            (native, '_automation_name'),
+        self.functions_refs = (
+            (factory, '_prepare_automation_config'), (factory, '_create_automation_entities'),
+            (factory, '_automation_name'),
             (EntityComponent, 'async_prepare_reload'),
             (native.AutomationEntity, '__init__'), (native.AutomationEntity, '_async_disable'),
             (native.AutomationEntity, '_async_enable'), (native.AutomationEntity, 'async_added_to_hass'),
-            (native.AutomationEntity, 'async_will_remove_from_hass')))
+            (native.AutomationEntity, 'async_will_remove_from_hass'))
+        self.functions = tuple((owner, name, getattr(owner, name))
+                               for owner, name in self.functions_refs)
         self.other_sources = tuple((path, path.read_bytes()) for path in sorted({
             Path(function.__code__.co_filename) for _, _, function in self.functions
         }) if path != self.path)
         self.other_code = tuple(code for path, source in self.other_sources
                                 for code in _codes(compile(source, str(path), 'exec', dont_inherit=True)))
+        if self.core111:
+            from homeassistant.helpers.entity_platform import EntityPlatform
+            from homeassistant.helpers.entity import Entity
+            from .native_controlled_yaml_core111 import prove
+            prove(self.functions_refs + ((EntityPlatform, 'async_add_entities'),
+                                          (Entity, 'async_remove')))
+            self.platform_add = EntityPlatform.async_add_entities
         self.check_native()
 
     async def prepare_preserving_enabled(self):
@@ -78,12 +93,12 @@ class NativeAutomationTransition:
         self.check_native()
         config = await self.component.async_prepare_reload(skip_reset=True)
         _need(config is not None)
-        configs = await self.native._prepare_automation_config(self.hass, config, None)
+        configs = await self.factory._prepare_automation_config(self.hass, config, None)
         rows = dict(self._entities())
         _need(len(configs) == len(rows) and all(
-            item.validation_status is self.native.ValidationStatus.OK
+            item.validation_status is self.factory.ValidationStatus.OK
             and item.config_block.get('id') in rows and item.raw_blueprint_inputs is None
-            and rows[item.config_block['id']].name == self.native._automation_name(item)
+            and rows[item.config_block['id']].name == self.factory._automation_name(item)
             and rows[item.config_block['id']].raw_config == item.raw_config
             for item in configs) and len({item.config_block['id'] for item in configs}) == len(configs))
         self.check_native()
@@ -136,6 +151,9 @@ class NativeAutomationTransition:
         _need(registry is not None and registry.id == registry_id
               and entity._is_enabled is self.expected_enabled[key]
               and (entity._initial_state is None or type(entity._initial_state) is bool))
+        if self.core111:
+            self.foreign = tuple(self._pin(other_key, other) for other_key, other in self._entities()
+                                 if other_key != key)
         original = entity._initial_state
         self.in_preserving_stage = True
         self.registry_readd_active = True
@@ -181,18 +199,22 @@ class NativeAutomationTransition:
             config = await self.component.async_prepare_reload(skip_reset=True)
             self.check_preserving_enabled()
             _need(config is not None)
-            configs = await self.native._prepare_automation_config(self.hass, config, None)
+            configs = await self.factory._prepare_automation_config(self.hass, config, None)
             self.check_preserving_enabled()
             current = dict(self._entities())
             _need(set(current) == set(self.expected_enabled) and len(configs) == len(current)
-                  and all(item.validation_status is self.native.ValidationStatus.OK
+                  and all(item.validation_status is self.factory.ValidationStatus.OK
                     and item.config_block.get('id') in current and item.raw_blueprint_inputs is None
                     for item in configs)
                   and len({item.config_block['id'] for item in configs}) == len(configs)
                   and all(entity._is_enabled is self.expected_enabled[key] for key, entity in current.items()))
             changed = [item for item in configs if
                 current[item.config_block['id']].raw_config != item.raw_config
-                or current[item.config_block['id']].name != self.native._automation_name(item)]
+                or current[item.config_block['id']].name != self.factory._automation_name(item)]
+            if self.core111:
+                selected = {item.config_block['id'] for item in changed}
+                self.foreign = tuple(self._pin(key, entity) for key, entity in current.items()
+                                     if key not in selected)
             self.replacing_ids = {current[item.config_block['id']].entity_id for item in changed}
             for item in changed:
                 key = item.config_block['id']
@@ -201,7 +223,7 @@ class NativeAutomationTransition:
                 self.check_preserving_enabled()
             staged = [replace(item, config_block={**item.config_block,
                 'initial_state': self.expected_enabled[item.config_block['id']]}) for item in changed]
-            entities = await self.native._create_automation_entities(self.hass, staged)
+            entities = await self.factory._create_automation_entities(self.hass, staged)
             self.check_preserving_enabled()
             _need(len(entities) == len(changed) and all(
                 type(entity) is self.native.AutomationEntity
@@ -231,6 +253,13 @@ class NativeAutomationTransition:
     def check_native(self):
         _need(threading.get_ident() == self.thread and self.path.read_bytes() == self.source
               and self.hass.data.get('automation') is self.component)
+        if self.core111:
+            from homeassistant.helpers.entity_platform import EntityPlatform
+            add = self.component.async_add_entities
+            platform = add.__self__
+            _need(type(platform) is EntityPlatform and platform.hass is self.hass
+                  and platform in self.component._platforms.values()
+                  and add.__func__ is self.platform_add is EntityPlatform.async_add_entities)
         if self.component is None:
             from homeassistant.helpers.entity_component import DATA_INSTANCES
             _need('automation' not in self.hass.config.components
@@ -291,10 +320,10 @@ class NativeAutomationTransition:
         self.assert_disabled()
         config = await self.component.async_prepare_reload(skip_reset=True)
         self.assert_disabled()
-        configs = await self.native._prepare_automation_config(self.hass, config, None)
+        configs = await self.factory._prepare_automation_config(self.hass, config, None)
         current = dict(self.assert_disabled())
         _need(len(configs) == len(current) and all(
-            item.validation_status is self.native.ValidationStatus.OK
+            item.validation_status is self.factory.ValidationStatus.OK
             and item.config_block.get('id') in current
             and item.raw_blueprint_inputs is None for item in configs)
             and len({item.config_block['id'] for item in configs}) == len(configs))
@@ -306,7 +335,7 @@ class NativeAutomationTransition:
             self.check_native()
         staged = [replace(item, config_block={**item.config_block, 'initial_state': False})
                   for item in changed]
-        entities = await self.native._create_automation_entities(self.hass, staged)
+        entities = await self.factory._create_automation_entities(self.hass, staged)
         self.check_native()
         _need(len(entities) == len(changed) and all(
             type(entity) is self.native.AutomationEntity and entity._initial_state is False

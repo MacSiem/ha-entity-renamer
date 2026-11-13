@@ -294,6 +294,9 @@ class NativeYAMLRuntimeReadback:
             entities = tuple(platform.entities.values())
         else:
             entities = tuple(component.entities)
+        if domain == 'automation' and __version__ == '2026.11.1':
+            from .native_controlled_yaml_core111 import prove_automation_projection
+            prove_automation_projection()
         for entity in entities:
             if entity.hass is not self.hass or self.hass.states.get(entity.entity_id) is None:
                 node = self.script_dispatch
@@ -302,7 +305,7 @@ class NativeYAMLRuntimeReadback:
                     raise ValueError('native_entity_missing')
             identities.append((entity.entity_id, id(entity)))
             if domain == 'script':
-                if __version__ == '2026.11.0':
+                if __version__ in ('2026.11.0', '2026.11.1'):
                     import homeassistant
                     from homeassistant.components.script.entity import ScriptEntity
                     from .native_unload_code_proof import prove_methods
@@ -316,7 +319,7 @@ class NativeYAMLRuntimeReadback:
                 if type(entity) is not ScriptEntity:
                     raise ValueError('native_script_type')
                 script = entity.script
-                if ((script._unloaded if __version__ in ('2026.10.2', '2026.10.4', '2026.11.0') else False) or not script.enabled
+                if ((script._unloaded if __version__ in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1') else False) or not script.enabled
                         or script._hass is not self.hass or script.domain != domain
                         or entity._blueprint_inputs is not None
                         or not self.hass.services.has_service('script', entity.unique_id)
@@ -343,14 +346,16 @@ class NativeYAMLRuntimeReadback:
                 rows.append([entity.unique_id, entity.raw_config, script.sequence,
                     script.script_mode, script.max_runs, script._max_exceeded, script.variables,
                     entity.icon, entity.description, entity.fields, entity._trace_config])
+                if __version__ == '2026.11.1':
+                    identities[-1] += (_fingerprint(rows[-1]),)
             elif domain == 'automation':
                 from homeassistant.components.automation import AutomationEntity
                 if type(entity) is not AutomationEntity:
                     raise ValueError('native_automation_type')
                 script = entity.action_script
-                if ((entity._condition if __version__ in ('2026.10.2', '2026.10.4') else entity._cond_func) is not None or entity._trigger_variables is not None
+                if ((entity._condition if __version__ in ('2026.10.2', '2026.10.4', '2026.11.1') else entity._cond_func) is not None or entity._trigger_variables is not None
                         or entity._blueprint_inputs is not None
-                        or (script._unloaded if __version__ in ('2026.10.2', '2026.10.4') else False)
+                        or (script._unloaded if __version__ in ('2026.10.2', '2026.10.4', '2026.11.1') else False)
                         or script._hass is not self.hass or script.domain != domain
                         or getattr(script.change_listener, '__self__', None) is not entity
                         or getattr(script.change_listener, '__func__', None)

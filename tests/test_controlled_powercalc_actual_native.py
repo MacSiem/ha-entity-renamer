@@ -39,6 +39,185 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
             'RENAMER_POWER_COLD_META': directory.name + '/unused'}))
         await super().asyncSetUp()
 
+    async def test_live_yaml_consumers_forward_fresh_inverse(self):
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.tasks import StatisticsTask
+        from homeassistant.config import async_hass_config_yaml
+        from homeassistant.core import callback
+        from homeassistant.setup import async_setup_component
+        from homeassistant.util import dt as dt_util
+        from custom_components.ha_entity_renamer.recorder_guard import NativeRecorderGuard
+        from custom_components.ha_entity_renamer.transaction import Refused
+        from ordinary_network_scope import native_dummy_mdns
+        import yaml
+
+        hass, runtime, root = self.f.hass, self._runtime(), self.f.root
+        source = self.sources[10]
+        old_source = source.entity_id
+        leaf = self.entities['fixture-meter-10'].entity_id
+        mapping = {old_source: 'light.controlled_yaml_source', leaf: 'sensor.controlled_yaml_power'}
+        sensor = 'sensor.controlled_yaml_readout'
+        script = 'controlled_yaml_read'
+        files = {domain: root / f'{domain}.yaml' for domain in ('automation', 'script', 'template')}
+        conf = root / 'configuration.yaml'
+        conf.write_text(conf.read_text() + ''.join(f'{domain}: !include {path.name}\n'
+                                                  for domain, path in files.items()))
+        read = "{{ states('" + leaf + "') | float(-1) }}"
+        def action(event):
+            return {'event': event, 'event_data': {'watts': read}}
+
+        state_trigger = {'trigger': 'state', 'entity_id': old_source, 'from': 'off', 'to': 'on'}
+        def automation(key, actions, trigger=state_trigger):
+            return {'id': key, 'alias': key, 'initial_state': True,
+                    'triggers': [trigger], 'actions': actions}
+
+        programs = {
+            'template': [{'sensor': [{'name': 'Controlled YAML readout',
+                'unique_id': 'controlled_yaml_readout',
+                'state': "{{ states('" + old_source + "') ~ ':' ~ states('" + leaf + "') }}"}]}],
+            'automation': [automation('controlled_yaml_on', [
+                {'delay': '{{ 120 if long | default(false) else 0 }}'},
+                {'action': 'script.' + script}, action('controlled_yaml_on_result')]),
+                automation('controlled_yaml_off', [action('controlled_yaml_off_result')]),
+                automation('controlled_yaml_foreign', [{'event': 'controlled_yaml_foreign_result'}],
+                           {'trigger': 'event', 'event_type': 'controlled_yaml_foreign_probe'})],
+            'script': {script: {'sequence': [
+                {'delay': '{{ 120 if long | default(false) else 0 }}'},
+                action('controlled_yaml_script_result')]},
+                'controlled_yaml_foreign': {'sequence': [{'event': 'controlled_yaml_foreign_script'}]}},
+        }
+        for domain, path in files.items():
+            path.write_text(yaml.safe_dump(programs[domain], sort_keys=False))
+        config = await async_hass_config_yaml(hass)
+        for domain in ('template', 'script', 'automation'):
+            self.assertTrue(await async_setup_component(hass, domain, config), domain)
+        await hass.async_block_till_done()
+        report = {}
+        def save():
+            Path('/qa/controlled-yaml-consumers.json').write_text(json.dumps(report, sort_keys=True))
+        self.addCleanup(save)
+
+        seen = {key: [] for key in ('on', 'off', 'script')}
+        for key, events in seen.items():
+            @callback
+            def collect(event, values=events):
+                values.append(float(event.data['watts']))
+            self.addCleanup(hass.bus.async_listen(f'controlled_yaml_{key}_result', collect))
+
+        def entity(domain, key):
+            return next(e for e in hass.data[domain].entities if e.unique_id == key)
+
+        foreign = {domain: entity(domain, 'controlled_yaml_foreign') for domain in ('automation', 'script')}
+        await entity('automation', 'controlled_yaml_off').async_turn_off()
+
+        async def flush():
+            await hass.data['powercalc_group_storage'].persist_states()
+            await self._flush_documents()
+            await get_instance(hass).async_block_till_done()
+
+        async def wait_for(predicate):
+            for _ in range(500):
+                if predicate():
+                    return
+                await asyncio.sleep(.01)
+            self.fail('native consumer stimulus did not settle')
+
+        async def signal(label, mapping):
+            active_id, power_id = (mapping.get(key, key) for key in (old_source, leaf))
+            for events in seen.values():
+                events.clear()
+            await source.async_turn_off()
+            await wait_for(lambda: hass.states.is_state(sensor, 'off:0.0')
+                           or hass.states.is_state(sensor, 'off:0'))
+            await source.async_turn_on(brightness=255)
+            await wait_for(lambda: len(seen['on']) == 1 and len(seen['script']) == 1
+                           and hass.states.get(sensor).state.startswith('on:'))
+            watts = float(hass.states.get(power_id).state)
+            self.assertEqual(watts, 10)
+            self.assertEqual(float(hass.states.get(sensor).state.split(':')[1]), watts)
+            self.assertEqual(seen, {'on': [watts], 'off': [], 'script': [watts]})
+            await hass.services.async_call('script', script, {}, blocking=True)
+            self.assertEqual(seen['script'], [watts, watts])
+            self.assertTrue(hass.states.is_state(active_id, 'on'))
+            self.assertTrue(entity('automation', 'controlled_yaml_on').is_on)
+            self.assertFalse(entity('automation', 'controlled_yaml_off').is_on)
+            for domain, obj in foreign.items():
+                self.assertIs(entity(domain, obj.unique_id), obj)
+            report[label] = {'ids': [active_id, power_id], 'template': hass.states.get(sensor).state,
+                             'events': {key: list(items) for key, items in seen.items()}}
+            save()
+
+        native_dummy_mdns(hass)
+        await signal('baseline', {})
+        await flush()
+        history = NativeRecorderGuard(hass)
+        await history.async_synchronize()
+        now = dt_util.utcnow()
+        get_instance(hass).queue_task(StatisticsTask(now.replace(minute=now.minute // 5 * 5,
+                                                                second=0, microsecond=0), False))
+        await history.async_synchronize()
+        initial = {path: path.read_bytes() for path in (*files.values(), conf, self.package)}
+
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+
+        async def prepare():
+            return await runtime.native_yaml_prepare(hass, mapping, actor_id='yaml-consumer-fixture',
+                                                     guard=lambda: True, refresh=refresh)
+
+        path = files['script']
+        programs['script'][script]['sequence'][-1]['event_data']['watts'] = "{{ states(target_id) }}"
+        path.write_text(yaml.safe_dump(programs['script'], sort_keys=False))
+        # Reload real config; a static-disk/live mismatch alone must not
+        # be the reason the dynamic reference is refused.
+        await hass.services.async_call('script', 'reload', {}, blocking=True)
+        await hass.async_block_till_done()
+        dynamic = path.read_bytes()
+        with self.assertRaises((ValueError, Refused)) as refusal:
+            await prepare()
+        self.assertEqual(path.read_bytes(), dynamic)
+        self.assertEqual({p: p.read_bytes() for p in initial if p is not path},
+                         {p: raw for p, raw in initial.items() if p is not path})
+        self.assertIs(source.registry_entry, self.f.entity.async_get(old_source))
+        report['dynamic_refused'] = str(refusal.exception)
+        path.write_bytes(initial[path])
+        await hass.services.async_call('script', 'reload', {}, blocking=True)
+        await hass.async_block_till_done()
+        await flush()
+
+        automation_obj = entity('automation', 'controlled_yaml_on')
+        script_obj = entity('script', script)
+        await hass.services.async_call('automation', 'trigger',
+            {'entity_id': automation_obj.entity_id, 'variables': {'long': True}}, blocking=False)
+        await hass.services.async_call('script', script, {'long': True}, blocking=False)
+        await wait_for(lambda: automation_obj.action_script.is_running and script_obj.script.is_running)
+        report['active_before'] = True
+        review = await prepare()
+        op, fingerprint = review['operation_id'], review['fingerprint']
+        report['review'] = review
+        save()
+        result = await runtime.native_yaml_apply(hass, op, fingerprint, actor_id='yaml-consumer-fixture',
+                                                 guard=lambda: True, refresh=refresh)
+        report['apply'] = result
+        save()
+        self.assertEqual(result['state'], 'applied')
+        self.assertFalse(automation_obj.action_script.is_running)
+        self.assertFalse(script_obj.script.is_running)
+        report['active_stopped'] = True
+        await signal('forward', mapping)
+        await flush()
+        inspected = await runtime.recovery_inspect(hass, op, fingerprint, guard=lambda: True, refresh=refresh)
+        report['inspect'] = inspected
+        save()
+        self.assertTrue(inspected['eligible'], inspected)
+        result = await runtime.recovery_restore(hass, op, fingerprint, guard=lambda: True, refresh=refresh)
+        report['restore'] = result
+        save()
+        self.assertEqual(result['state'], 'rolled_back')
+        await signal('inverse', {})
+        self.assertEqual({p: p.read_bytes() for p in initial}, initial)
+        native_dummy_mdns(hass)
+
     async def test_explicit_leaf_forward_fresh_inverse(self):
         from homeassistant.components.recorder import get_instance
         from homeassistant.components.recorder.tasks import StatisticsTask
@@ -280,4 +459,5 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
 
 
 def load_tests(loader, tests, pattern):
-    return unittest.TestSuite((ControlledActualGraphTests('test_explicit_leaf_forward_fresh_inverse'),))
+    return unittest.TestSuite(ControlledActualGraphTests(name) for name in
+        ('test_explicit_leaf_forward_fresh_inverse', 'test_live_yaml_consumers_forward_fresh_inverse'))

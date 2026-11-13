@@ -27,6 +27,10 @@ class DependentYAMLRuntime:
         self.positions = tuple((domain, position) for domain in ('automation', 'script'))
         self.active, self.unresolved = None, False
         self.own_fence = None
+        self.script_reload = None
+        if receipt.version == '2026.11.1' and allow_running and 'script' in receipt.changed_domains:
+            from .native_controlled_yaml_core111 import script_reload_token
+            self.script_reload = script_reload_token(hass)
         self._assert_reload_idle()
         self.sample = self._sample(self.positions)
         _need(not self.sample[1])
@@ -45,6 +49,12 @@ class DependentYAMLRuntime:
             _need(component is None or all(not entity.script.is_running
                                           for entity in component.entities))
 
+    def assert_script_reload(self):
+        if self.script_reload is not None:
+            from .native_controlled_yaml_core111 import script_reload_token
+            _need(all(current is original for current, original in
+                      zip(script_reload_token(self.hass), self.script_reload, strict=True)))
+
     def check(self):
         _need(not self.unresolved and self.active is None)
         # Registry mutation is journalled and bounded by the selected native
@@ -53,6 +63,7 @@ class DependentYAMLRuntime:
             transition = getattr(self.own_fence.root, 'controlled_automation', None)
             if transition is not None and transition.registry_readd_active:
                 return
+        self.assert_script_reload()
         self._assert_reload_idle()
         _need(self._sample(self.positions) == self.sample)
 
@@ -81,6 +92,15 @@ class DependentYAMLRuntime:
             old_tokens = dict((row[0], row[1:]) for row in self.sample[2])
             new_tokens = dict((row[0], row[1:]) for row in sample[2])
             _need(all(new_tokens[key] == old_tokens[key] for key in old_tokens if key != domain))
+            if self.script_reload is not None and domain == 'script':
+                self.assert_script_reload()
+                # Core 11.1 reload replaces only changed Script definitions.
+                # Same program must retain the real service and object graph.
+                old_scripts = {row[0]: row[1:] for row in old_tokens[domain][1]}
+                new_scripts = {row[0]: row[1:] for row in new_tokens[domain][1]}
+                for name in old_scripts.keys() & new_scripts.keys():
+                    if old_scripts[name][-1] == new_scripts[name][-1]:
+                        _need(old_scripts[name] == new_scripts[name])
             # Logical keys and registry UUIDs must survive this native reload.
             _need(sample[0] == self.sample[0])
         except BaseException:
