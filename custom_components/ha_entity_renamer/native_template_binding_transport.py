@@ -145,8 +145,9 @@ class _Runtime:
         from homeassistant.components.template import template_entity as te
         from homeassistant.core import HassJob, HomeAssistant
         self.native = native = _Native(hass)
-        _need(native.version in _EXTRA_PINS, 'template_binding_core_unqualified')
-        native.pins.update(_EXTRA_PINS[native.version])
+        pin = '2026.11.0' if native.version == '2026.11.1' else native.version
+        _need(pin in _EXTRA_PINS, 'template_binding_core_unqualified')
+        native.pins.update(_EXTRA_PINS[pin])
         self.refs = [(event, 'async_track_template_result'),
             (template.RenderInfo, '__init__'),
             (template.RenderInfo, '_freeze'), (template.RenderInfo, '_freeze_sets'),

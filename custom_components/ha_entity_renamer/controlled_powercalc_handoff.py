@@ -225,7 +225,7 @@ async def _native_store_write(hass, owner, method_name, receipt, input_state, ke
     writer, writer_code, core_refs = _store_writer(store)
     vendor = PowercalcVendor(hass, with_profiles=True) if key == 'powercalc_group' else None
     def prove():
-        pins = dict(_SOURCES[receipt.version])
+        pins = dict(_SOURCES['2026.11.0' if receipt.version == '2026.11.1' else receipt.version])
         core = prove_methods(Path(homeassistant.__file__).resolve().parent, pins, core_refs)
         owner_proof = (prove_methods(vendor.root, _pins(vendor.vendor_version), refs) if vendor is not None
                        else prove_methods(Path(homeassistant.__file__).resolve().parent, pins, refs))
@@ -467,7 +467,8 @@ class ControlledPowercalcHandoff:
         def prove():
             return (prove_methods(vendor.root, _pins(vendor.vendor_version), refs),
                     prove_methods(Path(homeassistant.__file__).resolve().parent,
-                                  dict(_SOURCES[self.chain.original_receipt.version]), core_refs))
+                                  dict(_SOURCES['2026.11.0' if self.chain.original_receipt.version == '2026.11.1'
+                                                else self.chain.original_receipt.version]), core_refs))
         proof, core_proof = await _drained(self.hass.async_add_executor_job, prove)
         self._scope()
         _need(_idle(pss), 'native_store_busy')
