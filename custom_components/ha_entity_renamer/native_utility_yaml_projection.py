@@ -3,6 +3,18 @@ from copy import deepcopy
 from collections.abc import Mapping
 
 
+def _exact(left, right):
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return (all(isinstance(key, str) for key in (*left, *right))
+                and left.keys() == right.keys()
+                and all(_exact(left[key], right[key]) for key in left))
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(_exact(a, b) for a, b in zip(left, right))
+    if isinstance(left, str) and isinstance(right, str):
+        return left == right
+    return type(left) is type(right) and type(left) in (type(None), bool, int, float) and left == right
+
+
 def source_only(before, after, mapping):
     """Match the whole effective configuration, changing only mapped sources."""
     if (not isinstance(before, Mapping) or not isinstance(after, Mapping)
@@ -23,7 +35,7 @@ def source_only(before, after, mapping):
         if not isinstance(source, str):
             return False
         config['source'] = mapping.get(source, source)
-    return candidate == new and candidate != old
+    return _exact(candidate, new) and not _exact(candidate, old)
 
 
 def native_projection(checked):

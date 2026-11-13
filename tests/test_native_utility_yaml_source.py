@@ -30,3 +30,8 @@ class UtilitySourceTests(unittest.TestCase):
         before = NativeMap(utility_meter=NativeMap(daily=NativeMap(source=NativeString('sensor.old'))))
         after = NativeMap(utility_meter=NativeMap(daily=NativeMap(source=NativeString('sensor.new'))))
         self.assertTrue(source_only(before, after, {'sensor.old':'sensor.new'}))
+
+    def test_boolean_and_integer_are_not_the_same_yaml_value(self):
+        before = {'utility_meter': {'daily': {'source':'sensor.old', 'net_consumption':False}}}
+        after = {'utility_meter': {'daily': {'source':'sensor.new', 'net_consumption':0}}}
+        self.assertFalse(source_only(before, after, {'sensor.old':'sensor.new'}))

@@ -64,7 +64,7 @@ def main():
         # Native loader diagnostics may contain expanded secrets.
         with open('/dev/null', 'w') as sink, redirect_stdout(sink), redirect_stderr(sink):
             result = asyncio.run(check(sys.argv[1], sys.argv[2], mapping))
-    except BaseException:
+    except Exception:
         result = {'status':'invalid'}
     print(json.dumps(result, sort_keys=True, separators=(',', ':')))
     return 0 if result['status'] == 'valid' else 1
