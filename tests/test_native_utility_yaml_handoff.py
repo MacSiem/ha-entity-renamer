@@ -101,6 +101,10 @@ class UtilityYAMLHandoffNativeTests(unittest.IsolatedAsyncioTestCase):
         wrapper.bind_phase_context(tx.PhaseContext(tx.Record('operation', plan, phases=('intent',)), 0))
         await wrapper.apply(step, guard)
         self.assertEqual(await wrapper.inspect(step), tx.Position.AFTER)
+        h.data['unexpected_meter'] = {}
+        self.assertEqual(await wrapper.inspect(step), tx.Position.UNKNOWN)
+        h.data.pop('unexpected_meter')
+        self.assertEqual(await wrapper.inspect(step), tx.Position.AFTER)
         self.assertIs(sensors()['p3_foreign_meter'], foreign)
         intent_key, receipt_key = wrapper._refs(step, 'forward')
         del prepared.plans[receipt_key]
