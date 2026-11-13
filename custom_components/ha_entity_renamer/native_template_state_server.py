@@ -80,6 +80,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         return await HomeKitLifecycleDriver(self).apply()
 
     async def rollback(self):
+        self._scope()
         if 'homekit' in self.receipt.changed_domains:
             raise Refused('homekit_native_rollback_lifecycle_required')
         return await super().rollback()
