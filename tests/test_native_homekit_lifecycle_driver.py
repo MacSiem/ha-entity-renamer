@@ -115,3 +115,33 @@ class HomeKitLifecycleOrderingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, 'applied')
         self.assertEqual(events, ['journal','unload','receipts','setup','terminal','release'])
         self.assertIsNone(root.homekit_lease)
+        events.clear()
+        async def uncertain(self, operation):
+            self.guard(); events.append('receipts')
+            raise OSError('synthetic lost effect acknowledgment')
+        with patch.object(NativeHelperActivationLease, 'acquire', acquire), \
+             patch.object(NativeHelperLifecycle, 'start', start), \
+             patch('custom_components.ha_entity_renamer.native_helper_lifecycle.native_helper_lifecycle_store',
+                   lambda *args: fresh), patch.object(Coordinator, 'resume', uncertain):
+            failed_driver = HomeKitLifecycleDriver(root)
+            with self.assertRaises(OSError):
+                await failed_driver.apply()
+            with self.assertRaises(Refused):
+                await failed_driver.apply()
+        self.assertEqual(events, ['journal','unload','receipts','release'])
+        self.assertIsNone(root.homekit_lease)
+        events.clear()
+        async def uncertain_setup(self, authorization):
+            events.append('setup')
+            raise OSError('synthetic lost setup acknowledgment')
+        with patch.object(NativeHelperActivationLease, 'acquire', acquire), \
+             patch.object(NativeHelperLifecycle, 'start', start), \
+             patch('custom_components.ha_entity_renamer.native_helper_lifecycle.native_helper_lifecycle_store',
+                   lambda *args: fresh), patch.object(Life, 'restore', uncertain_setup):
+            failed_setup = HomeKitLifecycleDriver(root)
+            with self.assertRaises(OSError):
+                await failed_setup.apply()
+            with self.assertRaises(Refused):
+                await failed_setup.apply()
+        self.assertEqual(events, ['journal','unload','receipts','setup','release'])
+        self.assertIsNone(root.homekit_lease)
