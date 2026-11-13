@@ -417,10 +417,18 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                     def ui_continue(label):
                         (directory / (label + '.go')).write_text('go')
             await pulse()
+            if browser_ui:
+                # Supply real numeric samples after Utility subscribes, so the
+                # retained value and native reset deadline have actual inputs.
+                for value in (2, 3):
+                    ordinary_entity._attr_native_value = value
+                    ordinary_entity.async_write_ha_state()
+                    await hass.async_block_till_done()
             await baseline()
             if browser_ui:
                 meter = utility_meter()
                 self.assertIsNotNone(meter._next_reset)
+                self.assertIsNotNone(meter.native_value)
                 meter_before = (meter.entity_id, meter.native_value, meter._next_reset)
             if public:
                 # Independent physical oracle for every native registry row,
@@ -624,6 +632,18 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             native_dummy_mdns(hass)
         finally:
             save()
+            destination = os.environ.get('RENAMER_BATCH_EVIDENCE')
+            if destination:
+                import shutil
+                storage = self.f.root / '.storage'
+                target = Path(destination) / 'multi-storage'
+                if storage.is_dir():
+                    target.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    for source in storage.iterdir():
+                        if source.is_file() and 'ha_entity_renamer' in source.name:
+                            copied = target / source.name
+                            shutil.copyfile(source, copied)
+                            copied.chmod(0o600)
 
 
 class ControlledMultiEntryColdPublicTests(ControlledMultiEntryTests):

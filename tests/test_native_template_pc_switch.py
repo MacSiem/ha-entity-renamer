@@ -11,7 +11,21 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         await self._exercise(use_leaf=True)
 
     async def test_input_forward_inverse(self):
-        await self._exercise(use_leaf=False)
+        try:
+            await self._exercise(use_leaf=False)
+        finally:
+            import os, shutil
+            from pathlib import Path
+            destination = os.environ.get('RENAMER_BATCH_EVIDENCE')
+            storage = self.f.root / '.storage'
+            if destination and storage.is_dir():
+                target_dir = Path(destination) / 'p2-storage'
+                target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                for item in storage.iterdir():
+                    if item.is_file() and 'ha_entity_renamer' in item.name:
+                        target_path = target_dir / item.name
+                        shutil.copyfile(item, target_path)
+                        target_path.chmod(0o600)
 
     async def _exercise(self, *, use_leaf):
         from homeassistant.config import async_hass_config_yaml
