@@ -19,25 +19,43 @@ class ControlledPowercalcPartsTests(ControlledActualGraphTests):
         slot = next(i for i in range(6) if monitor.get_tool(i) is None)
         monitor.use_tool_id(slot, 'parts history mismatch')
         history_diffs = []
-        def trace(code, offset, error):
+        exceptions = []
+        from ordinary_energy_diagnostic import energy_exception
+        def trace(event, code, offset, error):
+            captured = energy_exception(code, error, component=True)
+            if captured is not None:
+                captured["event"] = event
+                if captured not in exceptions:
+                    exceptions.append(captured)
             if code.co_name == '_need' and str(error) == 'template_yaml_server_history_identity_changed':
                 history_diffs.append(history_from_frame(sys._getframe(1)))
-        monitor.register_callback(slot, monitor.events.RAISE, trace)
-        monitor.set_events(slot, monitor.events.RAISE)
+        monitor.register_callback(slot, monitor.events.RAISE,
+                                  lambda code, offset, error: trace("raise", code, offset, error))
+        monitor.register_callback(slot, monitor.events.EXCEPTION_HANDLED,
+                                  lambda code, offset, error: trace("handled", code, offset, error))
+        monitor.register_callback(slot, monitor.events.PY_UNWIND,
+                                  lambda code, offset, error: trace("unwind", code, offset, error))
+        monitor.set_events(slot, monitor.events.RAISE | monitor.events.EXCEPTION_HANDLED | monitor.events.PY_UNWIND)
         try:
             await self._parts()
         finally:
             monitor.set_events(slot, 0)
+            monitor.register_callback(slot, monitor.events.RAISE, None)
+            monitor.register_callback(slot, monitor.events.EXCEPTION_HANDLED, None)
+            monitor.register_callback(slot, monitor.events.PY_UNWIND, None)
             monitor.free_tool_id(slot)
             destination = os.environ.get('RENAMER_BATCH_EVIDENCE')
             storage = self.f.root / '.storage'
-            if destination and storage.is_dir():
+            if destination:
                 target = Path(destination) / 'parts-storage'
                 target.mkdir(mode=0o700, parents=True, exist_ok=True)
+                exception_file = target / 'exceptions.json'
+                exception_file.write_text(json.dumps(exceptions, default=str))
+                exception_file.chmod(0o600)
                 diagnostic = target / 'history-diffs.json'
                 diagnostic.write_text(json.dumps(history_diffs, default=str))
                 diagnostic.chmod(0o600)
-                for item in storage.iterdir():
+                for item in storage.iterdir() if storage.is_dir() else ():
                     if item.is_file() and 'ha_entity_renamer' in item.name:
                         copied = target / item.name
                         shutil.copyfile(item, copied)
