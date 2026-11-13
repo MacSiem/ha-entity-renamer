@@ -755,7 +755,7 @@ class ControlledPowercalcHandoff:
                         'full_total': payload.full_total, 'precision': payload.precision, 'unit': payload.unit}
             encoded.append({'uuid': uuid, 'before_id': old, 'after_id': new, 'kind': kind, 'payload': body})
         receipt = {'kind': 'controlled_powercalc_population_receipt',
-                   'schema': 2 if __version__ in ('2026.11.0', '2026.11.1') else 1,
+                   'schema': 3 if __version__ in ('2026.11.0', '2026.11.1') else 1,
                    'root': self.chain.root_id, 'operation_id': self.chain.operation_id,
                    'fingerprint': self.chain.plan.fingerprint, 'direction': direction,
                    'intent': list(self.intent), 'source_head': intent['source_head'],
@@ -770,6 +770,11 @@ class ControlledPowercalcHandoff:
                    'restore_before_write_identity': _identity(restore_gate_id),
                    'pss_after_identity': _identity(pss_after_identity), 'restore_after_sha256': _sha(restore_after),
                    'restore_after_identity': _identity(restore_after_identity)}
+        if __version__ in ('2026.11.0', '2026.11.1'):
+            # Capture exact presence and contents before this handoff. A hash
+            # or the transformed map alone cannot distinguish a foreign stale
+            # target from a member introduced by the rename.
+            receipt['pss_owned_before'] = {name: prior[name] for name in owned if name in prior}
         key = _event_id(['controlled_pc_population', self.chain.root_id, direction, 'receipt'])
         self.receipt = await self.chain.store.create(key, receipt)
         self._scope()
