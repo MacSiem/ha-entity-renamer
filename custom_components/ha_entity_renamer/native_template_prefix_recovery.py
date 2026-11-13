@@ -66,6 +66,35 @@ def acknowledged_powercalc_registry_prefix(record):
             and record.phases == ('verified',) * count + ('pending',) * (len(record.phases) - count))
 
 
+def acknowledged_powercalc_prefix_receipts(chain, record):
+    """Verify durable handoff and registry receipts; never admit an inverse."""
+    from .native_registry_receipts import RegistryReceiptChain, _event_id
+    if (type(chain) is not RegistryReceiptChain or not acknowledged_powercalc_registry_prefix(record)
+            or chain.plan != record.plan or chain.operation_id != record.operation_id
+            or chain.writable or chain.active is not None):
+        return False
+    try:
+        from .controlled_powercalc_composition import ControlledPowercalcComposition
+        from .controlled_powercalc_setup_receipts import validate_handoff
+        from .native_template_yaml_server import _controlled_powercalc_plan
+        baseline, composition = chain.preparations.resolve_composition(chain.plan.native_inputs)
+        if (baseline != chain.baseline or type(composition) is not ControlledPowercalcComposition
+                or not _controlled_powercalc_plan(chain.plan, composition)):
+            return False
+        state = chain.reconstruct_inputs()
+        count = record.phases.count('verified')
+        if chain._setup_positions.get(state.head) != {index: 'forward' for index in range(count)}:
+            return False
+        key = _event_id(['controlled_pc_population', chain.root_id, 'forward', 'receipt'])
+        stored = chain.store.read(key)
+        if stored is None:
+            return False
+        validate_handoff(chain, [key, stored['digest']], 'forward')
+        return True
+    except Exception:
+        return False
+
+
 def unstarted_rollback_complete(chain, record):
     """Coordinator leaves genuinely unstarted steps pending after compensation.
 

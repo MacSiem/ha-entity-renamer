@@ -1,8 +1,11 @@
 """A prefix shape cannot grant recovery for an unconfirmed native effect."""
 from dataclasses import replace
+from types import SimpleNamespace
 import unittest
 
-from custom_components.ha_entity_renamer.native_template_prefix_recovery import acknowledged_powercalc_registry_prefix
+from custom_components.ha_entity_renamer.native_template_prefix_recovery import (
+    acknowledged_powercalc_prefix_receipts, acknowledged_powercalc_registry_prefix,
+)
 from custom_components.ha_entity_renamer.transaction import Plan, Record, Step
 
 
@@ -16,6 +19,8 @@ class PowercalcPrefixShapeTests(unittest.TestCase):
         record = Record('operation', plan, 'unknown', ('verified',) + ('pending',) * 5,
                         'effect_or_verification_uncertain')
         self.assertTrue(acknowledged_powercalc_registry_prefix(record))
+        self.assertFalse(acknowledged_powercalc_prefix_receipts(
+            SimpleNamespace(plan=plan, operation_id=record.operation_id), record))
         for changed in (
             replace(record, phases=('verified', 'intent', 'pending', 'pending', 'pending', 'pending')),
             replace(record, phases=('verified', 'verified', 'verified', 'pending', 'pending', 'pending')),
