@@ -1016,6 +1016,57 @@ class YAMLPlannerTests(unittest.TestCase):
             self.assertFalse(result.ready)
             self.assertIn('yaml_runtime_repeat_variable_unsupported', self.codes(result))
 
+    def test_numeric_repeat_items_are_metadata_but_not_entity_references(self):
+        for expression, ready in (("repeat.item", True),
+                                  ("states(repeat.item)", False)):
+            source = self.control_source('''
+                - repeat:
+                    for_each: [25, 100, 250]
+                    sequence:
+                    - data:
+                        message: '{{ EXPRESSION }}'
+                - value_template: '{{ states(ref) }}'
+            '''.replace('EXPRESSION', expression))
+            self.put('configuration.yaml', source)
+            result = self.plan()
+            self.assertEqual(result.ready, ready, result.issues)
+            if ready:
+                self.assertIn(b'sensor.new', result.patches[0].proposed_bytes)
+            else:
+                self.assertIn('template_requires_reference_parser', self.codes(result))
+
+    def test_native_trigger_entity_id_requires_complete_state_trigger_scope(self):
+        source = '''automation:
+  - triggers:
+      - trigger: state
+        entity_id: sensor.foo
+    actions:
+      - condition: template
+        value_template: "{{ is_state(trigger.entity_id, 'on') }}"
+'''
+        self.put('configuration.yaml', source)
+        result = self.plan()
+        self.assertTrue(result.ready, result.issues)
+        self.assertIn(b'entity_id: sensor.new', result.patches[0].proposed_bytes)
+        self.assertIn(b'is_state(trigger.entity_id', result.patches[0].proposed_bytes)
+        self.put('configuration.yaml', source.replace('      - trigger: state', '      - trigger: event\n        event_type: example\n      - trigger: state'))
+        self.assertFalse(self.plan().ready)
+
+    def test_static_url_output_does_not_hide_entity_expression(self):
+        source = '''automation:
+  - actions:
+      - data:
+          message: >-
+            {% if is_state('sensor.foo', 'on') %}https://example.invalid/a {% else %}https://example.invalid/b {% endif %}
+'''
+        self.put('configuration.yaml', source)
+        plan = self.plan()
+        self.assertTrue(plan.ready, plan.issues)
+        self.assertIn(b"is_state('sensor.new'", plan.patches[0].proposed_bytes)
+        unsafe = source.replace("is_state('sensor.foo', 'on')", "is_state(external, 'on')")
+        self.put('configuration.yaml', unsafe)
+        self.assertFalse(self.plan().ready)
+
     def test_repeat_runtime_object_shadows_and_restores_outer_same_name(self):
         source = self.control_source('''
             - repeat:

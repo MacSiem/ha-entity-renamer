@@ -747,10 +747,16 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                 item_part = static(items) if items is not None else None
                 item_bound = item_part[0] if item_part else (template_alias(items, entry) if items is not None else None)
                 known_items = item_bound is not None and item_bound[0] in ('list', 'record_list')
+                numeric_items = (isinstance(items, SequenceNode) and bool(items.value)
+                                 and all(isinstance(item, ScalarNode)
+                                         and item.tag in (_STANDARD + 'int', _STANDARD + 'float')
+                                         for item in items.value))
                 if known_items and item_part:
                     for producer in item_part[1]:
                         producers[id(producer)] = producers.get(id(producer), 0) + 1
-                if not known_items:
+                if numeric_items:
+                    invariant['repeat'] = ('runtime_repeat_numeric', ())
+                elif not known_items:
                     invariant['repeat'] = ('runtime_repeat', ())
                 elif item_bound[0] == 'record_list':
                     invariant['repeat'] = ('runtime_repeat_record', item_bound[1], item_bound[2])
@@ -935,20 +941,25 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
                     if not isinstance(entity, MappingNode):
                         continue
                     local = pairs(entity)
-                    if 'variables' not in local:
+                    if ('variables' not in local
+                            and set(values) - {'unique_id', 'sensor', 'binary_sensor'}):
                         continue
                     bindings = {}
                     def capture_local(key, child, bound, kind):
                         if bound and bound[0] == 'scalar' and len(bound[1]) == 1:
                             template_variables.append((node, key.value, child, bound[1][0], kind))
-                    define(local['variables'], bindings, on_binding=capture_local)
-                    if set(values) - {'unique_id', 'sensor', 'binary_sensor'}:
+                    if 'variables' in local:
+                        define(local['variables'], bindings, on_binding=capture_local)
+                    if 'variables' in local and set(values) - {'unique_id', 'sensor', 'binary_sensor'}:
                         issue(node, 'yaml_template_variable_runtime_scope_unsupported')
                         unsafe.update(origins(bindings))
                     if set(bindings) & {'states', 'is_state', 'state_attr', 'is_state_attr',
                             'expand', 'this', 'now', 'utcnow', 'today_at', 'as_timestamp'}:
-                        issue(local['variables'], 'yaml_template_variable_shadow_unsupported')
+                        issue(local.get('variables', entity), 'yaml_template_variable_shadow_unsupported')
                         unsafe.update(origins(bindings))
+                    if (set(values) <= {'unique_id', 'sensor', 'binary_sensor'}
+                            and 'this' not in bindings):
+                        bindings['this'] = ('native_self', ())
                     for key, child in entity.value:
                         if isinstance(key, ScalarNode) and key.value == 'variables':
                             continue

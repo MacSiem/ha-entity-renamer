@@ -81,6 +81,23 @@ _EXTERNAL = re.compile(r"(?:[a-z][a-z0-9+.-]{0,31}://|javascript:|<script\b)", r
 _TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?=([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![A-Za-z0-9_]))", re.ASCII)
 
 
+def _external_output_only(text):
+    """Allow literal HTTP URLs only in Jinja output text, never expressions."""
+    matches = list(_EXTERNAL.finditer(text))
+    if not matches or any(not re.fullmatch(r'https?://', m.group(), re.I) for m in matches):
+        return False
+    try:
+        from jinja2 import Environment
+        tokens = list(Environment().lex(text))
+        if any(_EXTERNAL.search(value) and (kind != 'data' or not value[-1:].isspace())
+               for _, kind, value in tokens):
+            return False
+        found = sum(len(list(_EXTERNAL.finditer(value))) for _, kind, value in tokens if kind == 'data')
+        return found == len(matches)
+    except Exception:
+        return False
+
+
 def _inert_template(text, mapping):
     """Recognize two complete non-reference forms without weakening other guards."""
     if re.fullmatch(r"\s*\{#(?:(?!#\}).)*#\}\s*", text, re.S):
@@ -267,6 +284,10 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
         if trigger_entities and any(isinstance(node, nodes.Name) and node.name == 'trigger'
                 and node.ctx in ('store', 'param') for node in all_nodes):
             trigger_entities = ()
+        if (initial_bindings and initial_bindings.get('this') == ('native_self', ())
+                and any(isinstance(node, nodes.Name) and node.name == 'this'
+                        and node.ctx in ('store', 'param') for node in all_nodes)):
+            return original_text, [('unsupported_template_scope', 'Native self shadowed')]
         markers = []
         used, unsafe = set(), set()
         replacements = {}
@@ -365,8 +386,18 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
             if isinstance(node, (nodes.Getattr, nodes.Getitem)):
                 attribute = (node.attr if isinstance(node, nodes.Getattr) else
                              node.arg.value if isinstance(node.arg, nodes.Const) else None)
+                if (attribute == 'entity_id' and isinstance(node.node, nodes.Name)
+                        and node.node.name == 'this'
+                        and bindings.get('this') == ('native_self', ())):
+                    return ('scalar', ())
+                if (strict_trigger_keys and trigger_entities and attribute == 'entity_id'
+                        and isinstance(node.node, nodes.Name) and node.node.name == 'trigger'
+                        and 'trigger' not in bindings):
+                    return ('scalar', ())
                 bound = value(node.node, bindings)
                 if attribute == 'item' and bound:
+                    if bound[0] == 'runtime_repeat_numeric':
+                        return ('metadata', ())
                     if bound[0] == 'runtime_repeat_item':
                         return ('scalar', bound[1])
                     if bound[0] == 'runtime_repeat_record':
@@ -609,10 +640,12 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
             # and flags carry no entity provenance; item/dynamic access may.
             if isinstance(node, (nodes.Getattr, nodes.Getitem)) and isinstance(node.node, nodes.Name):
                 bound = bindings.get(node.node.name)
-                if bound and bound[0] in ('runtime_repeat', 'runtime_repeat_item'):
+                if bound and bound[0] in ('runtime_repeat', 'runtime_repeat_item', 'runtime_repeat_numeric'):
                     attribute = (node.attr if isinstance(node, nodes.Getattr) else
                                  node.arg.value if isinstance(node.arg, nodes.Const)
                                  and type(node.arg.value) is str else None)
+                    if attribute == 'item' and bound[0] == 'runtime_repeat_numeric':
+                        return
                     if attribute == 'item' and bound[0] == 'runtime_repeat_item':
                         escape(('scalar', bound[1]))
                     elif attribute not in {'index', 'first', 'last'}:
@@ -635,7 +668,7 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
                     return
             if isinstance(node, nodes.Name):
                 bound = bindings.get(node.name)
-                if bound and bound[0] in ('runtime_repeat', 'runtime_repeat_item'):
+                if bound and bound[0] in ('runtime_repeat', 'runtime_repeat_item', 'runtime_repeat_numeric'):
                     escape(bound)
                     mark('unsupported_runtime_repeat', 'Runtime repeat object escapes counter access')
                     return
@@ -968,7 +1001,7 @@ def analyze_template_bindings(text, mapping, bindings, *, max_nodes=10000,
         return text, [], set(), set()
     if _inert_template(text, mapping):
         return text, [], set(), set()
-    if _EXTERNAL.search(text) or not _safe_comments(text, mapping) or re.search(r'{%[-+]?\s*raw\b', text):
+    if (_EXTERNAL.search(text) and not _external_output_only(text)) or not _safe_comments(text, mapping) or re.search(r'{%[-+]?\s*raw\b', text):
         return text, [('unsupported_template', 'External/comment/raw-bearing template')], set(), origins
     report = {}
     value, markers = _syntax_template(
@@ -1052,7 +1085,7 @@ def plan_references(
     def template(text: str, path: Path) -> str:
         if _inert_template(text, mapping):
             return text
-        if _EXTERNAL.search(text):
+        if _EXTERNAL.search(text) and not _external_output_only(text):
             markers.append(Marker(path, "external_content", "URL/script-bearing field left unchanged"))
             return text
         if not _safe_comments(text, mapping) or re.search(r"{%[-+]?\s*raw\b", text):
