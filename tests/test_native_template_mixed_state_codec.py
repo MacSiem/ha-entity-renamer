@@ -13,6 +13,15 @@ import test_native_template_state_yaml as selective
 legacy, subject = selective.legacy, selective.subject
 
 
+def legacy_identity_payload(change):
+    payload = asdict(change)
+    if not change.receipt.runtime_expected and type(change) is legacy.module.PreparedYAML:
+        payload['receipt'].pop('runtime_expected')
+    if change.receipt.checker_repairs_snapshot is None:
+        payload['receipt'].pop('checker_repairs_snapshot')
+    return payload
+
+
 class MixedStateYAMLCodecTests(unittest.TestCase):
     def change(self, domains=('automation', 'script', 'template')):
         old = selective.SelectiveYAMLCodecTests().change()
@@ -32,7 +41,7 @@ class MixedStateYAMLCodecTests(unittest.TestCase):
                 self.assertIs(type(decoded), subject.PreparedMixedTemplateStateYAML)
                 self.assertEqual(decoded, change)
                 self.assertEqual(decoded.identity, 'template_mixed_state_yaml:' +
-                                 legacy.module._digest(asdict(change)))
+                                 legacy.module._digest(legacy_identity_payload(change)))
                 self.assertNotEqual(decoded.identity,
                     replace(decoded, source_program_sha256='d' * 64).identity)
                 self.assertEqual(decoded.receipt.runtime_expected[-1], ('template', None, None))
@@ -88,7 +97,7 @@ class MixedStateYAMLCodecTests(unittest.TestCase):
         old = selective.SelectiveYAMLCodecTests().change().checked()
         encoded = legacy.prepared.encode_change(old)
         self.assertEqual(encoded['kind'], 'template_state_yaml')
-        self.assertEqual(old.identity, 'template_state_yaml:' + legacy.module._digest(asdict(old)))
+        self.assertEqual(old.identity, 'template_state_yaml:' + legacy.module._digest(legacy_identity_payload(old)))
         with self.assertRaises(ValueError):
             legacy.prepared.decode_change(dict(encoded, kind='template_mixed_state_yaml'))
         class Derived(subject.PreparedMixedTemplateStateYAML):
@@ -105,7 +114,7 @@ class MixedStateYAMLCodecTests(unittest.TestCase):
         encoded = legacy.prepared.encode_change(old)
         self.assertEqual(encoded, {'kind': 'yaml', 'data':
                          legacy.prepared.canonical(json.loads(json.dumps(asdict(old))))[0]})
-        self.assertEqual(old.identity, 'yaml:' + legacy.module._digest(asdict(old)))
+        self.assertEqual(old.identity, 'yaml:' + legacy.module._digest(legacy_identity_payload(old)))
         self.assertEqual(legacy.prepared.decode_change(encoded), old)
         encoded['data']['receipt']['runtime_expected'][-1][1:] = [None, None]
         with self.assertRaises(ValueError):

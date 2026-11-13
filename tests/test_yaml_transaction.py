@@ -74,7 +74,8 @@ class Regressions(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         scratch = os.environ.get('RENAMER_TEST_SCRATCH', tempfile.gettempdir())
         self.folder = tempfile.TemporaryDirectory(prefix='yaml-transaction-', dir=scratch)
-        self.root = Path(self.folder.name)
+        # macOS may return /var/... while native admission compares real paths.
+        self.root = Path(self.folder.name).resolve()
         (self.root / '.storage').mkdir()
         self.rows = []
         sources = []
