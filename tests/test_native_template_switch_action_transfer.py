@@ -49,7 +49,9 @@ class TemplateSwitchActionTransferTests(profile.NativeTemplateStateSourceProfile
         images = tuple((name, worker._normal(before_cfg[name]), worker._normal(after_cfg[name]))
                        for name in ('turn_on', 'turn_off'))
         transfer = actions.SwitchActionTransfer.capture(self.f.hass, ((entity, images),), (entity,))
-        entity._config = copy.deepcopy(before_cfg)
+        entity._config = dict(before_cfg)
+        for name in ('turn_on', 'turn_off'):
+            entity._config[name] = copy.deepcopy(before_cfg[name])
         transfer.install()
         await entity.async_turn_on()
         await entity.async_turn_off()
