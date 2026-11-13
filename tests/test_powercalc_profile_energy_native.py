@@ -376,12 +376,6 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await async_setup_component(hass, 'network', {}))
         self.sources = [ProfileLight(name) for name in ('Graph fixed', 'Graph linear',
                          'Graph model', 'Graph entry')]
-        # On cold boot a non-config-entry fixture producer must request its
-        # existing UUID's current ID explicitly, as a real registry-aware producer.
-        for source in self.sources:
-            entity_id = self.f.entity.async_get_entity_id('light', 'light', source.unique_id)
-            if entity_id is not None:
-                source.entity_id = entity_id
         component = EntityComponent(logging.getLogger(__name__), 'light', hass, timedelta(seconds=60))
         await component.async_add_entities(self.sources)
         self.yaml_source = self.sources[2].entity_id

@@ -115,6 +115,7 @@ class MixedPhase(PowercalcColdPhase):
             self.assertTrue(await async_setup_component(hass, 'ha_entity_renamer', {}))
             self.backend_entry_id = self.meta['backend_entry_id']
             self.entry = hass.config_entries.async_get_entry(self.meta['pc_entry'])
+        self.addAsyncCleanup(self._final_capture)
         await self._load_consumers()
         await hass.async_start()
         await hass.async_block_till_done()
@@ -122,12 +123,13 @@ class MixedPhase(PowercalcColdPhase):
         for source in self.sources:
             await source.async_turn_off()
         await hass.async_block_till_done()
+        self.assertEqual(self.sources[2].entity_id,
+                         'light.graph_model_target' if self.phase == 'resume' else 'light.graph_model')
         if self.phase == 'forward':
             await self._flush_documents(initialize=True)
         else:
             self.cold_evidence = self.evidence
             await MixedPowercalcColdPhase._await_cold_readiness(self)
-        self.addAsyncCleanup(self._final_capture)
 
     def _network_evidence(self):
         from ordinary_network_scope import native_dummy_mdns
@@ -163,9 +165,6 @@ class MixedPhase(PowercalcColdPhase):
             _attr_should_poll = False
 
         price = Tariff()
-        registered = self.f.entity.async_get_entity_id('sensor', 'sensor', price.unique_id)
-        if registered:
-            price.entity_id = registered
         component = EntityComponent(logging.getLogger(__name__), 'sensor', self.f.hass, timedelta(seconds=60))
         await component.async_add_entities([price])
         self.tariff = price
@@ -174,7 +173,6 @@ class MixedPhase(PowercalcColdPhase):
         import probatio
         from homeassistant.components.energy.data import ENERGY_SOURCE_SCHEMA, async_get_manager
         from homeassistant.components.integration.config_flow import ConfigFlowHandler as IntegrationConfigFlow
-        from homeassistant.components.utility_meter.config_flow import ConfigFlowHandler as UtilityMeterConfigFlow
         from homeassistant.config_entries import ConfigEntry
 
         hass = self.f.hass
@@ -190,18 +188,14 @@ class MixedPhase(PowercalcColdPhase):
         preferences['device_consumption'] = [{'stat_consumption': entity_id} for entity_id in groups]
         await manager.async_update(preferences)
         await manager._store.async_save(manager.data)
-        for domain, flow, options in (
-            ('integration', IntegrationConfigFlow, {'source': power, 'name': 'Graph integral',
-             'unit_prefix': 'k', 'unit_time': 'h', 'method': 'left', 'round': 9}),
-            ('utility_meter', UtilityMeterConfigFlow, {'source': groups[1], 'name': 'Graph utility',
-             'cycle': 'none', 'offset': 0, 'tariffs': [], 'net_consumption': False,
-             'delta_values': False, 'periodically_resetting': False, 'always_available': False}),
-        ):
-            entry = ConfigEntry(domain=domain, title=options['name'], data={}, options=options,
-                discovery_keys=MappingProxyType({}), source='user', version=flow.VERSION,
-                minor_version=flow.MINOR_VERSION, subentries_data=[], unique_id=domain + '-graph')
-            await hass.config_entries.async_add(entry)
-            self.assertEqual(entry.state.value, 'loaded', domain)
+        options = {'source': power, 'name': 'Graph integral', 'unit_prefix': 'k',
+                   'unit_time': 'h', 'method': 'left', 'round': 9}
+        entry = ConfigEntry(domain='integration', title=options['name'], data={}, options=options,
+            discovery_keys=MappingProxyType({}), source='user', version=IntegrationConfigFlow.VERSION,
+            minor_version=IntegrationConfigFlow.MINOR_VERSION, subentries_data=[],
+            unique_id='integration-graph')
+        await hass.config_entries.async_add(entry)
+        self.assertEqual(entry.state.value, 'loaded')
         group = groups[0]
         (self.f.root / 'graph_scripts.yaml').write_text(
             'graph_consumer:\n  sequence:\n    - event: graph_consumer_read\n'
@@ -361,8 +355,27 @@ class MixedPhase(PowercalcColdPhase):
         async def refresh():
             self.guard()
         runtime = self._runtime()
-        return await getattr(runtime, method)(self.f.hass, *args, guard=self.guard,
-                                               refresh=refresh, **kwargs)
+        trace = []
+        monitor = sys.monitoring
+        tool = next(i for i in range(6) if monitor.get_tool(i) is None)
+        monitor.use_tool_id(tool, 'Core 11 Energy fixture exceptions')
+        from custom_components.ha_entity_renamer.transaction import Refused
+
+        def raised(code, offset, error):
+            if (isinstance(error, (Refused, ValueError, KeyError, AttributeError))
+                    and '/custom_components/ha_entity_renamer/' in code.co_filename):
+                trace.append((Path(code.co_filename).name, code.co_name, str(error)))
+
+        monitor.register_callback(tool, monitor.events.RAISE, raised)
+        monitor.set_events(tool, monitor.events.RAISE)
+        try:
+            return await getattr(runtime, method)(self.f.hass, *args, guard=self.guard,
+                                                   refresh=refresh, **kwargs)
+        finally:
+            monitor.set_events(tool, 0)
+            monitor.register_callback(tool, monitor.events.RAISE, None)
+            monitor.free_tool_id(tool)
+            self.evidence[method + '_trace'] = list(dict.fromkeys(trace))[-35:]
 
     def guard(self):
         self.assertIs(self.f.hass.config_entries.async_get_entry(self.entry.entry_id), self.entry)
@@ -447,7 +460,7 @@ class MixedPhase(PowercalcColdPhase):
             group_point = await self._point(first)
             price_id = self.tariff.entity_id
             mapping = {self.yaml_source: 'light.graph_model_target', first: 'sensor.graph_energy_target',
-                       price_id: 'sensor.graph_price_target'}
+                       second: 'sensor.graph_second_energy_target', price_id: 'sensor.graph_price_target'}
             await restore.async_dump_states()
             self._assert_cost_restore(costs, stopped=False)
             await self._flush_documents()
