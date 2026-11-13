@@ -1088,6 +1088,8 @@ class YAMLPlannerTests(unittest.TestCase):
         self.assertEqual(proposed, source.replace('entity_id: sensor.foo', 'entity_id: sensor.new'))
         self.put('configuration.yaml', source.replace('switch.unrelated_', 'sensor.'))
         self.assertFalse(self.plan().ready)
+        self.put('configuration.yaml', source.replace('switch.unrelated_', 'sensor.ne'))
+        self.assertFalse(self.plan().ready)  # Also protect the future target ID.
         self.put('configuration.yaml', source.replace('is_state(source, \'on\')', 'true')
                  .replace('entity_id: sensor.foo', "entity_id: '{{ source }}'")
                  .replace('switch.unrelated_', 'sensor.'))

@@ -601,8 +601,9 @@ def _syntax_template(text, mapping, max_nodes, *, initial_bindings=None,
 
         def pattern_disjoint(bound):
             prefix, suffix, exact = bound[2]
-            return not any(old.startswith(prefix) and old.endswith(suffix)
-                           and (not exact or old == prefix) for old in mapping)
+            return not any(entity.startswith(prefix) and entity.endswith(suffix)
+                           and (not exact or entity == prefix)
+                           for entity in (*mapping, *mapping.values()))
 
         def expression(node, bindings):
             charge()
