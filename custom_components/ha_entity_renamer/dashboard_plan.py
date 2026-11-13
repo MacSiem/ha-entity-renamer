@@ -9,7 +9,7 @@ from dataclasses import replace
 import re
 
 from .reference_planner import Consumer, Context, Marker, Scope, Syntax, Change, plan_references
-from .dashboard_custom import plan_button_expression, unchanged_computed_target, unchanged_finite_jinja
+from .dashboard_custom import plan_button_expression, unchanged_computed_target, unchanged_finite_jinja, unchanged_button_style, unchanged_bubble_style, unchanged_button_field
 
 PASSIVE = frozenset('''type title name description label icon theme color unit attribute
 path url url_path navigation_path image alt_text state_image style aspect_ratio
@@ -61,7 +61,7 @@ def _passive_template(value, mapping):
     if type(value) is list:
         return all(_passive_template(v, mapping) for v in value)
     if type(value) is str:
-        return not any(old in value for old in mapping) and not re.search(
+        return '[[[' not in value and not any(identity in value for identity in (*mapping.keys(), *mapping.values())) and not re.search(
             r'\b(?:states|hass|callService|fire-dom-event)\s*[.(\[]|\{[%{]', value)
     return value is None or type(value) in (int, float, bool)
 
@@ -73,7 +73,7 @@ def _foreign_static(value, mapping):
     if type(value) is list:
         return all(_foreign_static(v, mapping) for v in value)
     if type(value) is str:
-        if any(old in value for old in mapping) or 'states[' in value or 'states.' in value or '[[[' in value:
+        if any(identity in value for identity in (*mapping.keys(), *mapping.values())) or 'states[' in value or 'states.' in value or '[[[' in value:
             return False
         if '{{' in value or '{%' in value:
             plan = plan_references(value, mapping, Context(Consumer.DASHBOARD, (Scope((), Syntax.JINJA),)))
@@ -240,6 +240,15 @@ def plan_dashboard(config, mapping):
             block(path); return
         for i, child in enumerate(value): node(child, path + (i,), role, **kwargs)
 
+    def styles_safe(value, variables):
+        if type(value) is dict:
+            return all(type(key) is str and styles_safe(item, variables) for key,item in value.items())
+        if type(value) is list:
+            return all(styles_safe(item, variables) for item in value)
+        if type(value) is str and '[[[' in value:
+            return unchanged_button_style(value, variables, mapping)
+        return _passive_template(value, mapping)
+
     def custom(value, path, kind):
         # Explicitly owned component slots; unrecognized options are refused.
         passive = PASSIVE | {'styles', 'show_label', 'show_entity_picture', 'size',
@@ -252,7 +261,9 @@ def plan_dashboard(config, mapping):
         for key, child in value.items():
             p = path + (key,)
             if key == 'type': continue
-            if key == 'entity': ref(child, p)
+            if key in {'styles', 'extra_styles', 'style'}:
+                if not (kind == 'custom:bubble-card' and unchanged_bubble_style(child, mapping)) and not styles_safe(child, value.get('variables', {})): block(p, 'dynamic_button_style')
+            elif key == 'entity': ref(child, p)
             elif key == 'triggers_update' and kind == 'custom:button-card': ref(child, p, many=True)
             elif key == 'template' and kind == 'custom:button-card':
                 names = [child] if type(child) is str else child
@@ -298,7 +309,10 @@ def plan_dashboard(config, mapping):
                     if type(item) is dict and set(item) <= {'card', 'do_not_eval'} and 'card' in item and (
                             'do_not_eval' not in item or type(item['do_not_eval']) is bool):
                         node(item['card'], q + ('card',), 'card')
-                    elif type(item) is str and not any(old in item for old in mapping):
+                    elif type(item) is str and '[[[' in item:
+                        if not unchanged_button_field(item, value.get('variables', {}), mapping):
+                            block(q, 'unsupported_button_custom_field')
+                    elif type(item) is str and not any(identity in item for identity in (*mapping.keys(), *mapping.values())):
                         continue
                     else: block(q, 'unsupported_button_custom_field')
             elif key == 'state' and kind == 'custom:bubble-card':
@@ -306,7 +320,10 @@ def plan_dashboard(config, mapping):
             elif key == 'state' and kind == 'custom:button-card':
                 if type(child) is not list: block(p); continue
                 for i, item in enumerate(child):
-                    if type(item) is not dict or set(item) - {'value', 'styles'}: block(p + (i,))
+                    if type(item) is not dict or set(item) - {'value', 'styles'}:
+                        block(p + (i,)); continue
+                    if 'styles' in item and not styles_safe(item['styles'], value.get('variables', {})):
+                        block(p + (i, 'styles'), 'dynamic_button_style')
             elif key == 'cards': sequence(child, p, 'card')
             elif key not in passive: block(p)
 

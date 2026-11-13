@@ -54,6 +54,8 @@ class ObservedLabelTests(unittest.TestCase):
             self.assertEqual(reverse, text)
             _, error = adapter.plan_button_expression(text, {'sensor.item_22cry': 'sensor.changed'})
             self.assertEqual(error, 'dynamic_button_state_reference')
+            _, error = adapter.plan_button_expression(text, {'sensor.other':'sensor.item_22cry'})
+            self.assertEqual(error, 'dynamic_button_state_reference')
             _, error = adapter.plan_button_expression(text + ' ', {'sensor.item_0': 'sensor.changed'})
             self.assertEqual(error, 'unsupported_button_javascript')
 
@@ -119,3 +121,47 @@ class ForeignFilterTests(unittest.TestCase):
         config = {'button_card_templates': {'x':{'label':"[[[ return states[key]; ]]]"}},
                   'views':[{'cards':[{'type':'custom:button-card','template':'x'}]}]}
         self.assertTrue(plan_dashboard(config, {'sensor.old':'sensor.new'}).markers)
+
+class DashboardGuardRegressionTests(unittest.TestCase):
+    def test_foreign_source_target_enters_computed_prefix(self):
+        import hashlib
+        from unittest.mock import patch
+        from custom_components.ha_entity_renamer import dashboard_custom as dc
+        text = "[[[ return states['sensor.group_' + user.id]; ]]]"
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        with patch.object(dc, '_OBSERVED_UNCHANGED', frozenset({digest})):
+            _, code = dc.plan_button_expression(text, {'sensor.other':'sensor.group_a'})
+            self.assertEqual(code, 'dynamic_button_state_reference')
+        target = "[[[ return ('sensor.group_' + user.id); ]]]"
+        with patch.object(dc, '_COMPUTED_TARGETS', frozenset({hashlib.sha256(target.encode()).hexdigest()})):
+            self.assertFalse(dc.unchanged_computed_target(target, {'sensor.other':'sensor.group_a'}))
+
+    def test_jinja_target_and_nested_shadow_are_not_suppressed(self):
+        from custom_components.ha_entity_renamer.dashboard_custom import unchanged_finite_jinja
+        finite = "{% for e, label in [('sensor.target', 'x')] %}{{ states(e) }}{% endfor %}"
+        self.assertFalse(unchanged_finite_jinja(finite, {'sensor.other':'sensor.target'}))
+        shadow = "{% for e in ['sensor.foreign'] %}{% for e in variable_list %}{{ states(e) }}{% endfor %}{% endfor %}"
+        self.assertFalse(unchanged_finite_jinja(shadow, {'sensor.old':'sensor.new'}))
+
+    def test_opaque_bracket_access_in_style_refused(self):
+        card = {'type':'custom:button-card', 'styles':{'card':[
+            {'color':"[[[ return this['hass']['states'][key].state; ]]]"}]}}
+        result = plan_dashboard({'views':[{'cards':[card]}]}, {'sensor.old':'sensor.new'})
+        self.assertIn('dynamic_button_style', {marker.code for marker in result.markers})
+
+class DashboardStyleSafetyTests(unittest.TestCase):
+    def test_foreign_bubble_style_target_cannot_become_selected(self):
+        import hashlib
+        from unittest.mock import patch
+        from custom_components.ha_entity_renamer import dashboard_custom as dc
+        text = "${hass.states['sensor.target']?.state}"
+        with patch.object(dc, '_BUBBLE_STYLES', frozenset({hashlib.sha256(text.encode()).hexdigest()})):
+            self.assertFalse(dc.unchanged_bubble_style(text, {'sensor.other':'sensor.target'}))
+
+    def test_opaque_custom_field_and_nested_state_style_refuse(self):
+        evil = "[[[ return this['hass']['states'][key].state; ]]]"
+        for extra in ({'custom_fields':{'x':evil}}, {'state':[{'value':'on','styles':{'card':[{'color':evil}]}}]}):
+            with self.subTest(extra=extra):
+                result=plan_dashboard({'views':[{'cards':[{'type':'custom:button-card',**extra}]}]},
+                                      {'sensor.old':'sensor.new'})
+                self.assertTrue(result.markers)
