@@ -56,6 +56,7 @@ class NativeHomeKitHelperObservers:
     async def capture(cls, hass, snapshots, mapping_proof, *, activation_lease=None):
         from homeassistant.const import __version__
         from homeassistant.components.homekit import FILTER_SCHEMA
+        from homeassistant.components.homekit.const import CONFIG_OPTIONS
         from homeassistant.helpers import entity_registry as er
         from .helper_observers import RegistryMappingProof
         _need(__version__ == '2026.11.1' and type(snapshots) in (tuple, list) and bool(snapshots), 'scope')
@@ -72,7 +73,9 @@ class NativeHomeKitHelperObservers:
         obj.entry_ids = frozenset(entry.entry_id for entry in hass.config_entries.async_entries())
         for snapshot in snapshots:
             _need(snapshot['domain'] == 'homekit' and snapshot['identity']['source'] == 'import'
-                  and 'index' not in snapshot['data'] and not snapshot['subentries'], 'entry_shape')
+                  and 'index' not in snapshot['data'] and not snapshot['subentries']
+                  and not any(key in snapshot['data'] and key not in snapshot['options']
+                              for key in CONFIG_OPTIONS), 'entry_shape')
             key = snapshot['identity']['entry_id']
             _need(key not in obj.before and snapshot_equal(read_entry(hass, key), snapshot), 'entry_changed')
             plan = plan_helper(snapshot, mapping)

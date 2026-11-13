@@ -62,6 +62,28 @@ from .native_template_prefix_recovery import acknowledged_registry_prefix as _ac
 
 
 class NativeTemplateStateServer(NativeTemplateYAMLServer):
+    async def apply(self):
+        if getattr(self, 'homekit_yaml_binding', None) is None:
+            return await super().apply()
+        self._scope()
+        _need(asyncio.current_task() is self.task and self.bound and not self.used,
+              'no_replay')
+        _need(set(self.receipt.changed_domains) <= {'template', 'homekit'}
+              and 'homekit' in self.receipt.changed_domains,
+              'homekit_mixed_lifecycle_unsupported')
+        self.used = True
+        await self.refresh()
+        self._scope()
+        await self._fresh_stores(None)
+        await self._common(False, initial=True)
+        from .native_homekit_lifecycle_driver import HomeKitLifecycleDriver
+        return await HomeKitLifecycleDriver(self).apply()
+
+    async def rollback(self):
+        if 'homekit' in self.receipt.changed_domains:
+            raise Refused('homekit_native_rollback_lifecycle_required')
+        return await super().rollback()
+
     async def _prefix_current(self, record):
         """Read-only classification of the exact acknowledged physical prefix.
 
