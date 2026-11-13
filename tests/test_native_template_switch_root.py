@@ -98,7 +98,20 @@ class TemplateSwitchRootTests(root.NativeTemplateStateRootCoverageTests):
         runtime = await self._runtime(self.module)
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
-        result = await runtime.native_forward(hass, {old: new}, guard=lambda: None, refresh=refresh)
+        import sys
+        caught = []
+        def trace(frame, event, arg):
+            if event == 'exception' and 'ha_entity_renamer/' in frame.f_code.co_filename:
+                typ, value, _ = arg
+                caught.append((frame.f_code.co_name, typ.__name__, str(value)))
+            return trace
+        sys.settrace(trace)
+        try:
+            result = await runtime.native_forward(hass, {old: new}, guard=lambda: None, refresh=refresh)
+        except Exception as error:
+            self.fail(f'{error}: {caught[-20:]}')
+        finally:
+            sys.settrace(None)
         self.assertEqual(result['state'], 'applied')
         self.assertEqual(self.f.entity.async_get(new).id, uuid)
         self.assertIs(binary._delay_cancel, token)
