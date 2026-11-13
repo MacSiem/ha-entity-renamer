@@ -299,10 +299,7 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
     bind = PowercalcProfileEnergyNativeTests.bind
 
     async def _setup_real_vendor(self):
-        from homeassistant.config import async_hass_config_yaml
         from homeassistant.config_entries import ConfigEntry
-        from homeassistant.helpers.discovery import async_load_platform
-        from homeassistant.helpers.entity_component import EntityComponent
         from homeassistant.helpers.entity_platform import async_get_platforms
         from homeassistant.setup import async_setup_component
         hass = self.f.hass
@@ -311,14 +308,8 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
             self.with_yaml = True
             await recorder_fixture.NativeReceiptedHelperTests._before_start(self, hass, self.f.root)
             self.assertTrue(await async_setup_component(hass, 'homeassistant', {}))
-        self.assertEqual(self.f.version, '2026.11.0')
-        self.assertTrue(await async_setup_component(hass, 'network', {}))
-        self.sources = [ProfileLight(name) for name in ('Graph fixed', 'Graph linear',
-                         'Graph model', 'Graph entry')]
-        component = EntityComponent(logging.getLogger(__name__), 'light', hass, timedelta(seconds=60))
-        await component.async_add_entities(self.sources)
+        await self._add_graph_lights()
         fixed, linear, model, gui = [source.entity_id for source in self.sources]
-        self.yaml_source = model
         self.profile_root = stage_public_profiles(self.f.root, os.environ['POWERCALC_PROFILE_DIR'])
         self.config = f"""powercalc:
   discovery:
@@ -361,16 +352,8 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
             max_power: 12
 """
         path = self.f.root / 'configuration.yaml'
-        # A reference-only member reuses an already configured native leaf.
-        # Load its owner first so HA's concurrent YAML dispatch cannot skip it.
-        path.write_text(self.config.split('    - create_group: Second graph group', 1)[0])
-        self.assertTrue(await async_setup_component(hass, 'powercalc', await async_hass_config_yaml(hass)))
-        await hass.async_block_till_done()
         path.write_text(self.config)
-        config = await async_hass_config_yaml(hass)
-        second = {**config['powercalc']['sensors'][1], 'discovery_type': 'user_yaml'}
-        await async_load_platform(hass, 'sensor', 'powercalc', second, config)
-        await hass.async_block_till_done()
+        await self._load_graph()
         from custom_components.powercalc.config_flow import PowercalcConfigFlow
         self.entry = ConfigEntry(domain='powercalc', title='Graph entry', unique_id='graph-entry',
             data={'name': 'Graph entry', 'entity_id': gui, 'sensor_type': 'virtual_power',
@@ -383,6 +366,42 @@ class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.entry.state.value, 'loaded')
         self.entities = {entity.unique_id: entity for platform in async_get_platforms(hass, 'powercalc')
                          for entity in platform.entities.values()}
+
+    async def _add_graph_lights(self):
+        from homeassistant.helpers.entity_component import EntityComponent
+        from homeassistant.setup import async_setup_component
+
+        hass = self.f.hass
+        self.assertEqual(self.f.version, '2026.11.0')
+        self.assertTrue(await async_setup_component(hass, 'network', {}))
+        self.sources = [ProfileLight(name) for name in ('Graph fixed', 'Graph linear',
+                         'Graph model', 'Graph entry')]
+        # On cold boot a non-config-entry fixture producer must request its
+        # existing UUID's current ID explicitly, as a real registry-aware producer.
+        for source in self.sources:
+            entity_id = self.f.entity.async_get_entity_id('light', 'light', source.unique_id)
+            if entity_id is not None:
+                source.entity_id = entity_id
+        component = EntityComponent(logging.getLogger(__name__), 'light', hass, timedelta(seconds=60))
+        await component.async_add_entities(self.sources)
+        self.yaml_source = self.sources[2].entity_id
+
+    async def _load_graph(self):
+        from homeassistant.config import async_hass_config_yaml
+        from homeassistant.helpers.discovery import async_load_platform
+        from homeassistant.setup import async_setup_component
+
+        hass = self.f.hass
+        # A reference-only member reuses an already configured native leaf.
+        # Load its owner first so HA's concurrent YAML dispatch cannot skip it.
+        config = await async_hass_config_yaml(hass)
+        first, second = config['powercalc']['sensors']
+        initial = {**config, 'powercalc': {**config['powercalc'], 'sensors': [first]}}
+        self.assertTrue(await async_setup_component(hass, 'powercalc', initial))
+        await hass.async_block_till_done()
+        await async_load_platform(hass, 'sensor', 'powercalc',
+                                  {**second, 'discovery_type': 'user_yaml'}, config)
+        await hass.async_block_till_done()
 
     async def test_mixed_yaml_group_graph_reopens_and_refuses_drift(self):
         original = importlib.import_module(fixtures.PACKAGE + '.yaml_source_binding')
