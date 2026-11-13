@@ -183,7 +183,8 @@ class _Native:
             from homeassistant.helpers.script import Script
             self.switch = switch.StateSwitchEntity
             self.pins.update({'components/template/switch.py': '8599819b248e7c9783fb62eff18aefba0a93c8834f3e2a0524c30914d01a3452',
-                              'helpers/script.py': '4e7e2e4ac0b2bb43e9f2d56c785e7851c7e01967eefb17e52ca1358ab9824efa'})
+                              'helpers/script.py': '4e7e2e4ac0b2bb43e9f2d56c785e7851c7e01967eefb17e52ca1358ab9824efa',
+                              'components/template/validators.py': '6d7e15265f62f6fd4711955a00419161173d831bb4f15ca908bcd3fd5facfa22'})
         self.sensor = (sensor.SensorTemplate if __version__ == '2025.6.0'
                        else sensor.StateSensorEntity)
         self.binary = (binary_sensor.BinarySensorTemplate if __version__ == '2025.6.0'

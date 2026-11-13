@@ -115,6 +115,12 @@ def _callback(native, value, entity, slot=None):
             path.read_bytes(), str(path), sys.flags.optimize)), 'template_binding_callback_code')
     cells = dict(zip(value.__code__.co_freevars,
         (cell.cell_contents for cell in value.__closure__ or ()), strict=True))
+    if (type(entity) is native.switch and value.__module__ == 'homeassistant.components.template.validators'
+            and value.__qualname__ == 'boolean.<locals>.convert'):
+        _need(cells == {'as_false': None, 'as_true': None, 'attribute': 'state',
+                        'entity': entity, 'kwargs': {}},
+              'template_switch_boolean_validator_changed')
+        return
     if '__class__' in cells:
         # Zero-argument super() captures the DEFINING class, not arbitrary
         # per-instance data. These exact pinned native state callbacks are the
