@@ -38,7 +38,10 @@ class TemplatePowercalcSwitchTests(base.ControlledActualGraphTests):
         path.write_text(yaml.safe_dump(templates, sort_keys=False))
         initial = path.read_bytes()
         checked = await async_hass_config_yaml(hass)
-        self.assertTrue(await async_setup_component(hass, 'template', checked))
+        if 'template' in hass.config.components:
+            await hass.services.async_call('template', 'reload', {}, blocking=True)
+        else:
+            self.assertTrue(await async_setup_component(hass, 'template', checked))
         await hass.async_block_till_done()
         await self._flush_documents()
         rows = {e.unique_id: e for p in async_get_platforms(hass, 'template') for e in p.entities.values()}
