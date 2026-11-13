@@ -30,7 +30,7 @@ def extend_vendor(vendor):
         ('power_profile.sub_profile_selector', 'EntityStateMatcher',
             ('__init__', 'match', 'get_tracking_entities')),
         ('strategy.linear', 'LinearStrategy', ('__init__', 'initialize', 'calculate',
-            'is_enabled', 'get_entities_to_track', 'can_calculate_standby', 'get_calibration_segment',
+            'is_enabled', 'get_entities_to_track', 'get_calibration_segment',
             'apply_curve', 'get_current_state_value', 'get_initialized_value_entity',
             'get_attribute', 'get_value_from_attribute')),
         ('strategy.lut', 'LutStrategy', ('__init__', 'initialize', 'calculate', 'validate_config',
