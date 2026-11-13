@@ -592,6 +592,13 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 disk_energy = json.loads((self.f.root / '.storage/energy').read_bytes())['data']
                 self.assertEqual([row['stat_consumption'] for row in disk_energy['device_consumption']],
                                  [mapping[name] for name in energy_ids])
+                if browser_ui:
+                    expected_energy = deepcopy(energy_before)
+                    for row in expected_energy['energy_sources']:
+                        row['stat_energy_from'] = mapping[row['stat_energy_from']]
+                    for row in expected_energy['device_consumption']:
+                        row['stat_consumption'] = mapping[row['stat_consumption']]
+                    self.assertEqual(disk_energy, expected_energy)
                 self.assertEqual(energy.data, disk_energy)
                 self.assertEqual(json.loads(dashboard_path.read_bytes())['data']['config'], dashboard_after)
                 self.assertEqual(await dashboard.async_load(False), dashboard_after)
