@@ -43,6 +43,8 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         from homeassistant.components.recorder import get_instance
         from homeassistant.components.recorder.tasks import StatisticsTask
         from homeassistant.config import async_hass_config_yaml
+        from homeassistant.config_entries import ConfigEntry
+        from types import MappingProxyType
         from homeassistant.core import callback
         from homeassistant.components.webhook import async_handle_webhook
         from homeassistant.components.zha.helpers import get_zha_data
@@ -63,9 +65,17 @@ class ControlledActualGraphTests(cold.PowercalcColdPhase):
         leaf = self.entities['fixture-meter-10'].entity_id
         mapping = {old_source: 'light.controlled_yaml_source', leaf: 'sensor.controlled_yaml_power'}
         script = 'controlled_yaml_read'
-        zha_device = self.f.device.async_get_or_create(
-            config_entry_id=self.backend_entry_id, identifiers={('zha', 'synthetic-button')})
+        # Keep the synthetic coordinator offline, while giving HA's native
+        # device validator the actual same-domain ConfigEntry it requires.
+        zha_entry = ConfigEntry(domain='zha', title='Synthetic offline coordinator',
+            unique_id='synthetic-coordinator', data={}, options={},
+            discovery_keys=MappingProxyType({}), source='user', version=1,
+            minor_version=1, subentries_data=[])
+        hass.config_entries._entries[zha_entry.entry_id] = zha_entry
+        hass.config_entries._async_schedule_save()
         ieee = '00:11:22:33:44:55:66:77'
+        zha_device = self.f.device.async_get_or_create(
+            config_entry_id=zha_entry.entry_id, identifiers={('zha', ieee)})
         zha_payload = {'device_ieee': ieee, 'command': 'synthetic_press', 'endpoint_id': 1}
         # The native ZHA trigger supports its own persisted trigger-cache path
         # when a coordinator is offline. The validator, attach and event
