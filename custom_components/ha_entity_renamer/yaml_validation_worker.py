@@ -820,7 +820,13 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
                     if checked is None:
                         raise ValueError('native_projection_rejected')
                     projection = []
-                    if domain == 'template':
+                    if domain == 'homekit':
+                        # Native schema defaults, stable bridge identity, exact filter.
+                        # Activation remains unsupported until a journalled bridge
+                        # runtime binder explicitly admits the associated receipt.
+                        projection = sorted([[cfg['name'], cfg['port'], cfg.get('filter', {})]
+                                             for cfg in checked[domain]], key=lambda row: (row[0], row[1]))
+                    elif domain == 'template':
                         projection = qualified_template_state_projection(checked, hass.config.config_dir)
                     elif domain == 'script':
                         for key, cfg in checked[domain].items():

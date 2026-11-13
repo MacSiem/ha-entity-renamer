@@ -26,7 +26,7 @@ show_last_changed text new_tab download view dashboard hide_if_unavailable
 show_empty initial_view show_add_event add_event_style add_event_size
 badges_position badges_wrap max_columns dense section_mode column_span
 grid_options layout_options card_size subview back_path panel theme_mode
-background visible header footer show_zone_radius default_zoom auto_fit fit_zones
+background visible header footer heading heading_style dense_section_placement show_zone_radius default_zoom auto_fit fit_zones
 dark_mode show_all map_style scale_ruler cluster label_mode focus
 allow_open_top_navigation allow disable_sandbox hide_background text_only
 show_camera display_type sensor_classes alert_classes area
@@ -94,10 +94,21 @@ def plan_dashboard(config, mapping):
         if type(value) is not dict:
             block(path); return
         kind = value.get('action')
+        if kind == 'fire-dom-event':
+            if set(value) - {'action', 'browser_mod', 'haptic'}:
+                block(path, 'custom_dashboard_action'); return
+            event = value.get('browser_mod')
+            if type(event) is not dict or set(event) != {'service', 'data'} or event['service'] != 'browser_mod.popup':
+                block(path, 'custom_dashboard_action'); return
+            data = event['data']
+            if type(data) is not dict or set(data) - {'title', 'content'} or 'content' not in data:
+                block(path, 'custom_dashboard_action'); return
+            node(data['content'], path + ('browser_mod', 'data', 'content'), 'card')
+            return
         if kind not in {'none', 'toggle', 'more-info', 'navigate', 'url', 'assist',
                         'call-service', 'perform-action'}:
             block(path, 'custom_dashboard_action'); return
-        allowed = {'action', 'confirmation'}
+        allowed = {'action', 'confirmation', 'haptic'}
         if kind == 'more-info': allowed |= {'entity'}
         if kind == 'navigate': allowed |= {'navigation_path', 'navigation_replace'}
         if kind == 'url': allowed |= {'url_path'}
@@ -158,7 +169,11 @@ def plan_dashboard(config, mapping):
         # Explicitly owned component slots; unrecognized options are refused.
         passive = PASSIVE | {'styles', 'show_label', 'show_entity_picture', 'size',
                              'show_icon', 'show_name', 'show_state', 'button_type',
-                             'card_type', 'scrolling_effect', 'show_attribute'}
+                             'card_type', 'scrolling_effect', 'show_attribute', 'card_layout',
+                             'force_icon', 'modules', 'slider_live_update', 'hide_main_background',
+                             'color_type', 'hash', 'use_accent_color', 'temperature_colouring',
+                             'show_last_updated', 'card_mod', 'show_background', 'state_background',
+                             'justify_content', 'buttons_layout', 'sub_button_type', 'extra_styles'}
         for key, child in value.items():
             p = path + (key,)
             if key == 'type': continue
@@ -170,7 +185,20 @@ def plan_dashboard(config, mapping):
                 for field, item in child.items():
                     q = p + (field,)
                     if field not in {'entity_ids', 'floor_entity_ids', 'bound_entity',
-                                     'source_entities', 'cluster_bindings'}:
+                                     'source_entities', 'cluster_bindings', 'temperature_entity_id',
+                                     'humidity_entity_id', 'temperature_ids', 'humidity_ids', 'source_entity'}:
+                        if field in {'v4_role', 'exact_point_binding', 'left_percent', 'top_percent',
+                                     'cluster_ids', 'cluster_size', 'display_name', 'manual_point',
+                                     'mobile_stagger_group', 'point_code', 'point_floor', 'point_id',
+                                     'point_type', 'source_label', 'source_x', 'source_y', 'verification_status',
+                                     'bound_device_id', 'current_relay_verification', 'relay_verified_at',
+                                     'measurement', 'source_left', 'source_top', 'group_id', 'point_ids',
+                                     'room_confidence', 'visual_left_percent', 'visual_top_percent',
+                                     'confirmed_module_count', 'confidence_text', 'evidence',
+                                     'verification_method', 'floor', 'floor_point_counts', 'binding_note',
+                                     'verified_total', 'v4_layer', 'v4_owner', 'v4_schema', 'v4_home_merged',
+                                     'cluster_order', 'connectivity_status', 'position_accuracy', 'physical_description'}:
+                            continue
                         block(q, 'unsupported_button_variable'); continue
                     variable_refs(field, item, q)
             elif key == 'label' and kind == 'custom:button-card' and type(child) is str and child.startswith('[[['):
@@ -178,28 +206,49 @@ def plan_dashboard(config, mapping):
             elif key in ACTIONS: action(child, p)
             elif key in {'conditions', 'visibility'}: conditions(child, p)
             elif key == 'sub_button' and kind == 'custom:bubble-card':
-                if type(child) is not list: block(p); continue
-                for i, button in enumerate(child):
-                    if type(button) is not dict: block(p + (i,)); continue
-                    for field, item in button.items():
-                        q = p + (i, field)
-                        if field == 'entity': ref(item, q)
-                        elif field in {'conditions', 'visibility'}: conditions(item, q)
-                        elif field in ACTIONS: action(item, q)
-                        elif field not in passive: block(q)
+                bubble_buttons(child, p, passive)
+            elif key == 'button_action' and kind == 'custom:bubble-card':
+                if type(child) is not dict: block(p); continue
+                for field, item in child.items():
+                    if field in ACTIONS: action(item, p + (field,))
+                    else: block(p + (field,))
             elif key == 'custom_fields' and kind == 'custom:button-card':
                 if type(child) is not dict: block(p); continue
                 for field, item in child.items():
                     q = p + (field,)
-                    if type(item) is dict and set(item) == {'card'}: node(item['card'], q + ('card',), 'card')
+                    if type(item) is dict and set(item) <= {'card', 'do_not_eval'} and 'card' in item and (
+                            'do_not_eval' not in item or type(item['do_not_eval']) is bool):
+                        node(item['card'], q + ('card',), 'card')
+                    elif type(item) is str and not any(old in item for old in mapping):
+                        continue
                     else: block(q, 'unsupported_button_custom_field')
-            elif key == 'cards' and kind == 'custom:button-card': sequence(child, p, 'card')
+            elif key == 'state' and kind == 'custom:button-card':
+                if type(child) is not list: block(p); continue
+                for i, item in enumerate(child):
+                    if type(item) is not dict or set(item) - {'value', 'styles'}: block(p + (i,))
+            elif key == 'cards': sequence(child, p, 'card')
             elif key not in passive: block(p)
 
+    def bubble_buttons(value, path, passive):
+        if type(value) is dict and set(value) <= {'main', 'bottom'}:
+            for key, items in value.items(): bubble_buttons(items, path + (key,), passive)
+            return
+        if type(value) is not list: block(path); return
+        for i, button in enumerate(value):
+            q = path + (i,)
+            if type(button) is not dict: block(q); continue
+            for field, item in button.items():
+                p = q + (field,)
+                if field == 'entity': ref(item, p)
+                elif field in {'conditions', 'visibility'}: conditions(item, p)
+                elif field in ACTIONS: action(item, p)
+                elif field == 'group': bubble_buttons(item, p, passive)
+                elif field not in passive: block(p)
+
     def variable_refs(field, value, path):
-        if field == 'bound_entity':
+        if field in {'bound_entity', 'temperature_entity_id', 'humidity_entity_id', 'source_entity'}:
             ref(value, path)
-        elif field in {'entity_ids', 'source_entities'}:
+        elif field in {'entity_ids', 'source_entities', 'temperature_ids', 'humidity_ids'}:
             if type(value) is not list: block(path); return
             ref(value, path, many=True)
         elif field == 'floor_entity_ids':
@@ -251,6 +300,12 @@ def plan_dashboard(config, mapping):
                         for field, size in child.items()):
                     continue
                 block(p, 'unsupported_renamer_card_config')
+            return
+        if role == 'card' and kind == 'custom:mod-card':
+            for key, child in value.items():
+                if key == 'card': node(child, path + (key,), 'card')
+                elif key not in {'type', 'grid_options', 'card_mod', 'visibility'}: block(path + (key,))
+                elif key == 'visibility': conditions(child, path + (key,))
             return
         if role in {'card', 'element'} and kind in {'custom:button-card', 'custom:bubble-card'}:
             custom(value, path, kind)

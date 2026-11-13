@@ -44,6 +44,8 @@ _EXTRA = {
 }
 
 
+_EXTRA['2026.11.1'] = dict(_EXTRA['2026.11.0'])
+
 class UtilitySourceGapError(ValueError):
     """Sanitized refusal; no automatic retry after an attempted handoff."""
 

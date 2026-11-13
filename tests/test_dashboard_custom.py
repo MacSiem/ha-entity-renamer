@@ -33,3 +33,43 @@ class CustomDashboardTests(unittest.TestCase):
             self.assertFalse(result.changes)
 
 if __name__ == '__main__': unittest.main()
+
+class ObservedLabelTests(unittest.TestCase):
+    def test_bounded_label_reference_spans_and_dynamic_refusal(self):
+        import hashlib
+        from unittest.mock import patch
+        from custom_components.ha_entity_renamer import dashboard_custom as adapter
+        ids = [f'sensor.item_{i}' for i in range(24)]
+        text = '[[[ const L = [' + ','.join(repr(x) for x in ids[:15]) + '];' + ''.join(
+            f" states['{item}'];" for item in ids[15:22]) + ''.join(
+            f" states['{item}' + k];" for item in ids[22:]) + ' return L; ]]]'
+        normalized = adapter._ENTITY_LITERAL.sub(lambda m: m['q'] + '<entity>' + m['q'], text)
+        digest = hashlib.sha256(normalized.encode()).hexdigest()
+        with patch.object(adapter, '_OBSERVED_LABEL', digest):
+            forward, error = adapter.plan_button_expression(text, {'sensor.item_0': 'sensor.changed'})
+            self.assertIsNone(error)
+            self.assertIn("'sensor.changed'", forward)
+            reverse, error = adapter.plan_button_expression(forward, {'sensor.changed': 'sensor.item_0'})
+            self.assertIsNone(error)
+            self.assertEqual(reverse, text)
+            _, error = adapter.plan_button_expression(text, {'sensor.item_22cry': 'sensor.changed'})
+            self.assertEqual(error, 'dynamic_button_state_reference')
+            _, error = adapter.plan_button_expression(text + ' ', {'sensor.item_0': 'sensor.changed'})
+            self.assertEqual(error, 'unsupported_button_javascript')
+
+class NestedDashboardTests(unittest.TestCase):
+    def test_mod_nested_fields_and_popup_content(self):
+        original = {'views': [{'sections': [{'type':'grid', 'cards': [
+            {'type':'custom:mod-card', 'card_mod': {'style':'color: red'}, 'card':
+             {'type':'custom:button-card', 'custom_fields': {'rail': {'do_not_eval': True, 'card':
+              {'type':'vertical-stack', 'cards': [{'type':'custom:button-card',
+               'variables': {'source_entities':['sensor.old']},
+               'tap_action': {'action':'fire-dom-event', 'browser_mod': {'service':'browser_mod.popup',
+                   'data': {'title':'sensor.old', 'content': {'type':'entities',
+                            'entities':[{'entity':'sensor.old'}]}}}}}]}}}}}]}]}]}
+        result = plan_dashboard(original, {'sensor.old':'sensor.new'})
+        self.assertFalse(result.markers)
+        self.assertEqual(len(result.changes), 2)
+        reverse = plan_dashboard(result.value, {'sensor.new':'sensor.old'})
+        self.assertFalse(reverse.markers)
+        self.assertEqual(reverse.value, original)
