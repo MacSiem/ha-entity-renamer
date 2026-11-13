@@ -39,8 +39,10 @@ class BindingTests(unittest.TestCase):
              patch('custom_components.ha_entity_renamer.helper_native.read_entry', lambda hass, key:entries[key].snapshot), \
              patch('custom_components.ha_entity_renamer.native_homekit_filter._bridge_identity', lambda value:value.identity):
             self.assertTrue(binding.verify('after'))
+            self.assertTrue(binding.verify_foreign())
             entries['second'].identity='changed'
             with self.assertRaises(Refused): binding.verify('after')
+            with self.assertRaises(Refused): binding.verify_foreign()
             entries['second'].identity='two'
             entries['second'].runtime_data.homekit._filter=Schema({'exclude_entities':[new]})
             with self.assertRaises(Refused): binding.verify('after')

@@ -83,6 +83,7 @@ class HomeKitLifecycleDriver:
         _need(not self.used, 'no_replay')
         self.used = True
         root._scope(); binding.phase.check()
+        _need(binding.verify('before') is True, 'original_bridge_unconfirmed')
         entries = tuple(root.hass.config_entries.async_get_entry(entry_id)
                         for entry_id in sorted(binding.observer.before))
         _need(all(entry is not None for entry in entries), 'entry_missing')
@@ -117,6 +118,7 @@ class HomeKitLifecycleDriver:
             original_guard = coordinator.guard
             def guard():
                 original_guard(); lease.check(); life.require_quiescent()
+                _need(binding.verify_foreign() is True, 'foreign_bridge_unconfirmed')
             coordinator.guard = guard
             ready = await coordinator.reconcile(root.operation_id)
             _need(ready.status == 'ready' and ready.direction == 'forward'

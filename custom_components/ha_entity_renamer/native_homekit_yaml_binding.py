@@ -41,6 +41,30 @@ class HomeKitYAMLBinding:
         obj.phase, obj.observer = phase, observer
         return obj
 
+    def verify_foreign(self):
+        """Foreign bridges stay active and retain their exact native filter."""
+        from homeassistant.components.homekit import FILTER_SCHEMA
+        from .helper_native import read_entry
+        from .native_homekit_filter import _bridge_identity
+        captured = self.phase.capture
+        ids = tuple(row['identity']['entry_id'] for row in captured.entries)
+        _need(tuple(sorted(entry.entry_id for entry in self.hass.config_entries.async_entries('homekit'))) == ids,
+              'bridge_population_changed')
+        for before, after, identity in zip(captured.entries, captured.expected,
+                                            captured.bridge_identity, strict=True):
+            if not snapshot_equal(before, after):
+                continue
+            entry_id = before['identity']['entry_id']
+            entry = self.hass.config_entries.async_get_entry(entry_id)
+            _need(entry is not None and entry.state.value == 'loaded'
+                  and snapshot_equal(read_entry(self.hass, entry_id), before)
+                  and _bridge_identity(entry) == identity, 'foreign_bridge_changed')
+            native = entry.runtime_data.homekit._filter.get_filter()
+            expected = FILTER_SCHEMA(before['options'].get('filter', {})).get_filter()
+            _need(all(native(entity_id) == expected(entity_id)
+                      for pair in self.mapping.items() for entity_id in pair), 'foreign_filter_changed')
+        return True
+
     def verify(self, position):
         """Recheck every loaded bridge, including unaffected bridge identities."""
         from homeassistant.components.homekit import FILTER_SCHEMA
