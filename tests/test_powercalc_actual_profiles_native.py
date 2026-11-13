@@ -17,7 +17,6 @@ class ActualProfileGraphNativeTests(unittest.IsolatedAsyncioTestCase):
     namespace_source_bytes = b'# Synthetic Powercalc namespace\n'
     asyncSetUp = existing.PowercalcRuntimeNativeTests.asyncSetUp
     _flush_documents = existing.PowercalcRuntimeNativeTests._flush_documents
-    guard = existing.PowercalcRuntimeNativeTests.guard
     prepare = graph_fixture.PowercalcProfileEnergyNativeTests.prepare
     bind = graph_fixture.PowercalcProfileEnergyNativeTests.bind
 
@@ -90,6 +89,7 @@ class ActualProfileGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await async_setup_component(hass, 'powercalc', {
             'powercalc': {**self.package_globals, 'sensors': [dict(row) for row in leaves]}}))
         await hass.async_block_till_done()
+        self.entries = []
         for i, source in enumerate(self.sources[10:], 10):
             entry = ConfigEntry(domain='powercalc', title=f'Synthetic meter {i}',
                 unique_id=f'fixture-meter-{i}', data={'entity_id': source.entity_id,
@@ -102,6 +102,7 @@ class ActualProfileGraphNativeTests(unittest.IsolatedAsyncioTestCase):
                 pref_disable_polling=True)
             await hass.config_entries.async_add(entry)
             self.assertEqual(entry.state.value, 'loaded')
+            self.entries.append(entry)
         self.entities = {e.unique_id: e for p in async_get_platforms(hass, 'powercalc')
                          for e in p.entities.values()}
         self.members = {'fixture-group-a': (0, 1, 3, 4, 9, 10),
@@ -120,6 +121,10 @@ class ActualProfileGraphNativeTests(unittest.IsolatedAsyncioTestCase):
         await hass.async_block_till_done()
         self.entities = {e.unique_id: e for p in async_get_platforms(hass, 'powercalc')
                          for e in p.entities.values()}
+
+    def guard(self):
+        for entry in self.entries:
+            self.assertIs(self.f.hass.config_entries.async_get_entry(entry.entry_id), entry)
 
     def write_package(self, rows):
         # JSON is YAML; all source/member IDs come from native registrations.
