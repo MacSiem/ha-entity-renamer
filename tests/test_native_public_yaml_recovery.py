@@ -362,10 +362,30 @@ class NativePublicYAMLRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runtime.operation_lock.locked())
 
     async def test_registered_inspect_rechecks_real_role_after_runtime_lock_wait(self):
-        await self._revoked_while_waiting('inspect')
+        try:
+            await self._revoked_while_waiting('inspect')
+        finally:
+            self._save_role_journals('inspect')
 
     async def test_registered_restore_rechecks_real_role_after_runtime_lock_wait(self):
-        await self._revoked_while_waiting('restore')
+        try:
+            await self._revoked_while_waiting('restore')
+        finally:
+            self._save_role_journals('restore')
+
+    def _save_role_journals(self, action):
+        import os
+        import shutil
+        destination = os.environ.get('RENAMER_BATCH_EVIDENCE')
+        storage = self.f.root / '.storage'
+        if destination and storage.is_dir():
+            target = Path(destination) / ('role-' + action + '-storage')
+            target.mkdir(mode=0o700, parents=True, exist_ok=True)
+            for source in storage.iterdir():
+                if source.is_file() and 'ha_entity_renamer' in source.name:
+                    copied = target / source.name
+                    shutil.copyfile(source, copied)
+                    copied.chmod(0o600)
 
     async def test_registered_status_finishes_during_actual_server_forward_effect(self):
         await self._forward(multiple=True, variant='mixed', status_probe=True)
