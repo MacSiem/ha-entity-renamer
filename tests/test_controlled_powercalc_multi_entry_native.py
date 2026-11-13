@@ -480,6 +480,13 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                                 for name, meter in utility_meters().items()}
                 self.assertTrue(all(value is not None and deadline is not None
                                     for _, value, deadline in meter_before.values()))
+                cost_before = {}
+                for cost_id in cost_ids:
+                    state = hass.states.get(cost_id)
+                    self.assertIsNotNone(state)
+                    value = Decimal(state.state)
+                    self.assertTrue(value.is_finite())
+                    cost_before[cost_id] = (value, state.attributes.get('unit_of_measurement'))
             if public:
                 # Independent physical oracle for every native registry row,
                 # including foreign IDs, device associations, units and labels.
@@ -606,6 +613,10 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                         self.assertEqual(self.f.entity.async_get(mapping[cost_ids[index]]).id, cost_uuids[cost_ids[index]])
                         self.assertEqual(hass.data['energy']['cost_sensors'][energy_sources[index].entity_id],
                                          mapping[cost_ids[index]])
+                        state = hass.states.get(mapping[cost_ids[index]])
+                        self.assertIsNotNone(state)
+                        self.assertEqual((Decimal(state.state), state.attributes.get('unit_of_measurement')),
+                                         cost_before[cost_ids[index]])
                     self.assertEqual((_bridge_identity(bridge_entry), aid(mapping[sources[0]])),
                                      (bridge_identity, original_aid))
                 if hasattr(self, 'boot_automation'):
@@ -671,6 +682,10 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                         self.assertIsNotNone(meter._collecting)
                         self.assertEqual(self.f.entity.async_get(cost_ids[index]).id, cost_uuids[cost_ids[index]])
                         self.assertEqual(hass.data['energy']['cost_sensors'][energy_sources[index].entity_id], cost_ids[index])
+                        state = hass.states.get(cost_ids[index])
+                        self.assertIsNotNone(state)
+                        self.assertEqual((Decimal(state.state), state.attributes.get('unit_of_measurement')),
+                                         cost_before[cost_ids[index]])
                     self.assertEqual((_bridge_identity(bridge_entry), aid(sources[0])),
                                      (bridge_identity, original_aid))
                     self.assertEqual((self.f.root / 'configuration.yaml').read_bytes(), external_config_before)
