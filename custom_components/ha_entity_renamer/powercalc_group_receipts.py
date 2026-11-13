@@ -151,10 +151,11 @@ def validate_group_receipt(chain, payload, change):
     from .controlled_powercalc_composition import ControlledPowercalcComposition
     composition = _composition(chain)
     if type(composition) is ControlledPowercalcComposition:
-        from .controlled_powercalc_setup_receipts import validate_handoff
+        from .controlled_powercalc_setup_receipts import validate_registry_handoff
         from .native_registry_transition import _powercalc_group_suggested_move
         direction = payload['binding']['direction']
-        handoff = validate_handoff(chain, payload.get('controlled_powercalc_handoff'), direction)
+        handoff = validate_registry_handoff(chain, payload.get('controlled_powercalc_handoff'),
+                                            payload['binding'])
         controlled = payload.get('controlled_powercalc_group')
         is_group = (type(change) is PreparedRegistryChange and change.kind == 'entity'
                     and change.mapping and change.before.get('platform') == 'powercalc')
