@@ -43,7 +43,16 @@ class HomeKitHelperNativeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result['adapter_write']);self.assertIsNotNone(result['_native_config_mutation'])
             self.assertTrue(await hass.config_entries.async_setup(entry.entry_id));await settle()
             await observer.verify_runtime(plan.after)
-            self.assertTrue(await observer.verify_lifecycle_runtime(entry.entry_id, {'entry_id':entry.entry_id}, None))
+            lifecycle=importlib.import_module(fixture.PACKAGE+'.native_helper_lifecycle')
+            auth=lifecycle.RestoreAuthorization('operation', 'f'*64, 'a'*64,
+                                                'applied' if source == old else 'rolled_back')
+            self.assertTrue(await observer.verify_lifecycle_runtime(
+                entry.entry_id, {'entry_id':entry.entry_id, 'state':'loaded'}, auth))
+            opposite=lifecycle.RestoreAuthorization('operation', 'f'*64, 'a'*64,
+                         'rolled_back' if source == old else 'applied')
+            with self.assertRaises(Exception):
+                await observer.verify_lifecycle_runtime(
+                    entry.entry_id, {'entry_id':entry.entry_id, 'state':'loaded'}, opposite)
             path.write_text(yaml(target))
             await hass.services.async_call('homekit','reload',{},blocking=True);await settle()
             await observer.verify_runtime(plan.after)

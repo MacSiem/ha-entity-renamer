@@ -101,8 +101,23 @@ class NativeHomeKitHelperObservers:
         return await self.verify_activation(current)
 
     async def verify_lifecycle_runtime(self, entry_id, original, authorization):
-        _need(entry_id in self.before and original.get('entry_id') == entry_id, 'entry_scope')
+        from homeassistant.helpers import entity_registry as er
+        from .native_helper_lifecycle import RestoreAuthorization
+        _need(entry_id in self.before and original.get('entry_id') == entry_id
+              and type(authorization) is RestoreAuthorization
+              and authorization.status in ('applied', 'rolled_back'), 'entry_scope')
         current = read_entry(self.hass, entry_id)
+        expected = self.after[entry_id] if authorization.status == 'applied' else self.before[entry_id]
+        entry = self.hass.config_entries.async_get_entry(entry_id)
+        _need(entry is not None and entry.state.value == original.get('state')
+              and snapshot_equal(current, expected), 'lifecycle_position')
+        registry = er.async_get(self.hass)
+        for proof in self.proofs:
+            source, other = ((proof.new, proof.old) if authorization.status == 'applied'
+                             else (proof.old, proof.new))
+            row = registry.async_get(source)
+            _need(row is not None and row.id == proof.registry_id
+                  and registry.async_get(other) is None, 'lifecycle_registry_position')
         return await self.verify_runtime(current)
 
     async def validate_snapshot(self, snapshot):
