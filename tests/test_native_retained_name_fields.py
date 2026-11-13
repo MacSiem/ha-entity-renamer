@@ -151,7 +151,10 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.f.entity.async_get(extra_id).name, 'Reviewed extra')
         self.assertEqual(self.f.device.async_get(device.id).name_by_user, 'Reviewed device')
         self.assertEqual(hass.states.get(new).attributes['friendly_name'], 'Reviewed source')
-        self.assertEqual(hass.states.get(extra_id).attributes['friendly_name'], 'Reviewed extra')
+        from homeassistant.const import __version__
+        expected_extra = ('Reviewed device Reviewed extra'
+                          if __version__ in ('2026.11.0', '2026.11.1') else 'Reviewed extra')
+        self.assertEqual(hass.states.get(extra_id).attributes['friendly_name'], expected_extra)
         applied = await runtime.journal.load(review['operation_id'])
         inspected = await runtime.recovery_inspect(hass, review['operation_id'], review['fingerprint'],
             guard=lambda: None, refresh=refresh)

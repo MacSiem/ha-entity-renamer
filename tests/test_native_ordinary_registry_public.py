@@ -127,7 +127,9 @@ class OrdinaryRegistryPublicTests(unittest.IsolatedAsyncioTestCase):
             binding = None
             apply_attempted = inspected = False
             try:
-                response = await self._request(ws, 1, 'prepare', **payload)
+                from test_native_template_mixed_yaml_server import native_diagnostics
+                with native_diagnostics(self.module):
+                    response = await self._request(ws, 1, 'prepare', **payload)
                 self._result('prepare', response)
                 if broken_subscription:
                     self.assertFalse(response['success'], response)
