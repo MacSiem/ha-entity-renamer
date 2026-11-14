@@ -28,6 +28,34 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         target.parent.mkdir(exist_ok=True)
         shutil.copyfile(Path(__file__).resolve().parents[1] / 'ha-entity-renamer.js', target)
 
+    async def test_native_disabled_device_members_are_observable(self):
+        from homeassistant.helpers import entity_registry as er
+        from types import MappingProxyType
+        from homeassistant.config_entries import ConfigEntry, ConfigEntryDisabler
+        _, _, _, _, _ = await self.restored_source()
+        hass = self.f.hass
+        entry = ConfigEntry(domain='input_boolean', title='Device fixture', data={}, options={},
+            version=1, minor_version=1, source='user', unique_id='device-fixture-entry',
+            disabled_by=ConfigEntryDisabler.USER, discovery_keys=MappingProxyType({}), subentries_data=[])
+        await hass.config_entries.async_add(entry)
+        devices = [self.f.device.async_get_or_create(config_entry_id=entry.entry_id,
+                   identifiers={('input_boolean', f'qualified-device-{i}')}, name=f'Device {i}')
+                   for i in range(3)]
+        for i, device in enumerate(devices):
+            self.f.entity.async_get_or_create('sensor', 'input_boolean', f'qualified-entity-{i}',
+                config_entry=entry, device_id=device.id, suggested_object_id=f'qualified_entity_{i}',
+                disabled_by=er.RegistryEntryDisabler.USER)
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        nr = self.module('native_registry')
+        bridge = nr.NativeRegistryBridge(nr.NativeRegistryIO(hass),
+                                        self.module('recorder_guard').NativeRecorderGuard(hass))
+        requests = [('device', device.id, {'name_by_user': f'Reviewed {i}'})
+                    for i, device in enumerate(devices)]
+        batch = await bridge.prepare_many(requests, lambda: None)
+        singles = [await bridge.prepare(*request, lambda: None) for request in requests]
+        self.assertEqual(batch, singles)
+
     async def test_native_microbatch_receipts_match_individual(self):
         from homeassistant.helpers import entity_registry as er
         runtime, _, _, _, _ = await self.restored_source()
