@@ -73,3 +73,20 @@ class PrepareManyTests(unittest.IsolatedAsyncioTestCase):
         io.is_pending = True
         with self.assertRaises(Conflict):
             await bridge.prepare_many(requests, lambda: None)
+
+    async def test_runtime_drift_during_second_kind_disk_refuses(self):
+        io, _, bridge = self.make(1)
+        calls = 0
+        disk = io.disk
+        async def drifting_disk(kind):
+            nonlocal calls
+            result = await disk(kind)
+            calls += 1
+            if calls == 2:
+                io.runtime_ok = False
+            return result
+        io.disk = drifting_disk
+        requests = [('entity', '0', {'entity_id': 'sensor.new_0'}),
+                    ('device', 'device', {'name_by_user': 'After'})]
+        with self.assertRaises(Conflict):
+            await bridge.prepare_many(requests, lambda: None)

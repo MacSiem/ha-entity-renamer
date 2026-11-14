@@ -614,6 +614,8 @@ class NativeRegistryBridge:
                         or self.io.pending(kind)):
                     raise RegistryConflict('before_state_unverified:scoped_evidence_incomplete')
             del disk
+        if any(self.runtime_probe(change, change.before) is not True for change in changes):
+            raise RegistryConflict('before_state_unverified:runtime_changed')
         if any(self.io.pending(kind) for kind in {c.kind for c in changes}):
             raise RegistryConflict('before_state_unverified:native_persistence_pending')
         fence()
