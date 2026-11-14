@@ -325,34 +325,58 @@ class NativeMixedFixtureCensusTest(unittest.IsolatedAsyncioTestCase):
             directory.mkdir(parents=True, exist_ok=True)
             (directory / 'census.json').write_text(json.dumps(result, sort_keys=True, indent=2))
 
-    async def test_active_custom_card_is_identified_and_product_refuses_prepare(self):
-        runtime, mapping, _, dashboard = await self._fixture_with_dashboard(custom=True)
+    async def test_generic_custom_dashboard_native_review_receipt_and_unchanged_peer(self):
+        runtime, mapping, uuids, dashboard = await self._fixture_with_dashboard(custom=True, named=True)
         hass, root = self.f.hass, self.f.root
+        old, new = next(iter(mapping.items()))
+        from homeassistant.components.lovelace.const import LOVELACE_DATA
+        peer = hass.data[LOVELACE_DATA].dashboards[None]
+        original_peer = await peer.async_load(False)
+        original_peer_bytes = Path(peer._store.path).read_bytes()
+        original_dashboard = await dashboard.async_load(False)
         observed = await self.module('native_discovery_consumers').async_observe_discovery_consumers(
             hass, guard=lambda: None)
-        with self.assertRaises(ValueError):
-            self.module('dashboard_storage_semantics').qualify_dashboard_storage(observed, mapping)
-        census = await collect_native(hass, root, self.producer, mapping)
-        print('MIXED_CENSUS_CUSTOM', json.dumps(census, sort_keys=True), flush=True)
-        self.assertIn(('dashboard:<default>', 'custom_card_unsupported:custom:r8-unknown'), census['unverified'])
-        before = await self._flush_documents()
-        original_dashboard = Path(dashboard._store.path).read_bytes()
-        original_sources = {name: (root / name).read_bytes() for name in
-                            ('configuration.yaml', 'template.yaml', 'mixed_automations.yaml',
-                             'mixed_scripts.yaml', 'boards/r8-map.yaml')}
+        self.assertEqual(observed.dashboard.status, 'COMPLETE')
+        changes = self.module('dashboard_storage_semantics').qualify_dashboard_storage(observed, mapping)
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].before.dashboard.route, 'r6-map')
+        self.assertEqual(changes[0].after['views'][0]['cards'][0]['entity'], new)
+        from homeassistant.helpers import area_registry, floor_registry, label_registry, issue_registry
+        for module, member in ((floor_registry, 'floors'), (label_registry, 'labels'), (area_registry, 'areas')):
+            manager = hass.data.get(module.DATA_REGISTRY)
+            if manager is None:
+                await module.async_load(hass)
+                manager = hass.data[module.DATA_REGISTRY]
+            elif not hasattr(manager, member):
+                await manager.async_load()
+            await manager._store.async_save(manager._data_to_save())
+        await hass.auth._store._store.async_save(hass.auth._store._data_to_save())
+        issues = issue_registry.async_get(hass)
+        await issues._store.async_save(issues._data_to_save())
+        await self._flush_documents()
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
-        try:
-            await runtime.native_yaml_prepare(hass, mapping, actor_id='census-custom-card',
-                                               guard=lambda: None, refresh=refresh)
-        except (ValueError, self.module('transaction').Refused) as error:
-            print('CENSUS_CUSTOM_CARD_REFUSAL', type(error).__name__, str(error), flush=True)
-        else:
-            self.fail('active unqualified custom card was accepted by prepare')
-        self.assertEqual(await self._flush_documents(), before)
-        self.assertEqual(Path(dashboard._store.path).read_bytes(), original_dashboard)
-        for name, raw in original_sources.items():
-            self.assertEqual((root / name).read_bytes(), raw)
+        review = await runtime.native_yaml_prepare(hass, mapping, actor_id='generic-dashboard',
+                                                   guard=lambda: None, refresh=refresh)
+        self.assertEqual(review['dependencies']['dashboards'], [{'route': 'r6-map',
+            'references': [{'before': old, 'after': new, 'occurrences': 1}]}])
+        applied = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+            actor_id='generic-dashboard', guard=lambda: None, refresh=refresh)
+        self.assertEqual(applied['state'], 'applied')
+        self.assertEqual((await dashboard.async_load(False))['views'][0]['cards'][0]['entity'], new)
+        self.assertEqual(await peer.async_load(False), original_peer)
+        self.assertEqual(Path(peer._store.path).read_bytes(), original_peer_bytes)
+        self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+        inspected = await runtime.recovery_inspect(hass, review['operation_id'], review['fingerprint'],
+                                                    guard=lambda: None, refresh=refresh)
+        self.assertTrue(inspected['eligible'])
+        self.assertEqual(inspected['state'], 'applied')
+        await runtime.native_yaml_reverse(hass, review['operation_id'], review['fingerprint'],
+                                          guard=lambda: None, refresh=refresh)
+        self.assertEqual(await dashboard.async_load(False), original_dashboard)
+        self.assertEqual(await peer.async_load(False), original_peer)
+        self.assertEqual(Path(peer._store.path).read_bytes(), original_peer_bytes)
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
 
     async def test_active_native_map_forward_and_fresh_inverse(self):
         diagnostics = mixed.native_diagnostics(self.module)
