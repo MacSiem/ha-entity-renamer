@@ -55,6 +55,38 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertIsNone(self.f.entity.async_get(new))
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
+    async def test_registry_device_with_unrelated_automation_script_apply_inverse(self):
+        """Registry-only changes retain unrelated native sources and identities."""
+        runtime, mapping, uuids, original, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        before_config = (self.f.root / 'configuration.yaml').read_bytes()
+        before_automation = {state.entity_id: state.state for state in hass.states.async_all('automation')}
+        before_scripts = {state.entity_id: state.state for state in hass.states.async_all('script')}
+        self.assertTrue(before_automation)
+        self.assertTrue(before_scripts)
+        old_device_name = self.f.device.async_get(device.id).name_by_user
+        async def refresh(): pass
+        review = await runtime.native_yaml_prepare(hass, mapping,
+            entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
+            actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        self.assertEqual((review['entity_count'], review['device_count']), (1, 1))
+        result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+            actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        self.assertEqual(result['state'], 'applied')
+        self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+        self.assertEqual(self.f.device.async_get(device.id).name_by_user, 'Reviewed device')
+        result = await runtime.native_yaml_reverse(hass, review['operation_id'], review['fingerprint'],
+            guard=lambda: None, refresh=refresh)
+        self.assertEqual(result['state'], 'rolled_back')
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertEqual(self.f.device.async_get(device.id).name_by_user, old_device_name)
+        self.assertEqual((self.f.root / 'configuration.yaml').read_bytes(), before_config)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        self.assertEqual({state.entity_id: state.state for state in hass.states.async_all('automation')}, before_automation)
+        self.assertEqual({state.entity_id: state.state for state in hass.states.async_all('script')}, before_scripts)
+
     async def test_real_ws_first_and_502(self):
         from homeassistant.config_entries import ConfigEntry, ConfigEntryDisabler
         from homeassistant.helpers import entity_registry as er
