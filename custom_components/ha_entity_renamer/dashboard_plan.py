@@ -628,8 +628,11 @@ def plan_dashboard(config, mapping):
                     walk(child, p, field, False, value, variables)
                 elif field in {'state', 'state_not', 'above', 'below'} and any(part in {'conditions', 'visibility'} for part in path if type(part) is str):
                     for i, item in enumerate(child if type(child) is list else [child]):
+                        item_path = p + (i,) if type(child) is list else p
                         if type(item) is str and _ID.fullmatch(item):
-                            reference(item, p + (i,) if type(child) is list else p)
+                            reference(item, item_path)
+                        else:
+                            walk(item, item_path, field, False, value, variables)
                 else:
                     walk(child, p, field, False, value, variables)
         elif type(value) is list:

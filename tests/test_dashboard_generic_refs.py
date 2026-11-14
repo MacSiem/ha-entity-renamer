@@ -72,6 +72,15 @@ class GenericDashboardReferences(unittest.TestCase):
             c = {'filter': {'include': [{'name': 'entity_id', 'value': pattern}]}}
             self.assertTrue(plan_dashboard(c, mapping).markers)
 
+    def test_conditional_nonliteral_values_are_traversed(self):
+        source = {'conditions': [{'state': "{{ states('sensor.old') }}"},
+                  {'above': {'nested': {'entity': 'sensor.old'}}}]}
+        result = plan_dashboard(source, {'sensor.old': 'sensor.new'})
+        self.assertFalse(result.markers)
+        self.assertEqual(len(result.changes), 2)
+        self.assertEqual(result.value['conditions'][1]['above']['nested']['entity'], 'sensor.new')
+        self.assertIn('sensor.new', result.value['conditions'][0]['state'])
+
     def test_current_entity_js_rejects_selected_literal_and_extra_code(self):
         from custom_components.ha_entity_renamer.dashboard_custom import plan_button_expression
         good = "[[[ return entity && entity.state === 'on' ? 'up' : 'down'; ]]]"
