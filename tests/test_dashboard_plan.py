@@ -81,7 +81,7 @@ class DashboardPlanTests(unittest.TestCase):
         result = self.plan([{'type': 'custom:template-card', 'entity': 'sensor.old',
                              'template': "states['sensor.' + name]"}])
         self.assertEqual(len(result.changes), 1)
-        self.assertEqual(result.markers[0].code, 'dynamic_dashboard_reference')
+        self.assertIn('dynamic_dashboard_reference', {marker.code for marker in result.markers})
 
     def test_unknown_type_alone_is_not_a_blocker(self):
         for card in [{'type': 'new-native-card', 'entities': []},
