@@ -23,6 +23,15 @@ def _core11_name_rewrite_unchanged(row, change, strip):
                == row.original_name_unprefixed for image in (change.before, change.after))
 
 
+def _selected_rows(io, kind, identities):
+    """Read only the native storage fragments required by this observation."""
+    reader = getattr(io, 'row', None)
+    if reader is not None:
+        return {identity: reader(kind, identity) for identity in identities}
+    key = 'entities' if kind == 'entity' else 'devices'
+    return {row['id']: row for row in io.document(kind)[key] if row['id'] in identities}
+
+
 class NativeNameObserver:
     def __init__(self, io):
         self.io, self.hass = io, io.hass
@@ -216,10 +225,10 @@ class NativeNameObserver:
         # A device with no associated entities proves no runtime effect, not an
         # independently activated device. Fail closed instead of vacuous True.
         require(bool(rows), 'name_no_observable_entities')
-        document = self.io.document('entity')
+        native_rows = _selected_rows(self.io, 'entity', {row.id for row in rows})
         baseline = {}
-        devices = self.io.document('device')
         device_ids = {row.device_id for row in rows if row.device_id is not None}
+        devices = _selected_rows(self.io, 'device', device_ids)
         for row in rows:
             entity, state, entry, active = self._sample(row, loaded_restored=self._loaded_restored(change))
             if (not active and state is not None and entry is not None
@@ -235,15 +244,14 @@ class NativeNameObserver:
                         'name_native_entity_side_effect_unsupported')
             if change.kind == 'device' and active and version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
                 self._device_subscription(entity, row)
-            native = next(item for item in document['entities'] if item['id'] == row.id)
+            native = native_rows[row.id]
             baseline[row.id] = {'row': native, 'identity': list(registry_identity(row)),
                                 'entry': entry, 'active': active,
                                 'inactive_state': (state.state if state is not None else None) if not active else None,
                                 'inactive_attributes': ({k: v for k, v in state.attributes.items()
                                     if k != 'friendly_name'} if state is not None else None) if not active else None}
         payload = {'ha': version, 'entities': baseline,
-                   'devices': {row['id']: row for row in devices['devices']
-                               if row['id'] in device_ids}}
+                   'devices': devices}
         # Canonical JSON also detaches nested native preference mappings.
         return json.dumps(payload, sort_keys=True)
 
@@ -269,8 +277,8 @@ class NativeNameObserver:
         rows = self._rows(change)
         require(bool(rows) and {row.id for row in rows} == set(baseline['entities']),
                 'name_entity_membership_changed')
-        native_rows = {row['id']: row for row in self.io.document('entity')['entities']}
-        device_rows = {row['id']: row for row in self.io.document('device')['devices']}
+        native_rows = _selected_rows(self.io, 'entity', {row.id for row in rows})
+        device_rows = _selected_rows(self.io, 'device', set(baseline['devices']))
         for identity, original in baseline['devices'].items():
             expected = (target if change.kind == 'device' and identity == change.identity
                         else expected_devices.get(identity) if expected_devices is not None else original)
