@@ -57,6 +57,95 @@ class NativeYAMLSourceBindingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.blockers)
         self.assertFalse(result.migration_ready)
 
+    async def test_three_idless_peers_bind_without_registry_and_detect_live_drift(self):
+        from homeassistant.config import async_hass_config_yaml
+        from homeassistant.setup import async_setup_component
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        hass, root = self.f.hass, self.f.root
+        (root / 'configuration.yaml').write_text('''script:
+  probe: {sequence: []}
+template:
+  - sensor:
+      - unique_id: idless_probe_source
+        name: Idless probe source
+        state: "{{ states('sensor.original') }}"
+automation:
+  - alias: Idless one
+    initial_state: false
+    triggers: []
+    actions:
+      - action: script.probe
+  - alias: Idless two
+    initial_state: false
+    triggers: []
+    actions: []
+  - alias: Idless three
+    initial_state: false
+    triggers: []
+    actions: []
+''')
+        config = await async_hass_config_yaml(hass)
+        self.assertTrue(await async_setup_component(hass, 'script', config))
+        self.assertTrue(await async_setup_component(hass, 'automation', config))
+        await hass.async_block_till_done()
+        await self._flush_documents(initialize=True)
+        package = fixture.fixtures.PACKAGE
+        planner = importlib.import_module(package + '.yaml_plan')
+        validate = importlib.import_module(package + '.yaml_validation')
+        binding = importlib.import_module(package + '.yaml_source_binding')
+        plan = planner.plan_yaml(root, {'sensor.original': 'sensor.changed'})
+        self.assertTrue(plan.ready, plan.issues)
+        result = await validate.async_validate_proposed_with_template_state_sources(
+            hass, plan, {'sensor.original': 'sensor.changed'}, root.parent, with_state_program=True)
+        receipt, evidence = result.receipt, result.evidence
+        sample = await binding.async_bind_original_runtime(hass, receipt, evidence, guard=lambda: None)
+        self.assertTrue(sample.verified, sample.blockers)
+        peers = [row for row in sample.rows if row.domain == 'automation']
+        self.assertEqual(len(peers), 3)
+        self.assertTrue(all(row.registry_id == '' and row.disposition == 'loaded' for row in peers))
+        entity = next(iter(hass.data[DATA_INSTANCES]['automation'].entities))
+        original = entity.raw_config
+        entity.raw_config = dict(original, alias='foreign')
+        try:
+            changed = await binding.async_bind_original_runtime(hass, receipt, evidence, guard=lambda: None)
+            self.assertFalse(changed.verified)
+        finally:
+            entity.raw_config = original
+        self.assertEqual((await binding.async_bind_original_runtime(
+            hass, receipt, evidence, guard=lambda: None)).tokens, sample.tokens)
+        other = next(item for item in hass.data[DATA_INSTANCES]['automation'].entities if item is not entity)
+        script = entity.action_script
+        entity.action_script = other.action_script
+        try:
+            changed = await binding.async_bind_original_runtime(hass, receipt, evidence, guard=lambda: None)
+            self.assertFalse(changed.verified)
+        finally:
+            entity.action_script = script
+        platform = entity.platform
+        import copy
+        platform.entities[entity.entity_id] = copy.copy(entity)
+        try:
+            stale = await binding.async_bind_original_runtime(hass, receipt, evidence, guard=lambda: None)
+            self.assertFalse(stale.verified)
+        finally:
+            platform.entities[entity.entity_id] = entity
+        removed = platform.entities.pop(entity.entity_id)
+        try:
+            missing = await binding.async_bind_original_runtime(hass, receipt, evidence, guard=lambda: None)
+            self.assertFalse(missing.verified)
+        finally:
+            platform.entities[entity.entity_id] = removed
+        observer = importlib.import_module(package + '.yaml_runtime_observer').NativeYAMLRuntimeReadback(hass)
+        worker = importlib.import_module(package + '.yaml_validation_worker')
+        before = {domain: worker._normal(observer._projection(domain)[0])
+                  for domain in ('automation', 'script')}
+        after = copy.deepcopy(before)
+        after['script'][0][1] = {'$map': [['foreign', True]]}
+        transport = importlib.import_module(package + '.native_automation_config_transport')
+        refused = importlib.import_module(package + '.transaction').Refused
+        with self.assertRaisesRegex(refused, 'automation_idless_affected_unsupported'):
+            transport._call_scope(hass, before, after)
+
     async def test_valid_source_cannot_bless_foreign_runtime_body(self):
         receipt, evidence = await self.prepare(foreign_runtime=True)
         binding = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_source_binding')

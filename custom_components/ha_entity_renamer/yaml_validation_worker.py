@@ -271,6 +271,20 @@ def _fingerprint(value):
     return hashlib.sha256(payload).hexdigest()
 
 
+_IDLESS_AUTOMATION = '\0automation:'
+
+
+def _automation_key(unique_id, raw):
+    """Private source/runtime matching key; never assigned to HA entities."""
+    if unique_id is None:
+        if raw is None:
+            raise ValueError('automation_not_covered')
+        return _IDLESS_AUTOMATION + _fingerprint(raw)
+    if not isinstance(unique_id, str) or not unique_id or unique_id.startswith(_IDLESS_AUTOMATION):
+        raise ValueError('automation_not_covered')
+    return str(unique_id)
+
+
 def _qualified_metadata_expression(text):
     """Pure output expressions with finite literal entity dependencies; never render.
 
@@ -793,9 +807,66 @@ async def _expected_template_sources(hass, config, *, state_profile=None, with_s
         return {'version': __version__, 'projection': None, 'rows': None}
 
 
+async def _physical_idless_sources(hass, root, checked, integration):
+    """Validate each physical idless body with the same native schema."""
+    from pathlib import Path
+    import yaml
+    from yaml.nodes import MappingNode, SequenceNode
+    from homeassistant.config import async_process_component_and_handle_errors
+    from homeassistant.util.yaml.loader import parse_yaml
+    planner = _source_module('yaml_plan')
+    ledger_module = _source_module('yaml_source_ledger')
+    plan = planner.plan_yaml(root, {})
+    if not plan.ready:
+        raise ValueError('idless_source_plan_unqualified')
+    originals = {row.path: (Path(root) / row.path).read_bytes() for row in plan.files}
+    ledger = ledger_module.extract_source_ledger(plan, originals)
+    if ledger.findings:
+        raise ValueError('idless_source_ledger_unqualified')
+    physical = [row for row in ledger.definitions if row.domain == 'automation' and row.native_key is None]
+    native_keys = sorted(_automation_key(row.get('id'), row.raw_config)
+                         for row in checked['automation'] if row.get('id') is None)
+    bindings = []
+    for row in physical:
+        node = yaml.compose(originals[row.origin.path].decode('utf-8'), Loader=yaml.SafeLoader)
+        for step in row.origin.route:
+            kind, index = step.split(':', 1)
+            index = int(index)
+            if kind == 'i' and isinstance(node, SequenceNode):
+                node = node.value[index]
+            elif kind in ('k', 'v') and isinstance(node, MappingNode):
+                node = node.value[index][kind == 'v']
+            else:
+                raise ValueError('idless_source_location_unqualified')
+        seen = set()
+        def inspect_node(item):
+            if id(item) in seen or not item.tag.startswith('tag:yaml.org,2002:'):
+                raise ValueError('idless_source_body_unqualified')
+            seen.add(id(item))
+            if isinstance(item, MappingNode):
+                for key, child in item.value:
+                    inspect_node(key); inspect_node(child)
+            elif isinstance(item, SequenceNode):
+                for child in item.value:
+                    inspect_node(child)
+        inspect_node(node)
+        parsed = parse_yaml(yaml.serialize(node))
+        single = await async_process_component_and_handle_errors(hass, {'automation': [parsed]}, integration)
+        if single is None or len(single['automation']) != 1:
+            raise ValueError('idless_source_native_unqualified')
+        cfg = single['automation'][0]
+        if cfg.get('id') is not None or cfg.raw_config is None:
+            raise ValueError('idless_source_native_unqualified')
+        bindings.append([row.origin.path, list(row.origin.route), _automation_key(None, cfg.raw_config)])
+    keys = sorted(row[2] for row in bindings)
+    if keys != native_keys or len(set(keys)) != len(keys):
+        raise ValueError('idless_source_native_mismatch')
+    return bindings
+
+
 async def _expected_runtime(root, domains, *, source_rows=None, template_sources=None,
                             template_state_profile=None, template_state_program=False, template_program_sources=(),
-                            dependent_descriptors=None):
+                            dependent_descriptors=None, idless_sources=None):
     """Native schema projections in the isolated validator, without component setup.
 
     No scripts/actions/templates are run and no scene is activated. The trusted
@@ -883,15 +954,17 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
                                 cfg['mode'], cfg['max'], cfg['max_exceeded'], cfg.get('variables'),
                                 cfg.get('icon'), cfg['description'], cfg['fields'], cfg['trace']])
                     elif domain == 'automation':
+                        if idless_sources is not None and any(cfg.get('id') is None for cfg in checked[domain]):
+                            idless_sources.extend(await _physical_idless_sources(hass, root, checked, integration))
                         for cfg in checked[domain]:
                             # Conditions and trigger variables still need independent proof.
                             # Enabled static event/state registrations are observed separately.
-                            if (not cfg.get('id') or cfg.raw_config is None
+                            if (cfg.raw_config is None
                                     or cfg.raw_blueprint_inputs is not None
                                     or __version__ != '2026.11.1' and cfg.get('conditions')
                                     or cfg.get('trigger_variables')):
                                 raise ValueError('automation_not_covered')
-                            projection.append([cfg['id'], cfg.raw_config, cfg['triggers'],
+                            projection.append([_automation_key(cfg.get('id'), cfg.raw_config), cfg.raw_config, cfg['triggers'],
                                 cfg['actions'], cfg['mode'], cfg['max'], cfg['max_exceeded'],
                                 cfg.get('variables'), cfg['trace']])
                             if __version__ == '2026.11.1':
@@ -1206,6 +1279,7 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
     if registry_only_template and (changed or helper_seal is not None):
         raise ValueError('template_registry_only_effective_config_changed')
     source_rows = {} if with_sources else None
+    idless_sources = [] if with_sources else None
     original_domains = sorted(set(changed) | {'automation', 'script'}) if with_sources else changed
     template_sources = {} if with_sources else None
     old_state_profile = {} if template_source_profile is not None else None
@@ -1216,7 +1290,7 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
         source_rows=source_rows, template_sources=template_sources,
         template_state_profile=old_state_profile, template_state_program=template_state_program,
         template_program_sources=tuple(row[0] for row in reference_proof['files']) if template_state_program else (),
-        dependent_descriptors=old_dependent)
+        dependent_descriptors=old_dependent, idless_sources=idless_sources)
     candidate_templates = {} if with_sources else None
     candidate_domains = sorted(set(changed) | {'automation', 'script'}) if dependent_proof is not None else changed
     new_runtime = await _expected_runtime(proposed_root, candidate_domains,
@@ -1287,6 +1361,8 @@ async def check(before_root, proposed_root, *, with_sources=False, powercalc_pro
         result['source_runtime'] = {'version': __version__, 'domains': [
             [domain, old_runtime.get(domain), source_rows.get(domain)]
             for domain in ('automation', 'script')]}
+        if idless_sources:
+            result['source_runtime']['idless_sources'] = idless_sources
     return result
 
 

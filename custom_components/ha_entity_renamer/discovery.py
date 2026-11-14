@@ -188,7 +188,7 @@ def _runtime_row_diagnostics(hass, domain, *, owned_automation=None):
     from homeassistant.const import __version__
     from homeassistant.helpers.entity_component import DATA_INSTANCES
     from .yaml_runtime_observer import NativeYAMLRuntimeReadback, _pending_native_work
-    from .yaml_validation_worker import _fingerprint
+    from .yaml_validation_worker import _fingerprint, _automation_key
     supported = (__version__ in ('2025.6.0', '2026.10.2', '2026.10.4', '2026.11.1')
                  or __version__ == '2026.11.0' and domain == 'script')
     if domain not in ('automation', 'script') or not supported or _pending_native_work(hass, (domain,)):
@@ -198,12 +198,14 @@ def _runtime_row_diagnostics(hass, domain, *, owned_automation=None):
         raise ValueError('native_component_unsettled')
     entities = tuple(component.entities)
     ids = Counter(getattr(entity, 'entity_id', None) for entity in entities)
-    unique = Counter(getattr(entity, 'unique_id', None) for entity in entities)
+    unique = Counter(_automation_key(entity.unique_id, entity.raw_config) if domain == 'automation'
+                     else entity.unique_id for entity in entities)
     observer = NativeYAMLRuntimeReadback(hass, owned_automation=owned_automation)
     result = []
     for entity in entities:
         entity_id = getattr(entity, 'entity_id', None)
-        uid = getattr(entity, 'unique_id', None)
+        uid = (_automation_key(entity.unique_id, entity.raw_config) if domain == 'automation'
+               else entity.unique_id)
         if (type(entity_id) is not str or type(uid) is not str or not uid
                 or ids[entity_id] != 1 or unique[uid] != 1):
             result.append((entity_id, 'UNKNOWN', 'native_identity_ambiguous'))
@@ -285,7 +287,7 @@ def _runtime_family(hass, domain, *, owned_automation=None, include_row_diagnost
     from homeassistant.const import __version__
     from homeassistant.helpers.entity_component import DATA_INSTANCES
     from .yaml_runtime_observer import NativeYAMLRuntimeReadback, _pending_native_work
-    from .yaml_validation_worker import _normal, _fingerprint
+    from .yaml_validation_worker import _normal, _fingerprint, _automation_key
     try:
         if (__version__ not in ('2025.6.0', '2026.10.2', '2026.10.4')
                 and (__version__ != '2026.11.0' or domain != 'script')
@@ -295,7 +297,8 @@ def _runtime_family(hass, domain, *, owned_automation=None, include_row_diagnost
             raise ValueError('runtime_unsettled')
         rows, identities = NativeYAMLRuntimeReadback(hass, owned_automation=owned_automation)._projection(domain)
         component = hass.data.get(DATA_INSTANCES, {}).get(domain)
-        locators = {entity.unique_id: entity.entity_id for entity in component.entities}
+        locators = {(_automation_key(entity.unique_id, entity.raw_config) if domain == 'automation'
+                     else entity.unique_id): entity.entity_id for entity in component.entities}
         if (len(locators) != len(rows) or any(type(row[0]) is not str
                                             or row[0] not in locators for row in rows)):
             raise ValueError('runtime_identity_ambiguous')

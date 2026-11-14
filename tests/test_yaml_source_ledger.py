@@ -6,7 +6,7 @@ import unittest
 
 from custom_components.ha_entity_renamer.yaml_plan import plan_yaml
 from custom_components.ha_entity_renamer.yaml_source_ledger import (
-    extract_source_ledger, SourceLedgerError)
+    extract_source_ledger, bind_idless_sources, SourceLedgerError)
 
 
 class SourceLedgerTests(unittest.TestCase):
@@ -129,12 +129,31 @@ class SourceLedgerTests(unittest.TestCase):
             'scripts/kept.yaml': 'one: {sequence: []}\n'})
         self.assertIn('source_container_layout_unsupported', self.codes(ledger))
 
-    def test_missing_numeric_and_duplicate_id_are_unknown(self):
-        for body in ('actions: []', 'id: 123\n  actions: []', 'id: one\n  id: two\n  actions: []'):
+    def test_numeric_and_duplicate_id_are_unknown(self):
+        for body in ('id: 123\n  actions: []', 'id: one\n  id: two\n  actions: []'):
             with self.subTest(body=body):
                 ledger = self.ledger('automation:\n- ' + body + '\n')
                 self.assertIn('source_automation_stable_id_missing_or_ambiguous', self.codes(ledger))
                 self.assertEqual(ledger.definitions[0].disposition, 'unsupported')
+
+    def test_idless_source_inventory_requires_exact_native_count(self):
+        ledger = self.ledger('automation:\n- alias: one\n  actions: []\n- alias: two\n  actions: []\n- id: named\n  actions: []\n')
+        self.assertFalse(ledger.findings)
+        marker = '\0automation:'
+        pending = [row for row in ledger.definitions if row.native_key is None]
+        bindings = [[row.origin.path, list(row.origin.route), marker + char * 64]
+                    for row, char in zip(pending, 'ab', strict=True)]
+        with self.assertRaises(SourceLedgerError):
+            bind_idless_sources(ledger, [bindings[0], bindings[0]])
+        with self.assertRaises(SourceLedgerError):
+            bind_idless_sources(ledger, [bindings[0], [*bindings[1][:2], bindings[0][2]]])
+        ledger = bind_idless_sources(ledger, bindings)
+        keys = ledger.keys_for_native_projection('automation')
+        ledger.match_native_keys('automation', keys)
+        for wrong in (keys[1:], (keys[0], keys[0], 'named'),
+                      tuple(sorted((marker + 'x' * 64, marker + 'b' * 64, 'named')))):
+            with self.subTest(wrong=wrong), self.assertRaises(SourceLedgerError):
+                ledger.match_native_keys('automation', wrong)
 
     def test_nested_duplicate_body_keys_and_blueprint_are_not_candidates(self):
         for body in ('sequence: []\n    sequence: []', 'use_blueprint: {path: x.yaml}'):

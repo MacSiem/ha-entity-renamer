@@ -47,6 +47,9 @@ def _pair_program_rows(previous, following, source, mapping, *, reverse):
         target = {row[0]: row for row in right}
         pairs = tuple((row, target[redirect.get(row[0], row[0])]) for row in left)
         _need(len(pairs) == len(right), 'dependent_config_key_edge_unqualified')
+        _need(all(old == new for old, new in pairs
+                  if domain == 'automation' and old[0].startswith('\0automation:')),
+              'dependent_idless_automation_changed')
         result.append((domain, pairs))
     return tuple(result)
 

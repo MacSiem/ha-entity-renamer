@@ -96,6 +96,39 @@ class SourceLedger:
             raise SourceLedgerError('native_source_inventory_mismatch')
 
 
+def bind_idless_sources(ledger, bindings):
+    """Bind trusted same-checker native schema results to physical origins."""
+    if type(ledger) is not SourceLedger or ledger.findings or type(bindings) is not list:
+        raise SourceLedgerError('source_idless_binding_unqualified')
+    rows = [(i, row) for i, row in enumerate(ledger.definitions)
+            if row.domain == 'automation' and row.native_key is None and row.disposition == 'candidate']
+    pending = {(row.origin.path, row.origin.route): i for i, row in rows}
+    if len(pending) != len(rows) or len(pending) != len(bindings):
+        raise SourceLedgerError('source_idless_binding_unqualified')
+    definitions = list(ledger.definitions)
+    used = set()
+    for binding in bindings:
+        if (type(binding) is not list or len(binding) != 3 or type(binding[0]) is not str
+                or type(binding[1]) is not list or any(type(x) is not str for x in binding[1])
+                or type(binding[2]) is not str or not binding[2].startswith('\0automation:')
+                or len(binding[2]) != len('\0automation:') + 64
+                or any(c not in '0123456789abcdef' for c in binding[2][len('\0automation:'):])):
+            raise SourceLedgerError('source_idless_binding_unqualified')
+        origin, key = (binding[0], tuple(binding[1])), binding[2]
+        if origin not in pending or key in used:
+            raise SourceLedgerError('source_idless_binding_unqualified')
+        used.add(key)
+        index = pending.pop(origin)
+        definitions[index] = replace(definitions[index], native_key=key)
+    if pending or len({(r.domain, r.native_key) for r in definitions if r.native_key is not None}) != sum(
+            r.native_key is not None for r in definitions):
+        raise SourceLedgerError('source_idless_binding_unqualified')
+    payload = {'schema': ledger.schema, 'original_graph_sha256': ledger.original_graph_sha256,
+               'definitions': [asdict(row) for row in definitions],
+               'findings': [asdict(row) for row in ledger.findings]}
+    return replace(ledger, definitions=tuple(definitions), sha256=_hash(payload))
+
+
 def _hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
                                     ensure_ascii=True, allow_nan=False).encode()).hexdigest()
@@ -346,11 +379,13 @@ def _extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
                 flag(ref, 'source_blueprint_unsupported')
             if domain == 'automation':
                 ids = [(child, origin) for name, child, origin in members if name == 'id']
-                if len(ids) == 1 and isinstance(ids[0][0].node, ScalarNode) and ids[0][0].node.tag == _STR and ids[0][0].node.value:
+                if not ids:
+                    key, keyref = None, ref
+                elif len(ids) == 1 and isinstance(ids[0][0].node, ScalarNode) and ids[0][0].node.tag == _STR and ids[0][0].node.value:
                     key, keyref = ids[0][0].node.value, ids[0][1]
                 else:
                     flag(ref, 'source_automation_stable_id_missing_or_ambiguous')
-            if not isinstance(key, str) or not key:
+            if (domain != 'automation' or key is not None) and (not isinstance(key, str) or not key):
                 flag(ref, 'source_stable_key_missing')
         digest = _hash(body(ref))
         definitions.append(Definition(domain, key, section, package, ref.origin(),

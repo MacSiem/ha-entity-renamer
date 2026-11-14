@@ -100,9 +100,12 @@ def seal_original_sources(receipt, plan, ledger, native, *,
         sources = {row[0]: row[1:] for row in receipt.source_files}
         _need(all(sources.get(row.path) == (row.sha256, row.device, row.inode)
                   for row in plan.files))
-        _need(type(native) is dict and set(native) == {'version', 'domains'}
+        _need(type(native) is dict and set(native) in ({'version', 'domains'}, {'version', 'domains', 'idless_sources'})
               and native['version'] == receipt.version
               and type(native['domains']) is list and len(native['domains']) == 2)
+        if 'idless_sources' in native:
+            from .yaml_source_ledger import bind_idless_sources
+            ledger = bind_idless_sources(ledger, native['idless_sources'])
         domains = []
         for item in native['domains']:
             _need(type(item) is list and len(item) == 3)
@@ -118,6 +121,8 @@ def seal_original_sources(receipt, plan, ledger, native, *,
                           and type(row[0]) is str and 0 < len(row[0]) <= 255
                           and all(type(value) is str and _SHA.fullmatch(value)
                                   for value in row[1:]))
+                    if domain == 'automation' and row[0].startswith('\0automation:'):
+                        _need(row[0] == '\0automation:' + row[1])
                 keys = [row[0] for row in rows]
                 _need(keys == sorted(set(keys)))
                 if not ledger.findings:
@@ -293,6 +298,9 @@ def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=
     for expected in evidence.domains:
         domain = expected.domain
         source_keys = set(evidence.ledger.keys_for_native_projection(domain))
+        if domain == 'automation' and expected.rows is not None:
+            evidence.ledger.match_native_keys(domain, tuple(row[0] for row in expected.rows))
+            source_keys = {row[0] for row in expected.rows}
         _need(type(source_key_moves) is tuple and all(type(edge) is tuple and len(edge) == 3
               and all(type(part) is str and part for part in edge) for edge in source_key_moves))
         selected = tuple((old, new) for edge_domain, old, new in source_key_moves if edge_domain == domain)
@@ -326,7 +334,9 @@ def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=
         elif (_fingerprint(projection) != (override or expected.projection)
               or override is None and actual_rows != expected.rows):
             blockers.add('runtime_source_projection_mismatch')
-        live = {entity.unique_id: entity for entity in entities}
+        from .yaml_validation_worker import _automation_key
+        live = {(_automation_key(entity.unique_id, entity.raw_config) if domain == 'automation'
+                 else entity.unique_id): entity for entity in entities}
         if len(live) != len(entities):
             raise SourceBindingError('runtime_source_runtime_unavailable')
         candidates = [row for row in registry_rows if row.get('platform') == domain
@@ -341,6 +351,15 @@ def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=
                 key = entity.unique_id
             grouped.setdefault(key, []).append(row)
         for key in sorted(source_keys | set(grouped) | set(live)):
+            if domain == 'automation' and key.startswith('\0automation:'):
+                entity = live.get(key)
+                if key not in source_keys or entity is None or entity.registry_entry is not None:
+                    blockers.add('runtime_source_idless_identity_unverified')
+                    continue
+                # The observer's identity token pins this exact object, Script,
+                # entity_id and full projection; there is no registry row.
+                rows.append(BoundSourceRow(domain, key, entity.entity_id, '', '', 'loaded'))
+                continue
             entries = grouped.get(key, ())
             if len(entries) != 1:
                 blockers.add('runtime_source_registry_identity_unverified')

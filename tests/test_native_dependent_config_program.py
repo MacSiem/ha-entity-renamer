@@ -173,6 +173,18 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
     - variables:
         lookup: {1: first, one: second}
         sample: "{{ states('sensor.original') }}"
+- alias: idless one
+  initial_state: false
+  triggers: []
+  actions: []
+- alias: idless two
+  initial_state: false
+  triggers: []
+  actions: []
+- alias: idless three
+  initial_state: false
+  triggers: []
+  actions: []
 ''')
         mapping = {'sensor.original': 'sensor.changed', 'sensor.second': 'sensor.other'}
         planner, worker = self.module('yaml_plan'), self.module('yaml_validation_worker')
@@ -184,12 +196,21 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
             for patch in plan.patches:
                 (after / patch.path).write_bytes(patch.proposed_bytes)
             proof = worker._template_reference_proof(str(root), str(after), mapping)
-            before, candidate = {}, {}
-            await worker._expected_runtime(str(root), ('automation', 'script'), dependent_descriptors=before)
+            before, candidate, idless_sources = {}, {}, []
+            await worker._expected_runtime(str(root), ('automation', 'script'), dependent_descriptors=before,
+                                           idless_sources=idless_sources)
             await worker._expected_runtime(str(after), ('automation', 'script'), dependent_descriptors=candidate)
             self.assertIsNotNone(before['automation'])
             self.assertIsNotNone(candidate['automation'])
             self.assertIn('"$int": 1', json.dumps(before))
+            idless = [row for row in before['automation'] if row[0].startswith('\0automation:')]
+            self.assertEqual(len(idless), 3)
+            self.assertEqual(idless, [row for row in candidate['automation'] if row[0].startswith('\0automation:')])
+            originals = {row.path: (root / row.path).read_bytes() for row in plan.files}
+            ledger = self.module('yaml_source_ledger').extract_source_ledger(plan, originals)
+            self.assertFalse(ledger.findings)
+            ledger = self.module('yaml_source_ledger').bind_idless_sources(ledger, idless_sources)
+            ledger.match_native_keys('automation', tuple(row[0] for row in before['automation']))
             program = await self.module('dependent_config_program').native_prefix_images(
                 str(root), mapping, proof, before, candidate, worker._expected_runtime)
             self.assertEqual(len(program['images']), 3)
@@ -198,6 +219,14 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(digest(program['images'][0]), digest(program['images'][-1]))
             altered = json.loads(json.dumps(program).replace('"$int": 1', '"$int": 2', 1))
             self.assertNotEqual(digest(program), digest(altered))
+            pairs = self.module('dependent_config_program')._pair_program_rows
+            first, last = dict(program['images'][0]['domains']), dict(program['images'][-1]['domains'])
+            pairs(first, last, 'sensor.original', mapping, reverse=False)
+            import copy
+            changed = copy.deepcopy(last)
+            next(row for row in changed['automation'] if row[0].startswith('\0automation:'))[-1] = 'foreign'
+            with self.assertRaises(ValueError):
+                pairs(first, changed, 'sensor.original', mapping, reverse=False)
 
     async def test_unchanged_empty_family_is_present_in_every_native_image(self):
         result, _, mapping = await self.compile(empty_automation=True)

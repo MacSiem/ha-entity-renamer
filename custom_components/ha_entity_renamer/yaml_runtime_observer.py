@@ -385,7 +385,8 @@ class NativeYAMLRuntimeReadback:
                         id(entity.raw_config), id(entity.registry_entry), ('disabled',))
                 else:
                     raise ValueError('automation_listener_proof_unavailable')
-                rows.append([entity.unique_id, entity.raw_config, entity._trigger_config,
+                from .yaml_validation_worker import _automation_key
+                rows.append([_automation_key(entity.unique_id, entity.raw_config), entity.raw_config, entity._trigger_config,
                     script.sequence, script.script_mode, script.max_runs, script._max_exceeded,
                     entity._variables, entity._trace_config])
                 if __version__ == '2026.11.1':

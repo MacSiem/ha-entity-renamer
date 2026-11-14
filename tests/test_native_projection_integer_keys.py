@@ -50,3 +50,13 @@ class NativeProjectionIntegerKeysTests(unittest.TestCase):
         actual = dict(binding._objects(value, native))
         self.assertEqual(set(expected), set(actual))
         self.assertEqual(expected, {path: obj.template for path, obj in actual.items()})
+
+    def test_idless_private_key_refuses_namespace_and_distinguishes_raw(self):
+        key = self.worker._automation_key
+        value = key(None, {'alias': 'first'})
+        self.assertTrue(value.startswith('\0automation:'))
+        self.assertNotEqual(value, key(None, {'alias': 'second'}))
+        with self.assertRaises(ValueError):
+            key(value, {'alias': 'first'})
+        with self.assertRaises(ValueError):
+            key(None, None)

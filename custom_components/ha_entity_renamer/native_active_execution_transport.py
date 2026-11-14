@@ -194,12 +194,14 @@ class _Projection:
 
 def _entities(hass):
     from homeassistant.helpers.entity_component import DATA_INSTANCES
+    from .yaml_validation_worker import _automation_key
     entities = {}
     for domain in ('automation', 'script'):
         component = hass.data.get(DATA_INSTANCES, {}).get(domain)
         for entity in component.entities if component is not None else ():
-            _need((domain, entity.unique_id) not in entities)
-            entities[domain, entity.unique_id] = entity
+            key = _automation_key(entity.unique_id, entity.raw_config) if domain == 'automation' else entity.unique_id
+            _need((domain, key) not in entities)
+            entities[domain, key] = entity
     return entities
 
 
