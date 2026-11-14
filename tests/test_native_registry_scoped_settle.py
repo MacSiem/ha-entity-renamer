@@ -159,3 +159,78 @@ class NativeRegistryScopedSettleTests(unittest.IsolatedAsyncioTestCase):
             if settle is not None:
                 await asyncio.gather(settle, return_exceptions=True)
             await asyncio.gather(*callback_tasks, return_exceptions=True)
+
+    async def test_union_waits_for_selected_and_device_sources_and_shields_cancel(self):
+        from types import MappingProxyType
+        from homeassistant.components.sensor import SensorEntity
+        from homeassistant.config_entries import ConfigEntry
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        from homeassistant.helpers.entity import Entity
+        from homeassistant.setup import async_setup_component
+        hass, native = self.f.hass, self.modules['native_registry']
+        self.assertTrue(await async_setup_component(hass, 'sensor', {'sensor': []}))
+        entry = ConfigEntry(domain='sensor', title='Union fixture', data={}, options={},
+            source='user', unique_id='union-fixture', version=1, minor_version=1,
+            discovery_keys=MappingProxyType({}), subentries_data=[])
+        await hass.config_entries.async_add(entry)
+        device = self.f.device.async_get_or_create(config_entry_id=entry.entry_id,
+                                                  identifiers={('sensor', 'union-fixture')})
+
+        class Source(SensorEntity):
+            _attr_should_poll = False
+            _attr_native_value = 5
+            def __init__(self, key):
+                self._attr_unique_id = self._attr_name = key
+                self.renaming = False
+                self.entered, self.release = asyncio.Event(), asyncio.Event()
+            async def async_will_remove_from_hass(self):
+                await super().async_will_remove_from_hass()
+                if self.renaming:
+                    self.entered.set()
+                    await self.release.wait()
+
+        sources = [Source('Union selected'), Source('Union device'), Source('Union unrelated')]
+        await hass.data[DATA_INSTANCES]['sensor'].async_add_entities(sources)
+        self.f.entity.async_update_entity(sources[1].entity_id, device_id=device.id)
+        io = native.NativeRegistryIO(hass)
+        changes, callbacks = [], []
+        settle = None
+        try:
+            for index, source in enumerate(sources):
+                before = io.row('entity', source.registry_entry.id)
+                after = dict(before, entity_id=f'sensor.union_result_{index}')
+                change = native.PreparedRegistryChange('entity', before['id'], json.dumps(before), json.dumps(after))
+                changes.append(change)
+                source.renaming = True
+                io.mutate(change, after)
+                await source.entered.wait()
+                matches = [task for task in asyncio.all_tasks(hass.loop)
+                    if task is not asyncio.current_task() and any(
+                        frame.f_code is Entity._async_process_registry_update_or_remove.__code__
+                        and frame.f_locals.get('self') is source for frame in _await_frames(task))]
+                self.assertEqual(len(matches), 1)
+                callbacks.append(matches[0])
+            dev_change = native.PreparedRegistryChange('device', device.id, '{}', '{}')
+            settle = asyncio.create_task(io.settle_many([changes[0], dev_change]))
+            await asyncio.sleep(0)
+            self.assertFalse(settle.done())
+            settle.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await settle
+            self.assertFalse(callbacks[0].cancelled())
+            self.assertFalse(callbacks[1].cancelled())
+            settle = asyncio.create_task(io.settle_many([changes[0], dev_change]))
+            await asyncio.sleep(0)
+            sources[0].release.set()
+            await callbacks[0]
+            self.assertFalse(settle.done())
+            sources[1].release.set()
+            await settle
+            self.assertTrue(callbacks[1].done())
+            self.assertFalse(callbacks[2].done())
+        finally:
+            for source in sources:
+                source.release.set()
+            if settle is not None:
+                await asyncio.gather(settle, return_exceptions=True)
+            await asyncio.gather(*callbacks, return_exceptions=True)
