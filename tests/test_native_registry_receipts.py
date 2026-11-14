@@ -56,7 +56,7 @@ class MemoryDurable:
             raise OSError('synthetic lost save acknowledgement')
 
 
-async def fixture(padding=0):
+async def fixture(padding=0, deleted_count=0):
     data = [
         {'entities': [{'id': 'one', 'entity_id': 'sensor.one', 'name': 'One',
                        'modified_at': 'original', 'opaque': {'keep': [False, 1.0]}},
@@ -71,6 +71,10 @@ async def fixture(padding=0):
         {'entries': [{'entry_id': 'entry', 'options': {'foreign': True},
                       'subentries': [{'subentry_id': 'nested', 'data': {'keep': 1}}]}]},
     ]
+    if deleted_count:
+        data[0]['deleted_entities'] = [dict(id=f'deleted-{i:024d}',
+            **{f'field_{field:02d}': 'x' * 9 for field in range(28)})
+            for i in range(deleted_count)]
     data[0]['entities'][2]['padding'] = 'x' * padding
     data[1]['devices'][1]['padding'] = 'x' * padding
     data[2]['entries'][0]['padding'] = 'x' * padding
@@ -226,6 +230,105 @@ class RegistryReceiptTests(unittest.IsolatedAsyncioTestCase):
         state._documents['core.entity_registry']['data']['entities'][0]['opaque']['keep'].append('drift')
         self.assertFalse(chain.matches_input_state(state))
         self.assertFalse(chain.matches_input_state(state, documents_only=True))
+
+    async def test_large_state_inputs_guard_heartbeat(self):
+        import asyncio
+        from time import monotonic
+        from homeassistant import block_async_io
+        from unittest.mock import patch
+        binding = importlib.import_module(PACKAGE + '.native_template_state_binding')
+        f = await fixture(deleted_count=37_275)
+        self.assertGreater(len(f['observations'][0].raw), 24_000_000)
+        self.assertLess(len(f['observations'][0].raw), 32 * 1024 * 1024)
+        chain = f['chain']
+        state = chain.reconstruct_inputs()
+        times = []
+        running = True
+        async def heartbeat():
+            while running:
+                times.append(monotonic())
+                await asyncio.sleep(0.05)
+        ticker = asyncio.create_task(heartbeat())
+        await asyncio.sleep(0)
+        self.assertFalse(block_async_io._BLOCKED_CALLS.calls)
+        try:
+            with patch.object(block_async_io, '_IN_TESTS', False):
+                block_async_io.enable()
+            for _ in range(4):
+                self.assertIs(binding._state_inputs(chain, state), state)
+                await asyncio.sleep(0.06)
+        finally:
+            running = False
+            await ticker
+            for row in block_async_io._BLOCKED_CALLS.calls:
+                setattr(row.object, row.function, row.original_func)
+            block_async_io._BLOCKED_CALLS.calls.clear()
+        gap = max(b - a for a, b in zip(times, times[1:]))
+        print(f'large_guard_bytes={len(f["observations"][0].raw)} rows=37275 heartbeat_max_seconds={gap:.3f}')
+        self.assertLess(gap, 2.0)
+
+    async def test_state_inputs_guard_compares_without_copy_and_rejects_drift(self):
+        from unittest.mock import patch
+        binding = importlib.import_module(PACKAGE + '.native_template_state_binding')
+        f = await fixture(padding=25)
+        chain = f['chain']
+        state = chain.reconstruct_inputs()
+        with patch.object(receipts.AcceptedInputState, '__init__', side_effect=AssertionError('copy')), \
+             patch.object(receipts.AcceptedInputState, 'documents', side_effect=AssertionError('copy')), \
+             patch.object(chain, 'accepted_documents', side_effect=AssertionError('copy')):
+            self.assertIs(binding._state_inputs(chain, state), state)
+        _, documents = binding._state_inputs(chain, state, _with_documents=True)
+        documents['core.entity_registry']['data']['entities'].clear()
+        self.assertIs(binding._state_inputs(chain, state), state)
+        for field in ('head', 'source', 'documents'):
+            changed = chain.reconstruct_inputs()
+            if field == 'head':
+                changed.head = '0' * 64
+            elif field == 'source':
+                changed._sources['.storage/core.entity_registry'][0] = '0' * 64
+            else:
+                changed._documents['core.entity_registry']['data']['entities'].clear()
+            with self.subTest(field=field), self.assertRaises(Exception):
+                binding._state_inputs(chain, changed)
+        chain.store.rows[chain.root_id]['payload']['schema'] = -1
+        with self.assertRaises(receipts.RegistryReceiptError):
+            binding._state_inputs(chain, state)
+
+    async def test_state_inputs_pending_intent_keeps_existing_fences(self):
+        from unittest.mock import patch
+        binding = importlib.import_module(PACKAGE + '.native_template_state_binding')
+        f = await fixture()
+        chain = f['chain']
+        state = chain.reconstruct_inputs()
+        await chain.begin(context(f, 0, ['intent', 'pending', 'pending']), f['observations'])
+        with patch.object(state, 'assert_current') as physical:
+            self.assertIs(binding._state_inputs(chain, state), state)
+            physical.assert_called_once()
+        original_read = chain.store.read
+        def foreign_intent(key):
+            row = original_read(key)
+            if key == chain.active.reference[0]:
+                row['payload']['kind'] = 'yaml_intent'
+            return row
+        with patch.object(chain.store, 'read', side_effect=foreign_intent):
+            with self.assertRaises(Exception):
+                binding._state_inputs(chain, state)
+        chain.active = None
+        with self.assertRaises(receipts.RegistryReceiptError):
+            binding._state_inputs(chain, state)
+
+    async def test_state_inputs_expired_live_hook_refuses(self):
+        from unittest.mock import patch
+        binding = importlib.import_module(PACKAGE + '.native_template_state_binding')
+        f = await fixture()
+        chain = f['chain']
+        state = chain.reconstruct_inputs()
+        def expired():
+            raise ValueError('expired live input')
+        state._live_check = expired
+        with patch.object(chain, 'live_yaml_inputs', return_value=state):
+            with self.assertRaisesRegex(ValueError, 'expired live input'):
+                binding._state_inputs(chain, state, live_intent=object(), live_context=object())
 
     async def test_input_comparison_rejects_head_source_and_original_drift(self):
         f = await fixture()

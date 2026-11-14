@@ -219,7 +219,7 @@ def _state_inputs(chain, input_state=None, *, live_intent=None, live_context=Non
               'template_state_accepted_head_changed')
         states, head, _, _, pending = chain._reconstruct()
         if pending is None:
-            _need(input_state.same_evidence(chain.reconstruct_inputs()),
+            _need(chain.matches_input_state(input_state),
                   'template_state_accepted_head_changed')
         else:
             # This is a held pre-intent state, never a fresh reconstruction.
@@ -245,11 +245,11 @@ def _state_inputs(chain, input_state=None, *, live_intent=None, live_context=Non
               'template_state_live_input_changed')
         actual._bound(chain.original_receipt)
     input_state._bound(chain.original_receipt)
-    state_documents = input_state.documents()
-    documents = chain.accepted_documents()
-    _need(state_documents == documents,
+    _need(chain.matches_input_state(input_state, documents_only=True),
           'template_state_accepted_documents_changed')
-    return (input_state, documents) if _with_documents else input_state
+    # Callers requesting an image receive a detached copy; the common guard
+    # only needs the comparison above and must not copy entire registry trees.
+    return (input_state, chain.accepted_documents()) if _with_documents else input_state
 
 
 def accepted_state_prefix(chain, program, *, input_state=None, live_intent=None,

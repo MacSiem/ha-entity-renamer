@@ -84,15 +84,17 @@ class NativeOwnIDRegistryReadback(NativeTemplateStateYAMLRuntimeReadback):
         current = {path: row[0] for path, row in state.sources().items()
                    if not path.startswith('.storage/')}
         _need(current == original, 'own_registry_yaml_graph_changed')
-        snapshot = sample_state_bindings(runtime, self.program, prefix, 'original',
-                                         self.chain.accepted_documents())
+        # One detached accepted image serves this synchronous sample. No image
+        # is retained across a guard, await, or later receipt reconstruction.
+        documents = self.chain.accepted_documents()
+        snapshot = sample_state_bindings(runtime, self.program, prefix, 'original', documents)
         # Empty ID mappings still have a real before/after for selected names.
         # Use the accepted registry image of the last prepared change, bound to
         # its UUID; every selected row is independently checked by the bridge.
         change = self.change
         key = 'core.entity_registry' if change.kind == 'entity' else 'core.device_registry'
         family = 'entities' if change.kind == 'entity' else 'devices'
-        rows = [row for row in self.chain.accepted_documents()[key]['data'][family]
+        rows = [row for row in documents[key]['data'][family]
                 if row.get('id') == change.identity]
         _need(len(rows) == 1, 'own_registry_identity_changed')
         fields = {key for key in set(change.before) | set(change.after)
