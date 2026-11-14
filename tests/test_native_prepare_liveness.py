@@ -58,7 +58,10 @@ script:
             self.assertTrue(bound.verified, bound.blockers)
             observed = await module('native_discovery_inputs').async_observe_discovery_inputs(hass, guard=lambda: None)
             sampler = binding._RuntimeSourceSampler.bind(evidence, observed)
-            sample = sampler.sample(hass, evidence, observed)
+            proof = module('native_unload_code_proof')
+            with patch.object(proof, 'prove_methods', wraps=proof.prove_methods) as proofs:
+                sample = sampler.sample(hass, evidence, observed)
+            self.assertEqual(proofs.call_count, 1, 'one Script proof per projection')
             self.assertFalse(sample[1])
             for _ in range(3):
                 self.assertEqual(sampler.sample(hass, evidence, observed), sample)
@@ -76,7 +79,9 @@ script:
                 setattr(row.object, row.function, row.original_func)
             block_async_io._BLOCKED_CALLS.calls.clear()
         self.assertGreater(len(tick_times), 2)
-        self.assertLess(max(b - a for a, b in zip(tick_times, tick_times[1:])), 2.0)
+        largest_gap = max(b - a for a, b in zip(tick_times, tick_times[1:]))
+        print(f'native_liveness_heartbeat_max_seconds={largest_gap:.3f}')
+        self.assertLess(largest_gap, 2.0)
 
     async def test_proof_reads_file_once_and_rechecks_source_and_code(self):
         import hashlib
@@ -127,3 +132,21 @@ script:
         with self.assertLogs(server.__name__, level='WARNING') as logs:
             server._log_registry_mismatch(actual, server.Position.AFTER)
         self.assertIn('reason=scoped_evidence_incomplete position=unknown wanted=after', logs.output[0])
+
+    async def test_registry_mismatch_still_refuses(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        server = importlib.import_module(fixture.fixture.fixtures.PACKAGE + '.native_template_state_server')
+        registry = importlib.import_module(fixture.fixture.fixtures.PACKAGE + '.native_registry')
+        evidence = registry.RegistryEvidence('unknown', True, False, None, None, None,
+                                             'scoped_evidence_incomplete')
+        subject = SimpleNamespace(hass=self.f.hass, recorder=object(),
+            chain=SimpleNamespace(accepted_documents=object()), registry_changes=(object(),),
+            _scope=lambda: None)
+        bridge = SimpleNamespace(inspect=AsyncMock(return_value=evidence))
+        with patch.object(registry, 'NativeRegistryBridge', return_value=bridge):
+            with self.assertLogs(server.__name__, level='WARNING') as logs:
+                with self.assertRaisesRegex(server.Refused, 'source_identity_or_history_changed'):
+                    await server.NativeTemplateStateServer._check_common(subject, False, initial=True)
+        self.assertIn('reason=scoped_evidence_incomplete position=unknown wanted=before', logs.output[0])
+        bridge.inspect.assert_awaited_once()
