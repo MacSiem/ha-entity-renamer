@@ -204,7 +204,9 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
             capabilities = ({'fixture_key': f'fixture-{local}', 'fixture_enabled': local % 2 == 0}
                             if not deleted and local < 1730 else None)
             row = self.f.entity.async_get_or_create('sensor', 'input_boolean', f'fixture-{i:05d}-' + 'u' * 18,
-                config_entry=entries[i % len(entries)] if i % 5 else None,
+                config_entry=(entries[local % len(entries)] if not deleted and local < 52
+                              else entries[i % len(entries)] if i % 5 else None),
+                device_id=(devices[local].id if not deleted and local < 52 else None),
                 suggested_object_id=f'scale_row_{i:05d}_' + 'x' * 22,
                 disabled_by=er.RegistryEntryDisabler.USER, get_initial_options=options,
                 capabilities=capabilities, original_name=None if deleted else f'Fixture registry row {i}')

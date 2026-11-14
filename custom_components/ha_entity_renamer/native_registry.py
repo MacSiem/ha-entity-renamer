@@ -161,6 +161,31 @@ class NativeRegistryIO:
         This is not persistence or arbitrary integration-background completion:
         Store save/raw disk and the independent runtime/source probes still run.
         """
+        identities = None
+        if prepared is not None:
+            identities = ({prepared.identity} if prepared.kind == 'entity' else
+                          {row['id'] for row in self.document('entity')['entities']
+                           if row.get('device_id') == prepared.identity})
+        await self._settle_identities(identities)
+
+    def device_memberships(self, devices):
+        memberships = {identity: set() for identity in devices}
+        for row in self.registries['entity'].entities.values():
+            if row.device_id in memberships:
+                memberships[row.device_id].add(row.id)
+        return memberships
+
+    async def settle_many(self, changes):
+        # Resolve each selected entity and every entity owned by selected devices;
+        # the native task scan below fences that complete UUID union.
+        identities = {change.identity for change in changes if change.kind == 'entity'}
+        devices = {change.identity for change in changes if change.kind == 'device'}
+        if devices:
+            for members in self.device_memberships(devices).values():
+                identities.update(members)
+        await self._settle_identities(identities)
+
+    async def _settle_identities(self, identities):
         import asyncio
         from pathlib import Path
         import homeassistant
@@ -191,11 +216,6 @@ class NativeRegistryIO:
         if (__version__ in ('2026.11.0', '2026.11.1')
                 and entity_module._ADD_REMOVE_METHODS != readd_methods):
             raise RegistryConflict('native_registry_readd_policy_changed')
-        identities = None
-        if prepared is not None:
-            identities = ({prepared.identity} if prepared.kind == 'entity' else
-                          {row['id'] for row in self.document('entity')['entities']
-                           if row.get('device_id') == prepared.identity})
         current = asyncio.current_task()
         observed = set()
         while True:
@@ -565,10 +585,16 @@ class NativeRegistryBridge:
         if len(combined) != len(mappings) or len(set(combined.values())) != len(combined):
             raise RegistryConflict('duplicate_registry_mapping')
 
+        device_ids = {c.identity for c in changes if c.kind == 'device'}
+        membership = getattr(self.io, 'device_memberships', None)
+        original_members = membership(device_ids) if membership is not None else None
+
         def fence():
             guard()
             for change in changes:
                 self._fresh(change, change.before, lambda: None)
+            if membership is not None and membership(device_ids) != original_members:
+                raise RegistryConflict('device_entity_membership_changed')
 
         fence()
         baselines, histories = [], []
@@ -584,14 +610,26 @@ class NativeRegistryBridge:
                    if c.mapping else replace(c, recorder_before_json='{}', history_before_json='{}')
                    for c in changes for pair in ([next(iterator)] if c.mapping else [(None, None)])]
         capture = getattr(self.io, 'capture_runtime', None)
-        if capture is not None:
-            for i, change in enumerate(changes):
-                await self.io.settle(change)
+        settle_many = getattr(self.io, 'settle_many', None)
+        async def settle_batch():
+            if settle_many is not None:
+                await settle_many(changes)
                 fence()
-                changes[i] = replace(change, runtime_before_json=capture(change))
-        for change in changes:
-            await self.io.settle(change)
+            else:
+                for item in changes:
+                    await self.io.settle(item)
+                    fence()
+
+        if capture is not None:
+            await settle_batch()
             fence()
+            for i, change in enumerate(changes):
+                changes[i] = replace(change, runtime_before_json=capture(change))
+                if change.kind == 'device' or not change.mapping:
+                    await asyncio.sleep(0)
+                    fence()
+        await settle_batch()
+        fence()
         current = None
         if mappings:
             current = await self.recorder.snapshot(combined)
