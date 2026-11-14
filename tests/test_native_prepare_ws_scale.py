@@ -191,10 +191,11 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
             if settle and not injected:
                 injected = True
                 hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 0.05)
+                callback = on_settle
                 def changed(value):
                     path = self.f.root / 'configuration.yaml'
                     path.write_bytes(path.read_bytes() + b'\n# foreign change\n')
-                    on_settle(value)
+                    callback(value)
                 on_settle = changed
             return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
         async def refresh(): pass
