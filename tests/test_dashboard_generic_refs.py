@@ -154,5 +154,33 @@ class GenericDashboardNativeIntegration(unittest.TestCase):
             with self.assertRaises(ValueError):
                 qualify_dashboard_yaml(plan, 'board.yaml', raw + b'\n', mapping)
 
+    def test_yaml_alias_include_and_empty_sources_fail_closed(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from custom_components.ha_entity_renamer.yaml_plan import plan_yaml, YAMLPlanError
+        mapping = {'sensor.old': 'sensor.new'}
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'configuration.yaml').write_text('{}\n')
+            board = root / 'board.yaml'
+            board.write_text('views:\n- cards:\n  - type: custom:x\n'
+                             '    entity: &item sensor.old\n    title: *item\n')
+            p = plan_yaml(root, mapping, yaml_dashboards=('board.yaml',))
+            self.assertFalse(p.ready)
+            self.assertIn('dashboard_yaml_semantics_mismatch', {i.code for i in p.issues})
+            board.write_text('views: !include other.yaml\n')
+            (root / 'other.yaml').write_text('[]\n')
+            p = plan_yaml(root, mapping, yaml_dashboards=('board.yaml',))
+            self.assertFalse(p.ready)
+            self.assertIn('dashboard_yaml_semantics_unavailable', {i.code for i in p.issues})
+            board.write_text('')
+            p = plan_yaml(root, mapping, yaml_dashboards=('board.yaml',))
+            self.assertFalse(p.ready)
+            self.assertIn('dashboard_yaml_semantics_unavailable', {i.code for i in p.issues})
+            (root / 'configuration.yaml').write_text('automation: !include board.yaml\n')
+            board.write_text('views: []\n')
+            with self.assertRaises(YAMLPlanError):
+                plan_yaml(root, mapping, yaml_dashboards=('board.yaml',))
+
 
 if __name__ == '__main__': unittest.main()

@@ -1126,7 +1126,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
             return keys
 
         def issue(node, code):
-            issues.add(Issue(path, node.start_mark.line + 1, code))
+            issues.add(Issue(path, 0 if node is None else node.start_mark.line + 1, code))
 
         def walk(node, depth=0, field=False, parent_key="", lovelace=False,
                  variable_definition=False, script_root=False):
