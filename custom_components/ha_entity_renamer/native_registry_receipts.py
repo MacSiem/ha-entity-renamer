@@ -406,6 +406,32 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                 (ref, _freeze_json(self.preparations.plans[ref])) for ref in refs)
             self._powercalc_original_objects = (self.plan, self.original_receipt, self.baseline)
 
+        self._dashboard_preparation_snapshot = None
+        if dashboard_changes:
+            from .native_template_yaml_server import _baseline_stamp
+            refs = tuple(dict.fromkeys((plan.native_inputs[0], *(step.prepared_ref for step in plan.steps))))
+            self._dashboard_preparation_snapshot = (
+                tuple((ref, _freeze_json(self.preparations.plans[ref])) for ref in refs),
+                _freeze_json(asdict(plan)), _freeze_json(asdict(receipt)),
+                _baseline_stamp(self.baseline), _freeze_json(self.root['bindings']))
+
+    def _dashboard_preparations_unchanged(self, index):
+        """Reuse semantic validation only while every ORIGINAL input is intact."""
+        saved = self._dashboard_preparation_snapshot
+        if saved is None:
+            return False
+        from .native_template_yaml_server import _baseline_stamp
+        self.preparations._ready()
+        rows, plan, receipt, baseline, bindings = saved
+        if (not _exact_json_equal(asdict(self.plan), plan)
+                or not _exact_json_equal(asdict(self.original_receipt), receipt)
+                or _baseline_stamp(self.baseline) != baseline
+                or not _exact_json_equal(self.root['bindings'], bindings)
+                or any(not _exact_json_equal(self.preparations.plans.get(ref), row)
+                       for ref, row in rows)):
+            _fail('dashboard_original_preparation_changed')
+        return True
+
     def _powercalc_preparations_unchanged(self):
         saved = self._powercalc_preparation_snapshot
         if saved is None:
@@ -541,7 +567,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                     or _digest(json.loads(_json(asdict(change)))) != binding['dashboard_digest']
                     or change != self.changes[index]):
                 _fail('dashboard_preparation_mismatch')
-            validate_prepared(self, change)
+            if not self._dashboard_preparations_unchanged(index):
+                validate_prepared(self, change)
             return change
         if self.plan.steps[index].adapter == 'energy':
             from .energy_native import PreparedEnergy
