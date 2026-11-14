@@ -40,7 +40,8 @@ class TemplateSecretScopeTests(unittest.TestCase):
             {'configuration.yaml': 'template: [{light: [{unique_id: x, state: !secret secret_name}]}]'},
         ]
         for files in cases:
-            with self.subTest(files=list(files)), self.assertRaises(ValueError) as error:
+            with self.subTest(files=list(files)), self.assertRaisesRegex(
+                    ValueError, 'template_state_config_program_secret_scope_unverified') as error:
                 self.run_scope(files)
             self.assertNotIn('secret_name', str(error.exception))
             self.assertNotIn('PRIVATE_ENV', str(error.exception))

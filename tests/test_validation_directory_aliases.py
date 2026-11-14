@@ -89,6 +89,7 @@ class DirectoryAliasTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(validation.YAMLValidationError) as error:
             await validation.async_validate_proposed_with_template_state_sources(
                 hass, plan, {'sensor.old': 'sensor.new'}, self.parent, with_state_program=True)
+        self.assertIn('SourceLedgerError', str(getattr(error.exception, '__notes__', ())))
         self.assertNotIn("states('sensor.old')", str(error.exception))
         self.assertNotIn("states('sensor.old')", str(getattr(error.exception, '__notes__', ())))
 
