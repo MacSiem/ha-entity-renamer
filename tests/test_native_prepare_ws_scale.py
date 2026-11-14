@@ -2,6 +2,7 @@
 import asyncio
 from dataclasses import replace
 import json
+import os
 from time import monotonic
 import unittest
 from unittest.mock import patch
@@ -149,7 +150,20 @@ async def main():
             except asyncio.CancelledError: pass
 asyncio.run(main())'''
         print(f'ws_fixture_bytes={len(raw)} entities=3156 deleted=37224 devices=261 config_entries=105', flush=True)
+        only = os.environ.get('RENAMER_WS_CASE')
+        original_prepare = type(runtime).native_yaml_prepare
+        async def diagnosed(subject, *args, **kwargs):
+            try:
+                return await original_prepare(subject, *args, **kwargs)
+            except Exception as error:
+                print(f'ws_synthetic_prepare_refusal={type(error).__name__}:{error}', flush=True)
+                raise
+        prepare_patch = patch.object(type(runtime), 'native_yaml_prepare', diagnosed)
+        prepare_patch.start()
+        self.addCleanup(prepare_patch.stop)
         for label, payload in zip(('FIRST1', 'BATCH502'), cases):
+            if only and label != only:
+                continue
             process = await asyncio.create_subprocess_exec('python3', '-c', client,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             data = json.dumps(dict(url=f'ws://127.0.0.1:{hass.http.server_port}/api/websocket',
