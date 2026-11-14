@@ -13,6 +13,16 @@ import test_native_retained_name_fields as retained
 @unittest.skipUnless(auth.backend_fixture.activation.fixtures.HAS_HA, 'native HA required')
 class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
     restored_source = retained.NativeRetainedNameFieldsTests.restored_source
+    # Match the public backend fixture: install its bundled card and let the
+    # real frontend configure HA editors exactly once.
+    native_frontend_config = True
+    async def _before_loader(self, hass, root):
+        import shutil
+        from pathlib import Path
+        await auth.backend_fixture.NativeBackendLifecycleTests._before_loader(self, hass, root)
+        target = self.installed_component / 'www/ha-entity-renamer.js'
+        target.parent.mkdir(exist_ok=True)
+        shutil.copyfile(Path(__file__).resolve().parents[1] / 'ha-entity-renamer.js', target)
 
     async def test_runtime_session_drift_at_resolve_await_refuses_review(self):
         runtime, mapping, uuids, original, device = await self.restored_source()
