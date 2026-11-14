@@ -43,6 +43,8 @@ candidate. They do not establish compatibility with every setup or combination.
 | Versions | Tested scope and limits |
 |---|---|
 | Home Assistant Core 2026.11.1; Powercalc 1.27.0 | A mixed real-card flow applied a reviewed batch and a separately reviewed fresh inverse. Product checks covered the selected registry changes, Powercalc, Energy, Utility Meter, HomeKit, Template, Automation, Script, dashboard and history consumers. |
+| Core 2026.11.1 (MQTT, REST and Command Line built-ins) | Targeted native tests cover qualified independent coexistence and refusal of related, dynamic or changed configuration. They do not establish migration of these integrations’ entities or full end-to-end coverage. |
+| Core 2026.10.4 | Targeted admission without these three integrations was tested; their coexistence was not tested on this version. |
 | Core 2026.10.4 and 2026.11.1 | Targeted Energy cost continuity checks included transiently unavailable metadata. These checks do not establish the full mixed-flow result on 2026.10.4. |
 | Core 2026.11.0 | Historical scoped native testing and source equivalence are available; no exact latest-candidate pass is claimed. |
 | Core 2025.6.0 | Read-only behavior and refusal of an active card were checked. Migration support was not tested or established. |
@@ -107,7 +109,10 @@ results remain limited to the tested configurations.
 The reviewed flow covers selected entity/device registry changes and recognized
 references, including qualified Template, Automation, Script, dashboard,
 helper, integration and Powercalc/Energy cases. Coverage is determined for the
-particular plan, not for an entire integration family. Unsupported or dynamic
+particular plan, not for an entire integration family. On Core 2026.11.1,
+qualified independent MQTT, REST and Command Line configurations can coexist
+with a selected plan; unknown shapes and references to selected IDs are refused.
+This does not migrate those integrations’ entities. Unsupported or dynamic
 cases that cannot be safely admitted are refused; the review also identifies
 scan limitations. Custom or external consumers may not be discoverable, so
 check them separately. Tests cover multiple Home Assistant versions and

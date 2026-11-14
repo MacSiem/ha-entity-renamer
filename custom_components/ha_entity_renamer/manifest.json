@@ -2,11 +2,14 @@
   "domain": "ha_entity_renamer",
   "name": "Entity Renamer",
   "after_dependencies": [
+    "command_line",
     "config",
     "energy",
     "homekit",
     "integration",
+    "mqtt",
     "recorder",
+    "rest",
     "template",
     "trace",
     "utility_meter"
