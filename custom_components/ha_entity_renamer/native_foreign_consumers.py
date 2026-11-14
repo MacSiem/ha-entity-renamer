@@ -198,7 +198,7 @@ def _python_source(raw, mapping):
                 _need(isinstance(parents[id(node)], ast.Subscript))
             if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == source_name:
                 parent = parents[id(node)]
-                _need(isinstance(parent, ast.Subscript) or (
+                _need((isinstance(parent, ast.Subscript) and isinstance(parent.ctx, ast.Load)) or (
                     isinstance(parent, ast.Attribute) and parent.attr == 'get') or (
                     isinstance(parent, ast.Assign) and len(parent.targets) == 1
                     and isinstance(parent.targets[0], ast.Name) and parent.targets[0].id == cfg))

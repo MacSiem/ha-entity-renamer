@@ -159,6 +159,8 @@ def report(con, room, start):
             source.replace('sensor.other', 'sensor.old'),
             source.replace('    return con.execute', "    entity_id = 'sensor.' + room\n    return con.execute"),
             source.replace('    cfg = ROOMS[room]', "    alias = ROOMS.get(room)\n    alias['item'] = 'sensor.' + room\n    cfg = ROOMS[room]"),
+            source.replace('    cfg = ROOMS[room]', "    ROOMS[room]['item'] = 'sensor.' + room\n    cfg = ROOMS[room]"),
+            source.replace('    cfg = ROOMS[room]', "    ROOMS[room].update({'item': 'sensor.' + room})\n    cfg = ROOMS[room]"),
         ):
             with self.assertRaises(tx.Refused):
                 module._python_source(changed.encode(), mapping)
