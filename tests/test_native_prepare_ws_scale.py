@@ -45,7 +45,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         with patch.object(server, 'prepare', classmethod(capture)), \
              patch.object(store_class, 'async_resolve_composition', drift):
             with self.assertRaises(self.module('transaction').Refused):
-                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin', entity_names={old: 'Reviewed fixture'},
                     guard=lambda: None, refresh=refresh)
         self.assertEqual(len(sessions), 1)
         self.assertFalse(runtime.reviews)
@@ -117,7 +117,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                 connection.async_handle({'id': 1, 'type': 'http/config/promote'})
                 self.assertTrue((await asyncio.wait_for(unused, 10))['success'])
         old, new = next(iter(mapping.items()))
-        cases = [dict(entities=[dict(entity_id=old, new_entity_id=new)]),
+        cases = [dict(entities=[dict(entity_id=old, new_entity_id=new, name='Reviewed fixture')]),
                  dict(entities=[dict(entity_id=x, new_entity_id=x + '_renamed') for x in selected],
                       devices=[dict(device_id=x.id, name_by_user='Reviewed ' + str(i)) for i,x in enumerate(devices[:52])])]
         client = r'''import asyncio,json,sys,time,websockets
