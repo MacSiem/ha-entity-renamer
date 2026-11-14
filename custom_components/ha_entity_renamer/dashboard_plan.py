@@ -649,7 +649,7 @@ def plan_dashboard(config, mapping):
             if '{{' in value or '{%' in value:
                 scope(path, Syntax.JINJA)
             elif '[[[' in value:
-                expressions.append((path, value))
+                expressions.append((path, value, variables))
             elif key not in _TEXT_FIELDS:
                 tokens = {m.group(1) for m in _ENTITY_TOKEN.finditer(value)}
                 if tokens & selected:
@@ -660,8 +660,8 @@ def plan_dashboard(config, mapping):
     walk(clean)
     result = plan_references(clean, mapping, Context(Consumer.DASHBOARD, tuple(scopes)))
     changes = list(result.changes)
-    for path, original in expressions:
-        updated, error = plan_button_expression(original, mapping)
+    for path, original, variables in expressions:
+        updated, error = plan_button_expression(original, mapping, variables)
         if error:
             mark(path, error, 'JavaScript reference is outside the supported static forms')
         elif updated != original:

@@ -47,7 +47,50 @@ _CURRENT_ENTITY_TERNARY = re.compile(
     + r"\s*;?\s*\]\]\]\Z", re.ASCII)
 
 
-def plan_button_expression(text, mapping):
+_JS_QUOTED = re.compile(r"'[^'\\\\]*'|\"[^\"\\\\]*\"")
+_JS_ENTITY_TOKEN = re.compile(r'(?<![A-Za-z0-9_.])([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![A-Za-z0-9_.])', re.ASCII)
+_JS_PREFIX_LOOKUP = (r"states\[\(S\+\(\{S:S,S:S\}\[user\.id\]\|\|S\)\)\]\?\.state")
+_JS_FINITE_PREFIX = tuple(re.compile(x, re.ASCII) for x in (
+    r"\[\[\[return\(" + _JS_PREFIX_LOOKUP + r"===S\)\?S:S;?\]\]\]",
+    r"\[\[\[constselected=" + _JS_PREFIX_LOOKUP + r";returnS\+\(selected\|\|S\);?\]\]\]",
+    r"\[\[\[constselected=" + _JS_PREFIX_LOOKUP + r";constcount=variables\.[A-Za-z_$][\w$]*\[selected\];returncount===undefined\?S:T;?\]\]\]",
+))
+_JS_LIST_LOOKUP = re.compile(
+    r"\[\[\[returnvariables\.source_entities\.every\(id=>Number\.isFinite\(Number\.parseFloat\(states\[id\]\?\.state\)\)\)\?S:S;?\]\]\]", re.ASCII)
+
+
+def _unchanged_finite_expression(text, variables, mapping):
+    """Prove two small expression grammars without executing JavaScript."""
+    selected = set(mapping) | set(mapping.values())
+    if any(m.group(1) in selected for m in _JS_ENTITY_TOKEN.finditer(text)):
+        return False
+    # Template literal output may interpolate only the previously read scalar
+    # and a local count. Any other expression could perform another lookup.
+    def template(match):
+        body = match.group(1)
+        body = body.replace('${selected}', '').replace('${count}', '')
+        return 'T' if '${' not in body and '\\' not in body else match.group(0)
+    normalized = re.sub(r'`([^`]*)`', template, text)
+    literals = []
+    def quote(match):
+        literals.append(match.group(0)[1:-1])
+        return 'S'
+    normalized = _JS_QUOTED.sub(quote, normalized)
+    normalized = re.sub(r'\s+', '', normalized)
+    if _JS_LIST_LOOKUP.fullmatch(normalized):
+        values = variables.get('source_entities') if type(variables) is dict else None
+        return (type(values) is list and all(type(item) is str for item in values)
+                and not any(item in mapping.values() and item not in mapping for item in values))
+    if any(pattern.fullmatch(normalized) for pattern in _JS_FINITE_PREFIX):
+        if not literals or not re.fullmatch(r'[a-z_][a-z0-9_]*\.[a-z0-9_]*', literals[0], re.ASCII):
+            return False
+        return not any(identity.startswith(literals[0]) for identity in selected)
+    return False
+
+
+def plan_button_expression(text, mapping, variables=None):
+    if _unchanged_finite_expression(text, variables, mapping):
+        return text, None
     if _CURRENT_ENTITY_TERNARY.fullmatch(text):
         if any(m['id'] in mapping or m['id'] in mapping.values() for m in _ENTITY_LITERAL.finditer(text)):
             return text, 'unsupported_button_javascript'
