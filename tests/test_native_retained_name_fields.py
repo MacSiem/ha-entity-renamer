@@ -19,7 +19,7 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
     stimulus = server.NativeTemplateYAMLServerTests.stimulus
 
     async def test_selected_name_and_id_retained_fresh_apply_inverse(self):
-        runtime, mapping, uuids, original = await self.data(variant='sensor')
+        runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
         from homeassistant.helpers.json import _orjson_bytes_default_encoder
@@ -60,7 +60,7 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         await self.stimulus(11)
 
     async def test_source_name_edit_after_review_refuses_without_overwriting(self):
-        runtime, mapping, uuids, original = await self.data(variant='sensor')
+        runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
         original_name = self.f.entity.async_get(old).name
@@ -87,6 +87,30 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         self.f.entity.async_update_entity(old, name=original_name)
         await hass.async_block_till_done()
         await self._flush_documents()
+
+    async def test_dependent_automation_name_and_id_refuses_without_effect(self):
+        runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        path = self.f.root / 'configuration.yaml'
+        text = path.read_text().replace('variables: {retained: unrelated}',
+            "variables: {retained: \"{{ states('" + old + "') }}\"}", 1)
+        path.write_text(text)
+        await hass.services.async_call('automation', 'reload', {}, blocking=True)
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        before = path.read_bytes()
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_yaml_prepare(hass, mapping,
+                entity_names={old: 'Reviewed source'}, actor_id='synthetic-admin',
+                guard=lambda: None, refresh=refresh)
+        self.assertEqual((self.f.entity.async_get(old).id, self.f.entity.async_get(old).name),
+                         (uuids[old], None))
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
     async def test_id_name_name_only_and_device_in_one_retained_plan(self):
         from types import MappingProxyType

@@ -566,8 +566,20 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 if transition is not None:
                     transition.close_preserving_enabled()
         if self.entity_names or self.device_names:
+            # Bound runtime rows cover the entire automation/script inventory,
+            # including sources unrelated to this operation.  A non-mixed plan
+            # has no changed automation/script sources; admit only combined
+            # ID/name updates for ordinary registry owners on that path.  The
+            # prepared bridge below still binds each exact UUID and fields.
+            combined_registry_names = (not self.mixed_state and not self.device_names
+                and bool(self.entity_names) and set(self.entity_names) <= set(self.mapping)
+                and all(len(hits := [row for row in source_rows
+                                     if row.get('entity_id') == entity_id]) == 1
+                        and hits[0].get('platform') not in ('template', 'automation', 'script')
+                        for entity_id in self.mapping))
             _need(controlled_reload or (self.mixed_state and dashboard_storage is not None and mixed_source_names)
-                  or not self.consumers.runtime_sample[0], 'selected_names_dependent_lifecycle_unsupported')
+                  or combined_registry_names or not self.consumers.runtime_sample[0],
+                  'selected_names_dependent_lifecycle_unsupported')
         baseline = await async_capture_native_input_baseline(self.hass, self.receipt, guard=self._scope)
         self._scope()
         pc_previous = pc_energy_physical = None
