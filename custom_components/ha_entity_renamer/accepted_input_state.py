@@ -235,6 +235,29 @@ class AcceptedInputState:
     def documents(self):
         return deepcopy(self._documents)
 
+    def non_storage_digests(self):
+        """Return only immutable physical YAML digests."""
+        return {path: row[0] for path, row in self._sources.items()
+                if not path.startswith('.storage/')}
+
+    def matches_observed_inventory(self, observed):
+        return set(self._documents) == {row.key for row in observed.files}
+
+    def matches_observed(self, observed):
+        """Compare native observations internally; never return private documents."""
+        import hashlib
+        import json
+        if set(self._documents) != {row.key for row in observed.files}:
+            return False
+        for row in observed.files:
+            expected = self._sources.get('.storage/' + row.key)
+            if (expected is None
+                    or [hashlib.sha256(row.raw).hexdigest(), *row.identity] != expected[:4]
+                    or (expected[4] is not None and [row.uid, row.gid] != expected[4:])
+                    or json.loads(row.manager_json) != self._documents[row.key]['data']):
+                return False
+        return True
+
     def same_evidence(self, other):
         return (type(other) is AcceptedInputState and self._live_check is None
                 and other._live_check is None and self.original_json == other.original_json

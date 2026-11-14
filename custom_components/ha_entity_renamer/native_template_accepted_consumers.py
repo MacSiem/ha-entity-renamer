@@ -70,16 +70,10 @@ def _source_image(receipt, evidence, state):
 
 
 def _documents(state, observed):
-    sources, documents = state.sources(), state.documents()
-    _need(set(documents) == {row.key for row in observed.files},
+    _need(state.matches_observed_inventory(observed),
           'template_accepted_native_inventory_changed')
-    for row in observed.files:
-        expected = sources.get('.storage/' + row.key)
-        _need(expected is not None
-              and [hashlib.sha256(row.raw).hexdigest(), *row.identity] == expected[:4]
-              and (expected[4] is None or [row.uid, row.gid] == expected[4:])
-              and json.loads(row.manager_json) == documents[row.key]['data'],
-              'template_accepted_native_sources_changed')
+    _need(state.matches_observed(observed),
+          'template_accepted_native_sources_changed')
 
 
 async def async_observe_accepted_template_consumers(hass, chain, evidence, *, guard):

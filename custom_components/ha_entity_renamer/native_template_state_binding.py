@@ -258,9 +258,9 @@ def accepted_state_prefix(chain, program, *, input_state=None, live_intent=None,
     from .native_registry_receipts import RegistryReceiptChain
     from .native_registry import PreparedRegistryChange
     _need(type(chain) is RegistryReceiptChain and type(program) is StateConfigProgram)
-    state, documents = _state_inputs(chain, input_state, live_intent=live_intent,
-                          live_context=live_context, live_calls=live_calls, _with_documents=True)
-    registry = documents['core.entity_registry']['data']['entities']
+    state = _state_inputs(chain, input_state, live_intent=live_intent,
+                          live_context=live_context, live_calls=live_calls)
+    registry = chain.accepted_registry_id_positions()
     known, active, ids, selected_entities, selected_devices = {}, set(), [], [], []
     for index, step in enumerate(chain.plan.steps):
         if step.adapter != 'registry':
@@ -271,12 +271,12 @@ def accepted_state_prefix(chain, program, *, input_state=None, live_intent=None,
         for old, new in change.mapping.items():
             _need(old not in known, 'template_state_registry_mapping_duplicate')
             known[old] = new
-            matches = [row for row in registry if row['id'] == change.identity]
-            _need(len(matches) == 1 and matches[0]['entity_id'] in (old, new),
+            matches = [entity_id for identity, entity_id in registry if identity == change.identity]
+            _need(len(matches) == 1 and matches[0] in (old, new),
                   'template_state_accepted_registry_identity_changed')
-            if matches[0]['entity_id'] == new:
+            if matches[0] == new:
                 active.add(old)
-            ids.append((change.identity, matches[0]['entity_id']))
+            ids.append((change.identity, matches[0]))
     _need(known == dict(program.mapping), 'template_state_original_mapping_changed')
     return StateBindingPrefix(program.sha256, chain.operation_id, chain.plan.fingerprint,
         state.head, frozenset(active), tuple(sorted(ids)),
@@ -447,11 +447,11 @@ def _keyed(runtime, remove, tracker, keys, callback):
     return (id(remove), id(job), id(callbacks), bus_token)
 
 
-def _graph(runtime, entity):
+def _graph(runtime, entity, source_codes):
     """Authenticate native graph without treating RenderInfo as source proof."""
     from homeassistant.helpers.template import RenderInfo
     from .yaml_runtime_observer import _registered_bus_remove
-    info = runtime.graph(entity)
+    info = runtime.graph(entity, source_codes=source_codes)
     event, native = runtime.event, runtime.native
     _need(type(info._info) is dict, 'template_state_complete_render_group_required')
     complete = set(info._info) == set(entity._template_attrs)
@@ -546,6 +546,7 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents, *,
     accepted_rows = documents['core.entity_registry']['data']['entities']
     registry_rows = {r['entity_id']: r for r in accepted_rows if r['platform'] == 'template'}
     rows, inventory, matched, live = [], [], set(), set()
+    source_codes = {}
     if entry_witness is not None:
         from .controlled_template_entry_witness import ControlledTemplateEntryWitness
         _need(type(entry_witness) is ControlledTemplateEntryWitness and entry_witness.hass is hass,
@@ -587,7 +588,7 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents, *,
                 inventory.append(('unaffected', domain, entity_id, id(entity), _fingerprint(cfg)))
                 continue
             runtime.bindings()
-            graph_token = _graph(runtime, entity)
+            graph_token = _graph(runtime, entity, source_codes)
             candidates = []
             for (source_domain, key), (semantic, static) in expected.items():
                 if (source_domain != domain
@@ -672,6 +673,7 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents, *,
               'template_state_coordinator_source_changed')
         seen.add(hits[0][1])
         inventory.append(('coordinator', id(coordinator), hits[0][1], _fingerprint(coordinator.config)))
+    runtime.check_callback_sources(source_codes)
     return StateConsumerSnapshot(prefix, yaml_position, tuple(rows), tuple(inventory),
         (tuple(row.token for row in rows), tuple(inventory)))
 
@@ -712,7 +714,7 @@ async def async_observe_accepted_state_bindings(hass, chain, program, *, guard,
     check(); _documents(state, observed)
     original = {p: d for p, d, *_ in receipt.source_files if not p.startswith('.storage/')}
     proposed = original | dict(receipt.proposed_files)
-    current = {p: r[0] for p, r in state.sources().items() if not p.startswith('.storage/')}
+    current = state.non_storage_digests()
     _need(current in (original, proposed), 'template_state_physical_yaml_image_changed')
     position = 'original' if current == original else 'proposed'
     _need(not runtime_original or position == 'original', 'template_state_original_projection_requires_original_yaml')

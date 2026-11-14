@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import Context
+import hashlib
 import math
 from dataclasses import dataclass
 from importlib import import_module
@@ -95,7 +96,7 @@ class _BindingCallerContext:
         _need(result is True, 'template_binding_root_fence_required')
 
 
-def _callback(native, value, entity, slot=None):
+def _callback(native, value, entity, slot=None, *, source_codes):
     """Authenticate native code and instance closure, without executing it."""
     if value is None:
         return
@@ -110,9 +111,14 @@ def _callback(native, value, entity, slot=None):
     _need(value.__globals__ is vars(module), 'template_binding_callback_globals')
     path = Path(value.__code__.co_filename)
     relative = path.relative_to(native.root).as_posix()
-    _need(relative in native.pins and any(value.__code__ == code
-        and value.__qualname__ == code.co_qualname for code in compiled_code_objects(
-            path.read_bytes(), str(path), sys.flags.optimize)), 'template_binding_callback_code')
+    _need(relative in native.pins, 'template_binding_callback_code')
+    if path not in source_codes:
+        raw = path.read_bytes()
+        _need(hashlib.sha256(raw).hexdigest() == native.pins[relative],
+              'template_binding_callback_code')
+        source_codes[path] = (raw, compiled_code_objects(raw, str(path), sys.flags.optimize))
+    _need(any(value.__code__ == code and value.__qualname__ == code.co_qualname
+              for code in source_codes[path][1]), 'template_binding_callback_code')
     cells = dict(zip(value.__code__.co_freevars,
         (cell.cell_contents for cell in value.__closure__ or ()), strict=True))
     if (type(entity) is native.switch and value.__module__ == 'homeassistant.components.template.validators'
@@ -137,7 +143,7 @@ def _callback(native, value, entity, slot=None):
         if key == 'self':
             _need(item is entity or item is slot, 'template_binding_callback_closure')
         elif key in ('on_update', 'validator'):
-            _callback(native, item, entity, slot)
+            _callback(native, item, entity, slot, source_codes=source_codes)
         elif key in ('attribute', 'attribute_key'):
             _need(slot is not None and item == slot._attribute,
                   'template_binding_callback_attribute')
@@ -325,8 +331,19 @@ class _Runtime:
         _need(set(cells) == {'self', 'state'} and cells['self'] is entity
               and type(cells['state']) is bool, 'template_binding_delay_closure_unqualified')
 
-    def graph(self, entity):
-        return self._graph(entity, None)
+    def graph(self, entity, *, source_codes=None):
+        owned = source_codes is None
+        source_codes = {} if owned else source_codes
+        result = self._graph(entity, None, source_codes)
+        if owned:
+            self.check_callback_sources(source_codes)
+        return result
+
+    @staticmethod
+    def check_callback_sources(source_codes):
+        # Detect external source changes during the same synchronous census.
+        for path, (raw, _) in source_codes.items():
+            _need(path.read_bytes() == raw, 'template_binding_callback_source_changed')
 
     def graph_with_ingress(self, entity, ingress):
         """Same full census, with an exact live owned action wrapper."""
@@ -334,9 +351,12 @@ class _Runtime:
         _need(type(ingress) is NativeTemplateRenameIngress and ingress.live
               and ingress.transport.runtime is self and ingress.witness.ingress is ingress,
               'template_binding_owned_ingress_required')
-        return self._graph(entity, ingress)
+        source_codes = {}
+        result = self._graph(entity, ingress, source_codes)
+        self.check_callback_sources(source_codes)
+        return result
 
-    def _graph(self, entity, ingress):
+    def _graph(self, entity, ingress, source_codes):
         native, event, te = self.native, self.event, self.te
         _need(type(entity) in (native.sensor, native.binary, native.switch)
               and entity.hass is native.hass and entity._preview_callback is None
@@ -412,12 +432,12 @@ class _Runtime:
                     configured.append(getattr(entity, fields[slot._attribute], None))
                 _need(any(value is slot.template for value in configured),
                       'template_binding_slot_config_identity_changed')
-                _callback(native, slot.on_update, entity, slot)
+                _callback(native, slot.on_update, entity, slot, source_codes=source_codes)
                 if slot._attribute == '_attr_icon':
                     native.icon_proof.validator(slot.validator)
                 elif slot.validator is not None:
                     # cv validators are source-pinned, global functions.
-                    _callback(native, slot.validator, entity, slot)
+                    _callback(native, slot.validator, entity, slot, source_codes=source_codes)
         for template, remove in tracker._time_listeners.items():
             self.time_owner(tracker, template, remove)
         variables = entity._run_variables

@@ -338,7 +338,7 @@ class NativeTemplateStateYAMLRuntimeReadback:
     def _sample(self, runtime, state, live):
         from .native_template_state_binding import accepted_state_prefix, sample_state_bindings
         prefix = accepted_state_prefix(self.chain, self.program, input_state=state, **live)
-        current = {p: r[0] for p, r in state.sources().items() if not p.startswith('.storage/')}
+        current = state.non_storage_digests()
         original = {p: d for p, d, *_ in self.receipt.source_files if not p.startswith('.storage/')}
         proposed = original | dict(self.receipt.proposed_files)
         _need(current in (original, proposed), 'template_state_physical_yaml_image_changed')

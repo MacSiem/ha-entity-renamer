@@ -1042,7 +1042,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         if type(self.composition) in (MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition, ControlledPowercalcComposition):
             self.observer.assert_dependents_position(wanted)
         actual = await async_observe_accepted_state_bindings(self.hass, self.chain,
-            self.program, guard=self._scope, entry_witness=getattr(self, 'entry_witness', None))
+            self.program, guard=self._scope, input_state=state,
+            entry_witness=getattr(self, 'entry_witness', None))
         self._scope()
         expected_active = frozenset() if rollback or initial else frozenset(self.mapping)
         _need(actual.prefix.active == expected_active

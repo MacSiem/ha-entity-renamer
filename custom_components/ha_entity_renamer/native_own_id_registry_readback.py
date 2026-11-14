@@ -81,8 +81,7 @@ class NativeOwnIDRegistryReadback(NativeTemplateStateYAMLRuntimeReadback):
         prefix = accepted_state_prefix(self.chain, self.program, input_state=state, **live)
         original = {path: digest for path, digest, *_ in self.receipt.source_files
                     if not path.startswith('.storage/')}
-        current = {path: row[0] for path, row in state.sources().items()
-                   if not path.startswith('.storage/')}
+        current = state.non_storage_digests()
         _need(current == original, 'own_registry_yaml_graph_changed')
         # One detached accepted image serves this synchronous sample. No image
         # is retained across a guard, await, or later receipt reconstruction.

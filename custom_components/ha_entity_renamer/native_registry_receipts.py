@@ -1117,6 +1117,12 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         states, _, _, _, _ = self._reconstruct()
         return {key: deepcopy(value['document']) for key, value in states.items()}
 
+    def accepted_registry_id_positions(self):
+        """Detached scalar registry identities for a freshly checked prefix."""
+        states, _, _, _, _ = self._reconstruct()
+        rows = states['core.entity_registry']['document']['data']['entities']
+        return tuple((deepcopy(row['id']), deepcopy(row.get('entity_id'))) for row in rows)
+
     def verify_intent_source(self, intent, context, observations):
         """Final full source fence after intent ACK, immediately before API."""
         if not self.writable or intent is not self.active:

@@ -109,13 +109,41 @@ class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
         program = program_type('a', 'b', b'{}', b'{}', tuple(mapping.items()), (), (), b'[]')
         state = chain.reconstruct_inputs()
         expected = binding.accepted_state_prefix(chain, program)
-        with patch.object(chain, 'accepted_documents', wraps=chain.accepted_documents) as documents:
+        with patch.object(chain, 'accepted_registry_id_positions', wraps=chain.accepted_registry_id_positions) as positions:
             self.assertEqual(binding.accepted_state_prefix(chain, program, input_state=state), expected)
-            self.assertEqual(documents.call_count, 1)
-        with patch.object(chain, 'accepted_documents', return_value={}):
+            self.assertEqual(positions.call_count, 1)
+        with patch.object(chain, 'accepted_registry_id_positions', return_value=()):
             with self.assertRaises(ValueError):
                 binding.accepted_state_prefix(chain, program, input_state=state)
         self.assertEqual(binding.accepted_state_prefix(chain, program, input_state=state), expected)
+
+    def test_callback_census_rechecks_each_code_and_source_changes(self):
+        import hashlib
+        import sys
+        import tempfile
+        from types import ModuleType
+        transport = importlib.import_module(mixed.base.PACKAGE + '.native_template_binding_transport')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / 'fixture_callbacks.py'
+            raw = b'def first(): return 1\ndef second(): return 2\n'
+            path.write_bytes(raw)
+            module = ModuleType('_fixture_callbacks')
+            sys.modules[module.__name__] = module
+            self.addCleanup(sys.modules.pop, module.__name__, None)
+            exec(compile(raw, str(path), 'exec'), vars(module))
+            native = SimpleNamespace(root=root, pins={path.name: hashlib.sha256(raw).hexdigest()}, switch=str)
+            source_codes = {}
+            transport._callback(native, module.first, object(), source_codes=source_codes)
+            transport._callback(native, module.second, object(), source_codes=source_codes)
+            self.assertEqual(len(source_codes), 1)
+            transport._Runtime.check_callback_sources(source_codes)
+            module.second.__code__ = (lambda: 3).__code__
+            with self.assertRaises(ValueError):
+                transport._callback(native, module.second, object(), source_codes=source_codes)
+            path.write_bytes(raw + b'# drift\n')
+            with self.assertRaises(ValueError):
+                transport._Runtime.check_callback_sources(source_codes)
 
     def test_detached_evidence_distinguishes_signed_zero_and_nested_type_drift(self):
         original = {'nested': [0.0, -0.0, 1, True, {'x': 1.5}]}
