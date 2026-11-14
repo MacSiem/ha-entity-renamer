@@ -93,10 +93,17 @@ class NativeEmptySceneFence:
         rows = []
         for platform in component._platforms.values():
             _need(type(platform) is EntityPlatform and platform.hass is hass
-                  and platform.domain == 'scene' and platform.platform_name in ('scene', 'homeassistant')
-                  and not platform.entities and platform._async_cancel_retry_setup is None)
+                  and platform.domain == 'scene' and type(platform.platform_name) is str
+                  and bool(platform.platform_name) and not platform.entities
+                  and platform._async_cancel_retry_setup is None)
             if platform.platform_name == 'homeassistant':
                 _need(platform is native and platform._setup_complete)
+            elif platform.platform_name == 'scene':
+                _need(getattr(component.async_add_entities, '__self__', None) is platform)
+            else:
+                # A foreign scene platform may coexist only after setup has
+                # settled with no entities. It gains no scene migration support.
+                _need(platform._setup_complete)
             rows.append((id(platform), platform.platform_name, id(platform.entities),
                          id(platform.domain_entities), platform._setup_complete))
         _need(sum(platform is native for platform in component._platforms.values()) == 1)
