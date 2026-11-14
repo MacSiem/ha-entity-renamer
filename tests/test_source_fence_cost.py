@@ -245,7 +245,7 @@ class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
             elif drift == 'plan': session.plan = replace(session.plan)
             elif drift == 'changes': session.registry_changes = []
             else: session.receipt = replace(session.receipt)
-            with self.assertRaises(ValueError):
+            with self.assertRaises(mixed.base.tx.Refused):
                 check()
 
     async def test_async_resolve_refuses_payload_drift_and_cancel(self):
