@@ -1535,8 +1535,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
             patches.append(FilePatch(path, files[path].sha256, tuple(edits), proposed))
 
     for root in roots:
-        if root not in files:
-            visit(root, dashboard_source=root in yaml_dashboards)
+        visit(root, dashboard_source=root in yaml_dashboards)
     from .yaml_script_parameters import prove_script_parameters
     parameters, arguments, argument_nodes = prove_script_parameters(
         documents, _yaml_bindings, limits.max_nodes)
