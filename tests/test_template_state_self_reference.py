@@ -21,7 +21,7 @@ class NativeSelfReferenceTests(unittest.TestCase):
 
     def test_self_ha_calls_and_literal_rewrite(self):
         for expression in ("{{ states(this.entity_id) }}", "{{ state_attr(this.entity_id, 'x') }}",
-                           "{{ is_state(this.entity_id, 'on') }}"):
+                           "{{ is_state(this.entity_id, 'on') }}", "{{ states(this['entity_id']) }}"):
             with self.subTest(expression=expression):
                 semantic = tree(expression)
                 self.assertEqual(self.project(semantic), semantic)
@@ -32,6 +32,8 @@ class NativeSelfReferenceTests(unittest.TestCase):
         cases = [
             tree('{{ states(other.entity_id) }}'),
             tree('{{ states(this.other) }}'),
+            tree('{% set alias = this %}{{ states(alias.entity_id) }}'),
+            tree('{% macro m(this) %}{{ states(this.entity_id) }}{% endmacro %}{{ m(other) }}'),
             tree('{% set this = other %}{{ states(this.entity_id) }}'),
             tree('{{ states(this.entity_id) }}', entity_variables=[['this', 'sensor.old']]),
             tree('{{ states(this.entity_id) }}', block_variables=[['this', 'sensor.old']]),
