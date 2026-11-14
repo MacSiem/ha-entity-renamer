@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 
 _LOOKUP = re.compile(
@@ -59,6 +60,51 @@ _JS_LIST_LOOKUP = re.compile(
     r"\[\[\[returnvariables\.source_entities\.every\(id=>Number\.isFinite\(Number\.parseFloat\(states\[id\]\?\.state\)\)\)\?S:S;?\]\]\]", re.ASCII)
 
 
+_TABLE_START = re.compile(r"\A\[\[\[\s*const\s+C\s*=\s*")
+_TABLE_COMMON = (";constW=states[S];constn=e=>{consts=states[e];"
+    "constv=s?parseFloat(s.state):NaN;returnisNaN(v)?null:v;};"
+    "constf1=x=>(x===null||x===undefined||isNaN(x))?S:"
+    "Number(x).toLocaleString(S,{minimumFractionDigits:1,maximumFractionDigits:1});")
+_TABLE_ENDS = frozenset({
+    "return(C[W?.state]||[null,S])[1];]]]",
+    "lett=n(S);if(t===null)t=W?.attributes?.temperature??null;"
+    "leth=n(S);if(h===null)h=W?.attributes?.humidity??null;returnT;]]]",
+})
+
+
+def _unchanged_literal_table(text, mapping):
+    """Recognize a finite literal-table program; all state arguments are literals."""
+    selected = set(mapping) | set(mapping.values())
+    if any(m.group(1) in selected for m in _JS_ENTITY_TOKEN.finditer(text)):
+        return False
+    start = _TABLE_START.match(text)
+    if not start:
+        return False
+    try:
+        table, end = json.JSONDecoder().raw_decode(text[start.end():])
+    except (ValueError, RecursionError):
+        return False
+    if (type(table) is not dict or any(type(k) is not str or type(v) is not list
+            or len(v) != 2 or any(type(item) is not str for item in v)
+            for k, v in table.items())):
+        return False
+    tail = text[start.end() + end:]
+    def output_template(match):
+        body = match.group(1)
+        if '\\' in body:
+            return match.group(0)
+        expressions = re.findall(r'\$\{([^}]*)\}', body)
+        normalized = [re.sub(r'\s+', '', _JS_QUOTED.sub('S', part)) for part in expressions]
+        if normalized != ['f1(t)', 'h===null?S:Math.round(h)']:
+            return match.group(0)
+        if '${' in re.sub(r'\$\{[^}]*\}', '', body):
+            return match.group(0)
+        return 'T'
+    tail = re.sub(r'`([^`]*)`', output_template, tail)
+    tail = re.sub(r'\s+', '', _JS_QUOTED.sub('S', tail))
+    return any(tail == _TABLE_COMMON + ending for ending in _TABLE_ENDS)
+
+
 def _unchanged_finite_expression(text, variables, mapping):
     """Prove two small expression grammars without executing JavaScript."""
     selected = set(mapping) | set(mapping.values())
@@ -89,6 +135,8 @@ def _unchanged_finite_expression(text, variables, mapping):
 
 
 def plan_button_expression(text, mapping, variables=None):
+    if _unchanged_literal_table(text, mapping):
+        return text, None
     if _unchanged_finite_expression(text, variables, mapping):
         return text, None
     if _CURRENT_ENTITY_TERNARY.fullmatch(text):
