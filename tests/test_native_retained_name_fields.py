@@ -119,7 +119,21 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         restored, restored_new = next(iter(mapping.items()))
         live = next(source for source in mapping if source != restored)
         live_new = mapping[live]
-        self.assertEqual(sorted(mapping), [live, restored])
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        second = type(self.producer)()
+        second._attr_unique_id = 'restored-second-producer'
+        second._attr_name = 'Z second restored'
+        await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([second])
+        second_id = second.entity_id
+        await second.platform.async_remove_entity(second_id)
+        entry_id = self.f.entity.async_get(restored).config_entry_id
+        second_device = self.f.device.async_get_or_create(config_entry_id=entry_id,
+            identifiers={('threshold', 'restored-second-device')}, name='Second fixture device')
+        row = self.f.entity.async_update_entity(second_id, config_entry_id=entry_id, device_id=second_device.id)
+        row.write_unavailable_state(hass)
+        mapping[second_id] = 'sensor.accepted_second_restored'
+        uuids[second_id] = row.id
+        self.assertEqual(sorted(mapping), [live, restored, second_id])
         self.assertIsNotNone(hass.states.get(live))
         from homeassistant.helpers.entity_registry import RegistryEntryDisabler
         disabled = self.f.entity.async_get_or_create('sensor', 'threshold', 'restored-disabled-peer',
@@ -131,10 +145,11 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
         review = await runtime.native_yaml_prepare(hass, mapping,
-            entity_names={restored: 'Restored reviewed source', live: 'Live reviewed source'},
-            device_names={device.id: 'Reviewed fixture device'}, actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+            entity_names={restored: 'Restored reviewed source', live: 'Live reviewed source',
+                          second_id: 'Second reviewed source'},
+            device_names={device.id: 'Reviewed fixture device', second_device.id: 'Second reviewed device'}, actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
         plan = runtime.reviews[review['operation_id']].plan
-        self.assertEqual(tuple(step.adapter for step in plan.steps), ('registry', 'registry', 'registry', 'yaml'))
+        self.assertEqual(tuple(step.adapter for step in plan.steps), ('registry', 'registry', 'registry', 'registry', 'registry', 'yaml'))
         from homeassistant.core import callback
         events = []
         @callback
@@ -151,6 +166,8 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hass.states.get(restored_new).attributes['friendly_name'],
                          'Reviewed fixture device Restored reviewed source')
         self.assertIsNone(hass.states.get(disabled.entity_id))
+        self.assertEqual(hass.states.get(mapping[second_id]).attributes['friendly_name'],
+                         'Second reviewed device Second reviewed source')
         self.assertTrue(any(key == restored_new and before is not None and after is not None
                             and after.attributes.get('friendly_name') ==
                                 'Reviewed fixture device Restored reviewed source'
@@ -170,6 +187,8 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
                                 'Restored fixture device Restored reviewed source'
                             for key, before, after in events))
         self.assertIsNone(hass.states.get(disabled.entity_id))
+        self.assertEqual(hass.states.get(second_id).attributes['friendly_name'],
+                         'Second fixture device Z second restored')
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
     async def test_loaded_restored_foreign_attributes_refused_before_review(self):
