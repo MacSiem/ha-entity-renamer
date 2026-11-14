@@ -799,12 +799,24 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 continue
             saved = json.loads(change.runtime_before_json)['entities'][change.identity]
             if not saved['active'] and saved['entry'] is not None and saved['entry']['state'] == 'loaded':
-                _need(len(self.mapping) == 1 and not self.mixed_state and dashboard_storage is None,
+                _need(not self.mixed_state and dashboard_storage is None,
                       'restored_source_scope_unsupported')
-                transition = observed.transition_pairs(self.program, frozenset(change.mapping))
-                _need(not any((transition.entities, transition.source_pairs, transition.configured_variables,
-                               transition.rendered_variables, transition.target_semantics, transition.action_pairs)),
+                # The registry executes sorted mapping steps. Compare the sealed
+                # SAME ORIGINAL program on the actual edge, even when earlier
+                # sources have already moved. The reverse traverses this edge in
+                # the opposite direction and therefore has the same empty image.
+                source = next(iter(change.mapping))
+                ordered = tuple(sorted(self.mapping))
+                index = ordered.index(source)
+                before = frozenset(ordered[:index])
+                after = before | {source}
+                _need(self.program.rows(before) == self.program.rows(after),
                       'restored_source_transition_unsupported')
+                if not before:
+                    transition = observed.transition_pairs(self.program, after)
+                    _need(not any((transition.entities, transition.source_pairs, transition.configured_variables,
+                                   transition.rendered_variables, transition.target_semantics, transition.action_pairs)),
+                          'restored_source_transition_unsupported')
         # Registry and physical consumers retain their actual original IDs.
         physical = tuple(sorted((r.domain.removeprefix('template.'), r.source_key, r.entity.entity_id)
             for r in observed.rows if (r.domain, r.source_key) in self.program.physical_keys))
