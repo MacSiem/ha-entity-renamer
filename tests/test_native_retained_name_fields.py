@@ -119,6 +119,7 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         restored, restored_new = next(iter(mapping.items()))
         live = next(source for source in mapping if source != restored)
         live_new = mapping[live]
+        self.assertEqual(sorted(mapping), [live, restored])
         self.assertIsNotNone(hass.states.get(live))
         from homeassistant.helpers.entity_registry import RegistryEntryDisabler
         disabled = self.f.entity.async_get_or_create('sensor', 'threshold', 'restored-disabled-peer',
@@ -134,6 +135,13 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
             device_names={device.id: 'Reviewed fixture device'}, actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
         plan = runtime.reviews[review['operation_id']].plan
         self.assertEqual(tuple(step.adapter for step in plan.steps), ('registry', 'registry', 'registry', 'yaml'))
+        from homeassistant.core import callback
+        events = []
+        @callback
+        def state_changed(event):
+            if event.data['entity_id'] in (restored, restored_new):
+                events.append((event.data['entity_id'], event.data['old_state'], event.data['new_state']))
+        self.addCleanup(hass.bus.async_listen('state_changed', state_changed))
         result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
             actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
         self.assertEqual(result['state'], 'applied')
@@ -143,6 +151,10 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hass.states.get(restored_new).attributes['friendly_name'],
                          'Reviewed fixture device Restored reviewed source')
         self.assertIsNone(hass.states.get(disabled.entity_id))
+        self.assertTrue(any(key == restored_new and before is not None and after is not None
+                            and after.attributes.get('friendly_name') ==
+                                'Reviewed fixture device Restored reviewed source'
+                            for key, before, after in events))
         self.assertEqual(self.f.entity.async_get(live_new).id, uuids[live])
         result = await runtime.native_yaml_reverse(hass, review['operation_id'], review['fingerprint'],
             guard=lambda: None, refresh=refresh)
@@ -153,6 +165,10 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(hass.states.get(restored).attributes['restored'])
         self.assertEqual(hass.states.get(restored).attributes['friendly_name'],
                          'Restored fixture device Template runtime producer')
+        self.assertTrue(any(key == restored_new and before is not None and after is not None
+                            and after.attributes.get('friendly_name') ==
+                                'Restored fixture device Restored reviewed source'
+                            for key, before, after in events))
         self.assertIsNone(hass.states.get(disabled.entity_id))
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
