@@ -48,6 +48,7 @@ class NativeForeignApplyTests(unittest.IsolatedAsyncioTestCase):
         await hass.services.async_call('template', 'reload', {}, blocking=True)
         await hass.async_block_till_done()
         registry = self.f.entity.async_get_or_create('sensor', 'rest', 'foreign-fixture')
+        self.f.entity.async_get_or_create('sensor', 'rest', 'foreign-inactive')
         await self._flush_documents()
         platform = EntityPlatform(hass=hass, logger=logging.getLogger(__name__),
             domain='sensor', platform_name='rest', platform=None,
@@ -64,6 +65,13 @@ class NativeForeignApplyTests(unittest.IsolatedAsyncioTestCase):
         entity.platform, entity.registry_entry, entity._attr_unique_id = platform, registry, registry.unique_id
         entity._unique_id = registry.unique_id
         platform.entities[registry.entity_id] = entity
+        live = object.__new__(RestSensor)
+        live.hass, live.platform, live.entity_id = hass, platform, 'sensor.foreign_unregistered'
+        live._unique_id = None
+        live._config, live._value_template = {}, ValueTemplate(source, hass)
+        live._resource_template = live._coordinator = None
+        live.rest = entity.rest
+        platform.entities[live.entity_id] = live
         hass.config.components.add('rest')
         original = path.read_bytes()
         async def refresh():
