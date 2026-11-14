@@ -10,7 +10,6 @@ import test_native_queue_prepare_auth as queue
 class NativeForeignApplyTests(unittest.IsolatedAsyncioTestCase):
     with_yaml = True
     asyncSetUp = queue.NativeQueuePrepareAuthTests.asyncSetUp
-    _before_loader = queue.NativeQueuePrepareAuthTests._before_loader
     _before_start = queue.NativeQueuePrepareAuthTests._before_start
     _loaded_backend = queue.NativeQueuePrepareAuthTests._loaded_backend
     _flush_documents = queue.NativeQueuePrepareAuthTests._flush_documents
@@ -19,6 +18,14 @@ class NativeForeignApplyTests(unittest.IsolatedAsyncioTestCase):
     data = queue.NativeQueuePrepareAuthTests.data
     _runtime = queue.NativeQueuePrepareAuthTests._runtime
     module = queue.NativeQueuePrepareAuthTests.module
+
+    async def _before_loader(self, hass, root):
+        import shutil
+        from pathlib import Path
+        await queue.NativeQueuePrepareAuthTests._before_loader(self, hass, root)
+        target = self.installed_component / 'www/ha-entity-renamer.js'
+        target.parent.mkdir(exist_ok=True)
+        shutil.copyfile(Path(__file__).resolve().parents[1] / 'ha-entity-renamer.js', target)
 
     async def test_same_file_foreign_scope_apply_and_restore(self):
         from homeassistant.const import __version__
