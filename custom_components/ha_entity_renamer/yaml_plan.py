@@ -312,7 +312,7 @@ def plan_yaml(
     try:
         reader = _Reader(config_root, limits)
         return _plan(reader, mapping, entrypoints + yaml_dashboards, limits,
-                     stable_script_services, owned_script_services)
+                     stable_script_services, owned_script_services, yaml_dashboards)
     except (OSError, UnicodeError, yaml.YAMLError, RecursionError) as exc:
         # Do not leak YAML content or secret values through parser exception text.
         raise YAMLPlanError("unreadable, unsafe or invalid YAML graph") from None
@@ -1051,7 +1051,7 @@ def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_par
 
 
 def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limits: Limits,
-          stable_script_services=(), owned_script_services=()) -> Plan:
+          stable_script_services=(), owned_script_services=(), yaml_dashboards=()) -> Plan:
     files: dict[str, FileSnapshot] = {}
     patches = []
     edges = []
@@ -1068,7 +1068,8 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
     pending = []
 
     def visit(path: str, graph_depth: int = 0, inherited_field=False, inherited_key="",
-              inherited_lovelace=False, inherited_variable=False, inherited_script_root=False) -> None:
+              inherited_lovelace=False, inherited_variable=False, inherited_script_root=False,
+              dashboard_source=False) -> None:
         nonlocal total_bytes, nodes_count, owned_definition_count
         path = _relative(path)
         if PurePosixPath(path).name == "secrets.yaml":
@@ -1077,7 +1078,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
             raise YAMLPlanError("include graph depth limit")
         if path in active:
             raise YAMLPlanError("include graph cycle")
-        context = (inherited_field, inherited_key, inherited_lovelace, inherited_variable, inherited_script_root)
+        context = (inherited_field, inherited_key, inherited_lovelace, inherited_variable, inherited_script_root, dashboard_source)
         if path in files:
             if contexts_seen[path] != context:
                 raise YAMLPlanError("same include has different semantic contexts")
@@ -1157,7 +1158,7 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                                          if parent_key == 'utility_meter' and node.tag == '!include_dir_named'
                                          else '' if parent_key == 'packages' and node.tag == '!include_dir_named'
                                          else parent_key)
-                            visit(child, graph_depth + 1, field, child_key, lovelace, variable_definition, script_root)
+                            visit(child, graph_depth + 1, field, child_key, lovelace, variable_definition, script_root, dashboard_source)
                     elif node.tag == '!secret':
                         if field:
                             issue(node, "secret_reference_unresolved")
@@ -1195,12 +1196,12 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                                     issue(key, 'owned_script_key_conflict')
                                 owned_script_keys[id(key)] = (new_key, prior[1] + 1)
                                 owned_definition_count += 1
-                    projected = [mapping.get(k, k) if parent_key in _ENTITY_KEY_MAPS else k for k in merged_keys]
+                    projected = [mapping.get(k, k) if parent_key in _ENTITY_KEY_MAPS and not dashboard_source else k for k in merged_keys]
                     if len(projected) != len(set(projected)):
                         issue(node, "entity_key_collision")
                     values = {k.value: v for k, v in node.value if isinstance(k, ScalarNode)}
                     card_type = values.get('type')
-                    if isinstance(card_type, ScalarNode) and card_type.value.startswith('custom:'):
+                    if not dashboard_source and isinstance(card_type, ScalarNode) and card_type.value.startswith('custom:'):
                         issue(card_type, 'custom_card_semantics_unknown')
                     mode = values.get('mode')
                     filename = values.get('filename')
@@ -1263,6 +1264,9 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
                 visiting.remove(id(node))
 
         def finish(script_parameters, script_arguments, argument_nodes):
+            if dashboard_source:
+                finish_dashboard(path, data, text, tree, tokens, issue)
+                return
             finish_document(path, data, text, tree, tokens, candidates, stable_services,
                             owned_script_keys, issue, inherited_key, script_parameters, script_arguments, argument_nodes)
 
@@ -1270,9 +1274,74 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
              variable_definition=inherited_variable, script_root=inherited_script_root)
         for dashboard in sorted(dashboard_paths):
             edges.append(IncludeEdge(path, 0, "lovelace_yaml_dashboard", dashboard, (dashboard,)))
-            visit(dashboard, graph_depth + 1)
+            visit(dashboard, graph_depth + 1, dashboard_source=True)
         active.remove(path)
         pending.append(finish)
+
+    def finish_dashboard(path, data, text, tree, tokens, issue):
+        # Keep the source graph and byte-level CAS; derive dashboard edits from
+        # exactly the same planner used for storage/review/receipt.
+        from .dashboard_plan import plan_dashboard
+        try:
+            before = yaml.safe_load(text)
+            semantic = plan_dashboard(before, mapping)
+        except (yaml.YAMLError, ValueError, TypeError, RecursionError):
+            issue(tree, 'dashboard_yaml_semantics_unavailable')
+            return
+        for marker in semantic.markers:
+            issue(tree, 'dashboard_' + marker.code)
+        edits, seen = [], set()
+        for change in semantic.changes:
+            node = tree
+            try:
+                for part in change.path:
+                    if isinstance(node, MappingNode) and type(part) is str:
+                        matches = [v for k, v in node.value if isinstance(k, ScalarNode)
+                                   and k.tag == _STR and k.value == part]
+                        if len(matches) != 1:
+                            raise ValueError('ambiguous path')
+                        node = matches[0]
+                    elif isinstance(node, SequenceNode) and type(part) is int:
+                        node = node.value[part]
+                    else:
+                        raise ValueError('invalid path')
+                if not isinstance(node, ScalarNode) or node.tag != _STR or node.value != change.before:
+                    raise ValueError('not an exact scalar')
+                token = tokens.get(node.end_mark.index)
+                if token is None or token.value != node.value or token.style in ('|', '>'):
+                    raise ValueError('unsupported scalar source')
+                start = len(text[:token.start_mark.index].encode('utf-8'))
+                end = len(text[:token.end_mark.index].encode('utf-8'))
+                if (start, end) in seen:
+                    raise ValueError('shared scalar span')
+                seen.add((start, end))
+                raw = data[start:end]
+                if token.style == "'":
+                    replacement = "'" + change.after.replace("'", "''") + "'"
+                elif token.style == '"':
+                    replacement = json.dumps(change.after, ensure_ascii=False)
+                else:
+                    replacement = change.after
+                    if yaml.safe_load(replacement) != change.after:
+                        replacement = json.dumps(change.after, ensure_ascii=False)
+                edits.append(Edit(start, end, raw, replacement.encode('utf-8')))
+            except (ValueError, IndexError, yaml.YAMLError):
+                issue(node, 'dashboard_scalar_source_unavailable')
+        edits.sort(key=lambda edit: edit.start)
+        proposed = data
+        for edit in reversed(edits):
+            proposed = proposed[:edit.start] + edit.after + proposed[edit.end:]
+        try:
+            # Aliases, merge semantics and source formatting may make one scalar
+            # affect several paths; require full-document equality independently.
+            from .lovelace_native import revision
+            if revision(yaml.safe_load(proposed)) != revision(semantic.value):
+                raise ValueError('semantic mismatch')
+        except (yaml.YAMLError, ValueError, TypeError):
+            issue(tree, 'dashboard_yaml_semantics_mismatch')
+            return
+        if edits:
+            patches.append(FilePatch(path, files[path].sha256, tuple(edits), proposed))
 
     def finish_document(path, data, text, tree, tokens, candidates, stable_services,
                         owned_script_keys, issue, inherited_key, script_parameters, script_arguments, argument_nodes):
@@ -1466,7 +1535,8 @@ def _plan(reader: _Reader, mapping: dict[str, str], roots: tuple[str, ...], limi
             patches.append(FilePatch(path, files[path].sha256, tuple(edits), proposed))
 
     for root in roots:
-        visit(root)
+        if root not in files:
+            visit(root, dashboard_source=root in yaml_dashboards)
     from .yaml_script_parameters import prove_script_parameters
     parameters, arguments, argument_nodes = prove_script_parameters(
         documents, _yaml_bindings, limits.max_nodes)
