@@ -66,8 +66,8 @@ class RetainedDashboardTests(unittest.IsolatedAsyncioTestCase):
             row = chain.preparations.plans[ref]
             original = deepcopy(row)
             row['payload']['foreign'] = True
-            with self.subTest(ref=ref), self.assertRaises(Exception):
-                chain._original_change(1)
+            with self.subTest(ref=ref), self.assertRaisesRegex(rr.RegistryReceiptError, 'dashboard_original_preparation_changed'):
+                chain._dashboard_preparations_unchanged(1)
             chain.preparations.plans[ref] = original
             chain._original_change(1)
         for field in ('plan', 'original_receipt', 'baseline'):
@@ -79,21 +79,47 @@ class RetainedDashboardTests(unittest.IsolatedAsyncioTestCase):
             else:
                 altered = replace(original, receipt_json=original.receipt_json + b' ')
             setattr(chain, field, altered)
-            with self.subTest(field=field), self.assertRaises(Exception):
-                chain._original_change(1)
+            with self.subTest(field=field), self.assertRaisesRegex(rr.RegistryReceiptError, 'dashboard_original_preparation_changed'):
+                chain._dashboard_preparations_unchanged(1)
             setattr(chain, field, original)
             chain._original_change(1)
         original = deepcopy(chain.root['bindings'][1])
         chain.root['bindings'][1]['foreign'] = True
-        with self.assertRaises(Exception):
-            chain._original_change(1)
+        with self.assertRaisesRegex(rr.RegistryReceiptError, 'dashboard_original_preparation_changed'):
+            chain._dashboard_preparations_unchanged(1)
         chain.root['bindings'][1] = original
         for target in (chain.changes[1].before.config, chain.changes[1].after):
             target['foreign'] = True
-            with self.assertRaises(Exception):
+            with self.assertRaisesRegex(rr.RegistryReceiptError, 'dashboard_preparation_mismatch'):
                 chain._original_change(1)
             del target['foreign']
             chain._original_change(1)
         chain.preparations.plans = None
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(ValueError, 'preparations_unavailable'):
             chain._original_change(1)
+
+    async def test_nested_types_fallback_and_live_guard(self):
+        chain = await make_chain()
+        # Exact-type comparison rejects bool/int equality inside every relevant row.
+        for ref, path in (('native', ('schema',)), ('change', ('data', 'kind')),
+                          ('dashboard', ('data', 'before', 'config', 'views'))):
+            row = chain.preparations.plans[ref]
+            original = deepcopy(row)
+            node = row['payload']
+            for key in path[:-1]:
+                node = node[key]
+            node[path[-1]] = True
+            with self.subTest(ref=ref), self.assertRaisesRegex(
+                    rr.RegistryReceiptError, 'dashboard_original_preparation_changed'):
+                chain._dashboard_preparations_unchanged(1)
+            chain.preparations.plans[ref] = original
+        chain._dashboard_preparation_snapshot = None
+        with patch.object(dr, 'validate_prepared', wraps=dr.validate_prepared) as validate:
+            chain._original_change(1)
+            self.assertEqual(validate.call_count, 1)
+        class Stale(Exception):
+            pass
+        def guard():
+            raise Stale('lost authority')
+        with self.assertRaisesRegex(Stale, 'lost authority'):
+            await dr.observe(None, None, guard)
