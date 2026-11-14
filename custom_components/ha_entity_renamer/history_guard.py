@@ -88,6 +88,30 @@ def _project(metadata, mapping):
             for kind, rows in metadata.items()}
 
 
+def _validate_snapshot(snapshot):
+    if (type(snapshot) is not dict or set(snapshot) != {'schema', 'state_ids', 'statistic_ids', 'content'}
+            or snapshot['schema'] != 1):
+        raise HistoryConflict('invalid_history_snapshot')
+    for key in ('state_ids', 'statistic_ids'):
+        ids = snapshot[key]
+        if (type(ids) is not list or len(ids) > 10000
+                or any(type(value) is not int or value < 1 for value in ids)
+                or sorted(set(ids)) != ids):
+            raise HistoryConflict('invalid_history_identity')
+    expected = snapshot['content']
+    if type(expected) is not dict or set(expected) != {'states', 'short_term', 'hourly', 'attributes'}:
+        raise HistoryConflict('invalid_history_content')
+    for name, row in expected.items():
+        fields = {'count', 'sha256'} | ({'ceiling'} if name != 'attributes' else set())
+        if (type(row) is not dict or set(row) != fields or type(row['count']) is not int
+                or row['count'] < 0 or type(row['sha256']) is not str
+                or len(row['sha256']) != 64 or any(c not in '0123456789abcdef' for c in row['sha256'])):
+            raise HistoryConflict('invalid_history_content')
+        if name != 'attributes' and row['ceiling'] is not None:
+            if type(row['ceiling']) is not int or row['ceiling'] < 1:
+                raise HistoryConflict('invalid_history_ceiling')
+
+
 class NativeHistoryGuard:
     def __init__(self, recorder_guard):
         self.guard = recorder_guard
@@ -113,8 +137,8 @@ class NativeHistoryGuard:
                 for (states, statistics, _), item in zip(requests, content)]
 
     async def verify_many(self, snapshots, fence):
-        # Snapshots were generated locally by capture_many, with the same schema
-        # and ceilings as capture(); no externally supplied receipt enters here.
+        for snapshot in snapshots:
+            _validate_snapshot(snapshot)
         await self.guard.snapshot({})
         fence()
         requests = [(item['state_ids'], item['statistic_ids'], item['content'])
@@ -133,27 +157,8 @@ class NativeHistoryGuard:
         return {'schema': 1, 'state_ids': states, 'statistic_ids': statistics, 'content': content}
 
     async def verify(self, snapshot):
-        if (type(snapshot) is not dict or set(snapshot) != {'schema', 'state_ids', 'statistic_ids', 'content'}
-                or snapshot['schema'] != 1):
-            raise HistoryConflict('invalid_history_snapshot')
-        for key in ('state_ids', 'statistic_ids'):
-            ids = snapshot[key]
-            if (type(ids) is not list or len(ids) > 10000
-                    or any(type(value) is not int or value < 1 for value in ids)
-                    or sorted(set(ids)) != ids):
-                raise HistoryConflict('invalid_history_identity')
+        _validate_snapshot(snapshot)
         expected = snapshot['content']
-        if type(expected) is not dict or set(expected) != {'states', 'short_term', 'hourly', 'attributes'}:
-            raise HistoryConflict('invalid_history_content')
-        for name, row in expected.items():
-            fields = {'count', 'sha256'} | ({'ceiling'} if name != 'attributes' else set())
-            if (type(row) is not dict or set(row) != fields or type(row['count']) is not int
-                    or row['count'] < 0 or type(row['sha256']) is not str
-                    or len(row['sha256']) != 64 or any(c not in '0123456789abcdef' for c in row['sha256'])):
-                raise HistoryConflict('invalid_history_content')
-            if name != 'attributes' and row['ceiling'] is not None:
-                if type(row['ceiling']) is not int or row['ceiling'] < 1:
-                    raise HistoryConflict('invalid_history_ceiling')
         await self.guard.snapshot({})  # Native Recorder commit barrier, no SQL writes.
         current = await self.recorder.async_add_executor_job(
             _read, self.recorder, snapshot['state_ids'], snapshot['statistic_ids'], expected)

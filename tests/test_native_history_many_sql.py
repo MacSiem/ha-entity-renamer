@@ -45,6 +45,11 @@ class NativeHistoryManySQLTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item['content']['states']['ceiling'] for item in batch], [3, 2])
         self.assertEqual(batch[0]['content']['attributes'], batch[1]['content']['attributes'])
         self.assertEqual(await guard.verify_many(batch, lambda: None), [True, True])
+        malformed = dict(batch[0], state_ids=[2, 1])
+        with self.assertRaises(history.HistoryConflict):
+            await guard.verify(malformed)
+        with self.assertRaises(history.HistoryConflict):
+            await guard.verify_many([malformed], lambda: None)
         with Session.begin() as session:
             session.get(States, 2).state = 'altered'
         self.assertEqual(await guard.verify_many(batch, lambda: None), [True, False])
