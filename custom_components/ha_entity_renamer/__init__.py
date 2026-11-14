@@ -56,6 +56,7 @@ class _PreparedReview:
     trace_admission: tuple = ()
     template_admission: object = None
     entry_admission: object = None
+    foreign_admission: object = None
 
 
 @dataclass
@@ -130,8 +131,13 @@ class Runtime:
             current()
             from .review_retention import async_reclaim_reviews, review_lease
             import uuid
-            self.reviews = {op: review for op, review in self.reviews.items()
-                            if review.actor_id != actor_id and review.expires_at > hass.loop.time()}
+            retained = {}
+            for op, review in self.reviews.items():
+                if review.actor_id != actor_id and review.expires_at > hass.loop.time():
+                    retained[op] = review
+                elif review.foreign_admission is not None:
+                    review.foreign_admission.close()
+            self.reviews = retained
             self.preparations, self.journal = await async_reclaim_reviews(
                 hass, keep=self.reviews, guard=current)
             current()
@@ -329,9 +335,15 @@ class Runtime:
                 template_admission = getattr(session, 'own_template_admission', None)
                 if template_admission is not None:
                     template_admission.check_review()
+                foreign = getattr(session, 'foreign', None)
+                if foreign is not None:
+                    foreign.check(require_sources=True)
+                    foreign.expiry = hass.loop.call_later(900, foreign.close)
                 self.reviews[operation] = _PreparedReview(actor_id, plan, count,
                     hass.loop.time() + 900, admission, own, trace_admission, template_admission,
-                    getattr(session, 'review_admission', None))
+                    getattr(session, 'review_admission', None), foreign)
+                if foreign is not None:
+                    session.foreign_transferred = True
                 return {'operation_id': operation, 'fingerprint': plan.fingerprint,
                     'entity_count': count, 'device_count': devices, 'changes': changes,
                     'dependencies': dependencies,
@@ -364,6 +376,9 @@ class Runtime:
                     or review.expires_at <= hass.loop.time()):
                 raise Refused('review_unavailable_or_mismatched')
             self.reviews.pop(operation_id)
+            if review.foreign_admission is not None and review.foreign_admission.expiry is not None:
+                review.foreign_admission.expiry.cancel()
+                review.foreign_admission.expiry = None
             @trace_owned
             async def operation():
                 try:
@@ -378,10 +393,18 @@ class Runtime:
                         review.own_admission.check()
                     if review.entry_admission is not None:
                         review.entry_admission.check()
+                    if review.foreign_admission is not None:
+                        review.foreign_admission.check(require_sources=True)
                     factory = _yaml_factory_for_plan(self.preparations, review.plan)
                     session = await factory.bind_prepared(hass, operation_id,
                         review.plan, guard=current, refresh=refresh)
                     try:
+                        if review.foreign_admission is not None:
+                            current_foreign = getattr(session, 'foreign', None)
+                            review.foreign_admission.check(require_sources=True)
+                            if current_foreign is None or current_foreign.image != review.foreign_admission.image:
+                                raise Refused('review_foreign_population_changed')
+                            session.review_foreign_pin = review.foreign_admission
                         if review.entry_admission is not None:
                             review.entry_admission.check()
                             session.review_record_admission = review.entry_admission
@@ -432,7 +455,11 @@ class Runtime:
                     return await session.apply()
                 finally:
                     session.close()
-            record = await drain_effect(operation())
+            try:
+                record = await drain_effect(operation())
+            finally:
+                if review.foreign_admission is not None:
+                    review.foreign_admission.close()
             current()
             return {'operation_id': record.operation_id, 'fingerprint': record.plan.fingerprint,
                 'state': record.status, 'reason': record.reason,

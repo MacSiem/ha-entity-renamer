@@ -99,6 +99,7 @@ class NativeForeignConsumers:
         self.hass, self.mapping, self.thread = hass, dict(mapping), threading.get_ident()
         self.closed = self.changed = False
         self.removers = []
+        self.expiry = None
         self.sources_verified = False
 
         @callback
@@ -143,7 +144,7 @@ class NativeForeignConsumers:
         from .yaml_runtime_observer import _pending_native_work
 
         hass, mapping = self.hass, self.mapping
-        templates = set()
+        templates = {'rest': set(), 'command_line': set()}
         registry = er.async_get(hass)
         _need(not _pending_native_work(hass, ('mqtt', 'rest', 'command_line')))
         images, foreign_ids = [], set()
@@ -182,25 +183,28 @@ class NativeForeignConsumers:
                           and entity.entity_id == entity_id and entity_id in registry_rows
                           and entity_id not in found)
                     found[entity_id] = entity
-                    config = _freeze(entity._config, mapping, set() if name == 'mqtt' else templates)
+                    strings = set() if name == 'mqtt' else templates[name]
+                    config = _freeze(entity._config, mapping, strings)
                     if name == 'mqtt':
                         discovery = _freeze(entity._discovery_data, mapping, set())
                         detail = (config, discovery)
                     else:
-                        value = _freeze(entity._value_template, mapping, templates)
+                        value = _freeze(entity._value_template, mapping, strings)
                         if name == 'rest':
                             rest = entity.rest
                             _need(type(rest) is RestData and rest._hass is hass)
                             detail = (config, value, id(rest),
-                                      _freeze(entity._resource_template, mapping, templates),
-                                      _freeze(rest._headers, mapping, templates),
-                                      _freeze(rest._params, mapping, templates),
-                                      _freeze(rest._request_data, mapping, templates))
+                                      _freeze(entity._resource_template, mapping, strings),
+                                      _freeze(rest._resource, mapping, strings)
+                                      if entity._resource_template is None else None,
+                                      _freeze(rest._headers, mapping, strings),
+                                      _freeze(rest._params, mapping, strings),
+                                      _freeze(rest._request_data, mapping, strings))
                         else:
                             data = entity.data
                             _need(type(data) is CommandSensorData and data.hass is hass)
                             detail = (config, value, id(data),
-                                      _freeze(data.command, mapping, templates))
+                                      _freeze(data.command, mapping, strings))
                     row = registry_rows[entity_id]
                     entity_rows.append((entity_id, id(entity), row.id, row.unique_id,
                                         row.config_entry_id, row.device_id, detail))
@@ -221,25 +225,25 @@ class NativeForeignConsumers:
         # retained image and every diagnostic message.
         self.foreign_ids = frozenset(foreign_ids)
         digest = hashlib.sha256(repr(tuple(images)).encode()).digest()
-        return digest, frozenset(templates)
+        return digest, tuple((name, frozenset(values)) for name, values in sorted(templates.items()))
 
     def bind_sources(self, yaml_plan, root):
         """Bind runtime templates to the same already-pinned YAML graph."""
         import yaml
         import os
         from .yaml_plan import _Reader, Limits
-        values = set()
+        values = {'rest': set(), 'command_line': set()}
         active = set()
-        def walk(node, depth=0):
+        def walk(node, domain, depth=0):
             _need(depth < 100 and id(node) not in active)
             active.add(id(node))
             if isinstance(node, yaml.ScalarNode):
-                values.add(node.value)
+                values[domain].add(node.value)
             elif isinstance(node, (yaml.SequenceNode, yaml.MappingNode)):
                 children = node.value if isinstance(node, yaml.SequenceNode) else (
                     item for pair in node.value for item in pair)
                 for child in children:
-                    walk(child, depth + 1)
+                    walk(child, domain, depth + 1)
             active.remove(id(node))
         reader = _Reader(root, Limits())
         try:
@@ -248,11 +252,25 @@ class NativeForeignConsumers:
                 _need(hashlib.sha256(raw).hexdigest() == item.sha256
                       and (stat.st_dev, stat.st_ino, len(raw)) == (item.device, item.inode, item.size))
                 node = yaml.compose(raw.decode('utf-8'), Loader=yaml.SafeLoader)
-                if node is not None:
-                    walk(node)
+                if isinstance(node, yaml.MappingNode):
+                    for key, value in node.value:
+                        if not isinstance(key, yaml.ScalarNode):
+                            continue
+                        domain = key.value.split(' ', 1)[0]
+                        if domain in values:
+                            walk(value, domain)
+                        elif domain in ('sensor', 'binary_sensor', 'switch') and isinstance(value, yaml.SequenceNode):
+                            for child in value.value:
+                                if not isinstance(child, yaml.MappingNode):
+                                    continue
+                                platform = next((v.value for k, v in child.value
+                                    if isinstance(k, yaml.ScalarNode) and k.value == 'platform'
+                                    and isinstance(v, yaml.ScalarNode)), None)
+                                if platform in values:
+                                    walk(child, platform)
         finally:
             os.close(reader.root)
-        _need(self.yaml_templates <= values)
+        _need(all(templates <= values[name] for name, templates in self.yaml_templates))
         self.sources_verified = True
 
     def check(self, *, require_sources=False):
@@ -265,6 +283,9 @@ class NativeForeignConsumers:
     def close(self):
         if not self.closed:
             self.closed = True
+            if self.expiry is not None:
+                self.expiry.cancel()
+                self.expiry = None
             for remove in self.removers:
                 remove()
             self.removers.clear()

@@ -346,6 +346,8 @@ class NativeTemplateYAMLServer:
             else:
                 _need(not obj.bound or not ({'mqtt', 'rest', 'command_line'}
                            & set(hass.config.components)), 'other_consumer_scope_unsupported')
+            if hasattr(obj, 'review_foreign_pin'):
+                obj.review_foreign_pin.check(require_sources=True)
             if hasattr(obj, 'consumers'):
                 obj.consumers.check()
             if hasattr(obj, 'automation_lifecycle'):
@@ -1253,7 +1255,7 @@ class NativeTemplateYAMLServer:
             if type(phases) in (NativeScriptPrefixPhase, NativeAutomationPrefixPhase):
                 phases.close()
         finally:
-            if hasattr(self, 'foreign'):
+            if hasattr(self, 'foreign') and not getattr(self, 'foreign_transferred', False):
                 self.foreign.close()
             self.scene_fence.close()
             self.bound, self.closed = False, True

@@ -43,7 +43,7 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
         entity._value_template = ValueTemplate(source, hass)
         entity._resource_template = None
         entity.rest = RestData(hass, 'GET', 'http://example.invalid', 'utf-8', None,
-                               None, None, None, True, 'default', 10)
+                               None, None, None, True, 'python_default', 10)
         platform.entities[entry.entity_id] = entity
         hass.config.components.add('rest')
         try:
