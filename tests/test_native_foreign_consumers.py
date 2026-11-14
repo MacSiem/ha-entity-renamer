@@ -41,6 +41,9 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
         (self.f.root / 'configuration.yaml').write_text(
             'rest:\n  - resource_template: "' + resource + '"\n    sensor:\n      - value_template: "' + source + '"\n')
         entry = self.f.entity.async_get_or_create('sensor', 'rest', 'fixture-unique')
+        own = self.f.entity.async_get_or_create('sensor', 'fixture', 'selected-source',
+                                                suggested_object_id='old')
+        self.assertEqual(own.entity_id, 'sensor.old')
         await hass.async_block_till_done()
         platform = EntityPlatform(hass=hass, logger=logging.getLogger(__name__),
             domain='sensor', platform_name='rest', platform=None,
@@ -67,17 +70,31 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
                 # Telemetry is deliberately outside the configuration image.
                 entity.rest.data = 'new reading'
                 fence.check(require_sources=True)
-                entity._value_template = ValueTemplate("{{ states('sensor.old') }}", hass)
+                self.f.entity.async_update_entity(own.entity_id, name='Selected renamed')
+                hass.bus.async_fire('device_registry_updated', {'action': 'update', 'device_id': 'selected-device'})
+                await hass.async_block_till_done()
+                fence.check(require_sources=True)
+                yaml_path = self.f.root / 'configuration.yaml'
+                original = yaml_path.read_text()
+                yaml_path.write_text(original + '\nautomation: []\n')
+                fence.check(require_sources=True)  # unrelated same-file change
+                yaml_path.write_text(original.replace("sensor.other", "sensor.changed"))
                 with self.assertRaises(tx.Refused):
                     fence.check()
-                entity._value_template = ValueTemplate("{{ states(variable) }}", hass)
-                with self.assertRaises(tx.Refused):
-                    fence.check()
-                entity._value_template = ValueTemplate("{{ 1 }}", hass)
-                with self.assertRaises(tx.Refused):
+                yaml_path.write_text(original)
+                with self.assertRaises(tx.Refused):  # observed drift stays latched
                     fence.check()
             finally:
                 fence.close()
+            for changed in ("{{ states('sensor.old') }}", "{{ states(variable) }}", "{{ 1 }}"):
+                fence = module.NativeForeignConsumers(hass, mapping, {})
+                try:
+                    entity._value_template = ValueTemplate(changed, hass)
+                    with self.assertRaises(tx.Refused):
+                        fence.check()
+                finally:
+                    entity._value_template = ValueTemplate(source, hass)
+                    fence.close()
             entity._value_template = ValueTemplate(source, hass)
             entity._coordinator = RestCoordinator(hass, entity.rest, None,
                 Template(resource, hass), None, timedelta(seconds=60))

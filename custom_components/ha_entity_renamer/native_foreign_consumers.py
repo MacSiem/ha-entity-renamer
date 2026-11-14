@@ -269,6 +269,7 @@ class NativeForeignConsumers:
         self.expiry = None
         self.sources_verified = False
         self.scripts = ()
+        self.yaml_sources = {}
 
         @callback
         def changed(*_):
@@ -434,10 +435,34 @@ class NativeForeignConsumers:
 
     def bind_sources(self, yaml_plan, root):
         """Bind runtime templates to the same already-pinned YAML graph."""
-        import yaml
-        import os
         from .yaml_plan import _Reader, Limits
         values = {'rest': set(), 'command_line': set()}
+        reader = _Reader(root, Limits())
+        sources = {}
+        try:
+            for item in yaml_plan.files:
+                raw, stat = reader.read(item.path)
+                raw_hash = hashlib.sha256(raw).hexdigest()
+                _need(raw_hash == item.sha256
+                      and (stat.st_dev, stat.st_ino, len(raw)) == (item.device, item.inode, item.size))
+                shape, file_values = self._yaml_shape(raw)
+                for domain in values:
+                    values[domain].update(file_values[domain])
+                sources[item.path] = (raw_hash, shape)
+        finally:
+            os.close(reader.root)
+        _need(all(templates <= values[name] for name, templates in self.yaml_templates))
+        _need(self.yaml_commands <= values['command_line'])
+        self.yaml_sources = sources
+        self.scripts = self._script_image(root, qualify=True)
+        self.sources_verified = True
+
+    @staticmethod
+    def _yaml_shape(raw):
+        """Fingerprint foreign sections, ignoring unrelated edits in the same file."""
+        import yaml
+        values = {'mqtt': set(), 'rest': set(), 'command_line': set()}
+        parts = []
         active = set()
         def walk(node, domain, depth=0):
             _need(depth < 100 and id(node) not in active)
@@ -450,35 +475,44 @@ class NativeForeignConsumers:
                 for child in children:
                     walk(child, domain, depth + 1)
             active.remove(id(node))
+        try:
+            root = yaml.compose(raw.decode('utf-8'), Loader=yaml.SafeLoader)
+            if isinstance(root, yaml.MappingNode):
+                for key, value in root.value:
+                    if not isinstance(key, yaml.ScalarNode):
+                        continue
+                    domain = key.value.split(' ', 1)[0]
+                    if domain in values:
+                        walk(value, domain)
+                        parts.append((domain, yaml.serialize(value)))
+                    elif domain in ('sensor', 'binary_sensor', 'switch') and isinstance(value, yaml.SequenceNode):
+                        for child in value.value:
+                            if not isinstance(child, yaml.MappingNode):
+                                continue
+                            platform = next((v.value for k, v in child.value
+                                if isinstance(k, yaml.ScalarNode) and k.value == 'platform'
+                                and isinstance(v, yaml.ScalarNode)), None)
+                            if platform not in values:
+                                continue
+                            walk(child, platform)
+                            parts.append((platform, yaml.serialize(child)))
+        except (UnicodeError, yaml.YAMLError, RecursionError):
+            _need(False)
+        return hashlib.sha256(repr(parts).encode()).digest(), values
+
+    def _check_yaml_sources(self, root):
+        from .yaml_plan import _Reader, Limits
         reader = _Reader(root, Limits())
         try:
-            for item in yaml_plan.files:
-                raw, stat = reader.read(item.path)
-                _need(hashlib.sha256(raw).hexdigest() == item.sha256
-                      and (stat.st_dev, stat.st_ino, len(raw)) == (item.device, item.inode, item.size))
-                node = yaml.compose(raw.decode('utf-8'), Loader=yaml.SafeLoader)
-                if isinstance(node, yaml.MappingNode):
-                    for key, value in node.value:
-                        if not isinstance(key, yaml.ScalarNode):
-                            continue
-                        domain = key.value.split(' ', 1)[0]
-                        if domain in values:
-                            walk(value, domain)
-                        elif domain in ('sensor', 'binary_sensor', 'switch') and isinstance(value, yaml.SequenceNode):
-                            for child in value.value:
-                                if not isinstance(child, yaml.MappingNode):
-                                    continue
-                                platform = next((v.value for k, v in child.value
-                                    if isinstance(k, yaml.ScalarNode) and k.value == 'platform'
-                                    and isinstance(v, yaml.ScalarNode)), None)
-                                if platform in values:
-                                    walk(child, platform)
+            for path, (prior_raw, expected) in tuple(self.yaml_sources.items()):
+                raw, _ = reader.read(path)
+                raw_hash = hashlib.sha256(raw).hexdigest()
+                if raw_hash != prior_raw:
+                    shape, _ = self._yaml_shape(raw)
+                    _need(shape == expected)
+                    self.yaml_sources[path] = (raw_hash, expected)
         finally:
             os.close(reader.root)
-        _need(all(templates <= values[name] for name, templates in self.yaml_templates))
-        _need(self.yaml_commands <= values['command_line'])
-        self.scripts = self._script_image(root, qualify=True)
-        self.sources_verified = True
 
     def _script_image(self, root, *, qualify):
         from .yaml_plan import _Reader, Limits
@@ -510,12 +544,19 @@ class NativeForeignConsumers:
         _need(not self.closed and not self.changed and (not require_sources or self.sources_verified))
         if threading.get_ident() != self.thread:
             return
-        image, templates, commands = self._sample()
-        _need(image == self.image and templates == self.yaml_templates
-              and commands == self.yaml_commands and not self.changed)
-        if self.sources_verified and self.yaml_commands:
+        try:
             from pathlib import Path
-            _need(self._script_image(Path(self.hass.config.config_dir).resolve(), qualify=False) == self.scripts)
+            image, templates, commands = self._sample()
+            _need(image == self.image and templates == self.yaml_templates
+                  and commands == self.yaml_commands and not self.changed)
+            if self.sources_verified:
+                root = Path(self.hass.config.config_dir).resolve()
+                self._check_yaml_sources(root)
+                if self.yaml_commands:
+                    _need(self._script_image(root, qualify=False) == self.scripts)
+        except BaseException:
+            self.changed = True
+            raise
 
     def close(self):
         if not self.closed:
