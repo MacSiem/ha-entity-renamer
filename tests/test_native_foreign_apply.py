@@ -9,6 +9,7 @@ import test_native_queue_prepare_auth as queue
 @unittest.skipUnless(queue.backend_fixture.activation.fixtures.HAS_HA, 'actual pinned HA required')
 class NativeForeignApplyTests(unittest.IsolatedAsyncioTestCase):
     with_yaml = True
+    native_frontend_config = True
     asyncSetUp = queue.NativeQueuePrepareAuthTests.asyncSetUp
     _before_start = queue.NativeQueuePrepareAuthTests._before_start
     _loaded_backend = queue.NativeQueuePrepareAuthTests._loaded_backend
