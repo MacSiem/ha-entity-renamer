@@ -85,7 +85,7 @@ class NativeOwnIDRegistryReadback(NativeTemplateStateYAMLRuntimeReadback):
         _need(current == original, 'own_registry_yaml_graph_changed')
         # One detached accepted image serves this synchronous sample. No image
         # is retained across a guard, await, or later receipt reconstruction.
-        documents = self.chain.accepted_documents()
+        documents = self.chain.accepted_runtime_documents(include_devices=self.change.kind == 'device')
         snapshot = sample_state_bindings(runtime, self.program, prefix, 'original', documents)
         # Empty ID mappings still have a real before/after for selected names.
         # Use the accepted registry image of the last prepared change, bound to

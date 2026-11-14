@@ -348,7 +348,10 @@ class NativeTemplateStateYAMLRuntimeReadback:
             _need(image == 'original', 'template_state_original_projection_requires_original_yaml')
             prefix = replace(prefix, active=frozenset())
         snapshot = sample_state_bindings(runtime, self.program, prefix, image,
-                                         self.chain.accepted_documents(), entry_witness=self.entry_witness)
+                                         self.chain.accepted_runtime_documents(
+                                             include_devices=self.entry_witness is not None,
+                                             include_entries=self.entry_witness is not None),
+                                         entry_witness=self.entry_witness)
         return (Position.BEFORE if image == 'original' else Position.AFTER), snapshot
 
     async def position(self, change):

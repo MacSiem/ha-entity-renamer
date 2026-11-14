@@ -117,6 +117,22 @@ class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
                 binding.accepted_state_prefix(chain, program, input_state=state)
         self.assertEqual(binding.accepted_state_prefix(chain, program, input_state=state), expected)
 
+    async def test_runtime_projection_is_detached_from_accepted_evidence(self):
+        fixture = await mixed.mixed_fixture()
+        chain = fixture['chain']
+        state = chain.reconstruct_inputs()
+        image = chain.accepted_runtime_documents(include_devices=True, include_entries=True)
+        entities = image['core.entity_registry']['data']['entities']
+        original = entities[0]['id']
+        entities[0]['id'] = 'private-copy-mutation'
+        image['core.config_entries']['data']['entries'].clear()
+        image['core.device_registry']['data']['devices'].clear()
+        self.assertTrue(chain.matches_input_state(state))
+        again = chain.accepted_runtime_documents(include_devices=True, include_entries=True)
+        self.assertEqual(again['core.entity_registry']['data']['entities'][0]['id'], original)
+        self.assertTrue(again['core.config_entries']['data']['entries'])
+        self.assertTrue(again['core.device_registry']['data']['devices'])
+
     def test_callback_census_rechecks_each_code_and_source_changes(self):
         import hashlib
         import sys

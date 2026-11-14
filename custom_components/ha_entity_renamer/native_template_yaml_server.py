@@ -706,7 +706,7 @@ class NativeTemplateYAMLServer:
         self._scope()
         _need(get_instance(self.hass) is instance, 'recorder_replaced')
         managers.check()
-        _need(state.same_evidence(self.chain.reconstruct_inputs()), 'head_changed')
+        _need(self.chain.matches_input_state(state), 'head_changed')
         witness.check()
 
     async def _full(self, rollback):

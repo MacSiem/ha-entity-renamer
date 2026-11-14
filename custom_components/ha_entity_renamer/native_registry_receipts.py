@@ -1117,6 +1117,21 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
         states, _, _, _, _ = self._reconstruct()
         return {key: deepcopy(value['document']) for key, value in states.items()}
 
+    def accepted_runtime_documents(self, *, include_devices=False, include_entries=False):
+        """Detached collections used by a synchronous runtime census only.
+
+        Full accepted-state and physical fences remain independent of this
+        projection. No internal mutable value leaves the reconstruction.
+        """
+        states, _, _, _, _ = self._reconstruct()
+        entity = states['core.entity_registry']['document']['data']['entities']
+        result = {'core.entity_registry': {'data': {'entities': deepcopy(entity)}}}
+        if include_devices:
+            result['core.device_registry'] = deepcopy(states['core.device_registry']['document'])
+        if include_entries:
+            result['core.config_entries'] = deepcopy(states['core.config_entries']['document'])
+        return result
+
     def accepted_registry_id_positions(self):
         """Detached scalar registry identities for a freshly checked prefix."""
         states, _, _, _, _ = self._reconstruct()

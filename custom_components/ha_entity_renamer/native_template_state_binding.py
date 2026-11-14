@@ -718,7 +718,9 @@ async def async_observe_accepted_state_bindings(hass, chain, program, *, guard,
     _need(current in (original, proposed), 'template_state_physical_yaml_image_changed')
     position = 'original' if current == original else 'proposed'
     _need(not runtime_original or position == 'original', 'template_state_original_projection_requires_original_yaml')
-    first = sample_state_bindings(runtime, program, prefix, position, chain.accepted_documents(),
+    first = sample_state_bindings(runtime, program, prefix, position,
+                                  chain.accepted_runtime_documents(include_devices=entry_witness is not None,
+                                                                   include_entries=entry_witness is not None),
                                   entry_witness=entry_witness)
     await asyncio.sleep(0)
     check()
@@ -728,7 +730,9 @@ async def async_observe_accepted_state_bindings(hass, chain, program, *, guard,
     check()
     assert_discovery_managers_current(hass, observed, guard=check)
     _documents(state, observed); runtime.bindings()
-    second = sample_state_bindings(runtime, program, prefix, position, chain.accepted_documents(),
+    second = sample_state_bindings(runtime, program, prefix, position,
+                                  chain.accepted_runtime_documents(include_devices=entry_witness is not None,
+                                                                   include_entries=entry_witness is not None),
                                    entry_witness=entry_witness)
     _need(first.same_bindings(second), 'template_state_native_observation_changed')
     check()
