@@ -81,6 +81,8 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertEqual(self.f.device.async_get(device.id).name_by_user, 'Reviewed device')
         await hass.services.async_call('script', 'corpus_unrelated', {}, blocking=True)
         await hass.services.async_call('automation', 'trigger', {'entity_id': next(iter(before_automation))}, blocking=True)
+        self.assertIsNotNone(hass.states.get('script.corpus_unrelated').attributes.get('last_triggered'))
+        self.assertIsNotNone(hass.states.get(next(iter(before_automation))).attributes.get('last_triggered'))
         result = await runtime.native_yaml_reverse(hass, review['operation_id'], review['fingerprint'],
             guard=lambda: None, refresh=refresh)
         self.assertEqual(result['state'], 'rolled_back')

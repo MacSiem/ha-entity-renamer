@@ -124,6 +124,24 @@ class NativeRegistryIO:
         return json.loads(_orjson_bytes_default_encoder(
             self.registries[kind]._data_to_save()))
 
+    def row(self, kind, identity):
+        """Read one native storage row by its immutable registry identity."""
+        from homeassistant.helpers.json import _orjson_bytes_default_encoder
+        registry = self.registries[kind]
+        if kind == 'entity':
+            entry = registry.entities.get_entry(identity)
+        else:
+            # The native serializer uses _devices on newer Core and devices
+            # on 2025.6; neither includes child or synthetic composite rows.
+            devices = registry._devices if hasattr(registry, '_devices') else registry.devices
+            entry = devices.get(identity)
+        if entry is None or entry.id != identity:
+            raise RegistryConflict('identity_missing_or_ambiguous')
+        return json.loads(_orjson_bytes_default_encoder(entry.as_storage_fragment))
+
+    def entity_id_occupied(self, entity_id):
+        return self.registries['entity'].async_get(entity_id) is not None
+
     def pending(self, kind):
         store = self.registries[kind]._store
         return (store._data is not None or store._write_lock.locked()
@@ -441,15 +459,26 @@ class NativeRegistryBridge:
             self.history_guard = NativeHistoryGuard(self.recorder)
         return self.history_guard
 
+    def _row(self, kind, identity):
+        reader = getattr(self.io, 'row', None)
+        return reader(kind, identity) if reader is not None else _row(
+            self.io.document(kind), kind, identity)
+
+    def _occupied(self, entity_id):
+        lookup = getattr(self.io, 'entity_id_occupied', None)
+        if lookup is not None:
+            return lookup(entity_id)
+        return any(row.get('entity_id') == entity_id
+                   for row in self.io.document('entity')['entities'])
+
     def _live(self, change):
-        return _row(self.io.document(change.kind), change.kind, change.identity)
+        return self._row(change.kind, change.identity)
 
     def _fresh(self, change, expected, guard):
         guard()
         if not self.io.running():
             raise RegistryConflict("home_assistant_not_running")
-        document = self.io.document(change.kind)
-        if not self._matches(change, _row(document, change.kind, change.identity), expected):
+        if not self._matches(change, self._live(change), expected):
             raise RegistryConflict("registry_revision_changed")
         if change.kind == "entity":
             if change.mapping and expected.get('device_id') is not None:
@@ -457,8 +486,7 @@ class NativeRegistryBridge:
                 NativeNameObserver(self.io).verify_readd_device(change)
             destination = change.after if expected == change.before else change.before
             if destination["entity_id"] != expected["entity_id"]:
-                if any(row.get("entity_id") == destination["entity_id"]
-                       for row in document["entities"]):
+                if self._occupied(destination["entity_id"]):
                     raise RegistryConflict("registry_destination_occupied")
             # A native Script key move also changes unique_id. The minimum
             # Core removes the old entity key *before* it checks this unique
@@ -479,7 +507,7 @@ class NativeRegistryBridge:
         guard()
         if kind not in ("entity", "device") or not self.io.running():
             raise RegistryConflict("unsupported_registry_or_lifecycle")
-        before = _row(self.io.document(kind), kind, identity)
+        before = self._row(kind, identity)
         allowed = {"entity_id", "name"} if kind == "entity" else {"name_by_user"}
         if not updates or not set(updates) <= allowed:
             raise RegistryConflict("unsupported_native_update")
@@ -539,9 +567,8 @@ class NativeRegistryBridge:
                                         None, None, None, reason="registry_revision_conflict")
             if change.kind == "entity":
                 other = after if position == "before" else before
-                if other["entity_id"] != target["entity_id"] and any(
-                        row.get("entity_id") == other["entity_id"]
-                        for row in self.io.document("entity")["entities"]):
+                if (other["entity_id"] != target["entity_id"]
+                        and self._occupied(other["entity_id"])):
                     return RegistryEvidence("conflict", True, None, None, None,
                                             reason="registry_destination_occupied")
             runtime = self.runtime_probe(change, target)

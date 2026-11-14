@@ -25,6 +25,29 @@ class NativeRegistryReceiptsTests(unittest.IsolatedAsyncioTestCase):
                                     'native_registry_transition', 'native_input_observation',
                                     'prepared', 'journal', 'transaction')}
 
+    async def test_native_index_rows_match_storage_and_refuse_drift(self):
+        f, nr = self.f, self.modules['native_registry']
+        io = nr.NativeRegistryIO(f.hass)
+        bridge = nr.NativeRegistryBridge(io, None)
+        for kind, identity in (('entity', f.row.id), ('device', f.native_device.id)):
+            self.assertEqual(io.row(kind, identity), nr._row(io.document(kind), kind, identity))
+            with self.assertRaisesRegex(nr.RegistryConflict, 'identity_missing_or_ambiguous'):
+                io.row(kind, 'missing-identity')
+        before = io.row('entity', f.row.id)
+        after = dict(before, entity_id='sensor.renamer_destination_test')
+        change = nr.PreparedRegistryChange('entity', f.row.id, json.dumps(before), json.dumps(after))
+        bridge._fresh(change, before, lambda: None)
+        f.entity.async_get_or_create('sensor', 'test', 'collision-test',
+                                     suggested_object_id='renamer_destination_test')
+        with self.assertRaisesRegex(nr.RegistryConflict, 'registry_destination_occupied'):
+            bridge._fresh(change, before, lambda: None)
+        f.entity.async_update_entity(before['entity_id'], name='Changed during await')
+        with self.assertRaisesRegex(nr.RegistryConflict, 'registry_revision_changed'):
+            bridge._fresh(change, before, lambda: None)
+        f.entity.async_remove(before['entity_id'])
+        with self.assertRaisesRegex(nr.RegistryConflict, 'identity_missing_or_ambiguous'):
+            bridge._fresh(change, before, lambda: None)
+
     async def test_actual_coordinator_adapter_checks_both_intents_at_native_boundary(self):
         f, m = self.f, self.modules
         rr, nr, observation, prep, journal, tx = (m[name] for name in (
