@@ -373,7 +373,7 @@ def _scan_yaml(root, mapping, yaml_roots, owned_script_services):
 
 
 async def async_discover(hass, proposal, guard, *, _expected_yaml=None, _owned_script_services=(),
-                         _settle_native=False):
+                         _settle_native=False, _on_native_settle=None):
     """Capture native sources and dependent families without any mutation API."""
     from homeassistant.const import __version__
     from .native_discovery_inputs import async_observe_discovery_inputs
@@ -405,7 +405,8 @@ async def async_discover(hass, proposal, guard, *, _expected_yaml=None, _owned_s
     except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
         powercalc_failure = _unknown('powercalc', 'powercalc_runtime_inventory_unavailable')
     try:
-        native = (await async_observe_discovery_inputs(hass, guard=guard, settle=True)
+        native = (await async_observe_discovery_inputs(hass, guard=guard, settle=True,
+                                                           on_settle=_on_native_settle)
                   if _settle_native else await async_observe_discovery_inputs(hass, guard=guard))
         guard()
         values, entities, devices = _native_families(native)

@@ -1,3 +1,4 @@
+from pathlib import Path
 """Isolated Core: real WebSocket responsiveness and Runtime drift fence."""
 import asyncio
 from dataclasses import replace
@@ -154,6 +155,29 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
         self.assertEqual({state.entity_id: state.state for state in hass.states.async_all('automation')}, before_automation)
         self.assertEqual({state.entity_id: state.state for state in hass.states.async_all('script')}, before_scripts)
+
+    async def test_pending_native_flush_restarts_prepare_before_review(self):
+        native = self.module('native_discovery_inputs')
+        original = native.async_observe_discovery_inputs
+        injected = []
+        async def observe(hass, *, guard, settle=False, on_settle=None):
+            if settle and not injected:
+                manager = hass.config_entries
+                store = manager._store
+                before = Path(store.path).stat().st_ino
+                raw = Path(store.path).read_bytes()
+                store.async_delay_save(manager._data_to_save, 0.05)
+                injected.append((before, raw))
+            result = await original(hass, guard=guard, settle=settle, on_settle=on_settle)
+            if settle and len(injected) == 1:
+                before, raw = injected[0]
+                self.assertNotEqual(Path(hass.config_entries._store.path).stat().st_ino, before)
+                self.assertEqual(Path(hass.config_entries._store.path).read_bytes(), raw)
+                injected.append('settled')
+            return result
+        with patch.object(native, 'async_observe_discovery_inputs', observe):
+            await self.test_registry_device_with_unrelated_automation_script_apply_inverse()
+        self.assertEqual(len(injected), 2)
 
     async def test_prepare_refuses_missing_selected_entity_and_device(self):
         runtime, mapping, uuids, original, device = await self.restored_source()

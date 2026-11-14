@@ -9,6 +9,49 @@ from .const import DATA_RUNTIME, DATA_WEBSOCKETS, DOMAIN
 from .installed_cost_trace import trace_request, trace_owned
 
 
+class _ReviewRetry(Exception):
+    """One pre-effect prepare restart after an unchanged native flush."""
+    def __init__(self, receipt, baseline):
+        self.receipt = receipt
+        self.baseline = baseline
+
+
+def _retry_receipt(baseline, observed):
+    """Bind a retry to the same bytes and all unchanged validation sources.
+
+    This temporary receipt authorizes no effects. The next complete prepare
+    creates its own original receipt and keeps all ordinary fences.
+    """
+    from dataclasses import replace
+    from .transaction import Refused
+    from .native_input_baseline import _KEYS
+    if (observed.version != baseline.receipt.version
+            or observed.config_root != baseline.receipt.config_root):
+        raise Refused('review_native_settle_changed')
+    updated = {}
+    for old, new in zip(baseline.files, observed.files, strict=True):
+        if (old.key != new.key or old.raw is None or old.identity is None
+                or old.raw != new.raw or old.manager_json != new.manager_json
+                or old.identity[2] != new.identity[2]):
+            raise Refused('review_native_settle_changed')
+        updated['.storage/' + old.key] = (old.sha256, *new.identity[:2])
+    if tuple(row.key for row in observed.files) != _KEYS:
+        raise Refused('review_native_settle_changed')
+    receipt = baseline.receipt
+    sources = tuple((path, *(updated[path] if path in updated else (digest, dev, ino)))
+                    for path, digest, dev, ino in receipt.source_files)
+    if not set(updated) <= {row[0] for row in sources}:
+        raise Refused('review_native_settle_changed')
+    directories = []
+    for path, entries, names in receipt.source_directories:
+        if path == '.storage':
+            entries = tuple((name, mode, *(updated['.storage/' + name][1:]
+                if '.storage/' + name in updated else (dev, ino)))
+                for name, mode, dev, ino in entries)
+        directories.append((path, entries, names))
+    return replace(receipt, source_files=sources, source_directories=tuple(directories))
+
+
 def CONFIG_SCHEMA(config):
     from homeassistant.helpers.config_validation import config_entry_only_config_schema
     return config_entry_only_config_schema(DOMAIN)(config)
@@ -142,6 +185,20 @@ class Runtime:
 
     @trace_request("prepare")
     async def native_yaml_prepare(self, hass, mapping, *, actor_id, guard, refresh, entity_names=None, device_names=None):
+        retry = None
+        for attempt in range(2):
+            try:
+                return await self._native_yaml_prepare_once(hass, mapping, actor_id=actor_id,
+                    guard=guard, refresh=refresh, entity_names=entity_names,
+                    device_names=device_names, retry=retry)
+            except _ReviewRetry as settled:
+                if attempt:
+                    from .transaction import Refused
+                    raise Refused('review_native_settle_repeated') from None
+                retry = settled
+
+    async def _native_yaml_prepare_once(self, hass, mapping, *, actor_id, guard, refresh,
+                                        entity_names=None, device_names=None, retry=None):
         """Private ordinary mapping -> server-owned immutable retained review.
 
         No mutation endpoint or family readiness is granted by this method.
@@ -160,6 +217,12 @@ class Runtime:
         async with self.operation_lock:
             await refresh()
             current()
+            if retry is not None:
+                from .native_input_baseline import _drained
+                from .yaml_validation import assert_validation_current
+                await _drained(hass.async_add_executor_job,
+                               lambda: assert_validation_current(retry.receipt))
+                current()
             from .review_retention import async_reclaim_reviews, review_lease
             import uuid
             retained = {}
@@ -246,6 +309,16 @@ class Runtime:
                 check_session()
                 from .dependency_review import dependency_files
                 receipt = baseline.receipt
+                if retry is not None:
+                    from .native_input_baseline import _drained
+                    from .yaml_validation import assert_validation_current
+                    if any((old.raw, old.manager_json) != (new.raw, new.manager_json)
+                           for old, new in zip(retry.baseline.files, baseline.files, strict=True)):
+                        raise Refused('review_native_settle_changed')
+                    await _drained(hass.async_add_executor_job,
+                                   lambda: assert_validation_current(retry.receipt))
+                    current()
+                    check_session()
                 # Aggregate only the admitted planned YAML scope. Paths, YAML,
                 # native keys, receipts and private consumer configuration stay here.
                 from .powercalc_composition import PowercalcComposition
@@ -326,9 +399,22 @@ class Runtime:
                     # profile inputs are verified by the existing PC fence.
                     from dataclasses import replace
                     expected_yaml = replace(expected_yaml, powercalc_inputs=None)
+                settled = []
                 capture = await async_discover(hass, proposal, session._scope,
                     _expected_yaml=expected_yaml,
-                    _owned_script_services=owned_script, _settle_native=True)
+                    _owned_script_services=owned_script, _settle_native=True,
+                    _on_native_settle=settled.append)
+                if settled:
+                    if retry is not None:
+                        raise Refused('review_native_settle_repeated')
+                    candidate = _retry_receipt(baseline, settled[0])
+                    from .native_input_baseline import _drained
+                    from .yaml_validation import assert_validation_current
+                    await _drained(hass.async_add_executor_job,
+                                   lambda: assert_validation_current(candidate))
+                    current()
+                    check_session()
+                    raise _ReviewRetry(candidate, baseline)
                 from homeassistant import loader
                 custom = await loader.async_get_custom_components(hass)
                 capture = await async_finalize_discovery(hass, capture, session._scope)
@@ -369,6 +455,11 @@ class Runtime:
                     foreign.check(require_sources=True)
                     foreign.expiry = hass.loop.call_later(900, foreign.close)
                 check_session()
+                if retry is not None:
+                    await _drained(hass.async_add_executor_job,
+                                   lambda: assert_validation_current(retry.receipt))
+                    current()
+                    check_session()
                 self.reviews[operation] = _PreparedReview(actor_id, plan, count,
                     hass.loop.time() + 900, admission, own, trace_admission, template_admission,
                     getattr(session, 'review_admission', None), foreign,

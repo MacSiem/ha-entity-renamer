@@ -207,7 +207,7 @@ class _DiscoveryPinned:
         self._named()
 
 
-async def async_observe_discovery_inputs(hass, *, guard, settle=False):
+async def async_observe_discovery_inputs(hass, *, guard, settle=False, on_settle=None):
     """Observe three existing, settled native documents under caller's scope.
 
 Exact supported versions/store classes/schema/layout/pending-state checks come
@@ -223,6 +223,7 @@ Cancellation drains executor work before any held descriptor can be released.
                 or os.path.normpath(root) != root or __version__ not in _SCHEMAS):
             _reject()
         location = _SourceLocation(__version__, root)
+        waited = False
         if settle:
             admission = _Managers(hass, location, identity_only=True)
 
@@ -237,6 +238,7 @@ Cancellation drains executor work before any held descriptor can be released.
             # sample manager contents once all five pending flags have cleared.
             deadline = hass.loop.time() + _SETTLE_TIMEOUT
             while any(admission.pending_for(store) for store in admission.stores):
+                waited = True
                 remaining = deadline - hass.loop.time()
                 if remaining <= 0:
                     flags = ('data', 'write_lock', 'delay_handle', 'final_listener', 'load_future')
@@ -270,6 +272,8 @@ Cancellation drains executor work before any held descriptor can be released.
         check()
         await _drained(hass.async_add_executor_job, pinned.verify)
         check()
+        if waited and on_settle is not None:
+            on_settle(observed)
         return observed
     except asyncio.CancelledError:
         raise
