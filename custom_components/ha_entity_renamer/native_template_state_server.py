@@ -794,6 +794,17 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 native.native, selected[0]['id'], guard=self._scope)
         observed = sample_state_bindings(native, self.program, prefix, 'original', documents,
                                          entry_witness=getattr(self, 'entry_witness', None))
+        for change in self.registry_changes:
+            if not change.mapping or not change.runtime_before_json:
+                continue
+            saved = json.loads(change.runtime_before_json)['entities'][change.identity]
+            if not saved['active'] and saved['entry'] is not None and saved['entry']['state'] == 'loaded':
+                _need(len(self.mapping) == 1 and not self.mixed_state and dashboard_storage is None,
+                      'restored_source_scope_unsupported')
+                transition = observed.transition_pairs(self.program, frozenset(change.mapping))
+                _need(not any((transition.entities, transition.source_pairs, transition.configured_variables,
+                               transition.rendered_variables, transition.target_semantics, transition.action_pairs)),
+                      'restored_source_transition_unsupported')
         # Registry and physical consumers retain their actual original IDs.
         physical = tuple(sorted((r.domain.removeprefix('template.'), r.source_key, r.entity.entity_id)
             for r in observed.rows if (r.domain, r.source_key) in self.program.physical_keys))

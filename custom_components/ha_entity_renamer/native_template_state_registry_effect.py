@@ -69,6 +69,14 @@ class NativeTemplateStateRegistryEffect:
             transition = snapshot.transition_pairs(root.program, target)
         obj = object.__new__(cls)
         obj.root, obj.io, obj.change = root, io, change
+        saved = (json.loads(change.runtime_before_json)['entities'][change.identity]
+                 if change.runtime_before_json else None)
+        obj.restored_source = bool(saved and not saved['active'] and saved['entry'] is not None
+                                   and saved['entry']['state'] == 'loaded')
+        if obj.restored_source:
+            _need(not any((transition.entities, transition.source_pairs, transition.configured_variables,
+                           transition.rendered_variables, transition.target_semantics, transition.action_pairs)),
+                  'restored_source_transition_unsupported')
         obj.cold_original = cold_original
         obj.source, obj.target = (new, old) if reverse else (old, new)
         obj.context, obj.intent, obj.before = context, intent, before
@@ -114,6 +122,9 @@ class NativeTemplateStateRegistryEffect:
             _need(dependent is not None and dependent.change == change and pure,
                   'own_dependent_identity_unqualified')
             obj.dependent_entity = dependent.entity
+        if obj.restored_source:
+            _need(obj.own_entity is None and obj.dependent_entity is None and obj.script_phase is None,
+                  'restored_source_actor_unsupported')
         producer_entities = transition.entities
         if obj.own_entity is not None and not any(e is obj.own_entity for e in producer_entities):
             producer_entities = (*producer_entities, obj.own_entity)
@@ -279,6 +290,11 @@ class NativeTemplateStateRegistryEffect:
             self.transition = StateBindingTransition((), (), (), (), ())
         else:
             self.transition = fresh.transition_pairs(self.root.program, self.expected.active)
+        if self.restored_source:
+            _need(not any((self.transition.entities, self.transition.source_pairs,
+                           self.transition.configured_variables, self.transition.rendered_variables,
+                           self.transition.target_semantics, self.transition.action_pairs)),
+                  'restored_source_transition_changed')
         self.transfer_entities = self.transition.entities
         if self.own_entity is not None and not any(e is self.own_entity for e in self.transfer_entities):
             self.transfer_entities = (*self.transfer_entities, self.own_entity)

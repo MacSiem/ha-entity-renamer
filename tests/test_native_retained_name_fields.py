@@ -57,6 +57,17 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         review = await runtime.native_yaml_prepare(hass, mapping,
             entity_names={old: 'Restored reviewed source'}, actor_id='synthetic-admin',
             guard=lambda: None, refresh=refresh)
+        plan = runtime.reviews[review['operation_id']].plan
+        baseline, _ = runtime.preparations.resolve_composition(plan.native_inputs)
+        self.assertEqual(baseline.receipt.changed_domains, ())
+        self.assertEqual(tuple(step.adapter for step in plan.steps), ('registry',))
+        events = []
+        from homeassistant.core import callback
+        @callback
+        def observed(event):
+            if event.data['entity_id'] in (old, new):
+                events.append((event.data['entity_id'], event.data['old_state'], event.data['new_state']))
+        self.addCleanup(hass.bus.async_listen('state_changed', observed))
         try:
             result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
                 actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
@@ -71,7 +82,13 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(hass.states.get(old))
         self.assertEqual(hass.states.get(new).state, 'unavailable')
         self.assertTrue(hass.states.get(new).attributes['restored'])
-        self.assertEqual(hass.states.get(new).attributes['friendly_name'], 'Restored reviewed source')
+        self.assertEqual(hass.states.get(new).attributes['friendly_name'],
+                         'Restored fixture device Restored reviewed source')
+        self.assertTrue(any(key == old and before is not None and after is None
+                            for key, before, after in events))
+        self.assertTrue(any(key == new and before is None and after is not None
+                            and after.state == 'unavailable' and after.attributes.get('restored') is True
+                            for key, before, after in events))
         reverse = await runtime.native_yaml_reverse(hass, review['operation_id'], review['fingerprint'],
             guard=lambda: None, refresh=refresh)
         self.assertEqual(reverse['state'], 'rolled_back')
@@ -80,6 +97,8 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(hass.states.get(new))
         self.assertEqual(hass.states.get(old).state, 'unavailable')
         self.assertTrue(hass.states.get(old).attributes['restored'])
+        self.assertEqual(hass.states.get(old).attributes['friendly_name'],
+                         'Restored fixture device Template runtime producer')
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
     async def test_loaded_restored_dependent_template_refuses_before_effect(self):
@@ -88,7 +107,8 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         old, new = next(iter(mapping.items()))
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
-        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+        with self.assertRaisesRegex((ValueError, self.module('transaction').Refused),
+                                    'restored_source_dependent_lifecycle_unsupported'):
             await runtime.native_yaml_prepare(hass, mapping,
                 entity_names={old: 'Restored reviewed source'}, actor_id='synthetic-admin',
                 guard=lambda: None, refresh=refresh)
