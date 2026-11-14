@@ -51,8 +51,13 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         review = await runtime.native_yaml_prepare(hass, mapping,
             entity_names={old: 'Restored reviewed source'}, actor_id='synthetic-admin',
             guard=lambda: None, refresh=refresh)
-        result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
-            actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        try:
+            result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        except Exception:
+            record = await runtime.journal.load(review['operation_id'])
+            print('RESTORED_FAILURE', record.status, record.reason, record.phases)
+            raise
         self.assertEqual(result['state'], 'applied')
         row = self.f.entity.async_get(new)
         self.assertEqual((row.id, row.device_id, row.name),
@@ -86,11 +91,13 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([appeared])
         await hass.async_block_till_done()
         await self._flush_documents()
+        before_apply = self.f.entity.async_get(old)
+        before_identity = (before_apply.id, before_apply.device_id)
         with self.assertRaises((ValueError, self.module('transaction').Refused)):
             await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
                 actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
         self.assertEqual((self.f.entity.async_get(old).id, self.f.entity.async_get(old).device_id),
-                         (uuids[old], device.id))
+                         before_identity)
         self.assertIsNone(self.f.entity.async_get(new))
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
 

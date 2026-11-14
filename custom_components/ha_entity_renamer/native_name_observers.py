@@ -143,6 +143,7 @@ class NativeNameObserver:
         # ID updates. Do not extend name-only/device or other Core paths.
         return (self._version() in ('2026.11.0', '2026.11.1')
                 and change.kind == 'entity' and bool(change.mapping)
+                and change.before.get('device_id') is not None
                 and change.before.get('name') != change.after.get('name'))
 
     def _device_subscription(self, entity, row):
