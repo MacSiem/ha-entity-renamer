@@ -72,7 +72,8 @@ class ActivationTests(unittest.IsolatedAsyncioTestCase):
             plan = plan_yaml(root, {'sensor.old': 'sensor.new'})
             before, after = parent / 'before', parent / 'after'
             before.mkdir(); after.mkdir()
-            files, directories = validation._stage(root, plan, before, after)
+            files, directories, links = validation._stage(root, plan, before, after)
+            self.assertFalse(links)
             receipt = validation.ValidationReceipt(str(root), files, directories,
                 (), ('script',), (), '2026.10.2')
             (root / 'home-assistant.log').write_text('normal runtime log')

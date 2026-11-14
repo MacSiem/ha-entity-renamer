@@ -37,7 +37,7 @@ _SCHEMAS = {'2025.6.0': ((1, 17), (1, 9), (1, 5)),
             '2026.11.0': ((1, 24), (3, 4), (1, 5)),
             '2026.11.1': ((1, 24), (3, 4), (1, 5))}
 _RECEIPT_FIELDS = frozenset(f.name for f in fields(ValidationReceipt))
-_LEGACY_RECEIPT_FIELDS = _RECEIPT_FIELDS - {'checker_repairs_snapshot'}
+_LEGACY_RECEIPT_FIELDS = _RECEIPT_FIELDS - {'checker_repairs_snapshot', 'source_links'}
 
 
 class NativeInputBaselineError(ValueError):
@@ -135,7 +135,7 @@ def _integer(value):
 
 def _receipt(raw):
     data = _loads(raw, MAX_RECEIPT_BYTES)
-    if type(data) is not dict or set(data) not in (_RECEIPT_FIELDS, _LEGACY_RECEIPT_FIELDS):
+    if (type(data) is not dict or not _LEGACY_RECEIPT_FIELDS <= set(data) <= _RECEIPT_FIELDS):
         _fail('native_input_receipt_invalid')
     try:
         receipt = ValidationReceipt(**{k: _tuple(v) for k, v in data.items()})
@@ -188,6 +188,23 @@ def _receipt(raw):
                         or (names is not None and name not in names)):
                     _fail('native_input_receipt_invalid')
                 seen.add(name)
+        links = receipt.source_links
+        if links is not None:
+            if type(links) is not tuple or not links or len(links) > 10000:
+                _fail('native_input_receipt_invalid')
+            parent = next((row for row in receipt.source_directories if row[0] == 'custom_components'), None)
+            seen_links = set()
+            for path, text, target, dev, ino in links:
+                _relative(path); _relative(target)
+                if (path.count('/') != 1 or not path.startswith('custom_components/')
+                        or not target.startswith('custom_components/') or target not in directories
+                        or type(text) is not str or not text or '\x00' in text
+                        or path in seen_links or not all(map(_integer, (dev, ino)))
+                        or parent is None or parent[2] is not None
+                        or not any(row[0] == path.split('/')[1] and stat.S_ISLNK(row[1])
+                                   and row[2:] == (dev, ino) for row in parent[1])):
+                    _fail('native_input_receipt_invalid')
+                seen_links.add(path)
         if '.' not in directories:
             _fail('native_input_receipt_invalid')
         for path, digest in receipt.proposed_files:
@@ -235,6 +252,8 @@ def _receipt_bytes(receipt):
     value = asdict(receipt)
     if receipt.checker_repairs_snapshot is None:
         value.pop('checker_repairs_snapshot')
+    if receipt.source_links is None:
+        value.pop('source_links')
     raw = _json(value)
     if len(raw) > MAX_RECEIPT_BYTES or _receipt(raw) != receipt:
         _fail('native_input_receipt_invalid')

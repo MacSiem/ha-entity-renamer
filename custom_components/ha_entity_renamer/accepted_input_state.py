@@ -10,6 +10,7 @@ import ctypes
 import errno
 import hashlib
 import os
+from pathlib import Path
 import stat
 import sys
 
@@ -278,6 +279,8 @@ class AcceptedInputState:
             _fail('input_graph_mismatch')
         reader = _PhysicalReader(original.config_root, Limits(max_file_bytes=MAX_FILE_BYTES))
         try:
+            from .yaml_validation import _assert_links
+            _assert_links(reader, Path(original.config_root), original.source_links or ())
             for path, expected in self._sources.items():
                 if (path == '.storage/repairs.issue_registry'
                         and original.checker_repairs_snapshot is not None):

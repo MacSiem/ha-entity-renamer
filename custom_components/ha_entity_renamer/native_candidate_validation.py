@@ -118,6 +118,8 @@ def _stage(state, original, change, reverse, before, after):
                 target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 target.write_bytes(raw)
                 target.chmod(0o600)
+        from .yaml_validation import _stage_links
+        _stage_links((before, after), original.source_links or ())
         # Also pin uid/gid for original ancillary files whose old receipts do
         # not record ownership. This is only an IO fence, never learned authority.
         for path, expected in captured:

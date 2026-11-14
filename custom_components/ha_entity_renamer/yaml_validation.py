@@ -46,6 +46,9 @@ class ValidationReceipt:
     # native-checker input, including explicitly witnessed absence.
     checker_repairs_snapshot: tuple[str, ...] | None = None
 
+    # None preserves legacy receipt encoding.
+    source_links: tuple[tuple[str, str, str, int, int], ...] | None = None
+
     @property
     def ready_for_apply(self):
         return not self.unsupported_domains
@@ -126,11 +129,59 @@ def _digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+def _capture_link(reader, root, path):
+    """Bind a top-level alias to a directory under the held canonical root."""
+    parent = reader.open('custom_components', directory=True)
+    try:
+        name = path.split('/')[1]
+        before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        text = os.readlink(name, dir_fd=parent)
+        if not stat.S_ISLNK(before.st_mode):
+            raise YAMLValidationError('unsafe_validation_input')
+        # resolve(strict=True) understands alternate names for the root, such
+        # as /config -> /homeassistant. The subsequent NOFOLLOW open anchors
+        # the resolved target beneath the held root, never beneath the alias.
+        resolved = (root / 'custom_components' / text).resolve(strict=True)
+        target = resolved.relative_to(root).as_posix()
+        if not target.startswith('custom_components/') or target == path:
+            raise YAMLValidationError('unsafe_validation_input')
+        fd = reader.open(target, directory=True)
+        os.close(fd)
+        after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if ((before.st_mode, before.st_dev, before.st_ino) !=
+                (after.st_mode, after.st_dev, after.st_ino)
+                or os.readlink(name, dir_fd=parent) != text
+                or (os.stat(root).st_dev, os.stat(root).st_ino) !=
+                   (os.fstat(reader.root).st_dev, os.fstat(reader.root).st_ino)):
+            raise YAMLValidationError('validation_source_changed')
+        return (path, text, target, before.st_dev, before.st_ino)
+    except (OSError, ValueError, RuntimeError):
+        raise YAMLValidationError('unsafe_validation_input') from None
+    finally:
+        os.close(parent)
+
+
+def _assert_links(reader, root, links):
+    for expected in links:
+        if _capture_link(reader, root, expected[0]) != expected:
+            raise YAMLValidationError('validation_source_changed')
+
+
+def _stage_links(roots, links):
+    for root in roots:
+        for path, _, target, _, _ in links:
+            link = Path(root) / _relative(path)
+            destination = Path(root) / _relative(target)
+            if not destination.is_dir():
+                raise YAMLValidationError('unsafe_validation_input')
+            link.symlink_to(os.path.relpath(destination, link.parent), target_is_directory=True)
+
+
 def _stage(config_root, plan, baseline, proposed, with_sources=False, native_helpers=(), registry_only=False,
            dashboard_yaml=None, dashboard_storage=None, mixed_powercalc=False):
     reader = _Reader(config_root, Limits(max_file_bytes=_MAX_BYTES))
     try:
-        return _stage_owned(reader, plan, baseline, proposed, with_sources=with_sources,
+        return _stage_owned(reader, plan, baseline, proposed, config_root=Path(config_root).resolve(), with_sources=with_sources,
                             native_helpers=native_helpers, registry_only=registry_only,
                             dashboard_yaml=dashboard_yaml, dashboard_storage=dashboard_storage,
                             mixed_powercalc=mixed_powercalc)
@@ -142,7 +193,7 @@ def _stage(config_root, plan, baseline, proposed, with_sources=False, native_hel
         os.close(reader.root)
 
 
-def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native_helpers=(), registry_only=False,
+def _stage_owned(reader, plan, baseline, proposed, *, config_root, with_sources=False, native_helpers=(), registry_only=False,
                  dashboard_yaml=None, dashboard_storage=None, mixed_powercalc=False):
     if (type(mixed_powercalc) is not bool or type(registry_only) is not bool or not plan.ready
             or (not plan.patches and not native_helpers and not registry_only)
@@ -276,6 +327,7 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native
             parent = parent.parent
     # Copy required auxiliary trees without following symlinks. Bound all input.
     walked = 0
+    links = []
     def walk(relative, depth=0):
         nonlocal walked
         if depth > 48:
@@ -297,6 +349,8 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native
                         walk(path, depth + 1)
                     elif stat.S_ISREG(info.st_mode):
                         paths.add(path)
+                    elif relative == 'custom_components' and stat.S_ISLNK(info.st_mode):
+                        links.append(_capture_link(reader, config_root, path))
                     else:
                         raise YAMLValidationError('unsafe_validation_input')
             if auxiliary is not None and relative in {r[0] for r in auxiliary.directories}:
@@ -376,6 +430,8 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native
                 destination.write_bytes(data)
                 destination.chmod(0o600)
             sources.append((path, digest, info.st_dev, info.st_ino))
+        _assert_links(reader, config_root, tuple(links))
+        _stage_links((baseline, proposed), links)
         staged = (tuple(sources), tuple((path, directories[path], directory_names[path])
                                        for path in sorted(directories)))
         if with_sources:
@@ -383,8 +439,8 @@ def _stage_owned(reader, plan, baseline, proposed, *, with_sources=False, native
                                               extract_template_source_ledger, extract_powercalc_source_ledger)
             return (*staged, extract_source_ledger(plan, original_bytes),
                     extract_template_source_ledger(plan, original_bytes),
-                    extract_powercalc_source_ledger(plan, original_bytes))
-        return staged
+                    extract_powercalc_source_ledger(plan, original_bytes), tuple(links))
+        return (*staged, tuple(links))
     except (OSError, ValueError) as exc:
         if isinstance(exc, YAMLValidationError):
             raise
@@ -402,6 +458,7 @@ def assert_validation_current(receipt):
         _receipt_bytes(receipt)
     reader = _Reader(receipt.config_root, Limits(max_file_bytes=_MAX_BYTES))
     try:
+        _assert_links(reader, Path(receipt.config_root), receipt.source_links or ())
         for index, (path, digest, device, inode) in enumerate(receipt.source_files):
             if path == '.storage/repairs.issue_registry' and snapshot is not None:
                 continue
@@ -641,7 +698,8 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 tuple(sorted((patch.path, _digest(patch.proposed_bytes)) for patch in plan.patches)),
                 tuple(result['changed_domains']), tuple(result['unsupported_domains']), result['version'],
                 tuple(tuple(row) for row in result.get('runtime_expected', ())),
-                _checker_repairs_snapshot(plan, before, directories, dashboard_yaml, dashboard_storage))
+                _checker_repairs_snapshot(plan, before, directories, dashboard_yaml, dashboard_storage),
+                staged[-1] or None)
             await _settled_executor(hass, assert_validation_current, receipt)
             if dashboard_yaml is not None:
                 dashboard_yaml.check()

@@ -24,6 +24,8 @@ def _identity_payload(value):
     payload = asdict(value)
     if value.receipt.checker_repairs_snapshot is None:
         payload['receipt'].pop('checker_repairs_snapshot', None)
+    if value.receipt.source_links is None:
+        payload['receipt'].pop('source_links', None)
     return payload
 
 

@@ -95,6 +95,8 @@ class PreparedYAML:
             payload['receipt'].pop('runtime_expected', None)
         if self.receipt.checker_repairs_snapshot is None:
             payload['receipt'].pop('checker_repairs_snapshot', None)
+        if self.receipt.source_links is None:
+            payload['receipt'].pop('source_links', None)
         return 'yaml:' + _digest(payload)
 
     @property
@@ -190,7 +192,8 @@ def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_ow
                 'changed_domains', 'unsupported_domains', 'version')
     # Old durable preparations remain decodable, but lack runtime proof.
     _keys(raw, receipt_keys + (('runtime_expected',) if 'runtime_expected' in raw else ())
-          + (('checker_repairs_snapshot',) if 'checker_repairs_snapshot' in raw else ()))
+          + (('checker_repairs_snapshot',) if 'checker_repairs_snapshot' in raw else ())
+          + (('source_links',) if 'source_links' in raw else ()))
     root = _text(raw['config_root'])
     if not Path(root).is_absolute() or str(Path(root)) != root or '..' in Path(root).parts:
         raise ValueError('invalid_prepared_yaml_root')
@@ -306,10 +309,13 @@ def _decode_yaml(data, *, state_mode=False, mixed_state_mode=False, dependent_ow
         if type(snapshot) not in (list, tuple):
             raise ValueError('invalid_checker_repairs_snapshot')
         snapshot = tuple(snapshot)
+    links = raw.get('source_links')
+    if links is not None:
+        links = tuple(tuple(row) for row in sequence(links, 10000))
     receipt = ValidationReceipt(root, tuple(sources), tuple(directories), tuple(proposed),
                                 domains, tuple(raw['unsupported_domains']), _text(raw['version']),
-                                tuple(runtime_expected), snapshot)
-    if snapshot is not None:
+                                tuple(runtime_expected), snapshot, links)
+    if snapshot is not None or links is not None:
         from .native_input_baseline import _receipt_bytes
         _receipt_bytes(receipt)
     if mixed_state_mode:
@@ -382,6 +388,8 @@ def _assert_sources(change, after_paths, restored=False):
     reader = _Reader(receipt.config_root, Limits(max_file_bytes=128_000_000))
     owned = {}
     try:
+        from .yaml_validation import _assert_links
+        _assert_links(reader, Path(receipt.config_root), receipt.source_links or ())
         for path, digest, device, inode in receipt.source_files:
             raw, info = reader.read(path)
             replacement = files.get(path)

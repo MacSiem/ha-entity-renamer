@@ -24,6 +24,8 @@ class PreparedPowercalcYAML(PreparedYAML):
         payload = asdict(self)
         if self.receipt.checker_repairs_snapshot is None:
             payload['receipt'].pop('checker_repairs_snapshot', None)
+        if self.receipt.source_links is None:
+            payload['receipt'].pop('source_links', None)
         return 'powercalc_yaml:' + _digest(payload)
 
     def checked(self):
