@@ -10,6 +10,8 @@ import asyncio
 import base64
 from copy import deepcopy
 import hashlib
+import inspect
+from dataclasses import asdict
 import json
 import re
 import zlib
@@ -59,6 +61,33 @@ def decode(value):
     return result
 
 
+def _native_payload(baseline, composition):
+    """Pure codec work on detached inputs; no Store or Home Assistant access."""
+    from .native_input_baseline import encode_baseline
+    raw = encode_baseline(baseline)
+    native_digest = hashlib.sha256(b'ha-entity-renamer/native-input-baseline/v1\x00' + raw).hexdigest()
+    payload = {'kind': 'native_input_baseline', 'schema': 1,
+               'codec': base64.b64encode(raw).decode('ascii'), 'baseline_digest': native_digest}
+    if composition is not None:
+        from .native_template_composition import encode_composition
+        payload.update(schema=2, composition=encode_composition(composition, baseline))
+    if len(json.dumps(payload, sort_keys=True, separators=(',', ':'),
+                      allow_nan=False).encode()) > _MAX_BYTES:
+        payload.update(schema=3, encoding='zlib+base64',
+                       codec=base64.b64encode(zlib.compress(raw)).decode('ascii'))
+    return payload, native_digest
+
+
+def _check_sync_guard(guard):
+    value = guard()
+    if inspect.isawaitable(value):
+        if inspect.iscoroutine(value):
+            value.close()
+        raise ValueError('synchronous_guard_required')
+    if value is not None and value is not True:
+        raise ValueError('guard_rejected')
+
+
 class PreparedStore:
     def __init__(self, store):
         self.store = store
@@ -84,29 +113,40 @@ class PreparedStore:
             raise ValueError('preparation_not_found_or_changed')
         return deepcopy(row['payload'])
 
-    async def create_native_inputs(self, preparation_id, baseline, *, composition=None):
+    async def create_native_inputs(self, preparation_id, baseline, *, composition=None, hass=None, guard=None):
         """Persist one full batch baseline BEFORE constructing its Plan.
 
         Caller must capture once under the coordinator/editor locks before any
         effect. This does not refresh inputs or upgrade a legacy preparation.
         Only the opaque returned tuple belongs in Plan.native_inputs.
         """
-        from .native_input_baseline import encode_baseline, baseline_digest
-        raw = encode_baseline(baseline)
-        native_digest = baseline_digest(baseline)
-        payload = {'kind': 'native_input_baseline', 'schema': 1,
-                   'codec': base64.b64encode(raw).decode('ascii'),
-                   'baseline_digest': native_digest}
-        if composition is not None:
-            from .native_template_composition import encode_composition
-            payload.update(schema=2, composition=encode_composition(composition, baseline))
-        # Select before the sole Store write. Old small envelopes retain their
-        # exact schema/bytes/digest; a lost write acknowledgment is never retried.
-        if len(json.dumps(payload, sort_keys=True, separators=(',', ':'),
-                          allow_nan=False).encode()) > _MAX_BYTES:
-            payload.update(schema=3, encoding='zlib+base64',
-                           codec=base64.b64encode(zlib.compress(raw)).decode('ascii'))
-        digest = await self.create(preparation_id, payload)
+        if hass is None:
+            payload, native_digest = _native_payload(baseline, composition)
+            digest = await self.create(preparation_id, payload)
+        else:
+            from .native_input_baseline import _drained, pinned_original_inputs
+            from .native_registry_receipts import _freeze_json, _exact_json_equal
+            if not callable(guard):
+                raise ValueError('synchronous_guard_required')
+            def scope():
+                _check_sync_guard(guard)
+            scope()
+            baseline_snapshot = _freeze_json(asdict(baseline))
+            composition_snapshot = None if composition is None else _freeze_json(asdict(composition))
+            detached_baseline, detached_composition = deepcopy(baseline), deepcopy(composition)
+            async with pinned_original_inputs(hass, baseline.receipt, guard=scope) as (observed, verify):
+                if observed != baseline:
+                    raise ValueError('native_input_preparation_changed')
+                payload, native_digest = await _drained(hass.async_add_executor_job,
+                    lambda: _native_payload(detached_baseline, detached_composition))
+                def admission():
+                    scope()
+                    if (not _exact_json_equal(asdict(baseline), baseline_snapshot)
+                            or (composition is not None and not _exact_json_equal(
+                                asdict(composition), composition_snapshot))):
+                        raise ValueError('native_input_preparation_changed')
+                admission()
+                digest = await self.create(preparation_id, payload, guard=admission, async_guard=verify)
         return (preparation_id, digest, native_digest)
 
     def _resolve_native_payload(self, reference):
@@ -180,11 +220,38 @@ class PreparedStore:
         except (ValueError, TypeError, KeyError):
             raise ValueError('native_input_composition_rejected') from None
 
-    async def create(self, plan_id, payload):
+    async def async_resolve_composition(self, reference, *, hass, guard, receipt):
+        """Decode detached bytes while original physical descriptors stay pinned."""
+        from .native_input_baseline import _drained, pinned_original_inputs
+        def scope():
+            _check_sync_guard(guard)
+        scope()
+        reference = tuple(reference)
+        payload = self.resolve(reference[0], reference[1])
+        def decode_detached():
+            isolated = PreparedStore(None)
+            isolated.plans = {reference[0]: {'digest': reference[1], 'payload': payload}}
+            return isolated.resolve_composition(reference)
+        async with pinned_original_inputs(hass, receipt, guard=scope) as (observed, verify):
+            baseline, composition = await _drained(hass.async_add_executor_job, decode_detached)
+            if observed != baseline:
+                raise ValueError('native_input_preparation_changed')
+            await verify()
+            scope()
+            current = self.resolve(reference[0], reference[1])
+            if canonical_digest(current) != reference[1]:
+                raise ValueError('native_input_preparation_changed')
+            return baseline, composition
+
+    async def create(self, plan_id, payload, *, guard=None, async_guard=None):
         if type(plan_id) is not str or not _ID.fullmatch(plan_id):
             raise ValueError('invalid_preparation_id')
         payload, digest = canonical(payload)
         async with self.lock:
+            if async_guard is not None:
+                await async_guard()
+            if guard is not None:
+                guard()
             self._ready()
             previous = self.plans.get(plan_id)
             if previous is not None:

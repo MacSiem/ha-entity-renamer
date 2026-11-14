@@ -17,6 +17,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 import asyncio
 import hashlib
+import inspect
 import json
 import re
 import stat
@@ -198,11 +199,15 @@ Any uncertain save permanently poisons this instance AND its PreparedStore.
         self._ready()
         return deepcopy(self.rows.get(key))
 
-    async def create(self, key: str, payload: dict) -> tuple[str, str]:
+    async def create(self, key: str, payload: dict, *, guard=None, async_guard=None) -> tuple[str, str]:
         if type(key) is not str or not re.fullmatch(r'rr-[0-9a-f]{64}', key):
             _fail('event_key_invalid')
         payload, digest = canonical(payload)
         async with self.lock:
+            if async_guard is not None:
+                await async_guard()
+            if guard is not None:
+                guard()
             self._ready()
             if key in self.rows:
                 _fail('event_exists_no_replay')
@@ -236,6 +241,11 @@ class RegistryIntent:
     reference: tuple[str, str]
 
 
+# A decoded baseline is admitted only by the private async start path after
+# rechecking its detached source and scope; clients cannot supply this token.
+_ASYNC_BASELINE_TOKEN = object()
+
+
 class RegistryReceiptChain:
     """One live writer; reopened views only read immutable accepted evidence.
 
@@ -247,7 +257,7 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
 
     def __init__(self, store: RegistryReceiptStore, operation_id: str, plan: Plan,
                  receipt: ValidationReceipt, prepared_digests: dict[str, str], *, yaml_original_metadata=None,
-                 dashboard_original_metadata=None):
+                 dashboard_original_metadata=None, _async_baseline=None):
         from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML, PreparedMixedPowercalcYAML, assert_state_yaml_composition
         from .native_external_yaml import PreparedExternalStateYAML
         if (type(store) is not RegistryReceiptStore or type(plan) is not Plan
@@ -268,7 +278,15 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
                        'energy': 'gap_nonnative_predecessor'}.get(step.adapter, 'gap_unknown_predecessor'))
         self.store, self.preparations = store, store.preparations
         self.operation_id, self.plan = operation_id, plan
-        self.baseline = self.preparations.resolve_native_inputs(plan.native_inputs, receipt)
+        if _async_baseline is None:
+            self.baseline = self.preparations.resolve_native_inputs(plan.native_inputs, receipt)
+        else:
+            from .native_input_baseline import NativeInputBaseline
+            if (type(_async_baseline) is not tuple or len(_async_baseline) != 2
+                    or _async_baseline[0] is not _ASYNC_BASELINE_TOKEN
+                    or type(_async_baseline[1]) is not NativeInputBaseline):
+                _fail('native_input_preparation_rejected')
+            self.baseline = _async_baseline[1]
         self.version = receipt.version
         self.root_id = _event_id(['root', operation_id, plan.fingerprint])
         self.original_receipt = receipt
@@ -448,7 +466,8 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
     @classmethod
     async def start(cls, store: RegistryReceiptStore, operation_id: str, plan: Plan,
                     receipt: ValidationReceipt, prepared_digests: dict[str, str], *,
-                    yaml_original_metadata=None, dashboard_original_metadata=None) -> RegistryReceiptChain:
+                    yaml_original_metadata=None, dashboard_original_metadata=None,
+                    hass=None, guard=None) -> RegistryReceiptChain:
         from .native_template_state_yaml import PreparedTemplateStateYAML, PreparedMixedTemplateStateYAML
         from .native_external_yaml import PreparedExternalStateYAML
         yaml_indices = [i for i, step in enumerate(plan.steps) if step.adapter == 'yaml']
@@ -476,11 +495,55 @@ Listeners, interleaved YAML and unknown predecessors remain unsupported.
             if dashboard_original_metadata is not None and canonical(dashboard_original_metadata)[0] != captured:
                 _fail('dashboard_original_metadata_mismatch')
             dashboard_original_metadata = captured
-        obj = cls(store, operation_id, plan, receipt, prepared_digests,
-                  yaml_original_metadata=yaml_original_metadata,
-                  dashboard_original_metadata=dashboard_original_metadata)
-        obj._initial()  # Refuse absence before creating any sidecar state.
-        await store.create(obj.root_id, obj.root)
+        if hass is None:
+            obj = cls(store, operation_id, plan, receipt, prepared_digests,
+                      yaml_original_metadata=yaml_original_metadata,
+                      dashboard_original_metadata=dashboard_original_metadata)
+            obj._initial()
+            await store.create(obj.root_id, obj.root)
+        else:
+            from .native_input_baseline import _drained, _receipt_bytes, pinned_original_inputs
+            if not callable(guard):
+                _fail('binding_invalid')
+            def check_guard():
+                result = guard()
+                if inspect.isawaitable(result):
+                    if inspect.iscoroutine(result):
+                        result.close()
+                    _fail('synchronous_guard_required')
+                if result is not None and result is not True:
+                    _fail('guard_rejected')
+            check_guard()
+            reference = plan.native_inputs
+            receipt_bytes = _receipt_bytes(receipt)
+            plan_snapshot = _freeze_json(asdict(plan))
+            digests_snapshot = _freeze_json(prepared_digests)
+            detached = store.preparations.resolve(reference[0], reference[1])
+            detached_receipt = deepcopy(receipt)
+            def decode_detached():
+                isolated = PreparedStore(None)
+                isolated.plans = {reference[0]: {'digest': reference[1], 'payload': detached}}
+                return isolated.resolve_native_inputs(reference, detached_receipt)
+            def check_admission():
+                check_guard()
+                current = store.preparations.resolve(reference[0], reference[1])
+                if (canonical_digest(current) != reference[1]
+                        or not _exact_json_equal(asdict(plan), plan_snapshot)
+                        or not _exact_json_equal(prepared_digests, digests_snapshot)
+                        or _receipt_bytes(receipt) != receipt_bytes):
+                    _fail('native_input_preparation_changed')
+            async with pinned_original_inputs(hass, receipt, guard=check_guard) as (observed, verify):
+                baseline = await _drained(hass.async_add_executor_job, decode_detached)
+                if observed != baseline:
+                    _fail('native_input_preparation_changed')
+                check_admission()
+                obj = cls(store, operation_id, plan, receipt, prepared_digests,
+                          yaml_original_metadata=yaml_original_metadata,
+                          dashboard_original_metadata=dashboard_original_metadata,
+                          _async_baseline=(_ASYNC_BASELINE_TOKEN, baseline))
+                obj._initial()
+                check_admission()
+                await store.create(obj.root_id, obj.root, guard=check_admission, async_guard=verify)
         obj.writable = True
         return obj
 

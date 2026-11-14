@@ -117,6 +117,111 @@ class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
                 binding.accepted_state_prefix(chain, program, input_state=state)
         self.assertEqual(binding.accepted_state_prefix(chain, program, input_state=state), expected)
 
+    async def test_async_baseline_refuses_preparation_and_guard_drift(self):
+        from types import SimpleNamespace
+        from dataclasses import replace
+        from contextlib import asynccontextmanager
+        for drift in ('payload', 'guard', 'digests', 'receipt', 'cancel', None):
+            fixture = await mixed.base.fixture()
+            chain, store = fixture['chain'], fixture['store']
+            @asynccontextmanager
+            async def pin(_hass, _receipt, *, guard):
+                guard()
+                async def verify(): guard()
+                yield chain.baseline, verify
+            self.enterContext(patch.object(mixed.base.baseline, 'pinned_original_inputs', pin))
+            receipt = replace(chain.original_receipt)
+            digests = dict(fixture['digests'])
+            started, resume = asyncio.Event(), asyncio.Event()
+            async def executor(function):
+                started.set()
+                await resume.wait()
+                return function()
+            hass = SimpleNamespace(async_add_executor_job=executor)
+            guards = [True]
+            def guard():
+                if not guards[0]:
+                    raise ValueError('scope changed')
+            before = len(store.rows)
+            operation = 'async-fixture-' + str(drift)
+            task = asyncio.create_task(receipts.RegistryReceiptChain.start(
+                store, operation, chain.plan, receipt, digests, hass=hass, guard=guard))
+            await started.wait()
+            if drift == 'payload':
+                ref = chain.plan.native_inputs[0]
+                fixture['preparations'].plans[ref]['payload']['codec'] += 'A'
+            elif drift == 'guard':
+                guards[0] = False
+            elif drift == 'digests':
+                digests[next(iter(digests))] = '0' * 64
+            elif drift == 'receipt':
+                object.__setattr__(receipt, 'version', 'changed')
+            elif drift == 'cancel':
+                task.cancel()
+            resume.set()
+            if drift is None:
+                result = await task
+                self.assertEqual(result.plan, chain.plan)
+                self.assertEqual(len(store.rows), before + 1)
+            elif drift == 'cancel':
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertEqual(len(store.rows), before)
+            else:
+                with self.assertRaises(ValueError):
+                    await task
+                self.assertEqual(len(store.rows), before)
+
+    async def test_async_baseline_requires_synchronous_positive_guard(self):
+        from types import SimpleNamespace
+        fixture = await mixed.base.fixture()
+        chain, store = fixture['chain'], fixture['store']
+        hass = SimpleNamespace(async_add_executor_job=lambda _fn: None)
+        async def async_guard():
+            return True
+        for guard in (lambda: False, async_guard):
+            with self.assertRaises(ValueError):
+                await receipts.RegistryReceiptChain.start(store, 'invalid-guard',
+                    chain.plan, chain.original_receipt, fixture['digests'], hass=hass, guard=guard)
+
+    async def test_async_native_payload_and_fence_drift(self):
+        from contextlib import asynccontextmanager
+        from types import SimpleNamespace
+        fixture = await mixed.base.fixture()
+        store, baseline = fixture['preparations'], fixture['chain'].baseline
+        async def executor(function):
+            return function()
+        hass = SimpleNamespace(async_add_executor_job=executor)
+        @asynccontextmanager
+        async def pin(_hass, _receipt, *, guard):
+            guard()
+            async def verify(): guard()
+            yield baseline, verify
+        expected = mixed.base.baseline.baseline_digest(baseline)
+        with patch.object(mixed.base.baseline, 'pinned_original_inputs', pin):
+            reference = await store.create_native_inputs('async-original', baseline, hass=hass, guard=lambda: None)
+        self.assertEqual(reference[2], expected)
+        self.assertEqual(store.resolve_native_inputs(reference, fixture['receipt']), baseline)
+        entered, release = asyncio.Event(), asyncio.Event()
+        @asynccontextmanager
+        async def delayed_pin(_hass, _receipt, *, guard):
+            async def verify():
+                entered.set()
+                await release.wait()
+                guard()
+            yield baseline, verify
+        before = set(store.plans)
+        with patch.object(mixed.base.baseline, 'pinned_original_inputs', delayed_pin):
+            guard_ok = [True]
+            task = asyncio.create_task(store.create_native_inputs('async-drift', baseline,
+                hass=hass, guard=lambda: guard_ok[0]))
+            await entered.wait()
+            guard_ok[0] = False
+            release.set()
+            with self.assertRaises(ValueError):
+                await task
+        self.assertEqual(set(store.plans), before)
+
     async def test_runtime_projection_is_detached_from_accepted_evidence(self):
         fixture = await mixed.mixed_fixture()
         chain = fixture['chain']

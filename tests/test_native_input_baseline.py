@@ -370,6 +370,30 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         return await baseline.async_capture_native_input_baseline(
             self.hass, receipt or self.receipt, guard=self.guard)
 
+    async def test_pinned_original_inputs_refuses_path_replacement(self):
+        original = await self.capture()
+        path = self.root / '.storage/core.entity_registry'
+        moved, replacement = path.with_suffix('.original'), path.with_suffix('.replacement')
+        async with baseline.pinned_original_inputs(self.hass, self.receipt, guard=self.guard) as (observed, verify):
+            self.assertEqual(observed, original)
+            original_bytes = path.read_bytes()
+            path.rename(moved)
+            path.write_bytes(original_bytes)
+            try:
+                with self.assertRaises((ValueError, OSError)):
+                    await verify()
+            finally:
+                path.rename(replacement)
+                moved.rename(path)
+
+    async def test_pinned_original_inputs_refuses_manager_drift(self):
+        original = await self.capture()
+        async with baseline.pinned_original_inputs(self.hass, self.receipt, guard=self.guard) as (observed, verify):
+            self.assertEqual(observed, original)
+            self.entity.async_update_entity(self.other.entity_id, name='fixture drift')
+            with self.assertRaises((ValueError, OSError)):
+                await verify()
+
     async def test_native_baseline_accepts_canonical_config_root_alias(self):
         with tempfile.TemporaryDirectory(dir=self.root.parent) as directory:
             alias = Path(directory) / 'config-alias'

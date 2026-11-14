@@ -880,7 +880,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             **({'previous': pc_previous, 'energy_original_physical': pc_energy_physical,
                 'population': self.powercalc_population.descriptors} if mixed_powercalc else {}))
         inputs = await self.preparations.create_native_inputs(own + '-original', baseline,
-                                                             composition=self.composition)
+            composition=self.composition, hass=self.hass, guard=self._scope)
         self._scope()
         scopes = ((('registry',) + (('helpers',) if pc_metadata or entry_change is not None or homekit_changes else ())
                    + (('energy',) if pc_energy else ())
@@ -897,7 +897,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         await self.receipt_store.initialize()
         self._scope()
         self.chain = await RegistryReceiptChain.start(self.receipt_store, self.operation_id,
-            self.plan, self.receipt, self.digests)
+            self.plan, self.receipt, self.digests, hass=self.hass, guard=self._scope)
         self._scope()
         if dashboard_storage is not None:
             await self._install_dashboard_fence()

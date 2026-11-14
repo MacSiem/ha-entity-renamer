@@ -215,7 +215,8 @@ class Runtime:
                     target = ({'entity_id': before['entity_id']} if change.kind == 'entity'
                               else {'device_id': change.identity})
                     changes.append({**target, 'fields': fields})
-                baseline, composition = self.preparations.resolve_composition(plan.native_inputs)
+                baseline, composition = await self.preparations.async_resolve_composition(
+                    plan.native_inputs, hass=hass, guard=current, receipt=session.receipt)
                 from .dependency_review import dependency_files
                 receipt = baseline.receipt
                 # Aggregate only the admitted planned YAML scope. Paths, YAML,

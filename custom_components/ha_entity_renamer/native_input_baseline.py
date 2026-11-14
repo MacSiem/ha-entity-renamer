@@ -813,3 +813,32 @@ async def async_capture_native_input_baseline(hass, receipt, *, guard):
     finally:
         if pinned is not None:
             pinned.close()
+
+
+@asynccontextmanager
+async def pinned_original_inputs(hass, receipt, *, guard):
+    """Hold the existing native descriptors across a pure executor operation.
+
+    The capture is observed evidence, never a replacement for ORIGINAL.  The
+    caller compares it with ORIGINAL and invokes verify under its Store lock
+    immediately before the existing write, or before returning a read result.
+    """
+    pinned = None
+    try:
+        guard()
+        original_receipt = _receipt_bytes(receipt)
+        managers = _Managers(hass, receipt)
+        pinned = _Pinned(receipt, managers.initial)
+        observed = await _drained(hass.async_add_executor_job, pinned.capture)
+        guard()
+        managers.check()
+        async def verify():
+            await _drained(hass.async_add_executor_job, pinned.verify)
+            guard()
+            managers.check()
+            if _receipt_bytes(receipt) != original_receipt:
+                _fail('native_input_receipt_changed')
+        yield observed, verify
+    finally:
+        if pinned is not None:
+            pinned.close()
