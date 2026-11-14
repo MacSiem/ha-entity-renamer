@@ -156,7 +156,7 @@ registry write. Dark mode follows your Home Assistant theme.*
 
 ## Installation of public 4.6.1
 
-The following instructions describe the released frontend. For the unreleased one-package 5.0.0 candidate, including fresh installation and migration from 4.6.1 or the planned 4.6.2 bridge, see the [draft migration guide](MIGRATION.md). The 5.0.0 release is not yet published.
+The following instructions describe the released frontend. For the unreleased one-package 5.0.0 candidate, including fresh installation and the planned 4.6.1 → 4.6.2 bridge → 5.0.0 migration path, see the [draft migration guide](MIGRATION.md). The 5.0.0 release is not yet published.
 
 Requires **Home Assistant 2025.6 or newer** for the automatic ID preview.
 
