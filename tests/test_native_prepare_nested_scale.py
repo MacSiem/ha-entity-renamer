@@ -1,5 +1,8 @@
 """Full retained prepare on isolated Core with nested, native config entries."""
 import asyncio
+from collections import Counter
+import sys
+import threading
 import json
 from time import monotonic
 from types import MappingProxyType
@@ -46,6 +49,22 @@ class NativeNestedPrepareScaleTests(fixture.NativeRetainedNameFieldsTests):
         await asyncio.sleep(0)
         self.assertFalse(block_async_io._BLOCKED_CALLS.calls)
         started = monotonic()
+        samples = Counter()
+        sample_stop = threading.Event()
+        loop_thread = threading.get_ident()
+        def profile():
+            while not sample_stop.wait(.1):
+                frame = sys._current_frames().get(loop_thread)
+                stack = []
+                while frame is not None:
+                    name = frame.f_code.co_filename
+                    if 'ha_entity_renamer/' in name:
+                        stack.append(f'{name.rsplit("/", 1)[-1]}:{frame.f_code.co_name}:{frame.f_lineno}')
+                    frame = frame.f_back
+                if stack:
+                    samples[';'.join(reversed(stack[-8:]))] += 1
+        sampler = threading.Thread(target=profile, daemon=True)
+        sampler.start()
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
         old = next(iter(mapping))
@@ -59,6 +78,7 @@ class NativeNestedPrepareScaleTests(fixture.NativeRetainedNameFieldsTests):
             await asyncio.sleep(.06)  # Include the final synchronous segment in the heartbeat.
         finally:
             running = False
+            sample_stop.set()
             await ticker
             for row in block_async_io._BLOCKED_CALLS.calls:
                 setattr(row.object, row.function, row.original_func)
@@ -66,5 +86,7 @@ class NativeNestedPrepareScaleTests(fixture.NativeRetainedNameFieldsTests):
         elapsed = monotonic() - started
         self.assertGreater(len(times), 2)
         gap = max(b - a for a, b in zip(times, times[1:]))
+        for stack, count in samples.most_common(30):
+            print(f'nested_profile_samples={count} stack={stack}')
         print(f'nested_prepare_bytes={len(raw)} entries=3300 elapsed_seconds={elapsed:.3f} heartbeat_max_seconds={gap:.3f}')
         self.assertLess(gap, 2.0)
