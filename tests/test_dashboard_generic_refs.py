@@ -18,7 +18,7 @@ class GenericDashboardReferences(unittest.TestCase):
                 'target': {'entity_id': ['sensor.old', 'sensor.new']},
                 'data': {'entity_id': 'sensor.old'}},
             'title': 'sensor.old', 'url': 'https://example.invalid/sensor.old',
-            'sensor.old': 'foreign'}]}]}
+            'foreign': 'untouched'}]}]}
         plan = plan_dashboard(source, self.mapping)
         self.assertFalse(plan.markers)
         self.assertEqual(len(plan.changes), 6)
@@ -26,8 +26,8 @@ class GenericDashboardReferences(unittest.TestCase):
         self.assertEqual(card['style']['popup']['entity'], 'sensor.new')
         self.assertEqual(card['entities'], ['sensor.new', {'entity': 'sensor.old'}])
         self.assertEqual(card['tap_action']['target']['entity_id'], ['sensor.new', 'sensor.old'])
-        self.assertEqual((card['title'], card['url'], card['sensor.old']),
-                         ('sensor.old', 'https://example.invalid/sensor.old', 'foreign'))
+        self.assertEqual((card['title'], card['url'], card['foreign']),
+                         ('sensor.old', 'https://example.invalid/sensor.old', 'untouched'))
         self.assertEqual(len({c.path for c in plan.changes}), len(plan.changes))
         self.assertEqual(source['views'][0]['cards'][0]['entities'][0], 'sensor.old')
 

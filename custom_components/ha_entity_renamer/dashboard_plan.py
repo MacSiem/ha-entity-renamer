@@ -513,7 +513,7 @@ _REFERENCE_LISTS = frozenset({
     'source_entities', 'temperature_ids', 'humidity_ids',
 })
 _NON_ENTITY_TARGETS = frozenset({'device_id', 'area_id', 'floor_id', 'label_id'})
-_TEXT_FIELDS = PASSIVE | frozenset({'language', 'default_tab', 'tabs'})
+_TEXT_FIELDS = PASSIVE | frozenset({'language', 'default_tab', 'tabs', 'state', 'state_not'})
 _ENTITY_TOKEN = re.compile(r'(?<![A-Za-z0-9_.])([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![A-Za-z0-9_.])', re.ASCII)
 _ACTIVE_ACCESS = re.compile(r'\b(?:states|hass|callService)\s*[.(\[]', re.ASCII)
 
@@ -537,13 +537,15 @@ def plan_dashboard(config, mapping):
         scopes.append(Scope(path, syntax))
 
     def reference(value, path):
+        if value is None:
+            return
         if type(value) is str:
+            if unchanged_computed_target(value, mapping):
+                return
             if '{{' in value or '{%' in value or '[[[' in value:
                 mark(path, 'dynamic_dashboard_reference', 'Computed entity target is not a static ID')
             elif _ID.fullmatch(value):
                 scope(path, Syntax.ENTITY_TREE)
-            elif unchanged_computed_target(value, mapping):
-                return
             elif ':' in value and not _ACTIVE_ACCESS.search(value) and not any(x in value for x in selected):
                 return  # external statistic identifier
             else:
@@ -551,15 +553,21 @@ def plan_dashboard(config, mapping):
         else:
             mark(path, 'dynamic_dashboard_reference', 'Reference is not a scalar entity ID')
 
-    def walk(value, path=(), key=None, list_reference=False, parent=None):
+    def walk(value, path=(), key=None, list_reference=False, parent=None, variables=None):
         if type(value) is dict:
             # Strategies load a source outside the configuration tree.
             if key == 'strategy' and value:
                 mark(path, 'dynamic_dashboard_strategy', 'Dashboard strategy loads an external source')
-            if key in ACTIONS and value.get('action') == 'fire-dom-event':
-                mark(path, 'custom_dashboard_action', 'External event action semantics are unknown')
+            if type(value.get('variables')) is dict:
+                variables = value['variables']
+            if value.get('name') == 'entity_id' and type(value.get('value')) is str:
+                pattern = value['value']
+                if any((pattern in old) != (pattern in new) for old, new in mapping.items()):
+                    mark(path + ('value',), 'dynamic_dashboard_selector', 'Entity filter membership changes')
             for field, child in value.items():
                 p = path + (field,)
+                if field in selected:
+                    mark(p, 'ambiguous_dashboard_key', 'Selected entity ID used as an unclassified key')
                 if field in _NON_ENTITY_TARGETS:
                     continue
                 if field in _REFERENCE_SCALARS:
@@ -568,23 +576,33 @@ def plan_dashboard(config, mapping):
                     else:
                         reference(child, p)
                 elif field in _REFERENCE_LISTS and type(child) is list:
-                    walk(child, p, field, True, value)
+                    walk(child, p, field, True, value, variables)
                 elif field in _REFERENCE_LISTS and type(child) is dict:
-                    mark(p, 'dynamic_dashboard_selector', 'Entity selector object requires semantic coverage')
-                    walk(child, p, field, False, value)
+                    import fnmatch
+                    for selector in ('include', 'exclude'):
+                        pattern = child.get(selector)
+                        if type(pattern) is str and any(fnmatch.fnmatchcase(old, pattern) != fnmatch.fnmatchcase(new, pattern) for old, new in mapping.items()):
+                            mark(p + (selector,), 'dynamic_dashboard_selector', 'Entity selector membership changes')
+                        elif pattern is not None and type(pattern) is not str:
+                            mark(p + (selector,), 'dynamic_dashboard_selector', 'Entity selector cannot be resolved')
+                    walk(child, p, field, False, value, variables)
                 elif field in {'above', 'below'} and type(child) is str and _ID.fullmatch(child):
                     reference(child, p)
                 else:
-                    walk(child, p, field, False, value)
+                    walk(child, p, field, False, value, variables)
         elif type(value) is list:
             for i, child in enumerate(value):
                 p = path + (i,)
                 if list_reference and type(child) is str:
                     reference(child, p)
                 else:
-                    walk(child, p, key, False, parent)
+                    walk(child, p, key, False, parent, variables)
         elif type(value) is str:
             if key in {'url', 'url_path', 'navigation_path', 'image', 'path'}:
+                return
+            if key in {'style', 'styles', 'extra_styles'} and (unchanged_bubble_style(value, mapping) or unchanged_button_style(value, variables, mapping)):
+                return
+            if '[[[' in value and unchanged_button_field(value, variables, mapping):
                 return
             if '{{' in value or '{%' in value:
                 scope(path, Syntax.JINJA)
@@ -610,6 +628,15 @@ def plan_dashboard(config, mapping):
                 target = target[part]
             target[path[-1]] = updated
             changes.append(Change(path, 'value', original, updated))
-    markers.extend(m for m in result.markers if m.code != 'no_supported_scopes')
+    for m in result.markers:
+        if m.code == 'no_supported_scopes':
+            continue
+        if m.code == 'dynamic_reference':
+            value = clean
+            for part in m.path:
+                value = value[part]
+            if unchanged_finite_jinja(value, mapping):
+                continue
+        markers.append(m)
     return replace(result, changes=tuple(changes), markers=tuple(markers),
                    coverage='dashboard_typed_fields_and_bounded_templates_v1')
