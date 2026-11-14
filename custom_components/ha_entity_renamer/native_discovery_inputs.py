@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import os
 
 from .native_input_baseline import (
-    MAX_FILE_BYTES, MAX_TOTAL_BYTES, _KEYS, _Managers, _SCHEMAS, _drained,
+    MAX_FILE_BYTES, MAX_TOTAL_BYTES, NativeInputBaselineError, _KEYS, _Managers, _SCHEMAS, _drained,
     _envelope, _json, _open_absolute_directory, _signature,
 )
 from .yaml_plan import Limits, _Reader
@@ -238,6 +238,10 @@ Cancellation drains executor work before any held descriptor can be released.
         raise
     except PermissionError:
         raise PermissionError('native_discovery_inputs_permission_denied') from None
+    except NativeInputBaselineError as error:
+        if str(error) == 'native_input_limit':
+            raise DiscoveryNativeInputsError('native_input_limit') from None
+        _reject()
     except Exception as error:
         from .yaml_validation_worker import _checker_diagnostic
         logging.getLogger(__name__).warning('Native discovery observation unavailable: %s',
