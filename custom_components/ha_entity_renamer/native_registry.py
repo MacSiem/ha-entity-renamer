@@ -600,19 +600,22 @@ class NativeRegistryBridge:
             fence()
             if not all(valid_history):
                 raise RegistryConflict('before_state_unverified:scoped_evidence_incomplete')
-        runtimes = [self.runtime_probe(change, change.before) for change in changes]
-        disks = {}
         for kind in dict.fromkeys(c.kind for c in changes):
-            disks[kind] = await self.io.disk(kind)
+            group = [change for change in changes if change.kind == kind]
+            runtimes = [self.runtime_probe(change, change.before) for change in group]
+            disk = await self.io.disk(kind)
             fence()
-        for change, runtime in zip(changes, runtimes):
-            durable = self._matches(change, _row(disks[change.kind], change.kind, change.identity), change.before)
-            metadata_ok = (not change.mapping or verify_rollback(
-                change.mapping, json.loads(change.recorder_before_json), _project(current, change.mapping)))
-            if (durable is not True or runtime is not True
-                    or self.runtime_probe(change, change.before) is not True or not metadata_ok
-                    or self.io.pending(change.kind)):
-                raise RegistryConflict('before_state_unverified:scoped_evidence_incomplete')
+            for change, runtime in zip(group, runtimes):
+                durable = self._matches(change, _row(disk, kind, change.identity), change.before)
+                metadata_ok = (not change.mapping or verify_rollback(
+                    change.mapping, json.loads(change.recorder_before_json), _project(current, change.mapping)))
+                if (durable is not True or runtime is not True
+                        or self.runtime_probe(change, change.before) is not True or not metadata_ok
+                        or self.io.pending(kind)):
+                    raise RegistryConflict('before_state_unverified:scoped_evidence_incomplete')
+            del disk
+        if any(self.io.pending(kind) for kind in {c.kind for c in changes}):
+            raise RegistryConflict('before_state_unverified:native_persistence_pending')
         fence()
         return changes
 
