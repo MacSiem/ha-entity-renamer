@@ -104,14 +104,21 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         runtime, mapping, uuids, original, device = await self.restored_source()
         hass = self.f.hass
         async def refresh(): pass
-        for kwargs in ({'entity_names': {'sensor.missing_selected': 'Missing'}},
-                       {'device_names': {'missing-device-id': 'Missing'}}):
-            with self.subTest(kwargs=kwargs):
-                with self.assertRaises(self.module('transaction').Refused):
-                    await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+        old = next(iter(mapping))
+        cases = (({'sensor.missing_selected': 'sensor.missing_target'}, {}, 'source_uuid_required'),
+                 (mapping, {'entity_names': {old: 'Reviewed fixture'},
+                            'device_names': {device.id: 'Reviewed device',
+                                             'missing-device-id': 'Missing'}},
+                  'selected_device_source_required'))
+        for selected_mapping, kwargs, reason in cases:
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(self.module('transaction').Refused, reason):
+                    await runtime.native_yaml_prepare(hass, selected_mapping, actor_id='synthetic-admin',
                         guard=lambda: None, refresh=refresh, **kwargs)
                 self.assertFalse(runtime.reviews)
                 self.assertEqual(await runtime.journal.active(), ())
+                self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+                self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
     async def test_registry_device_refuses_automation_owner_before_effect(self):
         runtime, mapping, uuids, original, device = await self.restored_source()
