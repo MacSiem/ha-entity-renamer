@@ -168,6 +168,19 @@ def _source_image(chain, evidence, state):
     has_energy = (type(candidate) is CandidatePowercalcSources
                   and candidate.documents.energy is not None)
     excluded = {'.storage/' + key for key in _KEYS}
+    dashboard_indexes = [index for index, step in enumerate(chain.plan.steps)
+                         if step.adapter == 'dashboard']
+    if dashboard_indexes:
+        # Dashboard storage is a separate native transaction. Only the SAME
+        # fully reconstructed receipt head can authorize excluding its paths;
+        # replay validates each physical preimage and acknowledged postimage.
+        _need(state.same_evidence(chain.reconstruct_inputs()), 'accepted_dashboard_head_changed')
+        for index in dashboard_indexes:
+            change = chain._original_change(index)
+            path = '.storage/' + change.before.dashboard.key
+            _need(path in {row[0] for row in receipt.source_files},
+                  'accepted_dashboard_source_missing')
+            excluded.add(path)
     if has_energy:
         excluded.add('.storage/energy')
     original_files = {path: digest for path, digest, *_ in receipt.source_files if path not in excluded}

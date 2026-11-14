@@ -142,6 +142,55 @@ class MixedInverseReceiptTests(unittest.TestCase):
                     with self.assertRaises(ValueError, msg=(position, mutate)):
                         _source_image(chain, evidence, state(foreign, 'foreignhash' if mutate == 'file' else digest))
 
+    def test_source_image_dashboard_requires_same_receipted_head(self):
+        from custom_components.ha_entity_renamer.native_powercalc_accepted_consumers import _source_image
+        from custom_components.ha_entity_renamer.powercalc_candidate_sources import CandidatePowercalcSources
+        from custom_components.ha_entity_renamer.yaml_source_binding import OriginalSourceEvidence
+        from custom_components.ha_entity_renamer.accepted_input_state import AcceptedInputState
+        keys = ('core.entity_registry', 'core.device_registry', 'core.config_entries')
+        docs = {key: {'data': {}} for key in keys}
+        raw = lambda doc: json.dumps(doc, sort_keys=True).encode()
+        planned = SimpleNamespace(energy=None, documents=tuple(
+            (key, raw(docs[key]), raw(docs[key])) for key in keys))
+        original = SimpleNamespace(native_json='old', closed_graph_json='old')
+        candidate = CandidatePowercalcSources(b'original', 'digest', (), planned,
+            SimpleNamespace(native_json='new', closed_graph_json='new'))
+        evidence = OriginalSourceEvidence(None, b'original', (), powercalc_sources=original,
+                                          powercalc_candidate_sources=candidate)
+        path = '.storage/lovelace.selected'
+        receipt = SimpleNamespace(version='2026.10.4',
+            source_files=(('configuration.yaml', 'old'), (path, 'dashboard-before'),
+                          ('.storage/lovelace.foreign', 'foreign')),
+            proposed_files=(('configuration.yaml', 'new'),))
+        change = SimpleNamespace(before=SimpleNamespace(dashboard=SimpleNamespace(key='lovelace.selected')))
+        chain = SimpleNamespace(original_receipt=receipt,
+            baseline=SimpleNamespace(files=tuple(SimpleNamespace(key=k, raw=raw(docs[k])) for k in keys)),
+            plan=SimpleNamespace(steps=(SimpleNamespace(adapter='dashboard'),)),
+            _original_change=lambda _: change, _setup_history=[])
+        def state(yaml, dashboard, foreign='foreign', head='head'):
+            return AcceptedInputState(b'original', head, {
+                'configuration.yaml': [yaml], path: [dashboard],
+                '.storage/lovelace.foreign': [foreign]}, deepcopy(docs))
+        with patch('custom_components.ha_entity_renamer.native_powercalc_accepted_consumers._envelope',
+                   side_effect=lambda value, *_: json.loads(value)), \
+             patch('custom_components.ha_entity_renamer.native_powercalc_accepted_consumers._literal_documents',
+                   return_value=True), patch.object(CandidatePowercalcSources, 'assert_original'):
+            for yaml, dashboard, position in (('new', 'dashboard-after', 'proposed'),
+                                               ('old', 'dashboard-restored', 'original')):
+                accepted = state(yaml, dashboard)
+                chain.reconstruct_inputs = lambda: accepted
+                self.assertEqual(_source_image(chain, evidence, accepted)[0], position)
+                with self.assertRaisesRegex(ValueError, 'accepted_dashboard_head_changed'):
+                    _source_image(chain, evidence, state(yaml, 'unreceipted'))
+                foreign = state(yaml, dashboard, foreign='tampered')
+                chain.reconstruct_inputs = lambda: foreign
+                with self.assertRaisesRegex(ValueError, 'accepted_image_unverified'):
+                    _source_image(chain, evidence, foreign)
+            receipt.source_files = (('configuration.yaml', 'old'),)
+            chain.reconstruct_inputs = lambda: accepted
+            with self.assertRaisesRegex(ValueError, 'accepted_dashboard_source_missing'):
+                _source_image(chain, evidence, accepted)
+
     def test_only_receipted_script_reverse_field_is_accepted(self):
         old = {'id': 'u', 'entity_id': 'script.old', 'platform': 'script',
                'unique_id': 'old', 'previous_unique_id': None, 'modified_at': 'a'}
