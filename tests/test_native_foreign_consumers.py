@@ -59,6 +59,7 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
         entity._coordinator = None
         entity.rest = RestData(hass, 'GET', 'http://example.invalid', 'utf-8', None,
                                None, None, None, True, 'python_default', 10)
+        entity.platform, entity.registry_entry, entity._attr_unique_id = platform, entry, entry.unique_id
         platform.entities[entry.entity_id] = entity
         hass.config.components.add('rest')
         try:
@@ -188,8 +189,27 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
         entity.hass, entity.entity_id = hass, registry.entity_id
         entity._config = {'value_template': "{{ value_json.temperature }}"}
         entity._discovery_data = None
+        entity.platform, entity.registry_entry, entity._attr_unique_id = platform, registry, registry.unique_id
         platform.entities[registry.entity_id] = entity
+        unregistered = object.__new__(MqttSensor)
+        unregistered.hass, unregistered.platform = hass, platform
+        unregistered.entity_id, unregistered._attr_unique_id = 'sensor.foreign_live', None
+        unregistered._config, unregistered._discovery_data = {'state_topic': 'fixture/topic'}, None
+        platform.entities[unregistered.entity_id] = unregistered
         try:
+            for mapping in ({'sensor.foreign_live': 'sensor.next'},
+                            {'sensor.old': 'sensor.foreign_live'}):
+                with self.assertRaises(tx.Refused):
+                    module.NativeForeignConsumers(hass, mapping, {})
+            fence = module.NativeForeignConsumers(hass, {'sensor.old': 'sensor.new'}, {})
+            try:
+                fence.check()
+                unregistered._config = {'state_topic': 'fixture/changed'}
+                with self.assertRaises(tx.Refused):
+                    fence.check()
+            finally:
+                unregistered._config = {'state_topic': 'fixture/topic'}
+                fence.close()
             fence = module.NativeForeignConsumers(hass, {'sensor.old': 'sensor.new'}, {'unrelated-device': 'name'})
             try:
                 fence.check()
@@ -253,6 +273,7 @@ def report(con, room, start):
         script = self.f.root / 'fixture.py'
         script.write_text("import subprocess\nsubprocess.run(['ffmpeg', '-version'], timeout=1)\n")
         entry = self.f.entity.async_get_or_create('sensor', 'command_line', 'fixture-command')
+        ghost = self.f.entity.async_get_or_create('sensor', 'command_line', 'fixture-inactive')
         await hass.async_block_till_done()
         platform = EntityPlatform(hass=hass, logger=logging.getLogger(__name__),
             domain='sensor', platform_name='command_line', platform=None,
@@ -263,6 +284,7 @@ def report(con, room, start):
         entity.hass, entity.entity_id = hass, entry.entity_id
         entity._config, entity._value_template = {}, None
         entity.data = CommandSensorData(hass, command, 10, 'sensor', 'fixture')
+        entity.platform, entity.registry_entry, entity._attr_unique_id = platform, entry, entry.unique_id
         platform.entities[entry.entity_id] = entity
         hass.config.components.add('command_line')
         try:
@@ -271,6 +293,15 @@ def report(con, room, start):
                 plan = planner.plan_yaml(self.f.root, mapping)
                 fence.bind_sources(plan, self.f.root)
                 fence.check(require_sources=True)
+                self.f.entity.async_update_entity(ghost.entity_id, name='Changed inactive entry')
+                await hass.async_block_till_done()
+                with self.assertRaises(tx.Refused):
+                    fence.check(require_sources=True)
+            finally:
+                fence.close()
+            fence = module.NativeForeignConsumers(hass, mapping, {})
+            try:
+                fence.bind_sources(plan, self.f.root)
                 script.write_text("import subprocess\nsubprocess.run(['ffmpeg', 'sensor.old'])\n")
                 with self.assertRaises(tx.Refused):
                     fence.check()

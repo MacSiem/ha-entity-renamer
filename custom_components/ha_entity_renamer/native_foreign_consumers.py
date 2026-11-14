@@ -336,7 +336,7 @@ class NativeForeignConsumers:
         templates = {'rest': set(), 'command_line': set()}
         registry = er.async_get(hass)
         _need(not _pending_native_work(hass, ('mqtt', 'rest', 'command_line')))
-        images, foreign_ids, commands = [], set(), set()
+        images, foreign_ids, commands, active_ids = [], set(), set(), set()
         for name, types in (('mqtt', (MqttSensor, MqttSwitch)), ('rest', (RestSensor,)),
                             ('command_line', (CommandSensor,))):
             loaded = name in hass.config.components
@@ -354,7 +354,7 @@ class NativeForeignConsumers:
                                  if row.platform == name}
             registry_rows = {identity: row for identity, row in all_registry_rows.items()
                              if row.disabled_by is None}
-            foreign_ids.update(registry_rows)
+            foreign_ids.update(all_registry_rows)
             _need(not (set(all_registry_rows) & (set(mapping) | set(mapping.values()))))
             _need(not any(row.device_id in self.device_ids for row in all_registry_rows.values()))
             found = {}
@@ -371,9 +371,20 @@ class NativeForeignConsumers:
                     _need(platform.config_entry is None)
                 entity_rows = []
                 for entity_id, entity in platform.entities.items():
-                    _need(type(entity) in types and entity.hass is hass
-                          and entity.entity_id == entity_id and entity_id in registry_rows
-                          and entity_id not in found)
+                    _need(type(entity_id) is str and entity_id.startswith(platform.domain + '.')
+                          and type(entity) in types and entity.hass is hass
+                          and entity.platform is platform and entity.entity_id == entity_id
+                          and entity_id not in active_ids and entity_id not in mapping
+                          and entity_id not in mapping.values())
+                    row = registry.async_get(entity_id)
+                    if row is None:
+                        # Native HA permits live entities without a unique ID.
+                        _need(entity.registry_entry is None and entity.unique_id is None)
+                    else:
+                        _need(row is registry_rows.get(entity_id) and entity.registry_entry is row
+                              and entity.unique_id == row.unique_id)
+                    active_ids.add(entity_id)
+                    foreign_ids.add(entity_id)
                     found[entity_id] = entity
                     strings = set() if name == 'mqtt' else templates[name]
                     config = freeze(entity._config, strings)
@@ -423,12 +434,11 @@ class NativeForeignConsumers:
                             commands.add(data.command)
                             detail = (config, value, id(data),
                                       freeze(data.command, strings))
-                    row = registry_rows[entity_id]
-                    entity_rows.append((entity_id, id(entity), row.id, row.unique_id,
-                                        row.config_entry_id, row.device_id, detail))
+                    registered = (None if row is None else
+                                  (row.id, row.unique_id, row.config_entry_id, row.device_id))
+                    entity_rows.append((entity_id, id(entity), registered, detail))
                 platform_rows.append((id(platform), platform.domain, id(platform.entities),
                                       tuple(sorted(entity_rows))))
-            _need(set(found) == set(registry_rows))
             extra = None
             if name == 'mqtt':
                 data = hass.data.get(DATA_MQTT)
