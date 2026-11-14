@@ -131,7 +131,7 @@ class EnergyCostUtilityContinuityTests(ControlledActualGraphTests):
         self.assertEqual((row.id, row.unique_id), cost_identity)
         self.assertEqual(current_cost[0]._config['stat_energy_from'], new_energy)
         self.assertEqual(zero_events, [])
-        self.assertEqual(Decimal(str(current_cost[0].native_value)), source_before)
+        self.assertEqual(current_cost[0].native_value, captured[2])
         self.assertEqual(Decimal(str(sensors()['p4_short_meter'].native_value)), meter_before)
         before_pulse_inspect = await wrapper.inspect(step)
         print('REBIND_INSPECT_BEFORE_PULSE', repr(before_pulse_inspect), flush=True)

@@ -277,7 +277,7 @@ class NativeEnergy:
                             or self.manager.data != current.value):
                         raise PersistenceError('energy_generated_cost_preimage_changed')
                     from homeassistant.const import __version__
-                    if __version__ == '2026.11.1':
+                    if __version__ in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
                         from .energy_cost_continuity import capture
                         continuity[row['after_source']] = (row, capture(self.hass, entity, row))
                     await entity.async_remove()

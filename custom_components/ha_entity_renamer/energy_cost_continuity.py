@@ -1,4 +1,4 @@
-"""Preserve a qualified native Energy cost across a source-ID rebind on Core 11.1."""
+"""Preserve a qualified native Energy cost across a source-ID rebind."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -34,9 +34,9 @@ def capture(hass, entity, row):
 @contextmanager
 def transfer(hass, manager, captured):
     """Seed only qualifying new native entities before their first publication."""
-    from homeassistant.components.energy.sensor import (EnergyCostSensor,
-        EnergyCostSensorExtraStoredData, SensorManager)
-    from homeassistant.helpers import entity_registry as er, restore_state
+    from homeassistant.components.energy.sensor import EnergyCostSensor, SensorManager
+    from homeassistant.const import __version__
+    from homeassistant.helpers import entity_registry as er
     listeners = [fn for fn in manager._update_listeners
                  if type(getattr(fn, '__self__', None)) is SensorManager
                  and getattr(fn, '__func__', None) is SensorManager._process_manager_data]
@@ -46,12 +46,17 @@ def transfer(hass, manager, captured):
     original = sensor_manager.async_add_entities
     _need(callable(original) and 'async_add_entities' in sensor_manager.__dict__)
     registry = er.async_get(hass)
-    restore = restore_state.async_get(hass)
     pending = dict(captured)
-    for row, _ in pending.values():
-        stored = restore.async_get_stored_state(row['entity_id'])
-        extra = None if stored is None else stored.extra_data
-        _need(extra is None or EnergyCostSensorExtraStoredData.from_dict(extra.as_dict()) is None)
+    if __version__ in ('2026.11.0', '2026.11.1'):
+        from homeassistant.components.energy.sensor import EnergyCostSensorExtraStoredData
+        from homeassistant.helpers import restore_state
+        restore = restore_state.async_get(hass)
+        for row, _ in pending.values():
+            stored = restore.async_get_stored_state(row['entity_id'])
+            extra = None if stored is None else stored.extra_data
+            _need(extra is None or EnergyCostSensorExtraStoredData.from_dict(extra.as_dict()) is None)
+    else:
+        _need(__version__ in ('2026.10.2', '2026.10.4'))
 
     def add(entities, *args, **kwargs):
         for entity in entities:
