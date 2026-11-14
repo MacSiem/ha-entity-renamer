@@ -162,7 +162,7 @@ class DiscoveryNativeTests(unittest.IsolatedAsyncioTestCase):
 
     async def observe(self, guard=None):
         return await subject.async_observe_discovery_inputs(self.fixture.hass,
-            guard=guard or self.fixture.guard)
+            guard=guard or self.fixture.guard, settle=True)
 
     async def test_actual_native_without_validation_or_native_effects(self):
         from homeassistant.helpers import entity_registry as er, device_registry as dr
@@ -207,6 +207,16 @@ class DiscoveryNativeTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(subject.DiscoveryNativeInputsError): await self.observe()
             finally:
                 store._write_lock.release()
+
+    async def test_default_observation_refuses_pending_without_wait(self):
+        store = self.fixture.managers[2]._store
+        await store._write_lock.acquire()
+        try:
+            with self.assertRaises(subject.DiscoveryNativeInputsError):
+                await asyncio.wait_for(subject.async_observe_discovery_inputs(
+                    self.fixture.hass, guard=self.fixture.guard), timeout=0.5)
+        finally:
+            store._write_lock.release()
 
     async def test_native_delayed_write_settles_before_observation(self):
         manager = self.fixture.managers[2]

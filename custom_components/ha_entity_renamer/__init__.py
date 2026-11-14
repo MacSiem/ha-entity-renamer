@@ -328,7 +328,7 @@ class Runtime:
                     expected_yaml = replace(expected_yaml, powercalc_inputs=None)
                 capture = await async_discover(hass, proposal, session._scope,
                     _expected_yaml=expected_yaml,
-                    _owned_script_services=owned_script)
+                    _owned_script_services=owned_script, _settle_native=True)
                 from homeassistant import loader
                 custom = await loader.async_get_custom_components(hass)
                 capture = await async_finalize_discovery(hass, capture, session._scope)

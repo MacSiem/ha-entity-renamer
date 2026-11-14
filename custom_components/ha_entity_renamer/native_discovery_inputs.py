@@ -207,7 +207,7 @@ class _DiscoveryPinned:
         self._named()
 
 
-async def async_observe_discovery_inputs(hass, *, guard):
+async def async_observe_discovery_inputs(hass, *, guard, settle=False):
     """Observe three existing, settled native documents under caller's scope.
 
 Exact supported versions/store classes/schema/layout/pending-state checks come
@@ -223,36 +223,40 @@ Cancellation drains executor work before any held descriptor can be released.
                 or os.path.normpath(root) != root or __version__ not in _SCHEMAS):
             _reject()
         location = _SourceLocation(__version__, root)
-        admission = _Managers(hass, location, identity_only=True)
+        if settle:
+            admission = _Managers(hass, location, identity_only=True)
 
-        def check_admission():
-            guard()
-            if type(hass.config.config_dir) is not str or hass.config.config_dir != root:
-                _reject()
-            admission.check_identity()
+            def check_admission():
+                guard()
+                if type(hass.config.config_dir) is not str or hass.config.config_dir != root:
+                    _reject()
+                admission.check_identity()
 
-        # Wait only for native work already in flight; never start, cancel, or
-        # flush a Store write. Pin native identities across every await; only
-        # sample manager contents once all five pending flags have cleared.
-        deadline = hass.loop.time() + _SETTLE_TIMEOUT
-        while any(admission.pending_for(store) for store in admission.stores):
-            remaining = deadline - hass.loop.time()
-            if remaining <= 0:
-                flags = ('data', 'write_lock', 'delay_handle', 'final_listener', 'load_future')
-                pending = []
-                for key, store in zip(_KEYS, admission.stores, strict=True):
-                    state = (store._data is not None, store._write_lock.locked(),
-                             store._delay_handle is not None,
-                             store._unsub_final_write_listener is not None,
-                             store._load_future is not None)
-                    pending.extend((key, flag) for flag, active in zip(flags, state, strict=True) if active)
-                logging.getLogger(__name__).warning('Native discovery Store settle timeout: %s', pending)
-                _reject()
-            await asyncio.sleep(min(_SETTLE_INTERVAL, remaining))
+            # Wait only for native work already in flight; never start, cancel, or
+            # flush a Store write. Pin native identities across every await; only
+            # sample manager contents once all five pending flags have cleared.
+            deadline = hass.loop.time() + _SETTLE_TIMEOUT
+            while any(admission.pending_for(store) for store in admission.stores):
+                remaining = deadline - hass.loop.time()
+                if remaining <= 0:
+                    flags = ('data', 'write_lock', 'delay_handle', 'final_listener', 'load_future')
+                    pending = []
+                    for key, store in zip(_KEYS, admission.stores, strict=True):
+                        state = (store._data is not None, store._write_lock.locked(),
+                                 store._delay_handle is not None,
+                                 store._unsub_final_write_listener is not None,
+                                 store._load_future is not None)
+                        pending.extend((key, flag) for flag, active in zip(flags, state, strict=True) if active)
+                    logging.getLogger(__name__).warning('Native discovery Store settle timeout: %s', pending)
+                    _reject()
+                await asyncio.sleep(min(_SETTLE_INTERVAL, remaining))
+                check_admission()
             check_admission()
-        check_admission()
-        managers = _Managers(hass, location)
-        check_admission()
+            managers = _Managers(hass, location)
+            check_admission()
+
+        else:
+            managers = _Managers(hass, location)
 
         def check():
             guard()
