@@ -226,15 +226,19 @@ class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
         from types import SimpleNamespace
         from dataclasses import replace
         fixture = await mixed.base.fixture()
-        spec = importlib.util.spec_from_file_location(mixed.base.PACKAGE + '.review_runtime',
-            mixed.base.COMPONENT / '__init__.py')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        runtime_path = mixed.base.COMPONENT / '__init__.py'
+        runtime = ast.parse(runtime_path.read_text())
+        helper = next(node for node in runtime.body
+                      if isinstance(node, ast.FunctionDef)
+                      and node.name == '_review_session_binding')
+        scope = {'__package__': mixed.base.PACKAGE}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[])),
+                     str(runtime_path), 'exec'), scope)
         for drift in ('operation', 'plan', 'changes', 'receipt'):
             chain = fixture['chain']
             session = SimpleNamespace(plan=chain.plan, operation_id=chain.operation_id,
                 registry_changes=list(chain.changes), receipt=chain.original_receipt)
-            _, _, _, _, check = module._review_session_binding(session)
+            _, _, _, _, check = scope['_review_session_binding'](session)
             check()
             await asyncio.sleep(0)
             if drift == 'operation': session.operation_id = 'other'
