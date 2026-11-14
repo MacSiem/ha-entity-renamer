@@ -47,7 +47,7 @@ class GenericDashboardReferences(unittest.TestCase):
     def test_jinja_js_and_negative_js(self):
         mapping = {'sensor.old': 'sensor.new'}
         source = {'cards': [{'type': 'custom:any',
-            'content': "{{ states('sensor.old') }}", 
+            'content': "{{ states('sensor.old') }}",
             'label': "[[[ return states['sensor.old'].state ]]]"}]}
         plan = plan_dashboard(source, mapping)
         self.assertFalse(plan.markers)
