@@ -66,6 +66,7 @@ class NativePrepareRuntimeDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(token)
 
     async def test_actual_automation_projection_refuses_without_row_rescan(self):
+        from homeassistant import block_async_io
         from homeassistant.const import __version__
         from homeassistant.setup import async_setup_component
         if __version__ != '2026.11.1':
@@ -86,11 +87,19 @@ class NativePrepareRuntimeDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         evidence = SimpleNamespace(ledger=SimpleNamespace(keys_for_native_projection=lambda _: ()))
         tick = asyncio.create_task(asyncio.sleep(0.01))
         start = monotonic()
-        with patch.object(core, 'automation_registration_token', side_effect=ValueError('unverified')) as reject:
-            with patch.object(discovery, '_runtime_row_diagnostics', side_effect=AssertionError('unneeded rescan')):
-                with self.assertRaisesRegex(forward.Refused, 'automation_runtime_unqualified'):
-                    await target.bind_sources(object(), evidence, guard=lambda: None)
-                await tick
+        self.assertFalse(block_async_io._BLOCKED_CALLS.calls)
+        try:
+            with patch.object(block_async_io, '_IN_TESTS', False):
+                block_async_io.enable()
+            with patch.object(core, 'automation_registration_token', side_effect=ValueError('unverified')) as reject:
+                with patch.object(discovery, '_runtime_row_diagnostics', side_effect=AssertionError('unneeded rescan')):
+                    with self.assertRaisesRegex(forward.Refused, 'automation_runtime_unqualified'):
+                        await target.bind_sources(object(), evidence, guard=lambda: None)
+                    await tick
+        finally:
+            for row in block_async_io._BLOCKED_CALLS.calls:
+                setattr(row.object, row.function, row.original_func)
+            block_async_io._BLOCKED_CALLS.calls.clear()
         reject.assert_called_once()
         self.assertLess(monotonic() - start, 2.0)
 
@@ -127,3 +136,9 @@ class NativePrepareRuntimeDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                     await target.bind_sources(object(), evidence, guard=lambda: None)
         self.assertIn('type=ValueError reason=other', logs.output[0])
         self.assertNotIn('private-caller-value', logs.output[0])
+        with patch.object(observer.NativeYAMLRuntimeReadback, '_projection',
+                          side_effect=ValueError('native_trigger_function_changed')):
+            with self.assertLogs(discovery.__name__, level='WARNING') as logs:
+                with self.assertRaises(forward.Refused):
+                    await target.bind_sources(object(), evidence, guard=lambda: None)
+        self.assertIn('reason=native_trigger_function_changed', logs.output[0])

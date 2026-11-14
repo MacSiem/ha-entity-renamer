@@ -246,6 +246,14 @@ _PROJECTION_REASONS = frozenset({
     'native_automation_state_writer_changed', 'native_unload_code_required',
     'native_unload_code_path', 'native_unload_source_pin', 'native_unload_code_changed',
     'native_unload_binding_changed', 'native_unload_cache_wrapper_required',
+    'native_trigger_function_changed', 'native_trigger_code_changed',
+    'native_event_detach_changed', 'native_event_key_changed', 'native_event_registration_missing',
+    'native_event_filter_not_covered', 'native_event_count_changed', 'native_event_filter_changed',
+    'native_event_listener_changed', 'native_event_extra_registration', 'native_state_detach_changed',
+    'native_state_keys_changed', 'native_state_registry_missing', 'native_state_dispatch_changed',
+    'native_state_config_changed', 'native_state_match_changed', 'native_state_registration_missing',
+    'native_state_extra_key', 'typed_owned_automation_graph_required', 'native_domain_not_covered',
+    'native_diagnostic_entity_missing', 'native_identity_ambiguous',
 })
 
 
