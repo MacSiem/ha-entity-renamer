@@ -37,7 +37,19 @@ _PREFIX = re.compile(r"(?:hass\.)?states\[\(?\s*['\"]([a-z_][a-z0-9_]*\.[a-z0-9_
 
 
 
+# A complete, deliberately small JavaScript expression.  It reads only the
+# current card entity and compares/returns literal strings; no dynamic lookup.
+# Reject escapes, comments, operators, function calls and trailing statements.
+_JS_LITERAL = r"(?:'[^'\\\\]*'|\"[^\"\\\\]*\")"
+_CURRENT_ENTITY_TERNARY = re.compile(
+    r"\A\[\[\[\s*return\s+entity\s*&&\s*entity\.state\s*===\s*"
+    + _JS_LITERAL + r"\s*\?\s*" + _JS_LITERAL + r"\s*:\s*" + _JS_LITERAL
+    + r"\s*;?\s*\]\]\]\Z", re.ASCII)
+
+
 def plan_button_expression(text, mapping):
+    if _CURRENT_ENTITY_TERNARY.fullmatch(text):
+        return text, None
     match = _LOOKUP.fullmatch(text)
     if match:
         old = match.group(3)
