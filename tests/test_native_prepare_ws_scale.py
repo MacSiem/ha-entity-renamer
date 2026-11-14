@@ -28,6 +28,24 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         target.parent.mkdir(exist_ok=True)
         shutil.copyfile(Path(__file__).resolve().parents[1] / 'ha-entity-renamer.js', target)
 
+    async def test_native_microbatch_receipts_match_individual(self):
+        from homeassistant.helpers import entity_registry as er
+        runtime, _, _, _, _ = await self.restored_source()
+        hass = self.f.hass
+        rows = [self.f.entity.async_get_or_create('sensor', 'input_boolean',
+                f'batch-parity-{i}', suggested_object_id=f'batch_parity_{i}',
+                disabled_by=er.RegistryEntryDisabler.USER) for i in range(10)]
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        nr = self.module('native_registry')
+        recorder = self.module('recorder_guard').NativeRecorderGuard(hass)
+        bridge = nr.NativeRegistryBridge(nr.NativeRegistryIO(hass), recorder)
+        requests = [('entity', row.id, {'entity_id': row.entity_id + '_new'}) for row in rows]
+        for size in (3, 10):
+            batch = await bridge.prepare_many(requests[:size], lambda: None)
+            singles = [await bridge.prepare(*request, lambda: None) for request in requests[:size]]
+            self.assertEqual(batch, singles)
+
     async def test_runtime_session_drift_at_resolve_await_refuses_review(self):
         runtime, mapping, uuids, original, device = await self.restored_source()
         hass = self.f.hass
