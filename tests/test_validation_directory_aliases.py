@@ -2,6 +2,7 @@
 import asyncio
 from dataclasses import replace
 import importlib
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -23,11 +24,13 @@ class DirectoryAliasTests(unittest.IsolatedAsyncioTestCase):
         self.root = self.parent / 'config'
         self.root.mkdir()
         (self.root / 'configuration.yaml').write_text(
-            "script:\n  fixture:\n    sequence:\n      - variables:\n          source: \"{{ states('sensor.old') }}\"\n")
+            "alias_fixture: {}\nscript:\n  fixture:\n    sequence:\n      - variables:\n          source: \"{{ states('sensor.old') }}\"\n")
         self.components = self.root / 'custom_components'
         self.target = self.components / 'fixture' / 'integrations' / 'alias_fixture'
         self.target.mkdir(parents=True)
-        (self.target / '__init__.py').write_text('VALUE = 1\n')
+        (self.target / '__init__.py').write_text('import voluptuous as vol\nCONFIG_SCHEMA = vol.Schema({vol.Optional("alias_fixture"): dict}, extra=vol.ALLOW_EXTRA)\n')
+        (self.target / 'manifest.json').write_text(json.dumps({'domain': 'alias_fixture', 'name': 'Alias fixture',
+            'version': '1.0.0', 'documentation': 'https://example.invalid', 'codeowners': []}))
         self.alias = self.components / 'alias_fixture'
         # Absolute source link through a different name for the config root.
         self.root_alias = self.parent / 'config_alias'
@@ -46,7 +49,7 @@ class DirectoryAliasTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(link.is_symlink())
                 self.assertFalse(os.path.isabs(os.readlink(link)))
                 self.assertEqual(link.resolve(), stage / self.target.relative_to(self.root))
-                self.assertEqual((link / '__init__.py').read_bytes(), b'VALUE = 1\n')
+                self.assertEqual((link / 'manifest.json').read_bytes(), (self.target / 'manifest.json').read_bytes())
             receipt = validation.ValidationReceipt(str(self.root), sources, directories, (),
                                                     ('script',), (), '2026.11.1', source_links=links)
             self.assertEqual(baseline._receipt(baseline._receipt_bytes(receipt)), receipt)
