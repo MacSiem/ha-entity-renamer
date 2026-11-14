@@ -435,17 +435,19 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(digest, self.public_source_sha256['www/ha-entity-renamer.js'])
                 self.assertEqual(served, (self.installed_component / 'www/ha-entity-renamer.js').read_bytes())
                 evidence['card_served_sha256'] = digest
-                async def connect(label, group):
-                    user = await hass.auth.async_create_user(label, group_ids=[group])
-                    token = await hass.auth.async_create_refresh_token(user,
-                        client_id='https://renamer.invalid/multi-queue', access_token_expiration=timedelta(hours=5))
-                    access = hass.auth.async_create_access_token(token, remote_ip='127.0.0.1')
+                async def open_socket(access):
                     socket = await client.ws_connect('http://127.0.0.1:' + str(hass.http.server_port) + '/api/websocket')
                     self.addAsyncCleanup(socket.close)
                     self.assertEqual((await socket.receive_json(timeout=10))['type'], 'auth_required')
                     await socket.send_json({'type': 'auth', 'access_token': access})
                     self.assertEqual((await socket.receive_json(timeout=10))['type'], 'auth_ok')
-                    return socket, access
+                    return socket
+                async def connect(label, group):
+                    user = await hass.auth.async_create_user(label, group_ids=[group])
+                    token = await hass.auth.async_create_refresh_token(user,
+                        client_id='https://renamer.invalid/multi-queue', access_token_expiration=timedelta(hours=5))
+                    access = hass.auth.async_create_access_token(token, remote_ip='127.0.0.1')
+                    return await open_socket(access), access
                 admin, admin_access = await connect('Synthetic multi administrator', GROUP_ID_ADMIN)
                 user, user_access = await connect('Synthetic multi nonadministrator', GROUP_ID_USER)
                 await hass.auth._store._store.async_save(hass.auth._store._data_to_save())
@@ -713,6 +715,11 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             if browser_ui:
                 meter_before, cost_before = capture_costs(mapping)
             if public:
+                if browser_ui:
+                    # This independent read-only oracle may have been idle for
+                    # the entire UI apply. Re-authenticate the SAME principal;
+                    # never retry an apply or restore after an uncertain result.
+                    admin = await open_socket(admin_access)
                 reply = await request(admin, 'recovery/inspect', operation_id=op, fingerprint=fingerprint)
                 self.assertTrue(reply.get('success'), reply)
                 inspected = reply['result']
