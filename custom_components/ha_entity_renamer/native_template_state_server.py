@@ -644,9 +644,15 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             self._scope()
             if prepared.runtime_before_json and not registry_only:
                 saved = json.loads(prepared.runtime_before_json)['entities'][prepared.identity]
-                _need(not (not saved['active'] and saved['entry'] is not None
-                           and saved['entry']['state'] == 'loaded'),
-                      'restored_source_dependent_lifecycle_unsupported')
+                if not saved['active'] and saved['entry'] is not None and saved['entry']['state'] == 'loaded':
+                    # Ask the existing planner about this source alone. A clean
+                    # single-source plan proves the restored move has no YAML
+                    # or registered-dashboard edits, even when other sources do.
+                    scoped = await _drained(self.hass.async_add_executor_job,
+                        lambda: plan_yaml(root, {old: new}, yaml_dashboards=dashboard_routes))
+                    self._scope()
+                    _need(scoped.ready and not scoped.patches,
+                          'restored_source_dependent_lifecycle_unsupported')
             if mixed_powercalc and source[0].get('platform') == 'powercalc':
                 from .powercalc_group_registry_preparation import prepare_group_registry
                 from .powercalc_group_metadata import prepare_group_metadata
@@ -799,7 +805,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 continue
             saved = json.loads(change.runtime_before_json)['entities'][change.identity]
             if not saved['active'] and saved['entry'] is not None and saved['entry']['state'] == 'loaded':
-                _need(not self.mixed_state and dashboard_storage is None,
+                _need(not self.mixed_state or controlled_reload,
                       'restored_source_scope_unsupported')
                 # The registry executes sorted mapping steps. Compare the sealed
                 # SAME ORIGINAL program on the actual edge, even when earlier

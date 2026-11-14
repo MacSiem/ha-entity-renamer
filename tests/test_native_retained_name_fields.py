@@ -18,7 +18,7 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
     data = server.NativeTemplateYAMLServerTests.data
     stimulus = server.NativeTemplateYAMLServerTests.stimulus
 
-    async def restored_source(self, *, registry_only=True, multiple=False):
+    async def restored_source(self, *, registry_only=True, multiple=False, live_dependent=False):
         from types import MappingProxyType
         from homeassistant.config_entries import ConfigEntry, ConfigEntryState
         runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True, multiple=multiple)
@@ -28,7 +28,8 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
             path = self.f.root / 'template.yaml'
             text = path.read_text()
             for source in mapping:
-                text = text.replace(source, 'sensor.unrelated_fixture')
+                if not live_dependent or source == old:
+                    text = text.replace(source, 'sensor.unrelated_fixture')
             path.write_text(text)
             await hass.services.async_call('template', 'reload', {}, blocking=True)
             await hass.async_block_till_done()
@@ -105,7 +106,7 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
     async def test_loaded_restored_and_live_multiple_apply_inverse(self):
-        runtime, mapping, uuids, original, device = await self.restored_source(multiple=True)
+        runtime, mapping, uuids, original, device = await self.restored_source(multiple=True, live_dependent=True)
         hass = self.f.hass
         restored, restored_new = next(iter(mapping.items()))
         live = next(source for source in mapping if source != restored)
@@ -117,7 +118,7 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
             entity_names={restored: 'Restored reviewed source', live: 'Live reviewed source'},
             actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
         plan = runtime.reviews[review['operation_id']].plan
-        self.assertEqual(tuple(step.adapter for step in plan.steps), ('registry', 'registry'))
+        self.assertEqual(tuple(step.adapter for step in plan.steps), ('registry', 'registry', 'yaml'))
         result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
             actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
         self.assertEqual(result['state'], 'applied')
