@@ -118,3 +118,54 @@ class EnergyCostContinuityNativeTests(ControlledActualGraphTests):
                 self.assertIsNot(sensor_manager.async_add_entities, original)
                 raise RuntimeError('injected failure')
         self.assertIs(sensor_manager.async_add_entities, original)
+
+    async def test_capture_rejects_unknown_renamed_source_without_removing_cost(self):
+        import probatio
+        from homeassistant.components.energy.data import async_get_manager, ENERGY_SOURCE_SCHEMA
+        from homeassistant.components.energy.sensor import EnergyCostSensor
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        from homeassistant.setup import async_setup_component
+        from custom_components.ha_entity_renamer.energy_cost_continuity import capture
+        from custom_components.ha_entity_renamer.persistence import PersistenceError
+
+        hass = self.f.hass
+        old = self.source.entity_id
+        manager = await async_get_manager(hass)
+        prefs = manager.default_preferences()
+        prefs['energy_sources'] = probatio.Schema(ENERGY_SOURCE_SCHEMA)([{
+            'type': 'grid', 'stat_energy_from': old, 'stat_energy_to': None,
+            'stat_cost': None, 'entity_energy_price': None, 'number_energy_price': 0.75,
+            'cost_adjustment_day': 0.0}])
+        await manager.async_update(prefs)
+        self.assertTrue(await async_setup_component(hass, 'energy', {}))
+        await hass.async_block_till_done()
+        for _ in range(200):
+            if old in hass.data['energy']['cost_sensors']:
+                break
+            await asyncio.sleep(.05)
+        cost_id = hass.data['energy']['cost_sensors'][old]
+        costs = [e for p in async_get_platforms(hass, 'energy') for e in p.entities.values()
+                 if type(e) is EnergyCostSensor and e.entity_id == cost_id]
+        self.assertEqual(len(costs), 1)
+        cost = costs[0]
+        self.source._attr_native_value = Decimal('110')
+        self.source.async_write_ha_state()
+        await hass.async_block_till_done()
+        self.assertAlmostEqual(cost.native_value, 7.5)
+        row = {'before_source': old, 'after_source': 'sensor.continuity_energy_new'}
+        self.f.entity.async_update_entity(old, new_entity_id=row['after_source'])
+        await hass.async_block_till_done()
+        self.source._attr_native_value = None
+        self.source.async_write_ha_state()
+        await hass.async_block_till_done()
+        self.assertEqual(hass.states.get(row['after_source']).state, 'unknown')
+        with self.assertRaisesRegex(PersistenceError, 'energy_generated_cost_continuity_unqualified'):
+            capture(hass, cost, row)
+        self.assertAlmostEqual(cost.native_value, 7.5)
+        self.assertIsNotNone(hass.states.get(cost_id))
+        self.source._attr_native_value = Decimal('112')
+        self.source.async_write_ha_state()
+        await hass.async_block_till_done()
+        captured = capture(hass, cost, row)
+        self.assertEqual(captured[0].state, '112')
+        self.assertAlmostEqual(captured[2], 7.5)
