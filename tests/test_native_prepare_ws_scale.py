@@ -55,6 +55,15 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         batch = await bridge.prepare_many(requests, lambda: None)
         singles = [await bridge.prepare(*request, lambda: None) for request in requests]
         self.assertEqual(batch, singles)
+        observer = self.module('native_name_observers').NativeNameObserver
+        class FullDocumentIO:
+            def __init__(self, io): self.io, self.hass = io, io.hass
+            def document(self, kind): return self.io.document(kind)
+        selective = observer(bridge.io)
+        full = observer(FullDocumentIO(bridge.io))
+        for change in batch:
+            self.assertEqual(selective.capture(change), full.capture(change))
+            self.assertEqual(selective.verify(change, change.before), full.verify(change, change.before))
 
     async def test_native_microbatch_receipts_match_individual(self):
         from homeassistant.helpers import entity_registry as er
