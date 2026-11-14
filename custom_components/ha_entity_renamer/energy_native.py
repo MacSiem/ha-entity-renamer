@@ -257,6 +257,7 @@ class NativeEnergy:
                     raise PersistenceError('energy_stale_cache')
                 recorder = NativeRecorderGuard(self.hass) if moves else None
                 history = NativeHistoryGuard(recorder) if recorder is not None else None
+                continuity = {}
                 for row in cost_preimage or ():
                     entity, registry_id, unique_id, cost_id, source_id = self._generated_cost(
                         row['before_source'], row['after_source'])
@@ -275,6 +276,10 @@ class NativeEnergy:
                             or self._cost_value(entity) != row['native_before']
                             or self.manager.data != current.value):
                         raise PersistenceError('energy_generated_cost_preimage_changed')
+                    from homeassistant.const import __version__
+                    if __version__ == '2026.11.1':
+                        from .energy_cost_continuity import capture
+                        continuity[row['after_source']] = (row, capture(self.hass, entity, row))
                     await entity.async_remove()
                     guard()
                     await recorder.async_synchronize()
@@ -285,7 +290,12 @@ class NativeEnergy:
                 self._settled()
                 if self.manager.data != current.value:
                     raise PersistenceError('energy_stale_cache')
-                await self.manager.async_update(deepcopy(prepared.after))
+                if continuity:
+                    from .energy_cost_continuity import transfer
+                    with transfer(self.hass, self.manager, continuity):
+                        await self.manager.async_update(deepcopy(prepared.after))
+                else:
+                    await self.manager.async_update(deepcopy(prepared.after))
                 guard()
                 if self.manager.data != prepared.after:
                     raise PersistenceError('energy_native_result_changed')
