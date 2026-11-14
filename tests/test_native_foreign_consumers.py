@@ -188,6 +188,66 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(kind=type(next(iter(bad))).__name__), self.assertRaises(tx.Refused):
                 module._freeze(bad, mapping, set())
 
+    async def test_native_yaml_integration_schemas_and_runtime_fields(self):
+        from homeassistant.const import __version__
+        if __version__ != '2026.11.1':
+            self.skipTest('Core 11.1 only')
+        from homeassistant.components.mqtt import CONFIG_SCHEMA as mqtt_schema
+        from homeassistant.components.rest.schema import CONFIG_SCHEMA as rest_schema
+        from homeassistant.components.rest.entity import async_get_trigger_entity_config
+        from homeassistant.components.command_line import CONFIG_SCHEMA as command_schema
+        from homeassistant.components.command_line.sensor import TRIGGER_ENTITY_OPTIONS
+        from homeassistant.helpers.template import Template
+        from homeassistant.util.yaml import load_yaml
+        from homeassistant.util.yaml.objects import NodeDictClass, NodeListClass
+        module = importlib.import_module(fixture.fixtures.PACKAGE + '.native_foreign_consumers')
+        tx = importlib.import_module(fixture.fixtures.PACKAGE + '.transaction')
+        path = self.f.root / 'native-configs.yaml'
+        path.write_text("""mqtt:
+  sensor:
+    - name: Fixture
+      state_topic: fixture/topic
+rest:
+  - resource: https://example.invalid/data
+    scan_interval: 60
+    headers:
+      Accept: application/json
+    sensor:
+      - name: Fixture REST
+        json_attributes: [temperature, humidity]
+        value_template: "{{ value_json.temperature }}"
+command_line:
+  - sensor:
+      name: Fixture command
+      command: echo fixture
+      json_attributes: [temperature, humidity]
+      scan_interval: 60
+      value_template: "{{ value_json.temperature }}"
+""")
+        raw = load_yaml(str(path))
+        mqtt = mqtt_schema({'mqtt': raw['mqtt']})['mqtt']
+        self.assertIs(type(mqtt[0]), NodeDictClass)
+        self.assertIs(type(mqtt[0]['sensor']), NodeListClass)
+        mapping = {'sensor.old': 'sensor.new'}
+        image = module._freeze(mqtt, mapping, set())
+        plain_mqtt = [{'sensor': [dict(sensor) for sensor in mqtt[0]['sensor']]}]
+        self.assertEqual(image, module._freeze(plain_mqtt, mapping, set()))
+        rest = rest_schema({'rest': raw['rest']})['rest'][0]
+        rest_sensor = rest['sensor'][0]
+        rest_config = async_get_trigger_entity_config(self.f.hass, rest_sensor, 'REST sensor')
+        command = command_schema({'command_line': raw['command_line']})['command_line'][0]['sensor']
+        command_config = {'name': Template(command['name'], self.f.hass),
+                          **{k: v for k, v in command.items() if k in TRIGGER_ENTITY_OPTIONS}}
+        for value in (rest_config, rest_sensor['value_template'], rest['headers'],
+                      rest['resource'], command_config, command['value_template'], command['command']):
+            module._freeze(value, mapping, set())
+        class UnknownList(list):
+            pass
+        for bad in (UnknownList(['safe']), NodeListClass(['sensor.old']),
+                    NodeListClass(["{{ states(variable) }}"]), NodeListClass([object()])):
+            with self.assertRaises(tx.Refused):
+                module._freeze(bad, mapping, set())
+
     async def test_native_mqtt_discovery_latches_and_device_scope(self):
         from homeassistant.const import __version__
         if __version__ != '2026.11.1':
