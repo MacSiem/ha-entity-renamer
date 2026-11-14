@@ -81,6 +81,30 @@ class GenericDashboardReferences(unittest.TestCase):
                     good.replace("'up'", "call()")):
             self.assertIsNotNone(plan_button_expression(bad, self.mapping)[1])
 
+    def test_bounded_javascript_proofs_reject_dynamic_or_selected_access(self):
+        from custom_components.ha_entity_renamer.dashboard_custom import plan_button_expression
+        mapping = {'sensor.old': 'sensor.new'}
+        prefix = ("[[[ return (states[('sensor.foreign_' + ({'a': 'x', 'b': 'y'}[user.id] || 'x'))]"
+                  "?.state === 'on') ? 'yes' : 'no'; ]]]")
+        self.assertIsNone(plan_button_expression(prefix, mapping)[1])
+        self.assertIsNotNone(plan_button_expression(prefix.replace('sensor.foreign_', 'sensor.o'), mapping)[1])
+        self.assertIsNotNone(plan_button_expression(prefix.replace('; ]]]', '; states[id]; ]]]'), mapping)[1])
+        source = ("[[[ return variables.source_entities.every(id=>Number.isFinite(Number.parseFloat("
+                  "states[id]?.state)))?'on':'off'; ]]]")
+        self.assertIsNone(plan_button_expression(source, mapping, {'source_entities': ['sensor.old']})[1])
+        self.assertIsNotNone(plan_button_expression(source, mapping, {'source_entities': ['sensor.new']})[1])
+        self.assertIsNotNone(plan_button_expression(source, mapping, {'source_entities': ['sensor.' + 'x', 1]})[1])
+        common = ("; const W = states['sensor.foreign']; const n = e => { const s = states[e];"
+                  " const v = s ? parseFloat(s.state) : NaN; return isNaN(v) ? null : v; };"
+                  " const f1 = x => (x === null || x === undefined || isNaN(x)) ? '-' :"
+                  " Number(x).toLocaleString('en', {minimumFractionDigits: 1, maximumFractionDigits: 1});"
+                  " return (C[W?.state] || [null, '-'])[1]; ]]]")
+        table = '[[[ const C = {"x": ["x", "icon"]}' + common
+        self.assertIsNone(plan_button_expression(table, mapping)[1])
+        self.assertIsNotNone(plan_button_expression(table.replace('states[e]', 'states[other]'), mapping)[1])
+        encoded = table.replace('"icon"', '"sensor' + chr(92) + 'u002eold"')
+        self.assertIsNotNone(plan_button_expression(encoded, mapping)[1])
+
     def test_review_real_change_no_change_and_tampering(self):
         mapping = {'sensor.old': 'sensor.new'}
         before = {'views': [{'cards': [{'type': 'custom:any', 'entity': 'sensor.old'}]}]}

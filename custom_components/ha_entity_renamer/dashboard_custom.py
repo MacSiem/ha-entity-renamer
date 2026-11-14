@@ -88,6 +88,9 @@ def _unchanged_literal_table(text, mapping):
             or len(v) != 2 or any(type(item) is not str for item in v)
             for k, v in table.items())):
         return False
+    if any(match.group(1) in selected for key, values in table.items()
+           for value in (key, *values) for match in _JS_ENTITY_TOKEN.finditer(value)):
+        return False
     tail = text[start.end() + end:]
     def output_template(match):
         body = match.group(1)
