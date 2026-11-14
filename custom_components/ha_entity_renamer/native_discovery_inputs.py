@@ -235,7 +235,7 @@ Cancellation drains executor work before any held descriptor can be released.
         # flush a Store write. Pin native identities across every await; only
         # sample manager contents once all five pending flags have cleared.
         deadline = hass.loop.time() + _SETTLE_TIMEOUT
-        while any(managers.pending_for(store) for store in admission.stores):
+        while any(admission.pending_for(store) for store in admission.stores):
             remaining = deadline - hass.loop.time()
             if remaining <= 0:
                 flags = ('data', 'write_lock', 'delay_handle', 'final_listener', 'load_future')
