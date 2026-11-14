@@ -48,6 +48,8 @@ class StateBindingPrefix:
     head: str
     active: frozenset[str]
     registry_ids: tuple[tuple[str, str], ...]
+    selected_entity_ids: tuple[str, ...] = ()
+    selected_device_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -259,12 +261,13 @@ def accepted_state_prefix(chain, program, *, input_state=None, live_intent=None,
     state, documents = _state_inputs(chain, input_state, live_intent=live_intent,
                           live_context=live_context, live_calls=live_calls, _with_documents=True)
     registry = documents['core.entity_registry']['data']['entities']
-    known, active, ids = {}, set(), []
+    known, active, ids, selected_entities, selected_devices = {}, set(), [], [], []
     for index, step in enumerate(chain.plan.steps):
         if step.adapter != 'registry':
             continue
         change = chain._original_change(index)
         _need(type(change) is PreparedRegistryChange)
+        (selected_entities if change.kind == 'entity' else selected_devices).append(change.identity)
         for old, new in change.mapping.items():
             _need(old not in known, 'template_state_registry_mapping_duplicate')
             known[old] = new
@@ -276,7 +279,8 @@ def accepted_state_prefix(chain, program, *, input_state=None, live_intent=None,
             ids.append((change.identity, matches[0]['entity_id']))
     _need(known == dict(program.mapping), 'template_state_original_mapping_changed')
     return StateBindingPrefix(program.sha256, chain.operation_id, chain.plan.fingerprint,
-        state.head, frozenset(active), tuple(sorted(ids)))
+        state.head, frozenset(active), tuple(sorted(ids)),
+        tuple(sorted(selected_entities)), tuple(sorted(selected_devices)))
 
 
 def _templates(value, path=()):
@@ -635,7 +639,26 @@ def sample_state_bindings(runtime, program, prefix, yaml_position, documents, *,
                 (id(entity), id(entry), graph_token[:2],
                  tuple(track[:3] for track in graph_token[3]), graph_token[4],
                  _fingerprint(cfg), configured_owner, action_owner)))
-    _need(set(registry_rows) <= live, 'template_state_missing_registry_consumer')
+    # Registry retains removed YAML entities indefinitely. Admit a missing
+    # native object only when it is outside every sealed physical/configured
+    # source and every selected entity/device. Keep its complete accepted row,
+    # native identity and exact state image in the existing inventory fence.
+    source_keys = {row[1] for row in original_descriptor['inventory']}
+    for entity_id in sorted(set(registry_rows) - live):
+        stored = registry_rows[entity_id]
+        entry = registry.async_get(entity_id)
+        state = hass.states.get(entity_id)
+        _need(type(entry) is er.RegistryEntry and _row(entry) == stored
+              and entry.id not in prefix.selected_entity_ids
+              and entry.device_id not in prefix.selected_device_ids
+              and entity_id not in dict(program.mapping)
+              and entity_id not in dict(program.mapping).values()
+              and entry.unique_id not in source_keys
+              and (state is None or (state.state == 'unavailable'
+                   and state.attributes.get('restored') is True)),
+              'template_state_missing_registry_consumer')
+        inventory.append(('registry_inactive', entity_id, id(entry), _fingerprint(stored),
+                          None if state is None else hashlib.sha256(state.as_dict_json).hexdigest()))
     expected_unsupported = {(r[0], r[1]) for r in unsupported if r[0] != 'template.trigger'}
     _need(matched == set(expected) | expected_unsupported,
           'template_state_full_population_changed')

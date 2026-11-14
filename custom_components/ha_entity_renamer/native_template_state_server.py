@@ -790,7 +790,9 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         self._scope()
         prefix = StateBindingPrefix(self.program.sha256, self.operation_id,
             'source-preflight', baseline.digest, frozenset(),
-            tuple(sorted((c.identity, next(iter(c.mapping))) for c in self.registry_changes if c.mapping)))
+            tuple(sorted((c.identity, next(iter(c.mapping))) for c in self.registry_changes if c.mapping)),
+            tuple(sorted(c.identity for c in self.registry_changes if c.kind == 'entity')),
+            tuple(sorted(c.identity for c in self.registry_changes if c.kind == 'device')))
         if entry_change is not None:
             from .controlled_template_entry_witness import ControlledTemplateEntryWitness
             source = next(iter(entry_change.mapping))

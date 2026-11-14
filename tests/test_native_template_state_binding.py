@@ -65,16 +65,44 @@ class NativeTemplateStateBindingTests(unittest.IsolatedAsyncioTestCase):
             self.f.hass, plan, mapping, self.f.root.parent, with_state_program=True)
         return validation, mapping
 
-    async def sample_original(self, validation):
+    async def sample_original(self, validation, *, selected=()):
         module = self.module('native_template_state_binding')
         program = validation.state_config_program
         observed = await self.module('native_discovery_inputs').async_observe_discovery_inputs(
             self.f.hass, guard=lambda: None)
         documents = {row.key: {'data': json.loads(row.manager_json)} for row in observed.files}
         prefix = module.StateBindingPrefix(program.sha256, 'sampler-only', 'sampler-only',
-            'sampler-only', frozenset(), ())
+            'sampler-only', frozenset(), (), tuple(selected))
         return module.sample_state_bindings(module._StateRuntime(self.f.hass), program,
             prefix, 'original', documents)
+
+    async def test_unconfigured_registry_peers_are_pinned_and_selected_refused(self):
+        validation, mapping = await self.boot()
+        first = self.f.entity.async_get_or_create('sensor', 'template', 'unconfigured-ghost-a')
+        second = self.f.entity.async_get_or_create('sensor', 'template', 'unconfigured-ghost-b')
+        second.write_unavailable_state(self.f.hass)
+        await self.f.hass.async_block_till_done()
+        await self._flush_documents()
+        before = await self.sample_original(validation)
+        peers = [row for row in before.inventory if row[0] == 'registry_inactive']
+        self.assertEqual(len(peers), 2)
+        self.assertTrue(before.same_bindings(await self.sample_original(validation)))
+        with self.assertRaisesRegex(ValueError, 'template_state_missing_registry_consumer'):
+            await self.sample_original(validation, selected=(first.id,))
+        state = self.f.hass.states.get(second.entity_id)
+        self.f.hass.states.async_set(second.entity_id, 'on', dict(state.attributes))
+        with self.assertRaisesRegex(ValueError, 'template_state_missing_registry_consumer'):
+            await self.sample_original(validation)
+
+    async def test_missing_configured_template_object_is_still_refused(self):
+        validation, mapping = await self.boot()
+        snapshot = await self.sample_original(validation)
+        entity = snapshot.rows[0].entity
+        await entity.platform.async_remove_entity(entity.entity_id)
+        await self.f.hass.async_block_till_done()
+        await self._flush_documents()
+        with self.assertRaisesRegex(ValueError, 'template_state_missing_registry_consumer'):
+            await self.sample_original(validation)
 
     async def test_real_same_checker_full_descriptors_and_distinct_prefix_projection(self):
         validation, mapping = await self.boot()
