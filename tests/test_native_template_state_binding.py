@@ -80,7 +80,16 @@ class NativeTemplateStateBindingTests(unittest.IsolatedAsyncioTestCase):
         validation, mapping = await self.boot()
         first = self.f.entity.async_get_or_create('sensor', 'template', 'unconfigured-ghost-a')
         second = self.f.entity.async_get_or_create('sensor', 'template', 'unconfigured-ghost-b')
-        device = self.f.device.async_get_or_create(config_entry_id='fixture-entry',
+        from types import MappingProxyType
+        from homeassistant.config_entries import ConfigEntry
+        owner = ConfigEntry(domain='threshold', title='Ghost fixture owner', data={},
+            options={'name': 'Ghost owner', 'entity_id': 'sensor.unrelated_fixture',
+                     'lower': 20, 'upper': None, 'hysteresis': 0},
+            discovery_keys=MappingProxyType({}), source='user', version=1,
+            minor_version=1, subentries_data=[], unique_id='ghost-fixture-owner')
+        await self.f.hass.config_entries.async_add(owner)
+        await self.f.hass.async_block_till_done()
+        device = self.f.device.async_get_or_create(config_entry_id=owner.entry_id,
             identifiers={('fixture', 'ghost-device')})
         first = self.f.entity.async_update_entity(first.entity_id, device_id=device.id)
         from homeassistant.helpers.entity_registry import RegistryEntryDisabler
