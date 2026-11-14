@@ -180,7 +180,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertEqual(len(injected), 2)
 
     async def test_retry_refuses_foreign_source_change_before_effect(self):
-        runtime, mapping, _, _, _ = await self.restored_source()
+        runtime, mapping, _, _, device = await self.restored_source()
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
         native = self.module('native_discovery_inputs')
@@ -202,8 +202,8 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         error = self.module('yaml_validation').YAMLValidationError
         with patch.object(native, 'async_observe_discovery_inputs', observe):
             with self.assertRaises(error):
-                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
-                    guard=lambda: None, refresh=refresh)
+                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin', entity_names={old: 'Reviewed fixture'},
+                    device_names={device.id: 'Reviewed device'}, guard=lambda: None, refresh=refresh)
         self.assertTrue(injected)
         self.assertIsNotNone(self.f.entity.async_get(old))
         self.assertIsNone(self.f.entity.async_get(new))
@@ -211,7 +211,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertFalse(await runtime.journal.all())
 
     async def test_cancel_before_retry_reclaims_lease_without_effect(self):
-        runtime, mapping, _, _, _ = await self.restored_source()
+        runtime, mapping, _, _, device = await self.restored_source()
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
         native = self.module('native_discovery_inputs')
@@ -237,7 +237,8 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         with patch.object(native, 'async_observe_discovery_inputs', observe), \
              patch.object(retention, 'async_reclaim_reviews', reclaim):
             task = asyncio.create_task(runtime.native_yaml_prepare(hass, mapping,
-                actor_id='synthetic-admin', guard=lambda: None, refresh=refresh))
+                actor_id='synthetic-admin', entity_names={old: 'Reviewed fixture'},
+                device_names={device.id: 'Reviewed device'}, guard=lambda: None, refresh=refresh))
             await asyncio.wait_for(entered.wait(), 120)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError): await task
