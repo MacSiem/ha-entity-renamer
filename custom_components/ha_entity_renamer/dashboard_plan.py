@@ -574,7 +574,7 @@ def plan_dashboard(config, mapping):
                 import fnmatch
                 pattern, operator = value.get('value'), value.get('operator')
                 if (type(pattern) is not str or len(pattern) > 256 or operator not in (None, 'contains')
-                        or pattern.count('*') > 1 or pattern.count('?') > 1
+                        or pattern.count('*') > 2 or pattern.count('?') > 1
                         or not re.fullmatch(r'\^?(?:[A-Za-z0-9_.*?]|\\[.])+(?:\$)?', pattern)):
                     mark(path + ('value',), 'dynamic_dashboard_selector', 'Entity filter pattern is unsupported')
                 else:
