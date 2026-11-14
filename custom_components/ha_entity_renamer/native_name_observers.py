@@ -142,9 +142,52 @@ class NativeNameObserver:
         # Core 11's registry restore listener moves the native placeholder on
         # ID updates. Do not extend name-only/device or other Core paths.
         return (self._version() in ('2026.11.0', '2026.11.1')
-                and change.kind == 'entity' and bool(change.mapping)
-                and change.before.get('device_id') is not None
-                and change.before.get('name') != change.after.get('name'))
+                and (change.kind == 'device' or (change.kind == 'entity' and bool(change.mapping)
+                     and change.before.get('device_id') is not None
+                     and change.before.get('name') != change.after.get('name'))))
+
+    def _canonical_restored(self, row, state, *, friendly=True):
+        """Check the exact Core 11 write_unavailable_state projection first."""
+        from homeassistant.helpers import device_registry as dr, entity_registry as er
+        device = dr.async_get(self.hass).async_get(row.device_id) if row.device_id else None
+        require(device is not None and row.config_entry_id in device.config_entries,
+                'name_restored_device_unverified')
+        attrs = {'restored': True}
+        if row.capabilities is not None:
+            attrs.update(row.capabilities)
+        for key, value in (('device_class', row.device_class or row.original_device_class),
+                           ('icon', row.icon or row.original_icon),
+                           ('supported_features', row.supported_features),
+                           ('unit_of_measurement', row.unit_of_measurement)):
+            if value is not None:
+                attrs[key] = value
+        if friendly:
+            name = er.async_get_legacy_friendly_name(self.hass, row)
+            if name:
+                attrs['friendly_name'] = name
+            actual = dict(state.attributes)
+        else:
+            attrs.pop('friendly_name', None)
+            actual = {k: v for k, v in state.attributes.items() if k != 'friendly_name'}
+        require(state.state == 'unavailable' and actual == attrs,
+                'name_restored_native_attributes_changed')
+
+    def preflight_restored_device(self, change):
+        """Recheck loaded placeholders synchronously before the device write."""
+        if change.kind != 'device' or not self._loaded_restored(change):
+            return
+        baseline = json.loads(change.runtime_before_json)
+        for row in self._rows(change):
+            saved = baseline['entities'][row.id]
+            if saved['active'] or saved['entry'] is None or saved['entry']['state'] != 'loaded':
+                continue
+            if saved['inactive_state'] is None:
+                continue
+            _, state, entry, active = self._sample(row, loaded_restored=True)
+            require(not active and state is not None and entry == saved['entry']
+                    and {k: v for k, v in state.attributes.items() if k != 'friendly_name'}
+                        == saved['inactive_attributes'], 'name_restored_source_changed')
+            self._canonical_restored(row, state)
 
     def _device_subscription(self, entity, row):
         """Prove Core 2026 will deliver this device's name update to this entity."""
@@ -179,6 +222,9 @@ class NativeNameObserver:
         device_ids = {row.device_id for row in rows if row.device_id is not None}
         for row in rows:
             entity, state, entry, active = self._sample(row, loaded_restored=self._loaded_restored(change))
+            if (not active and state is not None and entry is not None
+                    and entry['state'] == 'loaded' and self._loaded_restored(change)):
+                self._canonical_restored(row, state)
             if version in ('2026.11.0', '2026.11.1'):
                 # Core 11 clears compat_name on an entity-name update and may
                 # rewrite related entity fields in the device-name listener.

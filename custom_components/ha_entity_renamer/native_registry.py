@@ -264,6 +264,9 @@ class NativeRegistryIO:
         if previous is None or previous.id != prepared.identity:
             raise RegistryConflict('native_mutation_source_missing')
         before_json = _orjson_bytes_default_encoder(previous.as_storage_fragment).decode('utf-8')
+        if prepared.kind == 'device':
+            from .native_name_observers import NativeNameObserver
+            NativeNameObserver(self).preflight_restored_device(prepared)
         if prepared.kind == "entity":
             kwargs = {"name": target["name"]}
             if source["entity_id"] != target["entity_id"]:
@@ -325,12 +328,14 @@ class NativeRegistryIO:
                 saved = baseline['entities'][row.id]
                 if saved['active'] or saved['inactive_state'] is None:
                     continue
-                _, state, entry, active = observer._sample(row)
+                _, state, entry, active = observer._sample(row, loaded_restored=observer._loaded_restored(prepared))
                 from .helper_observers import require
                 require(not active and state is not None
                         and state.state == saved['inactive_state']
                         and {k: v for k, v in state.attributes.items() if k != 'friendly_name'}
                             == saved['inactive_attributes'], 'name_inactive_refresh_conflict')
+                if entry is not None and entry['state'] == 'loaded':
+                    observer._canonical_restored(row, state, friendly=False)
                 row.write_unavailable_state(self.hass)
         return stamp
 

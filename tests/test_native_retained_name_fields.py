@@ -112,19 +112,29 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         live = next(source for source in mapping if source != restored)
         live_new = mapping[live]
         self.assertIsNotNone(hass.states.get(live))
+        from homeassistant.helpers.entity_registry import RegistryEntryDisabler
+        disabled = self.f.entity.async_get_or_create('sensor', 'threshold', 'restored-disabled-peer',
+            config_entry=self.f.hass.config_entries.async_get_entry(self.f.entity.async_get(restored).config_entry_id),
+            device_id=device.id, disabled_by=RegistryEntryDisabler.USER)
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        self.assertIsNone(hass.states.get(disabled.entity_id))
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
         review = await runtime.native_yaml_prepare(hass, mapping,
             entity_names={restored: 'Restored reviewed source', live: 'Live reviewed source'},
-            actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+            device_names={device.id: 'Reviewed fixture device'}, actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
         plan = runtime.reviews[review['operation_id']].plan
-        self.assertEqual(tuple(step.adapter for step in plan.steps), ('registry', 'registry', 'yaml'))
+        self.assertEqual(tuple(step.adapter for step in plan.steps), ('registry', 'registry', 'registry', 'yaml'))
         result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
             actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
         self.assertEqual(result['state'], 'applied')
         self.assertEqual((self.f.entity.async_get(restored_new).id,
                           self.f.entity.async_get(restored_new).device_id), (uuids[restored], device.id))
         self.assertTrue(hass.states.get(restored_new).attributes['restored'])
+        self.assertEqual(hass.states.get(restored_new).attributes['friendly_name'],
+                         'Reviewed fixture device Restored reviewed source')
+        self.assertIsNone(hass.states.get(disabled.entity_id))
         self.assertEqual(self.f.entity.async_get(live_new).id, uuids[live])
         result = await runtime.native_yaml_reverse(hass, review['operation_id'], review['fingerprint'],
             guard=lambda: None, refresh=refresh)
@@ -133,7 +143,28 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.f.entity.async_get(source).id, uuids[source])
             self.assertIsNone(self.f.entity.async_get(target))
         self.assertTrue(hass.states.get(restored).attributes['restored'])
+        self.assertEqual(hass.states.get(restored).attributes['friendly_name'],
+                         'Restored fixture device Template runtime producer')
+        self.assertIsNone(hass.states.get(disabled.entity_id))
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
+    async def test_loaded_restored_foreign_attributes_refused_before_review(self):
+        runtime, mapping, uuids, original, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        state = hass.states.get(old)
+        hass.states.async_set(old, state.state, dict(state.attributes, foreign='preserve'))
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        with self.assertRaisesRegex((ValueError, self.module('transaction').Refused),
+                                    'name_restored_native_attributes_changed'):
+            await runtime.native_yaml_prepare(hass, mapping,
+                entity_names={old: 'Restored reviewed source'},
+                device_names={device.id: 'Reviewed fixture device'},
+                actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        self.assertEqual(hass.states.get(old).attributes['foreign'], 'preserve')
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertEqual(self.f.device.async_get(device.id).name_by_user, None)
 
     async def test_loaded_restored_dependent_template_refuses_before_effect(self):
         runtime, mapping, uuids, original, device = await self.restored_source(registry_only=False)
