@@ -32,6 +32,7 @@ class NativeSelfReferenceTests(unittest.TestCase):
         cases = [
             tree('{{ states(other.entity_id) }}'),
             tree('{{ states(this.other) }}'),
+            tree('{{ states(this[dynamic_key]) }}'),
             tree('{% set alias = this %}{{ states(alias.entity_id) }}'),
             tree('{% macro m(this) %}{{ states(this.entity_id) }}{% endmacro %}{{ m(other) }}'),
             tree('{% set this = other %}{{ states(this.entity_id) }}'),
