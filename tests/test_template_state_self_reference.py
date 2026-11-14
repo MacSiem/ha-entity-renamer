@@ -45,6 +45,16 @@ class NativeSelfReferenceTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'template_state_reference_scope_unverified'):
                 self.project(value)
 
+    def test_integer_payload_keys_are_preserved_during_template_projection(self):
+        value = tree("{{ states('sensor.old') }}", entity_variables=[
+            ['lookup', {'$map': [[{'$int': 1}, 'integer'], ['1', 'string']]}]])
+        projected = self.project(value)
+        self.assertEqual(subject._get(subject._get(projected[3], 'variables'), 'lookup'),
+                         {'$map': [[{'$int': 1}, 'integer'], ['1', 'string']]})
+        self.assertIn('sensor.new', str(projected))
+        with self.assertRaises(ValueError):
+            subject._pairs({'$map': [[{'$int': True}, 'bad']]})
+
 
 if __name__ == '__main__':
     unittest.main()

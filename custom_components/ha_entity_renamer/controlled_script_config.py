@@ -25,9 +25,14 @@ def _raw(value, depth=0):
           'raw_type_unqualified')
     result = {}
     for pair in value['$map']:
-        _need(type(pair) is list and len(pair) == 2 and type(pair[0]) is str
-              and pair[0] not in result, 'raw_key_unqualified')
-        result[pair[0]] = _raw(pair[1], depth + 1)
+        _need(type(pair) is list and len(pair) == 2, 'raw_key_unqualified')
+        key = pair[0]
+        if type(key) is dict and set(key) == {'$int'} and type(key['$int']) is int:
+            key = key['$int']
+        else:
+            _need(type(key) is str, 'raw_key_unqualified')
+        _need(key not in result, 'raw_key_unqualified')
+        result[key] = _raw(pair[1], depth + 1)
     return result
 
 

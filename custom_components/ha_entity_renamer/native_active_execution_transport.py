@@ -45,7 +45,7 @@ class _Projection:
     def project(self, value, before, after, parent, key):
         from homeassistant.helpers.template import Template
         from homeassistant.util.yaml.objects import NodeStrClass, NodeDictClass, NodeListClass
-        from .yaml_validation_worker import _normal
+        from .yaml_validation_worker import _normal, _normal_key
         _need(_normal(value) == before, 'active_config_source_changed')
         if before == after:
             return value
@@ -88,7 +88,7 @@ class _Projection:
                   'active_config_mapping_shape')
             for (name, child), (old_key, old), (new_key, new) in zip(
                     value.items(), before['$map'], after['$map'], strict=True):
-                _need(name == old_key == new_key, 'active_config_key_change_unsupported')
+                _need(_normal_key(name) == old_key == new_key, 'active_config_key_change_unsupported')
                 replacement = self.project(child, old, new, value, name)
                 if replacement is not child:
                     _need(id(value) in self.owners, 'active_config_nonfuture_write')

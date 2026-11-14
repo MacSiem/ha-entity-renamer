@@ -284,6 +284,8 @@ def _templates(value, path=()):
         yield path, value['$template']
     elif type(value) is dict and set(value) == {'$map'}:
         for key, child in _pairs(value):
+            if type(key) is dict:
+                key = key['$int']  # _pairs has already validated the exact tag.
             yield from _templates(child, path + (key,))
     elif type(value) is dict and set(value) == {'$variables'}:
         yield from _templates(value['$variables'], path + ('$variables',))

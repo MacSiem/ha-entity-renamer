@@ -16,3 +16,13 @@ class ControlledScriptConfigTests(unittest.TestCase):
                       {'$map': [['x']]}, {'$map': [[1, 'value']]}, {'arbitrary': 'mapping'}):
             with self.subTest(value=value), self.assertRaises(Refused):
                 _raw(value)
+
+    def test_integer_keys_round_trip_without_string_collisions(self):
+        value = {'$map': [[{'$int': 1}, 'number'], ['1', 'string']]}
+        self.assertEqual(list(_raw(value).items()), [(1, 'number'), ('1', 'string')])
+        for key in ({'$int': True}, {'$int': 1.0}, {'$int': 1, 'extra': 0},
+                    {'$other': 1}, True):
+            with self.subTest(key=key), self.assertRaises(Refused):
+                _raw({'$map': [[key, 'value']]})
+        with self.assertRaises(Refused):
+            _raw({'$map': [[{'$int': 1}, 'a'], [{'$int': 1}, 'b']]})

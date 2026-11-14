@@ -246,7 +246,7 @@ class NativeScriptConfigTransport:
         from homeassistant.helpers.template import Template
         from homeassistant.helpers.script_variables import ScriptVariables
         from homeassistant.util.yaml.objects import NodeStrClass, NodeDictClass, NodeListClass
-        from .yaml_validation_worker import _normal
+        from .yaml_validation_worker import _normal, _normal_key
         if before == after:
             return value
         if type(value) in (str, NodeStrClass):
@@ -272,13 +272,17 @@ class NativeScriptConfigTransport:
         if type(value) in (dict, NodeDictClass):
             _need(type(before) is dict and set(before) == {'$map'}
                   and type(after) is dict and set(after) == {'$map'}
-                  and len(value) == len(before['$map']) == len(after['$map'])
-                  and all(type(key) in (str, NodeStrClass) for key in value))
+                  and len(value) == len(before['$map']) == len(after['$map']))
             projected = []
             for (key, child), (old_key, old), (new_key, new) in zip(
                     value.items(), before['$map'], after['$map'], strict=True):
-                _need(key == old_key and type(new_key) is str)
-                projected.append((key if key == new_key else _source_string(key, new_key),
+                _need(_normal_key(key) == old_key)
+                if old_key == new_key:
+                    projected_key = key
+                else:
+                    _need(type(old_key) is str and type(new_key) is str)
+                    projected_key = _source_string(key, new_key)
+                projected.append((projected_key,
                                   self._project(child, old, new)))
             _need(len({key for key, _ in projected}) == len(projected))
             self.operations.append(('dict', value, tuple(value.items()), tuple(projected)))

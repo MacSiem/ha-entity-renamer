@@ -27,8 +27,11 @@ def _digest(value):
 def _pairs(value):
     _need(type(value) is dict and set(value) == {'$map'} and type(value['$map']) is list)
     rows = value['$map']
-    _need(all(type(row) is list and len(row) == 2 and type(row[0]) is str for row in rows)
-          and len({row[0] for row in rows}) == len(rows))
+    def valid_key(key):
+        return (type(key) is str or type(key) is dict and set(key) == {'$int'}
+                and type(key['$int']) is int)
+    _need(all(type(row) is list and len(row) == 2 and valid_key(row[0]) for row in rows)
+          and len({_bytes(row[0]) for row in rows}) == len(rows))
     return rows
 
 
@@ -209,7 +212,9 @@ def _project(semantic, mapping, active):
             parts = [layout(child) for child in value]
             return ('list', parts) if all(part is not None for part in parts) else None
         if type(value) is dict and set(value) == {'$map'}:
-            return ('map', [(key, deepcopy(child)) for key, child in _pairs(value)])
+            pairs = _pairs(value)
+            return ('map', [(key, deepcopy(child)) for key, child in pairs]) if all(
+                type(key) is str for key, _ in pairs) else None
         return None
     def alias_layout(text):
         from jinja2 import Environment, nodes
@@ -242,6 +247,7 @@ def _project(semantic, mapping, active):
         raw = (variables.get('$variables', variables) if type(variables) is dict else None)
         _need(raw is not None, 'template_state_variables_descriptor_required')
         for name, value in _pairs(raw):
+            _need(type(name) is str, 'template_state_variable_name_unverified')
             bound = origin(value)
             shape = layout(value)
             if type(value) is dict and set(value) == {'$template'}:
@@ -267,7 +273,8 @@ def _project(semantic, mapping, active):
             used.update(sinks); unsafe.update(bad)
             return {'$template': text}
         if type(value) is dict and set(value) == {'$map'}:
-            return {'$map': [[key, visit(child, path + (key,))] for key, child in _pairs(value)]}
+            return {'$map': [[key, visit(child, path + (key if type(key) is str else None,))]
+                             for key, child in _pairs(value)]}
         if type(value) is dict and set(value) == {'$variables'}:
             return {'$variables': visit(value['$variables'], path + ('$variables',))}
         if type(value) is list:

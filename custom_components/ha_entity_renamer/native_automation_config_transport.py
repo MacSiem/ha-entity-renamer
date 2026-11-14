@@ -6,6 +6,14 @@ from .native_script_config_transport import (NativeScriptConfigTransport, _graph
     _idle_census, _cache_names, _need)
 
 
+def _trigger_fields(value):
+    """Native trigger schema field names must be distinct strings."""
+    from .template_state_program import _pairs
+    rows = _pairs(value)
+    _need(all(type(key) is str for key, _ in rows), 'automation_trigger_field_unqualified')
+    return dict(rows)
+
+
 @dataclass(frozen=True)
 class _Actor:
     entity: object
@@ -217,7 +225,7 @@ class NativeAutomationConfigTransport:
                     from .yaml_validation_worker import _normal
                     for cfg, old_cfg, new_cfg in zip(entity._trigger_config, old[2], new[2], strict=True):
                         _need(type(old_cfg) is dict and type(new_cfg) is dict)
-                        a, b = dict(old_cfg['$map']), dict(new_cfg['$map'])
+                        a, b = _trigger_fields(old_cfg), _trigger_fields(new_cfg)
                         allowed = {'entity_id'}
                         if a.get('for') != b.get('for'):
                             from .native_automation_scalar_duration import configured_duration
@@ -286,8 +294,8 @@ class NativeAutomationConfigTransport:
             self.scalar_edge(b)
             old = next(row for row in self.before['automation'] if row[0] == b.entity.unique_id)
             new = next(row for row in self.after['automation'] if row[0] == b.entity.unique_id)
-            before = dict(old[2][b.index]['$map'])['for']
-            after = dict(new[2][b.index]['$map'])['for']
+            before = _trigger_fields(old[2][b.index])['for']
+            after = _trigger_fields(new[2][b.index])['for']
             if _frozen(before) == _frozen(after):
                 continue  # existing exact Template/cell and no metadata rewrite
             replacement = self._project(b.config['for'], before, after)

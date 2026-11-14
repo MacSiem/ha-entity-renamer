@@ -217,6 +217,15 @@ def _homekit_filter_only(before, after, mapping):
     return exact(projected, new) and not exact(old, new)
 
 
+def _normal_key(key):
+    """Encode qualified YAML mapping keys without conflating types."""
+    if isinstance(key, str):
+        return str(key)
+    if type(key) is int:
+        return {'$int': key}
+    raise ValueError('runtime_projection_key')
+
+
 def _normal(value):
     """Bounded, typed native config encoding; never render templates or use repr."""
     from collections.abc import Mapping
@@ -242,11 +251,9 @@ def _normal(value):
         if isinstance(item, (date, datetime, time)):
             return {'$datetime': item.isoformat()}
         if isinstance(item, Mapping):
-            if any(not isinstance(key, str) for key in item):
-                raise ValueError('runtime_projection_key')
             # Preserve native insertion order (variables can depend on it), and
             # tag maps so user keys cannot impersonate Template/State markers.
-            return {'$map': [[str(key), encode(child, depth + 1)]
+            return {'$map': [[_normal_key(key), encode(child, depth + 1)]
                              for key, child in item.items()]}
         if isinstance(item, (list, tuple)):
             return [encode(child, depth + 1) for child in item]
@@ -805,9 +812,10 @@ async def _expected_runtime(root, domains, *, source_rows=None, template_sources
     try:
         from homeassistant.const import __version__
         if __version__ in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
-            # Current native trigger validation requires its own platform
-            # registry initialized even when no automation is activated.
-            from homeassistant.helpers import trigger
+            # Match check_config's platform registries on this fresh hass;
+            # neither helper activates an automation or evaluates a condition.
+            from homeassistant.helpers import condition, trigger
+            await condition.async_setup(hass)
             await trigger.async_setup(hass)
         config = await async_hass_config_yaml(hass)
         if __version__ == '2026.11.1' and set(domains) & {'automation', 'script'}:

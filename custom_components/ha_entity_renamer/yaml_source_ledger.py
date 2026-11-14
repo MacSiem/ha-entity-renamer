@@ -290,7 +290,32 @@ def _extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
                 flag(ref, 'source_body_tag_unsupported')
             return [node.tag, node.value]
         if isinstance(node, MappingNode):
-            pairs(ref)  # Detect duplicate/merge keys in every nested body map.
+            if node.tag != _MAP:
+                flag(ref, 'source_container_layout_unsupported')
+            # Definition bodies may contain user data with integer keys.
+            # Construct only the YAML integer scalar, never a value or tag;
+            # compare Python keys so alternate integer spellings cannot shadow.
+            seen = {}
+            for i, (key, _) in enumerate(node.value):
+                keyref = ref.child(key, f'k:{i}')
+                if not isinstance(key, ScalarNode):
+                    flag(keyref, 'source_mapping_key_or_merge_unsupported')
+                    continue
+                if key.tag == _STR:
+                    scalar = key.value
+                elif key.tag == 'tag:yaml.org,2002:int':
+                    try:
+                        scalar = yaml.SafeLoader('').construct_yaml_int(key)
+                    except (ValueError, TypeError):
+                        flag(keyref, 'source_mapping_key_or_merge_unsupported')
+                        continue
+                else:
+                    flag(keyref, 'source_mapping_key_or_merge_unsupported')
+                    continue
+                if scalar in seen:
+                    flag(keyref, 'source_duplicate_mapping_key')
+                    flag(seen[scalar], 'source_duplicate_mapping_key')
+                seen[scalar] = keyref
             return [node.tag, [[body(ref.child(key, f'k:{i}'), active, depth + 1),
                                 body(ref.child(child, f'v:{i}'), active, depth + 1)]
                                for i, (key, child) in enumerate(node.value)]]

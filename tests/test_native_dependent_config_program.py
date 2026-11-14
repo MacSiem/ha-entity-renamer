@@ -17,7 +17,8 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
     def module(self, name):
         return importlib.import_module(fixture.fixtures.PACKAGE + '.' + name)
 
-    async def compile(self, *, empty_automation=False, secret=False, mixed=False, environment=False):
+    async def compile(self, *, empty_automation=False, secret=False, mixed=False, environment=False,
+                      integer_keys=False):
         root = self.f.root
         (root / 'configuration.yaml').write_text('script: !include scripts.yaml\n' +
             ('automation: []\n' if empty_automation else 'automation: !include automations.yaml\n'))
@@ -45,7 +46,7 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
   actions:
     - variables:
         sample: "{{ states('sensor.original') ~ states('sensor.second') }}"
-''')
+''' + ('        lookup: {1: first, one: second}\n' if integer_keys else ''))
         if mixed:
             with (root / 'configuration.yaml').open('a') as stream:
                 stream.write('template: !include templates.yaml\n')
@@ -128,6 +129,75 @@ class NativeDependentConfigProgramTests(unittest.IsolatedAsyncioTestCase):
         # No native components were set up; no services or state outputs created.
         self.assertFalse(self.f.hass.states.async_entity_ids('automation'))
         self.assertFalse(self.f.hass.states.async_entity_ids('script'))
+
+    async def test_integer_userdata_survives_native_prefix_and_codec(self):
+        from homeassistant.const import __version__
+        if __version__ == '2026.11.1':
+            self.skipTest('11.1 dependent-only checker is intentionally not admitted')
+        result, plan, mapping = await self.compile(integer_keys=True)
+        program = result.config_program
+        module = self.module('dependent_config_program')
+        before = program.rows(frozenset())
+        after = program.rows(frozenset(mapping))
+        for rows in (before, after):
+            encoded = json.dumps(rows)
+            self.assertIn('"$int": 1', encoded)
+            self.assertIn('"one", "second"', encoded)
+        program.assert_sources(result.receipt, result.evidence, plan=plan, mapping=mapping,
+                               source_order=tuple(sorted(mapping)))
+        payload = module.encode_dependent_config_program(program)
+        kwargs = dict(expected_sha256=program.sha256, receipt=result.receipt,
+                      evidence=result.evidence, plan=plan, mapping=mapping,
+                      source_order=tuple(sorted(mapping)))
+        self.assertEqual(module.decode_dependent_config_program(payload, **kwargs), program)
+        altered = json.loads(payload)
+        encoded = json.dumps(altered).replace('"$int": 1', '"$int": 2', 1)
+        with self.assertRaises(ValueError):
+            module.decode_dependent_config_program(encoded.encode(), **kwargs)
+
+    async def test_native_integer_variables_and_condition_prefix_images(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        root = self.f.root
+        (root / 'configuration.yaml').write_text('automation: !include automations.yaml\nscript: {}\n')
+        (root / 'automations.yaml').write_text('''- id: integer_probe
+  triggers:
+    - trigger: state
+      entity_id: sensor.original
+  conditions:
+    - condition: state
+      entity_id: sensor.second
+      state: "on"
+  actions:
+    - variables:
+        lookup: {1: first, one: second}
+        sample: "{{ states('sensor.original') }}"
+''')
+        mapping = {'sensor.original': 'sensor.changed', 'sensor.second': 'sensor.other'}
+        planner, worker = self.module('yaml_plan'), self.module('yaml_validation_worker')
+        plan = planner.plan_yaml(root, mapping)
+        self.assertTrue(plan.ready, plan.issues)
+        with tempfile.TemporaryDirectory(dir=root.parent) as temporary:
+            after = Path(temporary) / 'after'
+            shutil.copytree(root, after)
+            for patch in plan.patches:
+                (after / patch.path).write_bytes(patch.proposed_bytes)
+            proof = worker._template_reference_proof(str(root), str(after), mapping)
+            before, candidate = {}, {}
+            await worker._expected_runtime(str(root), ('automation', 'script'), dependent_descriptors=before)
+            await worker._expected_runtime(str(after), ('automation', 'script'), dependent_descriptors=candidate)
+            self.assertIsNotNone(before['automation'])
+            self.assertIsNotNone(candidate['automation'])
+            self.assertIn('"$int": 1', json.dumps(before))
+            program = await self.module('dependent_config_program').native_prefix_images(
+                str(root), mapping, proof, before, candidate, worker._expected_runtime)
+            self.assertEqual(len(program['images']), 3)
+            self.assertEqual(json.loads(json.dumps(program)), program)
+            digest = self.module('dependent_config_program')._digest
+            self.assertNotEqual(digest(program['images'][0]), digest(program['images'][-1]))
+            altered = json.loads(json.dumps(program).replace('"$int": 1', '"$int": 2', 1))
+            self.assertNotEqual(digest(program), digest(altered))
 
     async def test_unchanged_empty_family_is_present_in_every_native_image(self):
         result, _, mapping = await self.compile(empty_automation=True)

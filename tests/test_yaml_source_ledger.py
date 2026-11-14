@@ -141,6 +141,16 @@ class SourceLedgerTests(unittest.TestCase):
             ledger = self.ledger('script:\n  one:\n    ' + body + '\n')
             self.assertEqual(ledger.definitions[0].disposition, 'unsupported')
 
+    def test_integer_userdata_keys_and_semantic_duplicates(self):
+        ledger = self.ledger('automation:\n- id: one\n  actions:\n  - variables:\n      lookup: {1: first, "1": second}\n')
+        self.assertFalse(ledger.findings)
+        self.assertEqual(ledger.definitions[0].disposition, 'candidate')
+        for keys in ('{1: first, 01: second}', '{true: first}', '{1.0: first}',
+                     '!custom {one: first}', '{<<: {one: first}}'):
+            ledger = self.ledger('automation:\n- id: one\n  actions:\n  - variables:\n      lookup: ' + keys + '\n')
+            self.assertTrue(ledger.findings)
+            self.assertEqual(ledger.definitions[0].disposition, 'unsupported')
+
     def test_environment_and_body_directory_include_are_explicit_unsupported(self):
         ledger = self.ledger('script:\n  one:\n    sequence: !env_var ACTIONS\n')
         self.assertIn('source_body_tag_unsupported', self.codes(ledger))
