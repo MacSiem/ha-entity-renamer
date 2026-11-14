@@ -18,12 +18,18 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
     data = server.NativeTemplateYAMLServerTests.data
     stimulus = server.NativeTemplateYAMLServerTests.stimulus
 
-    async def restored_source(self):
+    async def restored_source(self, *, registry_only=True):
         from types import MappingProxyType
         from homeassistant.config_entries import ConfigEntry, ConfigEntryState
         runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
+        if registry_only:
+            path = self.f.root / 'template.yaml'
+            path.write_text(path.read_text().replace(old, 'sensor.unrelated_fixture'))
+            await hass.services.async_call('template', 'reload', {}, blocking=True)
+            await hass.async_block_till_done()
+            original = path.read_bytes()
         entry = ConfigEntry(domain='threshold', title='Restored fixture owner', data={},
             options={'name': 'Restored fixture helper', 'entity_id': 'sensor.unrelated_fixture',
                      'lower': 20, 'upper': None, 'hysteresis': 0},
@@ -74,6 +80,21 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(hass.states.get(new))
         self.assertEqual(hass.states.get(old).state, 'unavailable')
         self.assertTrue(hass.states.get(old).attributes['restored'])
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
+    async def test_loaded_restored_dependent_template_refuses_before_effect(self):
+        runtime, mapping, uuids, original, device = await self.restored_source(registry_only=False)
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_yaml_prepare(hass, mapping,
+                entity_names={old: 'Restored reviewed source'}, actor_id='synthetic-admin',
+                guard=lambda: None, refresh=refresh)
+        self.assertEqual((self.f.entity.async_get(old).id, self.f.entity.async_get(old).device_id),
+                         (uuids[old], device.id))
+        self.assertIsNone(self.f.entity.async_get(new))
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
     async def test_loaded_restored_source_object_appearance_refuses(self):

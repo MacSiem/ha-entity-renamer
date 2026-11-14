@@ -642,6 +642,11 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 service_recipients.check()
             prepared = await bridge.prepare('entity', source[0]['id'], fields, self._scope)
             self._scope()
+            if prepared.runtime_before_json and not registry_only:
+                saved = json.loads(prepared.runtime_before_json)['entities'][prepared.identity]
+                _need(not (not saved['active'] and saved['entry'] is not None
+                           and saved['entry']['state'] == 'loaded'),
+                      'restored_source_dependent_lifecycle_unsupported')
             if mixed_powercalc and source[0].get('platform') == 'powercalc':
                 from .powercalc_group_registry_preparation import prepare_group_registry
                 from .powercalc_group_metadata import prepare_group_metadata
