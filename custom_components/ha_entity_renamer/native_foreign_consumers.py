@@ -57,10 +57,12 @@ def _freeze(value, mapping, source_templates, *, depth=0, template_cache=None, s
     """Freeze configuration only; never inspect telemetry or execute templates."""
     from homeassistant.helpers.template import Template
     from homeassistant.helpers.trigger_template_entity import ValueTemplate
+    from homeassistant.util.yaml.objects import NodeStrClass
     _need(depth < 40)
     if type(value) in (Template, ValueTemplate):
         text = value.template
-        _need(type(text) is str)
+        _need(type(text) in (str, NodeStrClass))
+        text = str(text)
         if '{{' in text or '{%' in text or '{#' in text:
             if template_cache is None or text not in template_cache:
                 _template(text, mapping)
@@ -68,7 +70,8 @@ def _freeze(value, mapping, source_templates, *, depth=0, template_cache=None, s
                     template_cache.add(text)
             source_templates.add(text)
         return ('template', text)
-    if type(value) is str:
+    if type(value) in (str, NodeStrClass):
+        value = str(value)
         _need(not (selected_pattern.search(value) if selected_pattern is not None else
                    any(re.search(r'(?<![a-zA-Z0-9_])' + re.escape(old)
                                  + r'(?![a-zA-Z0-9_])', value)
@@ -90,7 +93,7 @@ def _freeze(value, mapping, source_templates, *, depth=0, template_cache=None, s
     if type(value) in (list, tuple):
         return tuple(_freeze(v, mapping, source_templates, depth=depth + 1, template_cache=template_cache, selected_pattern=selected_pattern) for v in value)
     if isinstance(value, dict):
-        _need(all(type(k) is str for k in value))
+        _need(all(type(k) in (str, NodeStrClass) for k in value))
         return tuple((_freeze(k, mapping, source_templates, depth=depth + 1, template_cache=template_cache, selected_pattern=selected_pattern),
                       _freeze(v, mapping, source_templates, depth=depth + 1, template_cache=template_cache, selected_pattern=selected_pattern))
                      for k, v in sorted(value.items()))

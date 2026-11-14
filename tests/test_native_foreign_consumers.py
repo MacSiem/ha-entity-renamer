@@ -167,7 +167,8 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
         module = importlib.import_module(fixture.fixtures.PACKAGE + '.native_foreign_consumers')
         tx = importlib.import_module(fixture.fixtures.PACKAGE + '.transaction')
         path = self.f.root / 'mqtt-fixture.yaml'
-        path.write_text('state_topic: fixture/topic\nname: Fixture sensor\n')
+        path.write_text('state_topic: fixture/topic\nname: Fixture sensor\n'
+                        'value_template: "{{ value_json.temperature }}"\n')
         raw = load_yaml(str(path))
         config = PLATFORM_SCHEMA_MODERN(raw)
         self.assertTrue(any(type(k) is NodeStrClass for k in config))
@@ -177,7 +178,10 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
         plain = {str(k): str(v) if type(v) is NodeStrClass else v for k, v in config.items()}
         self.assertEqual(frozen, module._freeze(plain, mapping, set()))
         self.assertTrue(all(type(k) is str for k, _ in frozen))
+        class UnknownString(str):
+            pass
         for bad in ({object(): 'value'}, {'key': object()},
+                    {UnknownString('key'): 'value'}, {'key': UnknownString('value')},
                     {NodeStrClass('sensor.old'): 'value'},
                     {'key': NodeStrClass("{{ states(variable) }}")}):
             with self.subTest(kind=type(next(iter(bad))).__name__), self.assertRaises(tx.Refused):
