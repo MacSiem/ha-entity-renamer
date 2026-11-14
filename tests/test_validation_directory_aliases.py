@@ -59,7 +59,9 @@ class DirectoryAliasTests(unittest.IsolatedAsyncioTestCase):
             return await asyncio.to_thread(function, *args)
         hass = SimpleNamespace(config=SimpleNamespace(config_dir=str(self.root_alias)),
                                async_add_executor_job=executor)
-        native = await validation.async_validate_proposed(hass, self.plan, self.parent)
+        bundle = await validation.async_validate_proposed_with_template_state_sources(
+            hass, self.plan, {'sensor.old': 'sensor.new'}, self.parent, with_state_program=True)
+        native = bundle.receipt
         self.assertEqual(native.changed_domains, ('script',))
         self.assertEqual(native.source_links, receipt.source_links)
         validation.assert_validation_current(native)
