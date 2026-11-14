@@ -64,3 +64,32 @@ class NativePrepareRuntimeDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(family.status, 'UNKNOWN')
         self.assertEqual(family.reason, 'runtime_rows_partially_unverified')
         self.assertIsNone(token)
+
+    async def test_actual_automation_projection_refuses_without_row_rescan(self):
+        from homeassistant.const import __version__
+        from homeassistant.setup import async_setup_component
+        if __version__ != '2026.11.1':
+            self.skipTest('actual Core 11.1 automation proof')
+        hass = self.f.hass
+        config = {'automation': [{'id': 'diagnostic_automation',
+            'alias': 'Diagnostic automation', 'initial_state': True,
+            'triggers': [{'trigger': 'state', 'entity_id': ['sensor.synthetic']}],
+            'actions': [{'event': 'diagnostic_probe'}]}]}
+        self.assertTrue(await async_setup_component(hass, 'automation', config))
+        await hass.async_block_till_done()
+        package = fixture.fixtures.PACKAGE
+        discovery = importlib.import_module(package + '.discovery')
+        forward = importlib.import_module(package + '.native_template_forward')
+        core = importlib.import_module(package + '.native_controlled_yaml_core111')
+        target = object.__new__(forward._UnchangedConsumers)
+        target.hass, target.loaded = hass, frozenset({'automation'})
+        evidence = SimpleNamespace(ledger=SimpleNamespace(keys_for_native_projection=lambda _: ()))
+        tick = asyncio.create_task(asyncio.sleep(0.01))
+        start = monotonic()
+        with patch.object(core, 'automation_registration_token', side_effect=ValueError('unverified')) as reject:
+            with patch.object(discovery, '_runtime_row_diagnostics', side_effect=AssertionError('unneeded rescan')):
+                with self.assertRaisesRegex(forward.Refused, 'automation_runtime_unqualified'):
+                    await target.bind_sources(object(), evidence, guard=lambda: None)
+                await tick
+        reject.assert_called_once()
+        self.assertLess(monotonic() - start, 2.0)
