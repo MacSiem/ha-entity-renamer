@@ -11,6 +11,7 @@ the existing conservative YAML fences; this module does not change those fences.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import base64
 from dataclasses import asdict, dataclass, fields
 from functools import wraps
