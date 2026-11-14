@@ -1,0 +1,75 @@
+import unittest
+from types import SimpleNamespace
+
+from custom_components.ha_entity_renamer.dashboard_plan import plan_dashboard
+from custom_components.ha_entity_renamer.dependency_review import dependency_dashboards
+from custom_components.ha_entity_renamer.lovelace_native import Dashboard, Snapshot, PreparedDashboard, revision
+from custom_components.ha_entity_renamer.reference_planner import PlanError
+
+
+class GenericDashboardReferences(unittest.TestCase):
+    mapping = {'sensor.old': 'sensor.new', 'sensor.new': 'sensor.old'}
+
+    def test_unknown_types_and_nested_typed_fields_are_traversed_once(self):
+        source = {'views': [{'cards': [{'type': 'custom:unlisted',
+            'style': {'popup': {'entity': 'sensor.old'}},
+            'entities': ['sensor.old', {'entity': 'sensor.new'}],
+            'tap_action': {'action': 'perform-action',
+                'target': {'entity_id': ['sensor.old', 'sensor.new']},
+                'data': {'entity_id': 'sensor.old'}},
+            'title': 'sensor.old', 'url': 'https://example.invalid/sensor.old',
+            'sensor.old': 'foreign'}]}]}
+        plan = plan_dashboard(source, self.mapping)
+        self.assertFalse(plan.markers)
+        self.assertEqual(len(plan.changes), 6)
+        card = plan.value['views'][0]['cards'][0]
+        self.assertEqual(card['style']['popup']['entity'], 'sensor.new')
+        self.assertEqual(card['entities'], ['sensor.new', {'entity': 'sensor.old'}])
+        self.assertEqual(card['tap_action']['target']['entity_id'], ['sensor.new', 'sensor.old'])
+        self.assertEqual((card['title'], card['url'], card['sensor.old']),
+                         ('sensor.old', 'https://example.invalid/sensor.old', 'foreign'))
+        self.assertEqual(len({c.path for c in plan.changes}), len(plan.changes))
+        self.assertEqual(source['views'][0]['cards'][0]['entities'][0], 'sensor.old')
+
+    def test_ambiguity_dynamic_and_token_boundary(self):
+        mapping = {'sensor.old': 'sensor.new'}
+        plan = plan_dashboard({'views': [{'cards': [
+            {'type': 'custom:any', 'entity': 'sensor.old', 'other': 'sensor.old',
+             'text': 'sensor.old', 'detail': 'sensor.older',
+             'lookup': "states['sensor.' + suffix]"}]}]}, mapping)
+        self.assertEqual([m.code for m in plan.markers],
+                         ['ambiguous_dashboard_reference', 'dynamic_dashboard_reference'])
+        self.assertEqual(plan.markers[0].path[-1], 'other')
+        self.assertTrue(all(m.detail for m in plan.markers))
+        self.assertEqual(plan.value['views'][0]['cards'][0]['detail'], 'sensor.older')
+        self.assertFalse(plan_dashboard({'type': 'custom:unknown'}, mapping).markers)
+
+    def test_jinja_js_and_negative_js(self):
+        mapping = {'sensor.old': 'sensor.new'}
+        source = {'cards': [{'type': 'custom:any',
+            'content': "{{ states('sensor.old') }}", 
+            'label': "[[[ return states['sensor.old'].state ]]]"}]}
+        plan = plan_dashboard(source, mapping)
+        self.assertFalse(plan.markers)
+        self.assertEqual(len(plan.changes), 2)
+        for expression in ("[[[ return states['sensor.' + suffix] ]]]",
+                           "[[[ return helper('sensor.old') ]]]"):
+            p = plan_dashboard({'label': expression}, mapping)
+            self.assertTrue(p.markers)
+            self.assertEqual(p.value['label'], expression)
+
+    def test_review_real_change_no_change_and_tampering(self):
+        mapping = {'sensor.old': 'sensor.new'}
+        before = {'views': [{'cards': [{'type': 'custom:any', 'entity': 'sensor.old'}]}]}
+        plan = plan_dashboard(before, mapping)
+        snap = Snapshot(Dashboard(None, 'lovelace', 'id'), before, revision(before), (7, 100, 'a' * 64))
+        change = PreparedDashboard(snap, plan.value, revision(plan.value))
+        self.assertEqual(dependency_dashboards([change], mapping)[0]['references'][0]['occurrences'], 1)
+        self.assertEqual(dependency_dashboards([], mapping), [])
+        with self.assertRaises(Exception):
+            dependency_dashboards([PreparedDashboard(snap, before, revision(before))], mapping)
+        with self.assertRaises(PlanError):
+            v = {}; v['child'] = v; plan_dashboard(v, mapping)
+
+
+if __name__ == '__main__': unittest.main()

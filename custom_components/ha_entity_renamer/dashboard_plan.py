@@ -118,7 +118,7 @@ def _foreign_filter_safe(kind, card, mapping):
     return False
 
 
-def plan_dashboard(config, mapping):
+def _legacy_plan_dashboard(config, mapping):
     """Plan only known semantic leaves; leave labels/URLs byte-for-byte intact.
 
     The reference engine validates/clones the entire input first, before schema
@@ -500,3 +500,116 @@ def plan_dashboard(config, mapping):
         retained.append(marker)
     return replace(result, changes=result.changes + tuple(extra_changes), markers=tuple(retained) + tuple(markers),
                    coverage='native_lovelace_known_schema_frontend_20260930.4')
+
+
+# Fields with shared Lovelace entity-reference semantics.  Do not treat an
+# arbitrary exact-looking value or dictionary key as an entity reference.
+_REFERENCE_SCALARS = frozenset({
+    'entity', 'entity_id', 'image_entity', 'camera_image', 'source_entity',
+    'bound_entity', 'temperature_entity_id', 'humidity_entity_id',
+})
+_REFERENCE_LISTS = frozenset({
+    'entities', 'entity_ids', 'exclude_entities', 'triggers_update',
+    'source_entities', 'temperature_ids', 'humidity_ids',
+})
+_NON_ENTITY_TARGETS = frozenset({'device_id', 'area_id', 'floor_id', 'label_id'})
+_TEXT_FIELDS = PASSIVE | frozenset({'language', 'default_tab', 'tabs'})
+_ENTITY_TOKEN = re.compile(r'(?<![A-Za-z0-9_.])([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![A-Za-z0-9_.])', re.ASCII)
+_ACTIVE_ACCESS = re.compile(r'\b(?:states|hass|callService)\s*[.(\[]', re.ASCII)
+
+
+def plan_dashboard(config, mapping):
+    """Plan bounded, typed references across a dashboard independent of card type.
+
+    Unknown active semantics produce path-specific coverage markers; labels and
+    URLs are never substituted. No JavaScript is executed.
+    """
+    clean = plan_references(config, mapping, Context(Consumer.DASHBOARD, ())).value
+    if type(clean) is not dict:
+        raise ValueError('invalid_dashboard')
+    scopes, markers, expressions = [], [], []
+    selected = set(mapping) | set(mapping.values())
+
+    def mark(path, code, detail):
+        markers.append(Marker(path, code, detail))
+
+    def scope(path, syntax):
+        scopes.append(Scope(path, syntax))
+
+    def reference(value, path):
+        if type(value) is str:
+            if '{{' in value or '{%' in value or '[[[' in value:
+                mark(path, 'dynamic_dashboard_reference', 'Computed entity target is not a static ID')
+            elif _ID.fullmatch(value):
+                scope(path, Syntax.ENTITY_TREE)
+            elif unchanged_computed_target(value, mapping):
+                return
+            elif ':' in value and not _ACTIVE_ACCESS.search(value) and not any(x in value for x in selected):
+                return  # external statistic identifier
+            else:
+                mark(path, 'dynamic_dashboard_reference', 'Reference is not a static entity ID')
+        else:
+            mark(path, 'dynamic_dashboard_reference', 'Reference is not a scalar entity ID')
+
+    def walk(value, path=(), key=None, list_reference=False, parent=None):
+        if type(value) is dict:
+            # Strategies load a source outside the configuration tree.
+            if key == 'strategy' and value:
+                mark(path, 'dynamic_dashboard_strategy', 'Dashboard strategy loads an external source')
+            if key in ACTIONS and value.get('action') == 'fire-dom-event':
+                mark(path, 'custom_dashboard_action', 'External event action semantics are unknown')
+            for field, child in value.items():
+                p = path + (field,)
+                if field in _NON_ENTITY_TARGETS:
+                    continue
+                if field in _REFERENCE_SCALARS:
+                    if type(child) is list and field == 'entity_id':
+                        for i, item in enumerate(child): reference(item, p + (i,))
+                    else:
+                        reference(child, p)
+                elif field in _REFERENCE_LISTS and type(child) is list:
+                    walk(child, p, field, True, value)
+                elif field in _REFERENCE_LISTS and type(child) is dict:
+                    mark(p, 'dynamic_dashboard_selector', 'Entity selector object requires semantic coverage')
+                    walk(child, p, field, False, value)
+                elif field in {'above', 'below'} and type(child) is str and _ID.fullmatch(child):
+                    reference(child, p)
+                else:
+                    walk(child, p, field, False, value)
+        elif type(value) is list:
+            for i, child in enumerate(value):
+                p = path + (i,)
+                if list_reference and type(child) is str:
+                    reference(child, p)
+                else:
+                    walk(child, p, key, False, parent)
+        elif type(value) is str:
+            if key in {'url', 'url_path', 'navigation_path', 'image', 'path'}:
+                return
+            if '{{' in value or '{%' in value:
+                scope(path, Syntax.JINJA)
+            elif '[[[' in value:
+                expressions.append((path, value))
+            elif key not in _TEXT_FIELDS:
+                tokens = {m.group(1) for m in _ENTITY_TOKEN.finditer(value)}
+                if tokens & selected:
+                    mark(path, 'ambiguous_dashboard_reference', 'Selected entity token in an unclassified field')
+                elif _ACTIVE_ACCESS.search(value):
+                    mark(path, 'dynamic_dashboard_reference', 'Unclassified state access may select an entity')
+
+    walk(clean)
+    result = plan_references(clean, mapping, Context(Consumer.DASHBOARD, tuple(scopes)))
+    changes = list(result.changes)
+    for path, original in expressions:
+        updated, error = plan_button_expression(original, mapping)
+        if error:
+            mark(path, error, 'JavaScript reference is outside the supported static forms')
+        elif updated != original:
+            target = result.value
+            for part in path[:-1]:
+                target = target[part]
+            target[path[-1]] = updated
+            changes.append(Change(path, 'value', original, updated))
+    markers.extend(m for m in result.markers if m.code != 'no_supported_scopes')
+    return replace(result, changes=tuple(changes), markers=tuple(markers),
+                   coverage='dashboard_typed_fields_and_bounded_templates_v1')
