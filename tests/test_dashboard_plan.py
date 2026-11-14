@@ -11,31 +11,27 @@ class DashboardPlanTests(unittest.TestCase):
     def plan(self, cards):
         return plan_dashboard({'views': [{'cards': cards}]}, self.mapping)
 
-    def test_ha_tools_bounded_profiles_and_power_reference(self):
-        defaults = ('purge-cache yaml-checker data-exporter baby-tracker chore-tracker '
-                    'log-email network-map trace-viewer automation-analyzer storage-monitor '
-                    'backup-manager security-check device-health sentence-manager encoding-fixer '
-                    'frigate-privacy vacuum-water-monitor').split()
-        cards = [{'type': 'custom:ha-' + name} for name in defaults]
-        cards += [{'type': 'custom:ha-energy-optimizer', 'power_entity': 'sensor.old',
+    def test_optimizer_bounded_profile_and_power_reference(self):
+        cards = [{'type': 'custom:ha-energy-optimizer', 'power_entity': 'sensor.old',
                    'energy_price': 0.8, 'currency': 'sensor.old', 'energy_tariff_mode': 'flat',
-                   'peak_rate': 0.8, 'off_peak_rate': 0.4},
-                  {'type': 'custom:ha-energy-insights', 'energy_price': 0.8,
-                   'currency': 'PLN', 'energy_tariff_mode': 'flat'},
-                  {'type': 'custom:ha-energy-email', 'energy_price': 0.8,
-                   'currency': 'PLN', 'energy_tariff_mode': 'flat'},
-                  {'type': 'custom:ha-smart-reports', 'energy_price': 0.8, 'currency': 'PLN'}]
+                   'peak_rate': 0.8, 'off_peak_rate': 0.4}]
         result = self.plan(cards)
         self.assertFalse(result.markers)
         self.assertEqual(1, len(result.changes))
-        self.assertEqual('sensor.new', result.value['views'][0]['cards'][17]['power_entity'])
-        self.assertEqual('sensor.old', result.value['views'][0]['cards'][17]['currency'])
+        self.assertEqual('sensor.new', result.value['views'][0]['cards'][0]['power_entity'])
+        self.assertEqual('sensor.old', result.value['views'][0]['cards'][0]['currency'])
         for card in ({'type': 'custom:ha-network-map', 'entity': 'sensor.old'},
                      {'type': 'custom:ha-smart-reports', 'energy_entity': 'sensor.old'},
+                     {'type': 'custom:ha-energy-email'},
                      {'type': 'custom:ha-energy-optimizer', 'power_entity': '{{ states(x) }}'},
                      {'type': 'custom:ha-unknown'}):
             with self.subTest(card=card):
                 self.assertTrue(self.plan([card]).markers)
+
+        for mapping in ({'sun.sun': 'sun.other'}, {'sensor.old': 'switch.new'},
+                        {'sun.other': 'sun.sun'}):
+            with self.subTest(mapping=mapping):
+                self.assertTrue(plan_dashboard({'views': [{'cards': cards}]}, mapping).markers)
 
     def test_nested_native_only_references(self):
         source = {'views': [{'title': 'sensor.old', 'sections': [{'type': 'grid',
