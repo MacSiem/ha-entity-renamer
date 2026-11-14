@@ -15,6 +15,22 @@ from unittest.mock import patch
 from test_controlled_powercalc_actual_native import ControlledActualGraphTests
 
 
+def registry_field_diff(actual, expected):
+    """Synthetic fixture's complete per-row mismatch, retained before assert."""
+    result = []
+    for identity in sorted(actual.keys() | expected.keys()):
+        left, right = actual.get(identity), expected.get(identity)
+        if left is None or right is None:
+            result.append({'id': identity, 'actual': left, 'expected': right})
+            continue
+        for key in sorted(left.keys() | right.keys()):
+            if key not in left or key not in right or left[key] != right[key]:
+                result.append({'id': identity, 'field': key,
+                    'actual_present': key in left, 'actual': left.get(key),
+                    'expected_present': key in right, 'expected': right.get(key)})
+    return result
+
+
 class ControlledMultiEntryTests(ControlledActualGraphTests):
     async def test_two_entries_real_ui_one_review_forward_fresh_inverse(self):
         self.use_public_transport = True
@@ -533,8 +549,16 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 original_entities = registry_rows('entity')
                 original_devices = registry_rows('device')
                 expected_entities = deepcopy(original_entities)
+                selected_pc_uuids = {uuids[f'fixture-meter-{i}{suffix}']
+                                     for i in (0, 10, 11) for suffix in ('', '_energy')}
                 for row in expected_entities.values():
-                    row['entity_id'] = mapping.get(row['entity_id'], row['entity_id'])
+                    old_entity_id = row['entity_id']
+                    row['entity_id'] = mapping.get(old_entity_id, old_entity_id)
+                    if row['id'] in selected_pc_uuids:
+                        self.assertEqual(row['platform'], 'powercalc')
+                        self.assertEqual(row['suggested_object_id'], old_entity_id.removeprefix('sensor.'))
+                        self.assertIn(old_entity_id, mapping)
+                        row['suggested_object_id'] = mapping[old_entity_id].removeprefix('sensor.')
                     if row['id'] == ordinary.id:
                         row['name'] = 'Synthetic ordinary name'
                     if browser_ui and row['id'] in cost_uuids.values():
@@ -649,7 +673,11 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(energy.data, disk_energy)
                 self.assertEqual(json.loads(dashboard_path.read_bytes())['data']['config'], dashboard_after)
                 self.assertEqual(await dashboard.async_load(False), dashboard_after)
-                self.assertEqual(registry_rows('entity'), expected_entities)
+                actual_entities = registry_rows('entity')
+                if browser_ui and actual_entities != expected_entities:
+                    (directory / 'registry-forward-diff.json').write_text(json.dumps(
+                        registry_field_diff(actual_entities, expected_entities), sort_keys=True))
+                self.assertEqual(actual_entities, expected_entities)
                 self.assertEqual(registry_rows('device'), expected_devices)
                 await verify_history()
                 if browser_ui:
@@ -721,7 +749,11 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                 self.assertEqual(energy.data, energy_before)
                 self.assertEqual(json.loads(dashboard_path.read_bytes())['data']['config'], dashboard_before)
                 self.assertEqual(await dashboard.async_load(False), dashboard_before)
-                self.assertEqual(registry_rows('entity'), original_entities)
+                actual_entities = registry_rows('entity')
+                if browser_ui and actual_entities != original_entities:
+                    (directory / 'registry-inverse-diff.json').write_text(json.dumps(
+                        registry_field_diff(actual_entities, original_entities), sort_keys=True))
+                self.assertEqual(actual_entities, original_entities)
                 self.assertEqual(registry_rows('device'), original_devices)
                 await verify_history()
                 if browser_ui:
