@@ -61,8 +61,7 @@ def _freeze(value, mapping, source_templates, *, depth=0, template_cache=None, s
     _need(depth < 40)
     if type(value) in (Template, ValueTemplate):
         text = value.template
-        _need(type(text) in (str, NodeStrClass))
-        text = str(text)
+        _need(type(text) is str)
         if '{{' in text or '{%' in text or '{#' in text:
             if template_cache is None or text not in template_cache:
                 _template(text, mapping)

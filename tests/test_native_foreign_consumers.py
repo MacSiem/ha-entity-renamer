@@ -173,6 +173,7 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
         config = PLATFORM_SCHEMA_MODERN(raw)
         self.assertTrue(any(type(k) is NodeStrClass for k in config))
         self.assertTrue(any(type(v) is NodeStrClass for v in config.values()))
+        self.assertIs(type(config['value_template'].template), str)
         mapping = {'sensor.old': 'sensor.new'}
         frozen = module._freeze(config, mapping, set())
         plain = {str(k): str(v) if type(v) is NodeStrClass else v for k, v in config.items()}
@@ -195,7 +196,8 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.helpers.entity_platform import EntityPlatform
         from homeassistant.helpers.dispatcher import async_dispatcher_send
         from homeassistant.components.mqtt.models import DATA_MQTT, MqttData
-        from homeassistant.components.mqtt.sensor import MqttSensor
+        from homeassistant.components.mqtt.sensor import MqttSensor, PLATFORM_SCHEMA_MODERN
+        from homeassistant.util.yaml import load_yaml
         from homeassistant.components.mqtt.discovery import MQTT_DISCOVERY_NEW
         hass = self.f.hass
         module = importlib.import_module(fixture.fixtures.PACKAGE + '.native_foreign_consumers')
@@ -225,7 +227,10 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
         unregistered = object.__new__(MqttSensor)
         unregistered.hass, unregistered.platform = hass, platform
         unregistered.entity_id, unregistered._attr_unique_id = 'sensor.foreign_live', None
-        unregistered._config, unregistered._discovery_data = {'state_topic': 'fixture/topic'}, None
+        yaml_path = self.f.root / 'mqtt-runtime-fixture.yaml'
+        yaml_path.write_text('state_topic: fixture/topic\nname: Fixture sensor\n')
+        native_config = PLATFORM_SCHEMA_MODERN(load_yaml(str(yaml_path)))
+        unregistered._config, unregistered._discovery_data = native_config, None
         platform.entities[unregistered.entity_id] = unregistered
         try:
             for mapping in ({'sensor.foreign_live': 'sensor.next'},
@@ -239,7 +244,7 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(tx.Refused):
                     fence.check()
             finally:
-                unregistered._config = {'state_topic': 'fixture/topic'}
+                unregistered._config = native_config
                 fence.close()
             fence = module.NativeForeignConsumers(hass, {'sensor.old': 'sensor.new'}, {'unrelated-device': 'name'})
             try:
