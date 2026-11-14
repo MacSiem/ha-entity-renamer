@@ -63,6 +63,10 @@ class _UnchangedConsumers:
         # Missing readers are never evidence for a loaded/native-present family.
         obj.presence = (id(hass.data.get(LOVELACE_DATA)), id(hass.data.get('energy_manager')))
         observed = await async_observe_discovery_consumers(hass, guard=guard)
+        from .dashboard_ha_tools_fence import HAToolsFence
+        dashboard_configs = ([row.config for row in observed.dashboard.value.snapshots if row.config is not None]
+                             if observed.dashboard.status == 'COMPLETE' else [])
+        obj.ha_tools = HAToolsFence(hass, mapping, dashboard_configs)
         _need(type(_dashboard_effects) is bool and type(_powercalc_reverse) is bool, 'dashboard_scope_invalid')
         obj.dashboard_observed = observed if _dashboard_effects else None
         guard()
@@ -143,6 +147,7 @@ class _UnchangedConsumers:
               == self.loaded and self.presence == (id(self.hass.data.get(LOVELACE_DATA)),
                   id(self.hass.data.get('energy_manager'))), 'consumer_inventory_changed')
         self.native.check()
+        self.ha_tools.check()
         if self.runtime_sample is not None:
             from .yaml_source_binding import _RuntimeSourceSampler
             fence = getattr(self, 'own_fence', None)

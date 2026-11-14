@@ -57,6 +57,7 @@ class NativeDashboardStorage:
     version: str
     guard: object
     mapping_items: tuple
+    ha_tools: object
 
     def __init__(self):
         raise ValueError('dashboard_storage_native_capture_required')
@@ -65,6 +66,7 @@ class NativeDashboardStorage:
         from .native_discovery_consumers import _inventory
         self.guard()
         self.fence.check()
+        self.ha_tools.check()
         if _inventory(self.hass, self.native, self.version) != self.token:
             raise ValueError('dashboard_storage_inventory_changed')
 
@@ -75,8 +77,11 @@ async def async_prepare_dashboard_storage(hass, observed, mapping, *, guard):
     from .lovelace_native import NativeLovelace
     from .native_discovery_consumers import _inventory
     from .native_input_baseline import _drained
+    from .dashboard_ha_tools_fence import HAToolsFence
 
     changes = qualify_dashboard_storage(observed, mapping)
+    ha_tools = HAToolsFence(hass, mapping, [row.config for row in observed.dashboard.value.snapshots
+                                            if row.config is not None])
     native = NativeLovelace(hass)
     evidence = observed.dashboard.value
     token = getattr(evidence, '_native_inventory_token', None)
@@ -87,6 +92,7 @@ async def async_prepare_dashboard_storage(hass, observed, mapping, *, guard):
     def check():
         guard()
         fence.check()
+        ha_tools.check()
         if _inventory(hass, native, observed.version) != token:
             raise ValueError('dashboard_storage_inventory_changed')
 
@@ -120,7 +126,7 @@ async def async_prepare_dashboard_storage(hass, observed, mapping, *, guard):
     result = object.__new__(NativeDashboardStorage)
     for key, value in (('hass', hass), ('native', native), ('fence', fence), ('changes', changes),
                        ('files', tuple(sorted(files))), ('tracked_names', tuple(sorted(names))),
-                       ('token', token), ('version', observed.version), ('guard', guard),
+                       ('token', token), ('version', observed.version), ('guard', guard), ('ha_tools', ha_tools),
                        ('mapping_items', tuple(sorted(mapping.items())))):
         object.__setattr__(result, key, value)
     return result

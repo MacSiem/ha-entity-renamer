@@ -22,16 +22,40 @@ class DashboardPlanTests(unittest.TestCase):
         self.assertEqual('sensor.old', result.value['views'][0]['cards'][0]['currency'])
         for card in ({'type': 'custom:ha-network-map', 'entity': 'sensor.old'},
                      {'type': 'custom:ha-smart-reports', 'energy_entity': 'sensor.old'},
-                     {'type': 'custom:ha-energy-email'},
                      {'type': 'custom:ha-energy-optimizer', 'power_entity': '{{ states(x) }}'},
                      {'type': 'custom:ha-unknown'}):
             with self.subTest(card=card):
                 self.assertTrue(self.plan([card]).markers)
 
-        for mapping in ({'sun.sun': 'sun.other'}, {'sensor.old': 'switch.new'},
-                        {'sun.other': 'sun.sun'}):
+        for mapping in ({'sun.sun': 'sun.other'}, {'sun.other': 'sun.sun'}):
             with self.subTest(mapping=mapping):
                 self.assertTrue(plan_dashboard({'views': [{'cards': cards}]}, mapping).markers)
+        with self.assertRaises(PlanError):
+            plan_dashboard({'views': [{'cards': cards}]}, {'sensor.old': 'switch.new'})
+
+    def test_energy_reports_profiles_and_runtime_dependencies(self):
+        for kind in ('energy-insights', 'energy-email', 'smart-reports'):
+            card = {'type': 'custom:ha-' + kind, 'currency': 'PLN', 'energy_price': 0.8}
+            self.assertFalse(self.plan([card]).markers)
+            self.assertFalse(self.plan([card]).changes)
+        email = {'views': [{'cards': [{'type': 'custom:ha-energy-email'}]}]}
+        for old in ('sensor.energy_report_devices', 'input_text.energy_email_price',
+                    'automation.send_daily_energy_report'):
+            with self.subTest(old=old):
+                self.assertTrue(plan_dashboard(email, {old: old + '_renamed'}).markers)
+                self.assertTrue(plan_dashboard(email, {old + '_renamed': old}).markers)
+
+    def test_tools_defaults_preserve_unknown_profiles_and_selectors(self):
+        for name in ('purge-cache yaml-checker data-exporter baby-tracker log-email '
+                     'network-map trace-viewer automation-analyzer storage-monitor device-health '
+                     'sentence-manager encoding-fixer frigate-privacy vacuum-water-monitor').split():
+            with self.subTest(name=name):
+                self.assertFalse(self.plan([{'type': 'custom:ha-' + name}]).markers)
+                self.assertTrue(self.plan([{'type': 'custom:ha-' + name, 'entity': 'sensor.old'}]).markers)
+        card = {'views': [{'cards': [{'type': 'custom:ha-device-health'}]}]}
+        self.assertTrue(plan_dashboard(card, {'sensor.old': 'sensor.old_battery'}).markers)
+        card = {'views': [{'cards': [{'type': 'custom:ha-vacuum-water-monitor'}]}]}
+        self.assertTrue(plan_dashboard(card, {'sensor.roborock_q7_battery': 'sensor.other'}).markers)
 
     def test_nested_native_only_references(self):
         source = {'views': [{'title': 'sensor.old', 'sections': [{'type': 'grid',

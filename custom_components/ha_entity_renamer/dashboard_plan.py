@@ -370,22 +370,76 @@ def plan_dashboard(config, mapping):
         if type(value) is not dict:
             block(path); return
         kind = value.get('type')
-        if role == 'card' and kind == 'custom:ha-energy-optimizer':
-            # Optimizer 4.0.3 reads sun.sun directly and discovers W/kW sensors
-            # by domain. A rename must preserve both lookup and membership.
-            if any(old == 'sun.sun' or new == 'sun.sun' or
-                   (old.startswith('sensor.') != new.startswith('sensor.'))
-                   for old, new in mapping.items()):
-                block(path, 'ha_energy_optimizer_membership_unverified')
+        # The default configuration of these HA Tools cards contains no
+        # authored entity references. Unknown options require an adapter.
+        tools_default = {'custom:ha-purge-cache', 'custom:ha-yaml-checker',
+            'custom:ha-data-exporter', 'custom:ha-baby-tracker', 'custom:ha-log-email',
+            'custom:ha-network-map', 'custom:ha-trace-viewer', 'custom:ha-automation-analyzer',
+            'custom:ha-storage-monitor', 'custom:ha-device-health',
+            'custom:ha-sentence-manager', 'custom:ha-encoding-fixer',
+            'custom:ha-frigate-privacy', 'custom:ha-vacuum-water-monitor'}
+        if role == 'card' and kind in tools_default:
+            if set(value) != {'type'}:
+                block(path, 'unsupported_ha_tools_card_config'); return
+            fixed = set()
+            if kind == 'custom:ha-log-email':
+                fixed = {'sensor.ha_log_summary', 'automation.ha_tools_log_email_daily',
+                         'automation.ha_tools_log_email_weekly', 'automation.log_email_instant_error_alert'}
+            if kind == 'custom:ha-device-health':
+                fixed = {'automation.ha_device_health_battery_alert',
+                         'automation.ha_device_health_offline_alert'}
+            if kind == 'custom:ha-vacuum-water-monitor':
+                # BRAND_PROFILES in the served VWM card contains these concrete
+                # fallback IDs; they are executable defaults, not dashboard data.
+                fixed = set('''binary_sensor.roborock_s8_maxv_ultra_dock_clean_water_box
+                    binary_sensor.roborock_s8_maxv_ultra_dock_dirty_water_box
+                    binary_sensor.roborock_s8_maxv_ultra_mop_attached binary_sensor.roborock_s8_maxv_ultra_mop_drying
+                    binary_sensor.roborock_s8_maxv_ultra_water_shortage select.roborock_s8_maxv_ultra_mop_intensity
+                    select.roborock_s8_maxv_ultra_mop_mode sensor.dreame_l20_ultra_battery sensor.irobot_j7_battery_level
+                    sensor.roborock_q7_battery sensor.roborock_q7_filter_time_left sensor.roborock_q7_main_brush_time_left
+                    sensor.roborock_q7_side_brush_time_left sensor.roborock_s8_maxv_ultra_battery
+                    sensor.roborock_s8_maxv_ultra_cleaning_area sensor.roborock_s8_maxv_ultra_cleaning_time
+                    sensor.roborock_s8_maxv_ultra_dock_error sensor.roborock_s8_maxv_ultra_dock_maintenance_brush_time_left
+                    sensor.roborock_s8_maxv_ultra_dock_strainer_time_left sensor.roborock_s8_maxv_ultra_filter_time_left
+                    sensor.roborock_s8_maxv_ultra_last_clean_begin sensor.roborock_s8_maxv_ultra_last_clean_end
+                    sensor.roborock_s8_maxv_ultra_main_brush_time_left sensor.roborock_s8_maxv_ultra_sensor_time_left
+                    sensor.roborock_s8_maxv_ultra_side_brush_time_left vacuum.dreame_l20_ultra vacuum.ecovacs
+                    vacuum.irobot_j7 vacuum.roborock_q7 vacuum.roborock_s8_maxv_ultra'''.split())
+            for old, new in mapping.items():
+                if (old in fixed or new in fixed or old.split('.')[0] != new.split('.')[0] or
+                    kind == 'custom:ha-device-health' and any(
+                        (fragment in old) != (fragment in new)
+                        for fragment in ('_battery', 'battery_level', '_signal'))):
+                    block(path, 'ha_tools_dynamic_membership_unverified'); break
+            return
+        if role == 'card' and kind in {'custom:ha-energy-optimizer', 'custom:ha-energy-insights',
+                                       'custom:ha-energy-email', 'custom:ha-smart-reports'}:
+            # Optimizer 4.0.3 and Reports 4.9.2: bounded config profiles.
+            # The email shim delegates to the Optimizer implementation.
+            fixed = set()
+            if kind == 'custom:ha-energy-optimizer': fixed.add('sun.sun')
+            if kind == 'custom:ha-energy-email':
+                fixed.update({'sensor.energy_report_devices',
+                    'automation.send_daily_energy_report', 'automation.send_weekly_energy_report',
+                    'automation.send_monthly_energy_report'})
+            for old, new in mapping.items():
+                if (old in fixed or new in fixed or
+                    kind == 'custom:ha-energy-email' and
+                    (old.startswith('input_text.energy_email') or new.startswith('input_text.energy_email')) or
+                    kind == 'custom:ha-energy-optimizer' and
+                    (old.startswith('sensor.') != new.startswith('sensor.')) or
+                    kind == 'custom:ha-smart-reports' and old.split('.')[0] != new.split('.')[0]):
+                    block(path, 'ha_tools_dynamic_membership_unverified')
+                    break
             for key, child in value.items():
                 p = path + (key,)
                 if key == 'type': continue
-                if key == 'power_entity':
+                if key == 'power_entity' and kind == 'custom:ha-energy-optimizer':
                     ref(child, p); continue
                 if key in {'energy_price', 'peak_rate', 'off_peak_rate'} and type(child) in (int, float):
-                    continue
+                    if key == 'energy_price' or kind == 'custom:ha-energy-optimizer': continue
                 if key == 'currency' and type(child) is str: continue
-                if key == 'energy_tariff_mode' and type(child) is str: continue
+                if key == 'energy_tariff_mode' and type(child) is str and kind != 'custom:ha-smart-reports': continue
                 block(p, 'unsupported_ha_tools_card_config')
             return
         if role == 'card' and kind == 'custom:ha-entity-renamer':
