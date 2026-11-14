@@ -3,6 +3,9 @@ import asyncio
 from dataclasses import replace
 import json
 import os
+import sys
+import threading
+from collections import Counter
 from time import monotonic
 import unittest
 from unittest.mock import patch
@@ -218,6 +221,7 @@ async def main():
                 'max_probe_gap':max(gaps,default=None),'closed':ws.close_code}),flush=True)
             if reply.get('id')!=1 or not reply.get('success'): sys.exit(1)
         finally:
+            print(json.dumps({'diagnostic_ping_count':len(samples),'max_ping_rtt':max(samples,default=None),'max_probe_gap':max(gaps,default=None),'closed':ws.close_code}),flush=True)
             task.cancel()
             try: await task
             except asyncio.CancelledError: pass
@@ -241,6 +245,31 @@ asyncio.run(main())'''
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             data = json.dumps(dict(url=f'ws://127.0.0.1:{hass.http.server_port}/api/websocket',
                                    token=access, payload=payload)).encode() + b'\n'
-            stdout, stderr = await asyncio.wait_for(process.communicate(data), 630)
+            counts = Counter()
+            stop = threading.Event()
+            loop_thread = threading.get_ident()
+            def sample():
+                last = monotonic()
+                while not stop.wait(.1):
+                    frame = sys._current_frames().get(loop_thread)
+                    stack = []
+                    while frame is not None:
+                        filename = frame.f_code.co_filename
+                        if 'ha_entity_renamer/' in filename:
+                            stack.append(f'{filename.rsplit("/", 1)[-1]}:{frame.f_code.co_name}:{frame.f_lineno}')
+                        frame = frame.f_back
+                    if stack:
+                        counts[';'.join(reversed(stack[-8:]))] += 1
+                    if monotonic() - last >= 60:
+                        print(f'ws_profile_case={label} samples={counts.most_common(12)}', flush=True)
+                        last = monotonic()
+            sampler = threading.Thread(target=sample, daemon=True)
+            sampler.start()
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(data), 630)
+            finally:
+                stop.set()
+                sampler.join(timeout=2)
+                print(f'ws_profile_final_case={label} samples={counts.most_common(20)}', flush=True)
             print(f'ws_case={label} exit={process.returncode} result={stdout.decode()} stderr={stderr.decode()}', flush=True)
             self.assertEqual(process.returncode, 0)
