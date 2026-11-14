@@ -10,6 +10,8 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, is_dataclass
 import hashlib
 import json
+import logging
+import os
 import uuid
 
 from .manifest import bind_registry, parse_manifest
@@ -232,6 +234,44 @@ def _runtime_row_diagnostics(hass, domain, *, owned_automation=None):
     return tuple(sorted(result, key=lambda row: str(row[0])))
 
 
+_PROJECTION_REASONS = frozenset({
+    'runtime_unsettled', 'runtime_identity_ambiguous', 'native_component_unsettled',
+    'native_automation_type', 'native_automation_condition_unavailable',
+    'automation_listener_proof_unavailable', 'native_entity_missing',
+    'native_script_not_settled', 'native_script_service_owner', 'native_script_service_registry',
+    'native_script_type', 'native_dynamic_trigger_not_covered', 'native_dynamic_event_not_covered',
+    'native_trigger_platform_not_covered', 'native_state_duration_not_covered',
+    'native_trigger_count_changed', 'native_trigger_owner_changed',
+    'native_automation_attach_incomplete', 'native_automation_trigger_enable_unverified',
+    'native_automation_state_writer_changed', 'native_unload_code_required',
+    'native_unload_code_path', 'native_unload_source_pin', 'native_unload_code_changed',
+    'native_unload_binding_changed', 'native_unload_cache_wrapper_required',
+})
+
+
+def _log_projection_failure(domain, error):
+    """Log only fixed codes and a trusted frame, never exception text or values."""
+    import homeassistant
+    name = type(error).__name__ if type(error) in (ValueError, KeyError, TypeError,
+                                                    AttributeError, RuntimeError) else 'Other'
+    reason = (error.args[0] if type(error) is ValueError and len(error.args) == 1
+              and type(error.args[0]) is str and error.args[0] in _PROJECTION_REASONS else 'other')
+    roots = (os.path.dirname(__file__) + os.sep, os.path.dirname(homeassistant.__file__) + os.sep)
+    frame = error.__traceback__
+    last = None
+    while frame is not None:
+        last = frame
+        frame = frame.tb_next
+    location, function, line = 'other', 'other', 0
+    if last is not None:
+        code = last.tb_frame.f_code
+        if any(code.co_filename.startswith(root) for root in roots):
+            location, function, line = os.path.basename(code.co_filename), code.co_name, last.tb_lineno
+    logging.getLogger(__name__).warning('Native runtime projection refused: domain=%s type=%s reason=%s frame=%s:%s:%d',
+                                       domain if domain in ('automation', 'script') else 'other',
+                                       name, reason, location, function, line)
+
+
 def _runtime_family(hass, domain, *, owned_automation=None, include_row_diagnostics=True):
     """Reuse exact native consumer projections without executing user actions."""
     from homeassistant.const import __version__
@@ -259,11 +299,12 @@ def _runtime_family(hass, domain, *, owned_automation=None, include_row_diagnost
         return family, (id(component), identities, digest)
     except PermissionError:
         return _unknown(domain, 'read_access_denied', denied=True), None
-    except (ValueError, KeyError, TypeError, AttributeError):
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
         # Strict prepare admits only COMPLETE and discards these explanatory
         # rows. Do not repeat the expensive native proof for every row on the
         # event loop when the caller is already obliged to refuse UNKNOWN.
         if not include_row_diagnostics:
+            _log_projection_failure(domain, error)
             return _unknown(domain, 'runtime_inventory_unavailable'), None
         try:
             diagnostics = _runtime_row_diagnostics(hass, domain, owned_automation=owned_automation)
@@ -273,6 +314,10 @@ def _runtime_family(hass, domain, *, owned_automation=None, include_row_diagnost
         # rows only explain which independent observations could be proven.
         return Family(domain, 'UNKNOWN', 'runtime_rows_partially_unverified',
                       _json({'row_diagnostics': diagnostics}), ()), None
+    except RuntimeError as error:
+        if not include_row_diagnostics:
+            _log_projection_failure(domain, error)
+        raise
 
 
 def _consumer_family(name, outcome, mapping):

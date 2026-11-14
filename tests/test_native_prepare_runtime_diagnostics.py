@@ -93,3 +93,37 @@ class NativePrepareRuntimeDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 await tick
         reject.assert_called_once()
         self.assertLess(monotonic() - start, 2.0)
+
+    async def test_production_blocking_detector_allows_pinned_code_proof(self):
+        from homeassistant import block_async_io
+        from homeassistant.const import __version__
+        if __version__ != '2026.11.1':
+            self.skipTest('actual Core 11.1 blocking detector')
+        core = importlib.import_module(fixture.fixtures.PACKAGE + '.native_controlled_yaml_core111')
+        self.assertFalse(block_async_io._BLOCKED_CALLS.calls)
+        read_bytes = next(row for row in block_async_io._BLOCKING_CALLS
+                          if row.object is __import__('pathlib').Path and row.function == 'read_bytes')
+        self.assertFalse(read_bytes.strict)
+        self.assertFalse(read_bytes.strict_core)
+        try:
+            # Reproduce production; unittest normally skips filesystem checks.
+            with patch.object(block_async_io, '_IN_TESTS', False):
+                block_async_io.enable()
+            core.prove_automation_projection()
+        finally:
+            for row in block_async_io._BLOCKED_CALLS.calls:
+                setattr(row.object, row.function, row.original_func)
+            block_async_io._BLOCKED_CALLS.calls.clear()
+
+    async def test_strict_failure_log_does_not_expose_exception_values(self):
+        discovery, forward, observer = await self.asyncSetUp_runtime()
+        target = object.__new__(forward._UnchangedConsumers)
+        target.hass, target.loaded = self.f.hass, frozenset({'script'})
+        evidence = SimpleNamespace(ledger=SimpleNamespace(keys_for_native_projection=lambda _: ()))
+        with patch.object(observer.NativeYAMLRuntimeReadback, '_projection',
+                          side_effect=ValueError('private-caller-value')):
+            with self.assertLogs(discovery.__name__, level='WARNING') as logs:
+                with self.assertRaises(forward.Refused):
+                    await target.bind_sources(object(), evidence, guard=lambda: None)
+        self.assertIn('type=ValueError reason=other', logs.output[0])
+        self.assertNotIn('private-caller-value', logs.output[0])
