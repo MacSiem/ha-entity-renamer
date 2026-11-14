@@ -191,6 +191,31 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
                          'Second fixture device Z second restored')
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
+    async def test_restored_apply_inverse_with_unconfigured_template_peer(self):
+        runtime, mapping, uuids, original, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        ghost = self.f.entity.async_get_or_create('sensor', 'template', 'old-unconfigured-peer')
+        ghost.write_unavailable_state(hass)
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        before = hass.states.get(ghost.entity_id).as_dict_json
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        review = await runtime.native_yaml_prepare(hass, mapping,
+            entity_names={old: 'Restored reviewed source'}, actor_id='synthetic-admin',
+            guard=lambda: None, refresh=refresh)
+        result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+            actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        self.assertEqual(result['state'], 'applied')
+        self.assertEqual(hass.states.get(ghost.entity_id).as_dict_json, before)
+        result = await runtime.native_yaml_reverse(hass, review['operation_id'], review['fingerprint'],
+            guard=lambda: None, refresh=refresh)
+        self.assertEqual(result['state'], 'rolled_back')
+        self.assertEqual(hass.states.get(ghost.entity_id).as_dict_json, before)
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+
     async def test_loaded_restored_foreign_attributes_refused_before_review(self):
         runtime, mapping, uuids, original, device = await self.restored_source()
         hass = self.f.hass
