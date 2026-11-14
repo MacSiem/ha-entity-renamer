@@ -19,12 +19,19 @@ class NativePrepareLivenessTests(fixture.NativeYAMLSourceBindingTests):
         from homeassistant.config import async_hass_config_yaml
         from homeassistant.setup import async_setup_component
         hass, root = self.f.hass, self.f.root
-        config = 'script:\n' + ''.join(
+        config = '''template:
+  - sensor:
+      - unique_id: liveness_source
+        name: Liveness source
+        state: "{{ states('sensor.original') }}"
+script:
+''' + ''.join(
             f'  liveness_{i}:\n    sequence:\n      - variables: {{sample: "{{{{ states(\'sensor.original\') }}}}"}}\n'
             for i in range(120))
         await hass.async_add_executor_job((root / 'configuration.yaml').write_text, config)
         parsed = await async_hass_config_yaml(hass)
         self.assertTrue(await async_setup_component(hass, 'script', parsed))
+        self.assertTrue(await async_setup_component(hass, 'template', parsed))
         await hass.async_block_till_done()
         await self._flush_documents(initialize=True)
         package = fixture.fixture.fixtures.PACKAGE
@@ -43,8 +50,9 @@ class NativePrepareLivenessTests(fixture.NativeYAMLSourceBindingTests):
         try:
             with patch.object(block_async_io, '_IN_TESTS', False):
                 block_async_io.enable()
-            receipt, evidence = await module('yaml_validation').async_validate_proposed_with_sources(
-                hass, plan, root.parent)
+            validation = await module('yaml_validation').async_validate_proposed_with_template_state_sources(
+                hass, plan, {'sensor.original': 'sensor.changed'}, root.parent, with_state_program=True)
+            receipt, evidence = validation.receipt, validation.evidence
             binding = module('yaml_source_binding')
             bound = await binding.async_bind_original_runtime(hass, receipt, evidence, guard=lambda: None)
             self.assertTrue(bound.verified, bound.blockers)
