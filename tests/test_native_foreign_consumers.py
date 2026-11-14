@@ -87,3 +87,78 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
                       "{{ custom_lookup('sensor.other') }}", "{{ states('sensor.new') }}"):
             with self.subTest(value=value), self.assertRaises(tx.Refused):
                 module._template(value, mapping)
+
+    async def test_native_mqtt_discovery_latches_and_device_scope(self):
+        from homeassistant.const import __version__
+        if __version__ != '2026.11.1':
+            self.skipTest('Core 11.1 only')
+        from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+        from homeassistant.helpers.entity_platform import EntityPlatform
+        from homeassistant.helpers.dispatcher import async_dispatcher_send
+        from homeassistant.components.mqtt.models import DATA_MQTT, MqttData
+        from homeassistant.components.mqtt.sensor import MqttSensor
+        from homeassistant.components.mqtt.discovery import MQTT_DISCOVERY_NEW
+        hass = self.f.hass
+        module = importlib.import_module(fixture.fixtures.PACKAGE + '.native_foreign_consumers')
+        tx = importlib.import_module(fixture.fixtures.PACKAGE + '.transaction')
+        entry = ConfigEntry(domain='mqtt', title='fixture', data={}, options={},
+            source='user', version=1, minor_version=1, unique_id='test-mqtt',
+            discovery_keys={}, subentries_data=[], state=ConfigEntryState.LOADED)
+        hass.config_entries._entries[entry.entry_id] = entry
+        mqtt = MqttData(client=object(), config=[])
+        hass.data[DATA_MQTT] = mqtt
+        hass.config.components.add('mqtt')
+        registry = self.f.entity.async_get_or_create('sensor', 'mqtt', 'fixture-mqtt',
+                                                      config_entry=entry)
+        await hass.async_block_till_done()
+        platform = EntityPlatform(hass=hass, logger=logging.getLogger(__name__),
+            domain='sensor', platform_name='mqtt', platform=None,
+            scan_interval=timedelta(seconds=30), entity_namespace=None)
+        platform.config_entry = entry
+        platform.async_prepare()
+        platform._setup_complete = True
+        entity = object.__new__(MqttSensor)
+        entity.hass, entity.entity_id = hass, registry.entity_id
+        entity._config = {'value_template': "{{ value_json.temperature }}"}
+        entity._discovery_data = None
+        platform.entities[registry.entity_id] = entity
+        try:
+            fence = module.NativeForeignConsumers(hass, {'sensor.old': 'sensor.new'}, {'unrelated-device': 'name'})
+            try:
+                fence.check()
+                async_dispatcher_send(hass, MQTT_DISCOVERY_NEW.format('sensor', 'mqtt'), {})
+                await hass.async_block_till_done()
+                with self.assertRaises(tx.Refused):
+                    fence.check()
+            finally:
+                fence.close()
+            entity._config = {'value_template': "{{ states('sensor.old') }}"}
+            with self.assertRaises(tx.Refused):
+                module.NativeForeignConsumers(hass, {'sensor.old': 'sensor.new'}, {})
+        finally:
+            platform.entities.clear()
+            await platform.async_destroy()
+            hass.config.components.remove('mqtt')
+            del hass.data[DATA_MQTT]
+            del hass.config_entries._entries[entry.entry_id]
+
+    async def test_recorder_script_requires_literal_unmodified_entity_sources(self):
+        module = importlib.import_module(fixture.fixtures.PACKAGE + '.native_foreign_consumers')
+        tx = importlib.import_module(fixture.fixtures.PACKAGE + '.transaction')
+        mapping = {'sensor.old': 'sensor.new'}
+        source = '''import sqlite3
+ROOMS = {'x': {'item': 'sensor.other'}}
+def read(con, entity_id, start):
+    return con.execute('SELECT * FROM states_meta WHERE entity_id = ? AND time > ?', (entity_id, start))
+def report(con, room, start):
+    cfg = ROOMS[room]
+    return read(con, cfg['item'], start)
+'''
+        module._python_source(source.encode(), mapping)
+        for changed in (
+            source.replace('sensor.other', 'sensor.old'),
+            source.replace('    return con.execute', "    entity_id = 'sensor.' + room\n    return con.execute"),
+            source.replace('    cfg = ROOMS[room]', "    alias = ROOMS.get(room)\n    alias['item'] = 'sensor.' + room\n    cfg = ROOMS[room]"),
+        ):
+            with self.assertRaises(tx.Refused):
+                module._python_source(changed.encode(), mapping)

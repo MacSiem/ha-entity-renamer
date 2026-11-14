@@ -870,8 +870,8 @@ class NativeTemplateYAMLServer:
             obj.change = changes[-1] if obj.receipt.proposed_files else obj.registry_changes[-1]
             _need(set(obj.digests) == {s.prepared_ref for s in obj.plan.steps}, 'preparation_scope')
             obj.mapping = _registry_mapping(obj.registry_changes, obj.composition, dashboard_plan=dashboard_plan)
-            await _admit_foreign(obj, {'selected': True} if any(
-                change.kind == 'device' for change in obj.registry_changes) else {})
+            await _admit_foreign(obj, {change.identity: True for change in obj.registry_changes
+                                       if change.kind == 'device'})
             from .energy_native import PreparedEnergy
             energy = [change for step, change in zip(obj.plan.steps, changes, strict=True)
                       if step.adapter == 'energy']
@@ -1064,8 +1064,8 @@ class NativeTemplateYAMLServer:
                                           if step.adapter == 'dashboard')
             obj.change = changes[-1] if obj.receipt.proposed_files else obj.registry_changes[-1]
             obj.mapping = _registry_mapping(obj.registry_changes, obj.composition, dashboard_plan=dashboard_plan)
-            await _admit_foreign(obj, {'selected': True} if any(
-                change.kind == 'device' for change in obj.registry_changes) else {})
+            await _admit_foreign(obj, {change.identity: True for change in obj.registry_changes
+                                       if change.kind == 'device'})
             from .energy_native import PreparedEnergy
             energy = [change for step, change in zip(plan.steps, changes, strict=True)
                       if step.adapter == 'energy']

@@ -57,6 +57,7 @@ class _PreparedReview:
     template_admission: object = None
     entry_admission: object = None
     foreign_admission: object = None
+    foreign_loaded: tuple = ()
 
 
 @dataclass
@@ -341,7 +342,8 @@ class Runtime:
                     foreign.expiry = hass.loop.call_later(900, foreign.close)
                 self.reviews[operation] = _PreparedReview(actor_id, plan, count,
                     hass.loop.time() + 900, admission, own, trace_admission, template_admission,
-                    getattr(session, 'review_admission', None), foreign)
+                    getattr(session, 'review_admission', None), foreign,
+                    tuple(sorted({'mqtt', 'rest', 'command_line'} & set(hass.config.components))))
                 if foreign is not None:
                     session.foreign_transferred = True
                 return {'operation_id': operation, 'fingerprint': plan.fingerprint,
@@ -382,6 +384,9 @@ class Runtime:
             @trace_owned
             async def operation():
                 try:
+                    if review.foreign_loaded != tuple(sorted(
+                            {'mqtt', 'rest', 'command_line'} & set(hass.config.components))):
+                        raise Refused('review_foreign_population_changed')
                     from .native_active_execution_pins import check_census
                     for script, census in review.execution_admission:
                         check_census(script, census)
