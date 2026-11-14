@@ -56,6 +56,24 @@ class CandidateTests(unittest.IsolatedAsyncioTestCase):
         return subject._stage(self.state, self.original, self.change, reverse,
                               self.before, self.after)
 
+    def test_physical_dashboard_change_refuses_accepted_source_fence(self):
+        path = self.root / '.storage/lovelace.selected'
+        path.write_bytes(b'{"views": []}')
+        receipt = fixture.receipt_for(self.root)
+        info = path.stat()
+        directories = []
+        for directory, entries, names in receipt.source_directories:
+            if directory == '.storage':
+                entries = tuple(sorted((*entries, (path.name, info.st_mode, info.st_dev, info.st_ino))))
+                names = tuple(sorted((*names, path.name)))
+            directories.append((directory, entries, names))
+        self.original = replace(receipt, source_directories=tuple(directories))
+        state = self.state_for_current()
+        state.assert_current(self.original)
+        path.write_bytes(b'{"views": ["foreign"]}')
+        with self.assertRaisesRegex(ValueError, 'input_source_changed'):
+            state.assert_current(self.original)
+
     def test_checker_repairs_snapshot_survives_live_change_and_reopen(self):
         from custom_components.ha_entity_renamer import yaml_validation
         from importlib import import_module

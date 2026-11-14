@@ -17,7 +17,7 @@ lov = import_module(pkg + '.lovelace_native')
 dr = import_module(pkg + '.dashboard_receipts')
 
 
-async def make_chain():
+async def make_chain(dashboard_first=False):
     baseline = fixture.source_baseline(1000)
     before = {'views': [{'cards': [{'type': 'entity', 'entity': 'sensor.original'}]}]}
     after = {'views': [{'cards': [{'type': 'entity', 'entity': 'sensor.renamed'}]}]}
@@ -44,6 +44,8 @@ async def make_chain():
                      registry.after_revision, 'change'),
              tx.Step('d', 'dashboard', 'identity', dashboard.before.revision,
                      dashboard.after_revision, 'dashboard'))
+    if dashboard_first:
+        steps = tuple(reversed(steps))
     plan = tx.Plan('bench', ('registry', 'dashboard'), ('registry', 'dashboard'), steps,
                    'coverage', ('registry', 'dashboard'), reference)
     sidecar = rr.RegistryReceiptStore(fixture.Disk(), store)
@@ -123,3 +125,17 @@ class RetainedDashboardTests(unittest.IsolatedAsyncioTestCase):
             raise Stale('lost authority')
         with self.assertRaisesRegex(Stale, 'lost authority'):
             await dr.observe(None, None, guard)
+
+    async def test_real_chain_unresolved_dashboard_intent_refuses_reconstruction(self):
+        chain = await make_chain(dashboard_first=True)
+        change = chain._original_change(0)
+        observations = tuple(rr.RegistryRawObservation(row.key, row.raw, row.identity)
+                             for row in chain.baseline.files)
+        record = tx.Record('bench', chain.plan, 'applying', ('intent', 'pending'),
+                           direction='forward')
+        context = tx.PhaseContext(record, 0)
+        physical = tuple(chain.root['dashboard_original_metadata']['.storage/lovelace'])
+        dashboard = dr.DashboardObservation(change.before, physical)
+        await chain.begin_dashboard(context, observations, dashboard)
+        with self.assertRaisesRegex(rr.RegistryReceiptError, 'unknown_unresolved_intent'):
+            chain.reconstruct_inputs()
