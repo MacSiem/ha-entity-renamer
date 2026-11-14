@@ -90,3 +90,38 @@ class PrepareManyTests(unittest.IsolatedAsyncioTestCase):
                     ('device', 'device', {'name_by_user': 'After'})]
         with self.assertRaises(Conflict):
             await bridge.prepare_many(requests, lambda: None)
+
+    async def test_recorder_await_drift_and_cancellation(self):
+        io, recorder, bridge = self.make(3)
+        requests = [('entity', str(i), {'entity_id': f'sensor.new_{i}'}) for i in range(3)]
+        original = recorder.snapshot
+        async def drift(mapping):
+            result = await original(mapping)
+            io.data['entities'][1]['name'] = 'changed during Recorder await'
+            return result
+        recorder.snapshot = drift
+        with self.assertRaises(Conflict):
+            await bridge.prepare_many(requests, lambda: None)
+        io.data = deepcopy(io.saved)
+        started = asyncio.Event()
+        async def blocked(mapping):
+            started.set()
+            await asyncio.Event().wait()
+        recorder.snapshot = blocked
+        task = asyncio.create_task(bridge.prepare_many(requests, lambda: None))
+        await started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(io.updates, [])
+
+    async def test_device_membership_drift_during_settle_refuses(self):
+        io, _, bridge = self.make(1)
+        members = {'device': {'0'}}
+        io.device_memberships = lambda ids: {key: set(members[key]) for key in ids}
+        async def settle_many(changes):
+            await asyncio.sleep(0)
+            members['device'].add('new')
+        io.settle_many = settle_many
+        with self.assertRaisesRegex(Conflict, 'device_entity_membership_changed'):
+            await bridge.prepare_many([('device', 'device', {'name_by_user': 'After'})], lambda: None)
