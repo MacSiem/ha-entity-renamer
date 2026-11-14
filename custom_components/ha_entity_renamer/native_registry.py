@@ -576,6 +576,9 @@ class NativeRegistryBridge:
         from .recorder_guard import prepare as recorder_prepare, verify_rollback
         from .history_guard import _project
 
+        device_ids = {identity for kind, identity, _ in requests if kind == 'device'}
+        membership = getattr(self.io, 'device_memberships', None)
+        original_members = membership(device_ids) if membership is not None else None
         changes = []
         guard()
         for kind, identity, updates in requests:
@@ -585,16 +588,14 @@ class NativeRegistryBridge:
                 guard()
                 for existing in changes:
                     self._fresh(existing, existing.before, lambda: None)
+                if membership is not None and membership(device_ids) != original_members:
+                    raise RegistryConflict('device_entity_membership_changed')
         if len({(c.kind, c.identity) for c in changes}) != len(changes):
             raise RegistryConflict('duplicate_registry_identity')
         mappings = [c.mapping for c in changes if c.mapping]
         combined = {old: new for mapping in mappings for old, new in mapping.items()}
         if len(combined) != len(mappings) or len(set(combined.values())) != len(combined):
             raise RegistryConflict('duplicate_registry_mapping')
-
-        device_ids = {c.identity for c in changes if c.kind == 'device'}
-        membership = getattr(self.io, 'device_memberships', None)
-        original_members = membership(device_ids) if membership is not None else None
 
         def fence():
             guard()
