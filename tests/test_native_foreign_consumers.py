@@ -60,6 +60,7 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
         entity.rest = RestData(hass, 'GET', 'http://example.invalid', 'utf-8', None,
                                None, None, None, True, 'python_default', 10)
         entity.platform, entity.registry_entry, entity._attr_unique_id = platform, entry, entry.unique_id
+        entity._unique_id = entry.unique_id
         platform.entities[entry.entity_id] = entity
         hass.config.components.add('rest')
         try:
@@ -285,6 +286,7 @@ def report(con, room, start):
         entity._config, entity._value_template = {}, None
         entity.data = CommandSensorData(hass, command, 10, 'sensor', 'fixture')
         entity.platform, entity.registry_entry, entity._attr_unique_id = platform, entry, entry.unique_id
+        entity._unique_id = entry.unique_id
         platform.entities[entry.entity_id] = entity
         hass.config.components.add('command_line')
         try:

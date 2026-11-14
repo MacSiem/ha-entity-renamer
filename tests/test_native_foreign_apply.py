@@ -62,6 +62,7 @@ class NativeForeignApplyTests(unittest.IsolatedAsyncioTestCase):
         entity.rest = RestData(hass, 'GET', 'http://example.invalid', 'utf-8', None,
                                None, None, None, True, 'python_default', 10)
         entity.platform, entity.registry_entry, entity._attr_unique_id = platform, registry, registry.unique_id
+        entity._unique_id = registry.unique_id
         platform.entities[registry.entity_id] = entity
         hass.config.components.add('rest')
         original = path.read_bytes()
