@@ -53,7 +53,7 @@ def _template(text, mapping):
         _need(False)
 
 
-def _freeze(value, mapping, source_templates, *, depth=0):
+def _freeze(value, mapping, source_templates, *, depth=0, template_cache=None, selected_pattern=None):
     """Freeze configuration only; never inspect telemetry or execute templates."""
     from homeassistant.helpers.template import Template
     from homeassistant.helpers.trigger_template_entity import ValueTemplate
@@ -62,30 +62,37 @@ def _freeze(value, mapping, source_templates, *, depth=0):
         text = value.template
         _need(type(text) is str)
         if '{{' in text or '{%' in text or '{#' in text:
-            _template(text, mapping)
+            if template_cache is None or text not in template_cache:
+                _template(text, mapping)
+                if template_cache is not None:
+                    template_cache.add(text)
             source_templates.add(text)
         return ('template', text)
     if type(value) is str:
-        _need(not any(re.search(r'(?<![a-zA-Z0-9_])' + re.escape(old)
-                                + r'(?![a-zA-Z0-9_])', value)
-                      for old in (*mapping, *mapping.values())))
+        _need(not (selected_pattern.search(value) if selected_pattern is not None else
+                   any(re.search(r'(?<![a-zA-Z0-9_])' + re.escape(old)
+                                 + r'(?![a-zA-Z0-9_])', value)
+                       for old in (*mapping, *mapping.values()))))
         if '{{' in value or '{%' in value or '{#' in value:
-            _template(value, mapping)
+            if template_cache is None or value not in template_cache:
+                _template(value, mapping)
+                if template_cache is not None:
+                    template_cache.add(value)
             source_templates.add(value)
         return value
     if value is None or type(value) in (bool, int, float):
         return value
     if isinstance(value, Enum):
         return ('enum', type(value).__module__, type(value).__qualname__,
-                _freeze(value.value, mapping, source_templates, depth=depth + 1))
+                _freeze(value.value, mapping, source_templates, depth=depth + 1, template_cache=template_cache, selected_pattern=selected_pattern))
     if type(value) is timedelta:
         return ('timedelta', value.total_seconds())
     if type(value) in (list, tuple):
-        return tuple(_freeze(v, mapping, source_templates, depth=depth + 1) for v in value)
+        return tuple(_freeze(v, mapping, source_templates, depth=depth + 1, template_cache=template_cache, selected_pattern=selected_pattern) for v in value)
     if isinstance(value, dict):
         _need(all(type(k) is str for k in value))
-        return tuple((_freeze(k, mapping, source_templates, depth=depth + 1),
-                      _freeze(v, mapping, source_templates, depth=depth + 1))
+        return tuple((_freeze(k, mapping, source_templates, depth=depth + 1, template_cache=template_cache, selected_pattern=selected_pattern),
+                      _freeze(v, mapping, source_templates, depth=depth + 1, template_cache=template_cache, selected_pattern=selected_pattern))
                      for k, v in sorted(value.items()))
     _need(False)
 
@@ -264,6 +271,13 @@ class NativeForeignConsumers:
               and all(type(key) is str for key in device_names))
         self.hass, self.mapping, self.thread = hass, dict(mapping), threading.get_ident()
         self.device_ids = frozenset(device_names)
+        selected = {**self.mapping, **{device: device for device in self.device_ids}}
+        self.selector = tuple(sorted(selected.items()))
+        identities = sorted(set(selected) | set(selected.values()))
+        self.selected_pattern = (re.compile(r'(?<![a-zA-Z0-9_])(?:'
+                                 + '|'.join(re.escape(value) for value in identities)
+                                 + r')(?![a-zA-Z0-9_])') if identities else None)
+        self.template_cache = set()
         self.closed = self.changed = False
         self.removers = []
         self.expiry = None
@@ -315,6 +329,10 @@ class NativeForeignConsumers:
 
         hass = self.hass
         mapping = {**self.mapping, **{device: device for device in self.device_ids}}
+        _need(tuple(sorted(mapping.items())) == self.selector)
+        def freeze(value, sources):
+            return _freeze(value, mapping, sources, template_cache=self.template_cache,
+                           selected_pattern=self.selected_pattern)
         templates = {'rest': set(), 'command_line': set()}
         registry = er.async_get(hass)
         _need(not _pending_native_work(hass, ('mqtt', 'rest', 'command_line')))
@@ -358,12 +376,12 @@ class NativeForeignConsumers:
                           and entity_id not in found)
                     found[entity_id] = entity
                     strings = set() if name == 'mqtt' else templates[name]
-                    config = _freeze(entity._config, mapping, strings)
+                    config = freeze(entity._config, strings)
                     if name == 'mqtt':
-                        discovery = _freeze(entity._discovery_data, mapping, set())
+                        discovery = freeze(entity._discovery_data, set())
                         detail = (config, discovery)
                     else:
-                        value = _freeze(entity._value_template, mapping, strings)
+                        value = freeze(entity._value_template, strings)
                         if name == 'rest':
                             rest = entity.rest
                             _need(type(rest) is RestData and rest._hass is hass)
@@ -391,20 +409,20 @@ class NativeForeignConsumers:
                                           and getattr(update, '__func__', None) is RestData.async_update)
                             detail = (config, value, id(rest),
                                       coordinator_image,
-                                      _freeze(resource_template, mapping, strings),
-                                      _freeze(payload_template, mapping, strings),
-                                      _freeze(rest._resource, mapping, strings)
+                                      freeze(resource_template, strings),
+                                      freeze(payload_template, strings),
+                                      freeze(rest._resource, strings)
                                       if resource_template is None else None,
-                                      _freeze(rest._headers, mapping, strings),
-                                      _freeze(rest._params, mapping, strings),
-                                      _freeze(rest._request_data, mapping, strings)
+                                      freeze(rest._headers, strings),
+                                      freeze(rest._params, strings),
+                                      freeze(rest._request_data, strings)
                                       if payload_template is None else None)
                         else:
                             data = entity.data
                             _need(type(data) is CommandSensorData and data.hass is hass)
                             commands.add(data.command)
                             detail = (config, value, id(data),
-                                      _freeze(data.command, mapping, strings))
+                                      freeze(data.command, strings))
                     row = registry_rows[entity_id]
                     entity_rows.append((entity_id, id(entity), row.id, row.unique_id,
                                         row.config_entry_id, row.device_id, detail))
@@ -417,10 +435,10 @@ class NativeForeignConsumers:
                 _need(type(data) is MqttData and not data.discovery_pending_discovered
                       and not data.discovery_discovered_and_disabled and not data.debug_info_triggers)
                 extra = (id(data), id(data.client),
-                         _freeze(data.config, mapping, set()),
+                         freeze(data.config, set()),
                          tuple(sorted(data.discovery_already_discovered)),
-                         id(entries[0].data), _freeze(dict(entries[0].data), mapping, set()),
-                         id(entries[0].options), _freeze(dict(entries[0].options), mapping, set()))
+                         id(entries[0].data), freeze(dict(entries[0].data), set()),
+                         id(entries[0].options), freeze(dict(entries[0].options), set()))
             images.append((name, True, tuple(id(e) for e in entries),
                            tuple(sorted((row.entity_id, row.id, row.unique_id, row.config_entry_id,
                                          row.device_id, str(row.disabled_by))
@@ -468,6 +486,7 @@ class NativeForeignConsumers:
             _need(depth < 100 and id(node) not in active)
             active.add(id(node))
             if isinstance(node, yaml.ScalarNode):
+                _need(not node.tag.startswith('!include'))
                 values[domain].add(node.value)
             elif isinstance(node, (yaml.SequenceNode, yaml.MappingNode)):
                 children = node.value if isinstance(node, yaml.SequenceNode) else (
@@ -567,3 +586,4 @@ class NativeForeignConsumers:
             for remove in self.removers:
                 remove()
             self.removers.clear()
+            self.template_cache.clear()

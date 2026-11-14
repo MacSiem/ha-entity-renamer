@@ -120,6 +120,24 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
             hass.config.components.remove('rest')
             await platform.async_destroy()
 
+    async def test_semantic_cache_is_selection_bound_and_includes_refuse(self):
+        from unittest.mock import patch
+        module = importlib.import_module(fixture.fixtures.PACKAGE + '.native_foreign_consumers')
+        tx = importlib.import_module(fixture.fixtures.PACKAGE + '.transaction')
+        text = "{{ states('sensor.other') }}"
+        mapping = {'sensor.old': 'sensor.new'}
+        cache = set()
+        with patch.object(module, '_template', wraps=module._template) as validate:
+            module._freeze(text, mapping, set(), template_cache=cache)
+            module._freeze(text, mapping, set(), template_cache=cache)
+            self.assertEqual(validate.call_count, 1)
+        with self.assertRaises(tx.Refused):
+            module._freeze("{{ states('sensor.old') }}", mapping, set(), template_cache=cache)
+        for raw in (b'rest: !include sensors.yaml\n',
+                    b'command_line:\n  - sensor: !include sensors.yaml\n'):
+            with self.assertRaises(tx.Refused):
+                module.NativeForeignConsumers._yaml_shape(raw)
+
     async def test_dynamic_and_unknown_template_calls_refuse(self):
         module = importlib.import_module(fixture.fixtures.PACKAGE + '.native_foreign_consumers')
         tx = importlib.import_module(fixture.fixtures.PACKAGE + '.transaction')
