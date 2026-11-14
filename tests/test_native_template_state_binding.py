@@ -65,14 +65,14 @@ class NativeTemplateStateBindingTests(unittest.IsolatedAsyncioTestCase):
             self.f.hass, plan, mapping, self.f.root.parent, with_state_program=True)
         return validation, mapping
 
-    async def sample_original(self, validation, *, selected=()):
+    async def sample_original(self, validation, *, selected=(), selected_devices=()):
         module = self.module('native_template_state_binding')
         program = validation.state_config_program
         observed = await self.module('native_discovery_inputs').async_observe_discovery_inputs(
             self.f.hass, guard=lambda: None)
         documents = {row.key: {'data': json.loads(row.manager_json)} for row in observed.files}
         prefix = module.StateBindingPrefix(program.sha256, 'sampler-only', 'sampler-only',
-            'sampler-only', frozenset(), (), tuple(selected))
+            'sampler-only', frozenset(), (), tuple(selected), tuple(selected_devices))
         return module.sample_state_bindings(module._StateRuntime(self.f.hass), program,
             prefix, 'original', documents)
 
@@ -80,18 +80,47 @@ class NativeTemplateStateBindingTests(unittest.IsolatedAsyncioTestCase):
         validation, mapping = await self.boot()
         first = self.f.entity.async_get_or_create('sensor', 'template', 'unconfigured-ghost-a')
         second = self.f.entity.async_get_or_create('sensor', 'template', 'unconfigured-ghost-b')
+        device = self.f.device.async_get_or_create(config_entry_id='fixture-entry',
+            identifiers={('fixture', 'ghost-device')})
+        first = self.f.entity.async_update_entity(first.entity_id, device_id=device.id)
+        from homeassistant.helpers.entity_registry import RegistryEntryDisabler
+        disabled = self.f.entity.async_get_or_create('sensor', 'template', 'unconfigured-disabled',
+                                                     disabled_by=RegistryEntryDisabler.USER)
         second.write_unavailable_state(self.f.hass)
         await self.f.hass.async_block_till_done()
         await self._flush_documents()
         before = await self.sample_original(validation)
         peers = [row for row in before.inventory if row[0] == 'registry_inactive']
-        self.assertEqual(len(peers), 2)
+        self.assertEqual(len(peers), 3)
         self.assertTrue(before.same_bindings(await self.sample_original(validation)))
         with self.assertRaisesRegex(ValueError, 'template_state_missing_registry_consumer'):
             await self.sample_original(validation, selected=(first.id,))
+        with self.assertRaisesRegex(ValueError, 'template_state_missing_registry_consumer'):
+            await self.sample_original(validation, selected_devices=(device.id,))
+        self.f.entity.async_update_entity(disabled.entity_id, name='Foreign change')
+        await self.f.hass.async_block_till_done()
+        await self._flush_documents()
+        self.assertFalse(before.same_bindings(await self.sample_original(validation)))
         state = self.f.hass.states.get(second.entity_id)
         self.f.hass.states.async_set(second.entity_id, 'on', dict(state.attributes))
         with self.assertRaisesRegex(ValueError, 'template_state_missing_registry_consumer'):
+            await self.sample_original(validation)
+
+    async def test_unconfigured_peer_object_appearance_refused(self):
+        validation, mapping = await self.boot()
+        ghost = self.f.entity.async_get_or_create('sensor', 'template', 'appearance-value')
+        await self.f.hass.async_block_till_done()
+        await self._flush_documents()
+        await self.sample_original(validation)
+        path = self.f.root / 'template.yaml'
+        with path.open('a') as handle:
+            handle.write('- unique_id: appearance\n  sensor:\n  - unique_id: value\n'
+                         '    name: Appeared fixture\n    state: "1"\n')
+        await self.f.hass.services.async_call('template', 'reload', {}, blocking=True)
+        await self.f.hass.async_block_till_done()
+        await self._flush_documents()
+        self.assertIsNotNone(self.f.hass.states.get(ghost.entity_id))
+        with self.assertRaises(ValueError):
             await self.sample_original(validation)
 
     async def test_missing_configured_template_object_is_still_refused(self):
