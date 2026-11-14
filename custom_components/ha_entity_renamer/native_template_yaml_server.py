@@ -32,6 +32,23 @@ def _need(value, reason):
         raise Refused('template_yaml_server_' + reason) from None
 
 
+async def _admit_foreign(server, device_names):
+    """Qualify coexisting native consumers against this exact selection."""
+    if not ({'mqtt', 'rest', 'command_line'} & set(server.hass.config.components)):
+        return
+    from .native_foreign_consumers import NativeForeignConsumers
+    from .yaml_plan import plan_yaml
+    server.foreign = NativeForeignConsumers(server.hass, server.mapping, device_names)
+    root = Path(server.hass.config.config_dir).resolve()
+    yaml = await _drained(server.hass.async_add_executor_job,
+                          lambda: plan_yaml(root, server.mapping))
+    server.foreign.check()
+    _need(yaml.ready, 'foreign_yaml_scope_unverified')
+    await _drained(server.hass.async_add_executor_job,
+                   lambda: server.foreign.bind_sources(yaml, root))
+    server.foreign.check(require_sources=True)
+
+
 def _mixed_composition(value):
     from .native_template_state_composition import MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition
     from .native_script_program_composition import ScriptTemplateStateComposition
@@ -324,8 +341,11 @@ class NativeTemplateYAMLServer:
             obj.scene_fence.check()
             _need(('powercalc' in hass.config.components) is powercalc_present
                   and (not powercalc_scope or powercalc_present), 'powercalc_scope_unsupported')
-            _need(not ({'mqtt', 'rest', 'command_line'}
-                       & set(hass.config.components)), 'other_consumer_scope_unsupported')
+            if hasattr(obj, 'foreign'):
+                obj.foreign.check(require_sources=obj.bound)
+            else:
+                _need(not obj.bound or not ({'mqtt', 'rest', 'command_line'}
+                           & set(hass.config.components)), 'other_consumer_scope_unsupported')
             if hasattr(obj, 'consumers'):
                 obj.consumers.check()
             if hasattr(obj, 'automation_lifecycle'):
@@ -402,6 +422,7 @@ class NativeTemplateYAMLServer:
         obj.mapping, obj.entity_names, obj.device_names = dict(mapping), names, devices
         obj.review_id = review_id
         try:
+            await _admit_foreign(obj, devices)
             async with obj.locks.hold(obj._scope):
                 await obj._prepare()
             obj._scope()
@@ -847,6 +868,8 @@ class NativeTemplateYAMLServer:
             obj.change = changes[-1] if obj.receipt.proposed_files else obj.registry_changes[-1]
             _need(set(obj.digests) == {s.prepared_ref for s in obj.plan.steps}, 'preparation_scope')
             obj.mapping = _registry_mapping(obj.registry_changes, obj.composition, dashboard_plan=dashboard_plan)
+            await _admit_foreign(obj, {'selected': True} if any(
+                change.kind == 'device' for change in obj.registry_changes) else {})
             from .energy_native import PreparedEnergy
             energy = [change for step, change in zip(obj.plan.steps, changes, strict=True)
                       if step.adapter == 'energy']
@@ -1039,6 +1062,8 @@ class NativeTemplateYAMLServer:
                                           if step.adapter == 'dashboard')
             obj.change = changes[-1] if obj.receipt.proposed_files else obj.registry_changes[-1]
             obj.mapping = _registry_mapping(obj.registry_changes, obj.composition, dashboard_plan=dashboard_plan)
+            await _admit_foreign(obj, {'selected': True} if any(
+                change.kind == 'device' for change in obj.registry_changes) else {})
             from .energy_native import PreparedEnergy
             energy = [change for step, change in zip(plan.steps, changes, strict=True)
                       if step.adapter == 'energy']
@@ -1228,5 +1253,7 @@ class NativeTemplateYAMLServer:
             if type(phases) in (NativeScriptPrefixPhase, NativeAutomationPrefixPhase):
                 phases.close()
         finally:
+            if hasattr(self, 'foreign'):
+                self.foreign.close()
             self.scene_fence.close()
             self.bound, self.closed = False, True
