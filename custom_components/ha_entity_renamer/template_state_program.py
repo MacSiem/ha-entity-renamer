@@ -36,35 +36,41 @@ def _get(value, key, default=None):
     return next((v for k, v in _pairs(value) if k == key), default)
 
 
+def _assert_template_secret_scope(root, source_paths):
+    """Prove every physical Template source is free of secret expansion."""
+    from .yaml_plan import Limits, _Reader, plan_yaml
+    from .yaml_source_ledger import extract_template_source_ledger
+    import os
+    _need(type(source_paths) is tuple and bool(source_paths)
+          and len(set(source_paths)) == len(source_paths),
+          'template_state_config_program_secret_scope_unverified')
+    plan = plan_yaml(root, {})
+    _need({row.path for row in plan.files} == set(source_paths),
+          'template_state_config_program_secret_scope_unverified')
+    reader = _Reader(root, Limits())
+    try:
+        originals = {row.path: reader.read(row.path)[0] for row in plan.files}
+    finally:
+        os.close(reader.root)
+    ledger = extract_template_source_ledger(plan, originals, reject_secret_tags=True)
+    _need(not ledger.findings and all(row.native_key is not None
+          and row.disposition == 'candidate' for row in ledger.definitions),
+          'template_state_config_program_secret_scope_unverified')
+    return ledger
+
+
 def native_state_descriptors(checked, root, *, source_paths):
     """Worker-only adjunct of the exact native schema result supplied to v3."""
     from .yaml_validation_worker import (_normal, _template_entity_keys,
         full_template_state_semantics, _template_source_projection)
-    # Full normalized descriptors would otherwise serialize expanded !secret
-    # values. The existing reference-only secret policy must survive this
-    # private sidecar. Staging is already a bounded, pinned input bundle; no
-    # live configuration is rediscovered here. Refuse this descriptor scope
-    # before returning any expanded configuration to the parent process.
-    from pathlib import Path
-    import yaml
-    from yaml.nodes import MappingNode, SequenceNode
-    def secret(node, ancestry=()):
-        if node is None or id(node) in ancestry:
-            return False
-        if node.tag in ('!secret', '!env_var'):
-            return True
-        ancestry += (id(node),)
-        if isinstance(node, MappingNode):
-            return any(secret(key, ancestry) or secret(value, ancestry) for key, value in node.value)
-        if isinstance(node, SequenceNode):
-            return any(secret(value, ancestry) for value in node.value)
-        return False
-    from .yaml_plan import _relative
-    _need(type(source_paths) is tuple and bool(source_paths))
-    for name in source_paths:
-        source = Path(root) / _relative(name)
-        _need(not any(secret(node) for node in yaml.compose_all(source.read_bytes())),
-              'template_state_config_program_secret_scope_unverified')
+    # Inspect every physical Template block, including included/package sources,
+    # triggers, unsupported families, metadata and keys. The source ledger
+    # fails closed for unresolved layouts and never expands secret values.
+    ledger = _assert_template_secret_scope(root, source_paths)
+    inventory = _template_source_projection(checked, root, full_state=True)
+    physical = sorted((row.domain, row.native_key) for row in ledger.definitions)
+    native = sorted((row[0], row[1]) for row in inventory)
+    _need(physical == native, 'template_state_config_program_secret_scope_unverified')
     rows = []
     for block in checked.get('template', ()):
         if 'trigger' in block or 'triggers' in block:
@@ -76,7 +82,7 @@ def native_state_descriptors(checked, root, *, source_paths):
                     _normal(full_template_state_semantics(block, platform, entity))])
     return {'profile': 'template_state_config_program_v1',
             'rows': sorted(rows, key=lambda r: (r[0], r[1])),
-            'inventory': _normal(_template_source_projection(checked, root, full_state=True))}
+            'inventory': _normal(inventory)}
 
 
 @dataclass(frozen=True)

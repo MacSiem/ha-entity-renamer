@@ -24,7 +24,8 @@ class DirectoryAliasTests(unittest.IsolatedAsyncioTestCase):
         self.root = self.parent / 'config'
         self.root.mkdir()
         (self.root / 'configuration.yaml').write_text(
-            "alias_fixture: {}\nscript:\n  fixture:\n    sequence:\n      - variables:\n          source: \"{{ states('sensor.old') }}\"\n")
+            "alias_fixture: {}\nscript:\n  fixture:\n    alias: !secret fixture_name\n    sequence:\n      - variables:\n          source: \"{{ states('sensor.old') }}\"\n")
+        (self.root / 'secrets.yaml').write_text('fixture_name: synthetic_private_value\n')
         self.components = self.root / 'custom_components'
         self.target = self.components / 'fixture' / 'integrations' / 'alias_fixture'
         self.target.mkdir(parents=True)

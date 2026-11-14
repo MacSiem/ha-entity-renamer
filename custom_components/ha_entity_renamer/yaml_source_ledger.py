@@ -134,13 +134,17 @@ def extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
 
 
 def extract_template_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
-                                   limits: Limits = Limits()) -> SourceLedger:
+                                   limits: Limits = Limits(),
+                                   reject_secret_tags: bool = False) -> SourceLedger:
     """All physical Template blocks/entities; no runtime or reload qualification.
 
     Schema 2 distinguishes this detached inventory from automation/script v1.
     Uses the exact same ORIGINAL Plan/bytes/edges; never scans includes again.
     """
-    return _extract_source_ledger(plan, original, limits=limits, template=True)
+    if type(reject_secret_tags) is not bool:
+        raise SourceLedgerError('source_bundle_invalid')
+    return _extract_source_ledger(plan, original, limits=limits, template=True,
+                                  reject_secret_tags=reject_secret_tags)
 
 
 def extract_powercalc_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
@@ -150,7 +154,8 @@ def extract_powercalc_source_ledger(plan: Plan, original: Mapping[str, bytes], *
 
 
 def _extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
-                           limits: Limits, template: bool, powercalc=False) -> SourceLedger:
+                           limits: Limits, template: bool, powercalc=False,
+                           reject_secret_tags=False) -> SourceLedger:
     """Inventory configuration.yaml reachability using the existing frozen graph.
 
     Extra Plan roots (e.g. dashboards) remain in graph digest but are not treated
@@ -271,6 +276,8 @@ def _extract_source_ledger(plan: Plan, original: Mapping[str, bytes], *,
             flag(ref, 'source_alias_cycle_unsupported')
             return ['cycle']
         active += (token,)
+        if reject_secret_tags and node.tag in ('!secret', '!env_var'):
+            raise SourceLedgerError('template_state_config_program_secret_scope_unverified')
         if isinstance(node, ScalarNode):
             if node.tag in _INCLUDES:
                 if node.tag != '!include':
