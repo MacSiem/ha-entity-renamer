@@ -196,7 +196,8 @@ class StateConsumerSnapshot:
             tuple(variables), tuple(semantics), tuple(actions))
 
 
-def _state_inputs(chain, input_state=None, *, live_intent=None, live_context=None, live_calls=()):
+def _state_inputs(chain, input_state=None, *, live_intent=None, live_context=None, live_calls=(),
+                  _with_documents=False):
     """Admit acknowledged state, or EXACT current live_yaml_inputs evidence.
 
     Default reads still refuse every pending intent. An explicitly held accepted
@@ -207,7 +208,8 @@ def _state_inputs(chain, input_state=None, *, live_intent=None, live_context=Non
     if input_state is None:
         _need(live_intent is None and live_context is None and not live_calls,
               'template_state_live_input_binding_required')
-        return chain.reconstruct_inputs()
+        state = chain.reconstruct_inputs()
+        return (state, chain.accepted_documents()) if _with_documents else state
     _need(type(input_state) is AcceptedInputState,
           'template_state_input_type_required')
     if input_state._live_check is None:
@@ -241,9 +243,11 @@ def _state_inputs(chain, input_state=None, *, live_intent=None, live_context=Non
               'template_state_live_input_changed')
         actual._bound(chain.original_receipt)
     input_state._bound(chain.original_receipt)
-    _need(input_state.documents() == chain.accepted_documents(),
+    state_documents = input_state.documents()
+    documents = chain.accepted_documents()
+    _need(state_documents == documents,
           'template_state_accepted_documents_changed')
-    return input_state
+    return (input_state, documents) if _with_documents else input_state
 
 
 def accepted_state_prefix(chain, program, *, input_state=None, live_intent=None,
@@ -252,9 +256,8 @@ def accepted_state_prefix(chain, program, *, input_state=None, live_intent=None,
     from .native_registry_receipts import RegistryReceiptChain
     from .native_registry import PreparedRegistryChange
     _need(type(chain) is RegistryReceiptChain and type(program) is StateConfigProgram)
-    state = _state_inputs(chain, input_state, live_intent=live_intent,
-                          live_context=live_context, live_calls=live_calls)
-    documents = chain.accepted_documents()
+    state, documents = _state_inputs(chain, input_state, live_intent=live_intent,
+                          live_context=live_context, live_calls=live_calls, _with_documents=True)
     registry = documents['core.entity_registry']['data']['entities']
     known, active, ids = {}, set(), []
     for index, step in enumerate(chain.plan.steps):

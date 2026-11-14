@@ -100,6 +100,23 @@ class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises((ValueError, receipts.RegistryReceiptError)):
             scope['check']()
 
+    async def test_prefix_reuses_only_the_same_checked_documents(self):
+        binding = importlib.import_module(mixed.base.PACKAGE + '.native_template_state_binding')
+        program_type = importlib.import_module(mixed.base.PACKAGE + '.template_state_program').StateConfigProgram
+        fixture = await mixed.mixed_fixture()
+        chain = fixture['chain']
+        mapping = {old: new for change in fixture['changes'] for old, new in change.mapping.items()}
+        program = program_type('a', 'b', b'{}', b'{}', tuple(mapping.items()), (), (), b'[]')
+        state = chain.reconstruct_inputs()
+        expected = binding.accepted_state_prefix(chain, program)
+        with patch.object(chain, 'accepted_documents', wraps=chain.accepted_documents) as documents:
+            self.assertEqual(binding.accepted_state_prefix(chain, program, input_state=state), expected)
+            self.assertEqual(documents.call_count, 1)
+        with patch.object(chain, 'accepted_documents', return_value={}):
+            with self.assertRaises(ValueError):
+                binding.accepted_state_prefix(chain, program, input_state=state)
+        self.assertEqual(binding.accepted_state_prefix(chain, program, input_state=state), expected)
+
     def test_detached_evidence_distinguishes_signed_zero_and_nested_type_drift(self):
         original = {'nested': [0.0, -0.0, 1, True, {'x': 1.5}]}
         evidence = receipts._freeze_json(original)
