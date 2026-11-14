@@ -536,6 +536,16 @@ def plan_dashboard(config, mapping):
     def scope(path, syntax):
         scopes.append(Scope(path, syntax))
 
+    def reference_tree(value, path):
+        if type(value) is dict:
+            for field, child in value.items():
+                reference_tree(child, path + (field,))
+        elif type(value) is list:
+            for i, child in enumerate(value):
+                reference_tree(child, path + (i,))
+        else:
+            reference(value, path)
+
     def reference(value, path):
         if value is None:
             return
@@ -560,17 +570,36 @@ def plan_dashboard(config, mapping):
                 mark(path, 'dynamic_dashboard_strategy', 'Dashboard strategy loads an external source')
             if type(value.get('variables')) is dict:
                 variables = value['variables']
-            if value.get('name') == 'entity_id' and type(value.get('value')) is str:
-                pattern = value['value']
-                if any((pattern in old) != (pattern in new) for old, new in mapping.items()):
-                    mark(path + ('value',), 'dynamic_dashboard_selector', 'Entity filter membership changes')
+            if value.get('name') == 'entity_id':
+                import fnmatch
+                pattern, operator = value.get('value'), value.get('operator')
+                if (type(pattern) is not str or len(pattern) > 256 or operator not in (None, 'contains')
+                        or not re.fullmatch(r'\^?(?:[A-Za-z0-9_.*?]|\\[.])+(?:\$)?', pattern)):
+                    mark(path + ('value',), 'dynamic_dashboard_selector', 'Entity filter pattern is unsupported')
+                else:
+                    # Restrict regex to an inexpensive subset; evaluate all semantics
+                    # used by supported selector consumers.
+                    try:
+                        regex = re.compile(pattern)
+                    except re.error:
+                        mark(path + ('value',), 'dynamic_dashboard_selector', 'Invalid entity filter pattern')
+                    else:
+                        if any((pattern in old) != (pattern in new)
+                               or fnmatch.fnmatchcase(old, pattern) != fnmatch.fnmatchcase(new, pattern)
+                               or bool(regex.search(old)) != bool(regex.search(new))
+                               for old, new in mapping.items()):
+                            mark(path + ('value',), 'dynamic_dashboard_selector', 'Entity filter membership changes')
             for field, child in value.items():
                 p = path + (field,)
                 if field in selected:
                     mark(p, 'ambiguous_dashboard_key', 'Selected entity ID used as an unclassified key')
                 if field in _NON_ENTITY_TARGETS:
+                    if type(child) in (dict, list):
+                        walk(child, p, field, False, value, variables)
                     continue
-                if field in _REFERENCE_SCALARS:
+                if field == 'floor_entity_ids':
+                    reference_tree(child, p)
+                elif field in _REFERENCE_SCALARS:
                     if type(child) is list and field == 'entity_id':
                         for i, item in enumerate(child): reference(item, p + (i,))
                     else:
@@ -586,8 +615,10 @@ def plan_dashboard(config, mapping):
                         elif pattern is not None and type(pattern) is not str:
                             mark(p + (selector,), 'dynamic_dashboard_selector', 'Entity selector cannot be resolved')
                     walk(child, p, field, False, value, variables)
-                elif field in {'above', 'below'} and type(child) is str and _ID.fullmatch(child):
-                    reference(child, p)
+                elif field in {'state', 'state_not', 'above', 'below'} and any(part in {'conditions', 'visibility'} for part in path if type(part) is str):
+                    for i, item in enumerate(child if type(child) is list else [child]):
+                        if type(item) is str and _ID.fullmatch(item):
+                            reference(item, p + (i,) if type(child) is list else p)
                 else:
                     walk(child, p, field, False, value, variables)
         elif type(value) is list:
