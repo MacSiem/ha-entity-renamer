@@ -49,6 +49,8 @@ _CURRENT_ENTITY_TERNARY = re.compile(
 
 def plan_button_expression(text, mapping):
     if _CURRENT_ENTITY_TERNARY.fullmatch(text):
+        if any(m['id'] in mapping or m['id'] in mapping.values() for m in _ENTITY_LITERAL.finditer(text)):
+            return text, 'unsupported_button_javascript'
         return text, None
     match = _LOOKUP.fullmatch(text)
     if match:

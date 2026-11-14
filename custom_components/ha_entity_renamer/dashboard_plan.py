@@ -594,8 +594,12 @@ def plan_dashboard(config, mapping):
                 if field in selected:
                     mark(p, 'ambiguous_dashboard_key', 'Selected entity ID used as an unclassified key')
                 if field in _NON_ENTITY_TARGETS:
-                    if type(child) in (dict, list):
+                    if type(child) is dict:
                         walk(child, p, field, False, value, variables)
+                    elif type(child) is list:
+                        for i, item in enumerate(child):
+                            if type(item) in (dict, list):
+                                walk(item, p + (i,), field, False, value, variables)
                     continue
                 if field == 'floor_entity_ids':
                     reference_tree(child, p)

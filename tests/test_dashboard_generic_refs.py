@@ -58,6 +58,29 @@ class GenericDashboardReferences(unittest.TestCase):
             self.assertTrue(p.markers)
             self.assertEqual(p.value['label'], expression)
 
+    def test_filter_regex_conditions_and_nested_foreign_target(self):
+        mapping = {'sensor.old': 'sensor.new'}
+        config = {'conditions': [{'entity': 'sensor.old', 'state': ['sensor.old', 'on']}],
+                  'target': {'area_id': {'popup': {'entity': 'sensor.old'}}},
+                  'filter': {'include': [{'name': 'entity_id', 'value': r'^sensor\\.old$'}]}}
+        result = plan_dashboard(config, mapping)
+        self.assertEqual(result.value['conditions'][0]['state'], ['sensor.new', 'on'])
+        self.assertEqual(result.value['target']['area_id']['popup']['entity'], 'sensor.new')
+        self.assertEqual(result.markers[0].code, 'dynamic_dashboard_selector')
+        self.assertEqual(result.markers[0].path[-1], 'value')
+        for pattern in ('(a+)+$', '['):
+            c = {'filter': {'include': [{'name': 'entity_id', 'value': pattern}]}}
+            self.assertTrue(plan_dashboard(c, mapping).markers)
+
+    def test_current_entity_js_rejects_selected_literal_and_extra_code(self):
+        from custom_components.ha_entity_renamer.dashboard_custom import plan_button_expression
+        good = "[[[ return entity && entity.state === 'on' ? 'up' : 'down'; ]]]"
+        self.assertEqual(plan_button_expression(good, self.mapping), (good, None))
+        for bad in (good.replace("'up'", "'sensor.old'"),
+                    good.replace('; ]]]', '; states[id]; ]]]'),
+                    good.replace("'up'", "call()")):
+            self.assertIsNotNone(plan_button_expression(bad, self.mapping)[1])
+
     def test_review_real_change_no_change_and_tampering(self):
         mapping = {'sensor.old': 'sensor.new'}
         before = {'views': [{'cards': [{'type': 'custom:any', 'entity': 'sensor.old'}]}]}
