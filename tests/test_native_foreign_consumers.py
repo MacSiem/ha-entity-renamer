@@ -157,6 +157,32 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(value=value), self.assertRaises(tx.Refused):
                 module._template(value, mapping)
 
+    async def test_native_mqtt_yaml_schema_scalar_freeze(self):
+        from homeassistant.const import __version__
+        if __version__ != '2026.11.1':
+            self.skipTest('Core 11.1 only')
+        from homeassistant.components.mqtt.sensor import PLATFORM_SCHEMA_MODERN
+        from homeassistant.util.yaml import load_yaml
+        from homeassistant.util.yaml.objects import NodeStrClass
+        module = importlib.import_module(fixture.fixtures.PACKAGE + '.native_foreign_consumers')
+        tx = importlib.import_module(fixture.fixtures.PACKAGE + '.transaction')
+        path = self.f.root / 'mqtt-fixture.yaml'
+        path.write_text('state_topic: fixture/topic\nname: Fixture sensor\n')
+        raw = load_yaml(str(path))
+        config = PLATFORM_SCHEMA_MODERN(raw)
+        self.assertTrue(any(type(k) is NodeStrClass for k in config))
+        self.assertTrue(any(type(v) is NodeStrClass for v in config.values()))
+        mapping = {'sensor.old': 'sensor.new'}
+        frozen = module._freeze(config, mapping, set())
+        plain = {str(k): str(v) if type(v) is NodeStrClass else v for k, v in config.items()}
+        self.assertEqual(frozen, module._freeze(plain, mapping, set()))
+        self.assertTrue(all(type(k) is str for k, _ in frozen))
+        for bad in ({object(): 'value'}, {'key': object()},
+                    {NodeStrClass('sensor.old'): 'value'},
+                    {'key': NodeStrClass("{{ states(variable) }}")}):
+            with self.subTest(kind=type(next(iter(bad))).__name__), self.assertRaises(tx.Refused):
+                module._freeze(bad, mapping, set())
+
     async def test_native_mqtt_discovery_latches_and_device_scope(self):
         from homeassistant.const import __version__
         if __version__ != '2026.11.1':
