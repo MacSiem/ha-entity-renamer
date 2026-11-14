@@ -60,14 +60,6 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         from homeassistant.helpers import entity_registry as er
         from homeassistant.helpers.json import _orjson_bytes_default_encoder
         from types import MappingProxyType
-        # This scenario has no dependent automation/script lifecycle; those
-        # unrelated services in restored_source's default fixture would make
-        # a device-name selection deliberately unsupported.
-        original_data = self.data
-        async def without_unrelated_consumers(*args, **kwargs):
-            kwargs['source_consumers'] = False
-            return await original_data(*args, **kwargs)
-        self.data = without_unrelated_consumers
         runtime, mapping, _, _, _ = await self.restored_source()
         hass = self.f.hass
         entries = []
