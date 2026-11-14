@@ -24,7 +24,8 @@ class DirectoryAliasTests(unittest.IsolatedAsyncioTestCase):
         self.root = self.parent / 'config'
         self.root.mkdir()
         (self.root / 'configuration.yaml').write_text(
-            "alias_fixture: {}\nscript:\n  fixture:\n    alias: !secret fixture_name\n    sequence:\n      - variables:\n          source: \"{{ states('sensor.old') }}\"\n")
+            "alias_fixture: {}\nscript:\n  fixture:\n    alias: !secret fixture_name\n    sequence:\n      - variables:\n          source: \"{{ states('sensor.old') }}\"\n"
+            "template:\n  - sensor:\n      - unique_id: scope_test\n        state: \"{{ states('sensor.old') }}\"\n")
         (self.root / 'secrets.yaml').write_text('fixture_name: synthetic_private_value\n')
         self.components = self.root / 'custom_components'
         self.target = self.components / 'fixture' / 'integrations' / 'alias_fixture'
@@ -66,12 +67,30 @@ class DirectoryAliasTests(unittest.IsolatedAsyncioTestCase):
         bundle = await validation.async_validate_proposed_with_template_state_sources(
             hass, self.plan, {'sensor.old': 'sensor.new'}, self.parent, with_state_program=True)
         native = bundle.receipt
-        self.assertEqual(native.changed_domains, ('script',))
+        self.assertEqual(native.changed_domains, ('script', 'template'))
         self.assertEqual(native.source_links, receipt.source_links)
         validation.assert_validation_current(native)
         (self.target / '__init__.py').write_text('VALUE = 2\n')
         with self.assertRaises(validation.YAMLValidationError):
             validation.assert_validation_current(native)
+
+    async def test_native_template_secret_refused_without_exposing_value(self):
+        config = self.root / 'configuration.yaml'
+        text = config.read_text()
+        text = text.replace("state: \"{{ states('sensor.old') }}\"", 'state: !secret template_state')
+        config.write_text(text)
+        (self.root / 'secrets.yaml').write_text(
+            'fixture_name: fixture\ntemplate_state: \"{{ states(\'sensor.old\') }}\"\n')
+        plan = planner.plan_yaml(self.root, {'sensor.old': 'sensor.new'})
+        async def executor(function, *args):
+            return await asyncio.to_thread(function, *args)
+        hass = SimpleNamespace(config=SimpleNamespace(config_dir=str(self.root)),
+                               async_add_executor_job=executor)
+        with self.assertRaises(validation.YAMLValidationError) as error:
+            await validation.async_validate_proposed_with_template_state_sources(
+                hass, plan, {'sensor.old': 'sensor.new'}, self.parent, with_state_program=True)
+        self.assertNotIn("states('sensor.old')", str(error.exception))
+        self.assertNotIn("states('sensor.old')", str(getattr(error.exception, '__notes__', ())))
 
     async def test_candidate_staging_preserves_alias_and_fence(self):
         storage = self.root / '.storage'

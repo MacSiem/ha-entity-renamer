@@ -2,6 +2,7 @@
 import importlib
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import test_native_input_baseline as fixture
 
@@ -43,6 +44,16 @@ class TemplateSecretScopeTests(unittest.TestCase):
                 self.run_scope(files)
             self.assertNotIn('secret_name', str(error.exception))
             self.assertNotIn('PRIVATE_ENV', str(error.exception))
+
+    def test_native_inventory_mismatch_cannot_authorize_scope(self):
+        with fixture.scratch() as directory:
+            root = Path(directory)
+            (root / 'configuration.yaml').write_text(
+                'template: [{sensor: [{unique_id: x, state: "1"}]}]\n')
+            worker = importlib.import_module(fixture.PACKAGE + '.yaml_validation_worker')
+            with patch.object(worker, '_template_source_projection', return_value=[]):
+                with self.assertRaisesRegex(ValueError, 'secret_scope_unverified'):
+                    subject.native_state_descriptors({}, root, source_paths=('configuration.yaml',))
 
     def test_unrecognized_template_shape_and_missing_source_fail_closed(self):
         with self.assertRaises(ValueError):
