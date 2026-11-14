@@ -49,7 +49,8 @@ class ActivationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(script.inode, os.fstat(source_pin).st_ino)
                 before, after = parent / 'before', parent / 'after'
                 before.mkdir(); after.mkdir()
-                files, directories = await asyncio.to_thread(validation._stage, root, reverse, before, after)
+                files, directories, links = await asyncio.to_thread(validation._stage, root, reverse, before, after)
+                self.assertFalse(links)
                 self.assertTrue(any(row[0] == 'scripts.yaml' for row in files))
                 # Source identity changes after capture must always fail closed.
                 replacement = root / 'replacement.yaml'
