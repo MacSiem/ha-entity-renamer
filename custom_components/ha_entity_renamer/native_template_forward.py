@@ -107,7 +107,8 @@ class _UnchangedConsumers:
         # _runtime_sample's absent-component path cannot prove loaded emptiness.
         for domain in ('automation', 'script'):
             if domain in self.loaded or evidence.ledger.keys_for_native_projection(domain):
-                family, token = _runtime_family(self.hass, domain, owned_automation=owned_automation)
+                family, token = _runtime_family(self.hass, domain, owned_automation=owned_automation,
+                                                include_row_diagnostics=False)
                 _need(family.status == 'COMPLETE' and token is not None,
                       domain + '_runtime_unqualified')
         bound = await async_bind_original_runtime(self.hass, receipt, evidence, guard=guard, owned_automation=owned_automation)

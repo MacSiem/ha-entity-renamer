@@ -232,7 +232,7 @@ def _runtime_row_diagnostics(hass, domain, *, owned_automation=None):
     return tuple(sorted(result, key=lambda row: str(row[0])))
 
 
-def _runtime_family(hass, domain, *, owned_automation=None):
+def _runtime_family(hass, domain, *, owned_automation=None, include_row_diagnostics=True):
     """Reuse exact native consumer projections without executing user actions."""
     from homeassistant.const import __version__
     from homeassistant.helpers.entity_component import DATA_INSTANCES
@@ -260,6 +260,11 @@ def _runtime_family(hass, domain, *, owned_automation=None):
     except PermissionError:
         return _unknown(domain, 'read_access_denied', denied=True), None
     except (ValueError, KeyError, TypeError, AttributeError):
+        # Strict prepare admits only COMPLETE and discards these explanatory
+        # rows. Do not repeat the expensive native proof for every row on the
+        # event loop when the caller is already obliged to refuse UNKNOWN.
+        if not include_row_diagnostics:
+            return _unknown(domain, 'runtime_inventory_unavailable'), None
         try:
             diagnostics = _runtime_row_diagnostics(hass, domain, owned_automation=owned_automation)
         except (PermissionError, ValueError, KeyError, TypeError, AttributeError):
