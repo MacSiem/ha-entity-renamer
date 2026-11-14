@@ -209,12 +209,39 @@ class DiscoveryNativeTests(unittest.IsolatedAsyncioTestCase):
                 store._write_lock.release()
 
     async def test_native_delayed_write_settles_before_observation(self):
-        store = self.fixture.managers[0]._store
-        store.async_delay_save(self.fixture.managers[0]._data_to_save, 0.05)
-        with patch.object(subject, '_SETTLE_INTERVAL', 0.02):
+        manager = self.fixture.managers[2]
+        store = manager._store
+        store.async_delay_save(manager._data_to_save, 0.05)
+        with patch.object(subject, '_SETTLE_INTERVAL', 0.02), \
+             patch.object(subject, '_SETTLE_TIMEOUT', 2):
             observed = await self.observe()
         self.assertFalse(subject._Managers.pending_for(store))
-        self.assertEqual(observed.files[0].raw, Path(store.path).read_bytes())
+        self.assertEqual(observed.files[2].raw, Path(store.path).read_bytes())
+
+    async def test_active_native_write_settles_before_observation(self):
+        from homeassistant.helpers.storage import Store
+        manager = self.fixture.managers[2]
+        store = manager._store
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = Store._async_write_data
+        async def gated_write(instance, data):
+            if instance is store:
+                entered.set()
+                await release.wait()
+            return await original(instance, data)
+        with patch.object(Store, '_async_write_data', gated_write), \
+             patch.object(subject, '_SETTLE_INTERVAL', 0.02), \
+             patch.object(subject, '_SETTLE_TIMEOUT', 2):
+            writer = asyncio.create_task(store.async_save(manager._data_to_save()))
+            await entered.wait()
+            self.assertTrue(store._write_lock.locked())
+            observer = asyncio.create_task(self.observe())
+            await asyncio.sleep(0.05)
+            self.assertFalse(observer.done())
+            release.set()
+            await writer
+            observed = await observer
+        self.assertEqual(observed.files[2].raw, Path(store.path).read_bytes())
 
     async def test_wait_rejects_manager_drift_and_releases_on_cancel(self):
         store = self.fixture.managers[0]._store
