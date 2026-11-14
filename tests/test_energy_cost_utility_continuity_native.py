@@ -105,9 +105,13 @@ class EnergyCostUtilityContinuityTests(ControlledActualGraphTests):
                           'registry_id':cost_identity[0], 'unique_id':cost_identity[1]}
         # Model the transient unavailable publication of the real Powercalc source.
         source_state = hass.states.get(new_energy)
-        hass.states.async_set(new_energy, 'unavailable', source_state.attributes)
+        placeholder = {key: value for key, value in source_state.attributes.items()
+                       if key != 'unit_of_measurement'}
+        placeholder['restored'] = True
+        hass.states.async_set(new_energy, 'unavailable', placeholder)
         await hass.async_block_till_done()
         self.assertEqual(hass.states.get(new_energy).state, 'unavailable')
+        self.assertNotIn('unit_of_measurement', hass.states.get(new_energy).attributes)
         captured = capture(hass, costs[0], continuity_row)
         zero_events = []
         from homeassistant.helpers.event import async_track_state_change_event

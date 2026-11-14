@@ -160,6 +160,19 @@ class EnergyCostContinuityNativeTests(ControlledActualGraphTests):
         await hass.async_block_till_done()
         self.assertEqual(hass.states.get(row['after_source']).state, 'unknown')
         unknown = hass.states.get(row['after_source'])
+        for key, wrong in (('unit_of_measurement', 'Wh'), ('state_class', 'measurement')):
+            mismatch = dict(unknown.attributes)
+            mismatch[key] = wrong
+            hass.states.async_set(row['after_source'], 'unavailable', mismatch)
+            with self.assertRaisesRegex(PersistenceError, 'energy_generated_cost_continuity_unqualified'):
+                capture(hass, cost, row)
+            missing = dict(unknown.attributes)
+            missing.pop(key, None)
+            hass.states.async_set(row['after_source'], '112', missing)
+            with self.assertRaisesRegex(PersistenceError, 'energy_generated_cost_continuity_unqualified'):
+                capture(hass, cost, row)
+            hass.states.async_set(row['after_source'], 'unavailable', missing)
+            capture(hass, cost, row)
         hass.states.async_set(row['after_source'], 'invalid', unknown.attributes)
         with self.assertRaisesRegex(PersistenceError, 'energy_generated_cost_continuity_unqualified'):
             capture(hass, cost, row)

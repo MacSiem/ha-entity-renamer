@@ -30,6 +30,9 @@ def capture(hass, entity, row):
     except (InvalidOperation, ValueError):
         _need(False)
     for key in ('unit_of_measurement', 'state_class'):
+        # Restored placeholders can omit capabilities until the entity starts.
+        if source.state in (STATE_UNKNOWN, STATE_UNAVAILABLE) and key not in source.attributes:
+            continue
         _need(source.attributes.get(key) == baseline.attributes.get(key))
     _need(entity.native_value is not None and entity.last_reset is not None)
     return (source, baseline, entity.native_value, entity.last_reset)
