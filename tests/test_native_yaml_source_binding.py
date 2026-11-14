@@ -164,6 +164,19 @@ automation:
         self.assertFalse(result.verified)
         self.assertIn('runtime_source_inventory_unverified', result.blockers)
 
+    async def test_native_limit_is_not_reported_as_source_change(self):
+        from unittest.mock import AsyncMock, patch
+        receipt, evidence = await self.prepare()
+        package = fixture.fixtures.PACKAGE
+        binding = importlib.import_module(package + '.yaml_source_binding')
+        native = importlib.import_module(package + '.native_input_baseline')
+        with patch(package + '.native_discovery_inputs.async_observe_discovery_inputs',
+                   new=AsyncMock(side_effect=native.NativeInputBaselineError('native_input_limit'))):
+            result = await binding.async_bind_original_runtime(self.f.hass, receipt, evidence,
+                                                              guard=lambda: None)
+        self.assertEqual(result.blockers, ('native_input_limit',))
+        self.assertFalse(result.verified)
+
     async def test_late_source_edit_and_revoked_guard_do_not_rebase_evidence(self):
         receipt, evidence = await self.prepare()
         binding = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_source_binding')

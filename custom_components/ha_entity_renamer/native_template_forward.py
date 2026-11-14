@@ -119,7 +119,7 @@ class _UnchangedConsumers:
                 'runtime_source_native_projection_unavailable', 'runtime_source_projection_mismatch',
                 'runtime_source_registry_identity_unverified', 'runtime_source_inventory_mismatch',
                 'runtime_source_disabled_entry_unverified', 'runtime_source_inventory_unverified',
-                'runtime_source_inputs_changed', 'runtime_source_observation_changed',
+                'runtime_source_inputs_changed', 'runtime_source_observation_changed', 'native_input_limit',
                 'runtime_source_runtime_unavailable'})
             logging.getLogger(__name__).warning('Native source binding refused: %s',
                 tuple(code for code in bound.blockers if code in safe_codes))

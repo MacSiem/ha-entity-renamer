@@ -22,6 +22,7 @@ from pathlib import Path
 import stat
 from threading import Event, Lock
 
+from .native_json_limits import MAX_JSON_NODES
 from .installed_cost_trace import current_trace, run_with_trace
 from .yaml_plan import Limits, _Reader, _relative
 from .yaml_validation import ValidationReceipt, assert_validation_current
@@ -81,7 +82,7 @@ def _loads(raw, limit=MAX_FILE_BYTES):
 def _bounded_json(value, depth=0, budget=None):
     # Bound nesting and object count, including valid JSON that expands in RAM.
     if budget is None:
-        budget = [1_000_000]
+        budget = [MAX_JSON_NODES]
     budget[0] -= 1
     if budget[0] < 0 or depth > 64:
         _fail('native_input_limit')

@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 
+from .native_json_limits import MAX_JSON_NODES
 from .helper_native import NativeConfigMutation
 from .helper_transaction import PreparedHelper
 
@@ -35,7 +36,7 @@ def _fail(reason):
 
 def _bounded(value, depth=0, budget=None):
     if budget is None:
-        budget = [1_000_000]
+        budget = [MAX_JSON_NODES]
     budget[0] -= 1
     if depth > 64 or budget[0] < 0:
         _fail('limit')

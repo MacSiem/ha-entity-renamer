@@ -401,6 +401,7 @@ async def async_bind_original_runtime(hass, receipt, evidence, *, guard, owned_a
     """
     import asyncio
     import hashlib
+    from .native_input_baseline import NativeInputBaselineError
     from .native_discovery_inputs import (async_observe_discovery_inputs,
                                           assert_discovery_managers_current)
     from .yaml_validation import _settled_executor, assert_validation_current
@@ -430,7 +431,9 @@ async def async_bind_original_runtime(hass, receipt, evidence, *, guard, owned_a
         from .yaml_validation_worker import _checker_diagnostic
         logging.getLogger(__name__).warning('Native source inputs unavailable: %s',
                                            _checker_diagnostic(error))
-        return result(blockers=('runtime_source_inputs_changed',))
+        reason = ('native_input_limit' if isinstance(error, NativeInputBaselineError)
+                  and str(error) == 'native_input_limit' else 'runtime_source_inputs_changed')
+        return result(blockers=(reason,))
     try:
         first = _runtime_sample(hass, evidence, observed, owned_automation=owned_automation)
         await asyncio.sleep(0)

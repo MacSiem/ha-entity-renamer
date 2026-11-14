@@ -16,6 +16,7 @@ import json
 import math
 import re
 
+from .native_json_limits import MAX_JSON_NODES
 from .native_registry import PreparedRegistryChange
 
 MAX_DOCUMENT_BYTES = 32 * 1024 * 1024
@@ -44,7 +45,7 @@ def _pairs(items):
 
 def _bounded(value, depth=0, budget=None):
     if budget is None:
-        budget = [1_000_000]
+        budget = [MAX_JSON_NODES]
     budget[0] -= 1
     if depth > 64 or budget[0] < 0:
         _fail('registry_transition_limit')
