@@ -57,7 +57,7 @@ def _freeze(value, mapping, source_templates, *, depth=0, template_cache=None, s
     """Freeze configuration only; never inspect telemetry or execute templates."""
     from homeassistant.helpers.template import Template
     from homeassistant.helpers.trigger_template_entity import ValueTemplate
-    from homeassistant.util.yaml.objects import NodeStrClass
+    from homeassistant.util.yaml.objects import NodeListClass, NodeStrClass
     _need(depth < 40)
     if type(value) in (Template, ValueTemplate):
         text = value.template
@@ -89,7 +89,7 @@ def _freeze(value, mapping, source_templates, *, depth=0, template_cache=None, s
                 _freeze(value.value, mapping, source_templates, depth=depth + 1, template_cache=template_cache, selected_pattern=selected_pattern))
     if type(value) is timedelta:
         return ('timedelta', value.total_seconds())
-    if type(value) in (list, tuple):
+    if type(value) in (list, tuple, NodeListClass):
         return tuple(_freeze(v, mapping, source_templates, depth=depth + 1, template_cache=template_cache, selected_pattern=selected_pattern) for v in value)
     if isinstance(value, dict):
         _need(all(type(k) in (str, NodeStrClass) for k in value))
