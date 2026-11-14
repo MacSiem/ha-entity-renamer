@@ -86,6 +86,13 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
                     fence.check()
             finally:
                 fence.close()
+            fence = module.NativeForeignConsumers(hass, mapping, {})
+            try:
+                fence.mapping['sensor.old'] = 'sensor.changed'
+                with self.assertRaises(tx.Refused):
+                    fence.check()
+            finally:
+                fence.close()
             for changed in ("{{ states('sensor.old') }}", "{{ states(variable) }}", "{{ 1 }}"):
                 fence = module.NativeForeignConsumers(hass, mapping, {})
                 try:
