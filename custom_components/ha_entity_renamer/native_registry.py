@@ -576,8 +576,15 @@ class NativeRegistryBridge:
         from .recorder_guard import prepare as recorder_prepare, verify_rollback
         from .history_guard import _project
 
-        changes = [self._prepare_change(kind, identity, updates, guard)
-                   for kind, identity, updates in requests]
+        changes = []
+        guard()
+        for kind, identity, updates in requests:
+            changes.append(self._prepare_change(kind, identity, updates, lambda: None))
+            if len(changes) % 10 == 0:
+                await asyncio.sleep(0)
+                guard()
+                for existing in changes:
+                    self._fresh(existing, existing.before, lambda: None)
         if len({(c.kind, c.identity) for c in changes}) != len(changes):
             raise RegistryConflict('duplicate_registry_identity')
         mappings = [c.mapping for c in changes if c.mapping]
