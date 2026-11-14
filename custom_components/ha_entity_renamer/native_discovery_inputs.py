@@ -238,11 +238,9 @@ Cancellation drains executor work before any held descriptor can be released.
         raise
     except PermissionError:
         raise PermissionError('native_discovery_inputs_permission_denied') from None
-    except NativeInputBaselineError as error:
-        if str(error) == 'native_input_limit':
-            raise DiscoveryNativeInputsError('native_input_limit') from None
-        _reject()
     except Exception as error:
+        if isinstance(error, NativeInputBaselineError) and str(error) == 'native_input_limit':
+            raise DiscoveryNativeInputsError('native_input_limit') from None
         from .yaml_validation_worker import _checker_diagnostic
         logging.getLogger(__name__).warning('Native discovery observation unavailable: %s',
                                            _checker_diagnostic(error))
