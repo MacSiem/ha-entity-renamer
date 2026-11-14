@@ -1,0 +1,187 @@
+import unittest
+from custom_components.ha_entity_renamer.dashboard_plan import plan_dashboard
+
+
+class CustomDashboardTests(unittest.TestCase):
+    def test_owned_slots_inverse_and_foreign(self):
+        original = {'views': [{'cards': [
+            {'type': 'custom:button-card', 'entity': 'sensor.old',
+             'name': 'sensor.old', 'styles': {'card': ['color: red']},
+             'triggers_update': ['sensor.old'],
+             'variables': {'entity_ids': ['sensor.old'], 'floor_entity_ids': {'up': ['sensor.old']}},
+             'label': "[[[ return states['sensor.old'].state; ]]]",
+             'tap_action': {'action': 'perform-action', 'perform_action': 'homeassistant.update_entity',
+                            'target': {'entity_id': 'sensor.old'}}},
+            {'type': 'custom:bubble-card', 'entity': 'sensor.old',
+             'sub_button': [{'entity': 'sensor.old', 'conditions': [{'entity': 'sensor.old', 'state': 'on'}]}]},
+        ]}]}
+        forward = plan_dashboard(original, {'sensor.old': 'sensor.new'})
+        self.assertFalse(forward.markers)
+        self.assertEqual(len(forward.changes), 9)
+        self.assertEqual(forward.value['views'][0]['cards'][0]['name'], 'sensor.old')
+        reverse = plan_dashboard(forward.value, {'sensor.new': 'sensor.old'})
+        self.assertFalse(reverse.markers)
+        self.assertEqual(reverse.value, original)
+
+    def test_dynamic_js_and_unknown_variable_block(self):
+        for extra in ({'label': "[[[ return states[prefix + 'old'].state; ]]]"},
+                      {'variables': {'unknown': 'sensor.old'}},
+                      {'custom_fields': {'x': 'sensor.old'}}):
+            result = plan_dashboard({'views': [{'cards': [{'type': 'custom:button-card', **extra}]}]},
+                                    {'sensor.old': 'sensor.new'})
+            self.assertTrue(result.markers)
+            self.assertFalse(result.changes)
+
+if __name__ == '__main__': unittest.main()
+
+class ObservedLabelTests(unittest.TestCase):
+    def test_bounded_label_reference_spans_and_dynamic_refusal(self):
+        import hashlib
+        from unittest.mock import patch
+        from custom_components.ha_entity_renamer import dashboard_custom as adapter
+        ids = [f'sensor.item_{i}' for i in range(24)]
+        text = '[[[ const L = [' + ','.join(repr(x) for x in ids[:15]) + '];' + ''.join(
+            f" states['{item}'];" for item in ids[15:22]) + ''.join(
+            f" states['{item}' + k];" for item in ids[22:]) + ' return L; ]]]'
+        normalized = adapter._ENTITY_LITERAL.sub(lambda m: m['q'] + '<entity>' + m['q'], text)
+        digest = hashlib.sha256(normalized.encode()).hexdigest()
+        with patch.object(adapter, '_OBSERVED_LABEL', digest):
+            forward, error = adapter.plan_button_expression(text, {'sensor.item_0': 'sensor.changed'})
+            self.assertIsNone(error)
+            self.assertIn("'sensor.changed'", forward)
+            reverse, error = adapter.plan_button_expression(forward, {'sensor.changed': 'sensor.item_0'})
+            self.assertIsNone(error)
+            self.assertEqual(reverse, text)
+            _, error = adapter.plan_button_expression(text, {'sensor.item_22cry': 'sensor.changed'})
+            self.assertEqual(error, 'dynamic_button_state_reference')
+            _, error = adapter.plan_button_expression(text, {'sensor.other':'sensor.item_22cry'})
+            self.assertEqual(error, 'dynamic_button_state_reference')
+            _, error = adapter.plan_button_expression(text + ' ', {'sensor.item_0': 'sensor.changed'})
+            self.assertEqual(error, 'unsupported_button_javascript')
+
+class NestedDashboardTests(unittest.TestCase):
+    def test_mod_nested_fields_and_popup_content(self):
+        original = {'views': [{'sections': [{'type':'grid', 'cards': [
+            {'type':'custom:mod-card', 'card_mod': {'style':'color: red'}, 'card':
+             {'type':'custom:button-card', 'custom_fields': {'rail': {'do_not_eval': True, 'card':
+              {'type':'vertical-stack', 'cards': [{'type':'custom:button-card',
+               'variables': {'source_entities':['sensor.old']},
+               'tap_action': {'action':'fire-dom-event', 'browser_mod': {'service':'browser_mod.popup',
+                   'data': {'title':'sensor.old', 'content': {'type':'entities',
+                            'entities':[{'entity':'sensor.old'}]}}}}}]}}}}}]}]}]}
+        result = plan_dashboard(original, {'sensor.old':'sensor.new'})
+        self.assertFalse(result.markers)
+        self.assertEqual(len(result.changes), 2)
+        reverse = plan_dashboard(result.value, {'sensor.new':'sensor.old'})
+        self.assertFalse(reverse.markers)
+        self.assertEqual(reverse.value, original)
+
+class FiniteDashboardTests(unittest.TestCase):
+    def test_foreign_literal_tuple_loop_and_selected_guard(self):
+        from custom_components.ha_entity_renamer.dashboard_custom import unchanged_finite_jinja
+        template = "{% for e, label in [('sensor.other', 'Other')] %}{{ states(e) }}{% endfor %}"
+        self.assertTrue(unchanged_finite_jinja(template, {'sensor.old':'sensor.new'}))
+        self.assertFalse(unchanged_finite_jinja(template, {'sensor.other':'sensor.new'}))
+        dynamic = template + "{{ states[prefix ~ suffix] }}"
+        self.assertFalse(unchanged_finite_jinja(dynamic, {'sensor.old':'sensor.new'}))
+
+    def test_selected_reference_in_foreign_card_is_migrated(self):
+        result = plan_dashboard({'views':[{'cards':[{'type':'custom:mini-graph-card',
+            'entities':['sensor.old']}]}]}, {'sensor.old':'sensor.new'})
+        self.assertFalse(result.markers)
+        self.assertEqual(len(result.changes), 1)
+
+    def test_unknown_button_template_is_not_assumed_safe(self):
+        result = plan_dashboard({'views':[{'cards':[{'type':'custom:button-card',
+            'template':'missing'}]}]}, {'sensor.old':'sensor.new'})
+        self.assertTrue(result.markers)
+
+class ForeignFilterTests(unittest.TestCase):
+    def test_domain_only_auto_entities_keeps_domain_membership(self):
+        card = {'type':'custom:auto-entities', 'filter':{'include':[{'domain':'sensor'}], 'exclude':[]},
+                'card':{'type':'entities'}}
+        result = plan_dashboard({'views':[{'cards':[card]}]}, {'sensor.old':'sensor.new'})
+        self.assertFalse(result.markers)
+        self.assertEqual(result.value['views'][0]['cards'][0], card)
+
+    def test_battery_entity_id_filter_membership_change_refused(self):
+        card = {'type':'custom:battery-state-card', 'filter':{'exclude':[
+            {'name':'entity_id', 'operator':'contains', 'value':'old'}], 'include':[]}}
+        result = plan_dashboard({'views':[{'cards':[card]}]}, {'sensor.old':'sensor.new'})
+        self.assertEqual(result.markers[0].code, 'dynamic_dashboard_selector')
+
+    def test_glob_membership_change_blocks(self):
+        card = {'type':'custom:flex-table-card', 'entities':{'include':'sensor.n*'}}
+        result = plan_dashboard({'views':[{'cards':[card]}]}, {'sensor.old':'sensor.new'})
+        self.assertTrue(result.markers)
+        card['entities']['include'] = 'sensor.*'
+        self.assertFalse(plan_dashboard({'views':[{'cards':[card]}]}, {'sensor.old':'sensor.new'}).markers)
+
+    def test_unrecognized_js_and_template_state_are_blocked(self):
+        card = {'type':'custom:button-card', 'label':"[[[ return states[prefix + suffix]; ]]]"}
+        self.assertTrue(plan_dashboard({'views':[{'cards':[card]}]}, {'sensor.old':'sensor.new'}).markers)
+        config = {'button_card_templates': {'x':{'label':"[[[ return states[key]; ]]]"}},
+                  'views':[{'cards':[{'type':'custom:button-card','template':'x'}]}]}
+        self.assertTrue(plan_dashboard(config, {'sensor.old':'sensor.new'}).markers)
+
+class DashboardGuardRegressionTests(unittest.TestCase):
+    def test_foreign_source_target_enters_computed_prefix(self):
+        import hashlib
+        from unittest.mock import patch
+        from custom_components.ha_entity_renamer import dashboard_custom as dc
+        text = "[[[ return states['sensor.group_' + user.id]; ]]]"
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        with patch.object(dc, '_OBSERVED_UNCHANGED', frozenset({digest})):
+            _, code = dc.plan_button_expression(text, {'sensor.other':'sensor.group_a'})
+            self.assertEqual(code, 'dynamic_button_state_reference')
+        target = "[[[ return ('sensor.group_' + user.id); ]]]"
+        with patch.object(dc, '_COMPUTED_TARGETS', frozenset({hashlib.sha256(target.encode()).hexdigest()})):
+            self.assertFalse(dc.unchanged_computed_target(target, {'sensor.other':'sensor.group_a'}))
+
+    def test_direct_foreign_target_reference_is_not_suppressed(self):
+        from custom_components.ha_entity_renamer.dashboard_custom import plan_button_expression
+        _, code = plan_button_expression("[[[ return states['sensor.target'].state; ]]]",
+                                         {'sensor.other':'sensor.target'})
+        self.assertEqual(code, 'target_reference_preexisting')
+
+    def test_jinja_target_and_nested_shadow_are_not_suppressed(self):
+        from custom_components.ha_entity_renamer.dashboard_custom import unchanged_finite_jinja
+        finite = "{% for e, label in [('sensor.target', 'x')] %}{{ states(e) }}{% endfor %}"
+        self.assertFalse(unchanged_finite_jinja(finite, {'sensor.other':'sensor.target'}))
+        shadow = "{% for e in ['sensor.foreign'] %}{% for e in variable_list %}{{ states(e) }}{% endfor %}{% endfor %}"
+        self.assertFalse(unchanged_finite_jinja(shadow, {'sensor.old':'sensor.new'}))
+
+    def test_opaque_bracket_access_in_style_refused(self):
+        card = {'type':'custom:button-card', 'styles':{'card':[
+            {'color':"[[[ return this['hass']['states'][key].state; ]]]"}]}}
+        result = plan_dashboard({'views':[{'cards':[card]}]}, {'sensor.old':'sensor.new'})
+        self.assertIn('unsupported_button_javascript', {marker.code for marker in result.markers})
+
+class DashboardStyleSafetyTests(unittest.TestCase):
+    def test_foreign_bubble_style_target_cannot_become_selected(self):
+        import hashlib
+        from unittest.mock import patch
+        from custom_components.ha_entity_renamer import dashboard_custom as dc
+        text = "${hass.states['sensor.target']?.state}"
+        with patch.object(dc, '_BUBBLE_STYLES', frozenset({hashlib.sha256(text.encode()).hexdigest()})):
+            self.assertFalse(dc.unchanged_bubble_style(text, {'sensor.other':'sensor.target'}))
+
+    def test_opaque_custom_field_and_nested_state_style_refuse(self):
+        evil = "[[[ return this['hass']['states'][key].state; ]]]"
+        for extra in ({'custom_fields':{'x':evil}}, {'state':[{'value':'on','styles':{'card':[{'color':evil}]}}]}):
+            with self.subTest(extra=extra):
+                result=plan_dashboard({'views':[{'cards':[{'type':'custom:button-card',**extra}]}]},
+                                      {'sensor.old':'sensor.new'})
+                self.assertTrue(result.markers)
+
+
+class ForeignDictionaryKeyTests(unittest.TestCase):
+    def test_selected_source_or_target_as_unknown_key_is_blocked(self):
+        for key in ('sensor.old', 'sensor.new'):
+            for card in ({'type':'custom:mini-graph-card', 'foreign':{key:0}},
+                         {'type':'custom:android-tv-card', 'foreign':{key:0}},
+                         {'type':'custom:button-card', 'styles':{key:0}}):
+                with self.subTest(key=key, kind=card['type']):
+                    result = plan_dashboard({'views':[{'cards':[card]}]}, {'sensor.old':'sensor.new'})
+                    self.assertTrue(result.markers)
+                    self.assertFalse(result.changes)

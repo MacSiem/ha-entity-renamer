@@ -3,7 +3,7 @@ const assert=require('node:assert/strict');
 const {JSDOM,VirtualConsole}=require('jsdom');
 function fixture() {
  const dom=new JSDOM('',{runScripts:'dangerously',url:'http://qa.invalid/',virtualConsole:new VirtualConsole()});
- dom.window.eval(require('node:fs').readFileSync(require('node:path').join(__dirname,'../ha-entity-renamer.js'),'utf8'));
+ dom.window.eval(require('node:fs').readFileSync(require('node:path').join(__dirname,'../custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8'));
  const card=dom.window.document.createElement('ha-entity-renamer');
  card._hass={user:{id:'qa',is_admin:true},language:'en',themes:{},states:{}};
  dom.window.document.body.append(card);
@@ -44,5 +44,15 @@ test('visual options preserve unknown fields, focused title and synchronous echo
   assert.equal(received.default_tab,'automatic');assert.equal(received.future.keep,true);
   title.focus();title.setSelectionRange(2,4);editor.setConfig({...received});
   assert.equal(root.querySelector('#cf_title'),title);assert.equal(root.activeElement,title);assert.equal(title.selectionStart,2);
+ }finally{dom.window.close();}
+});
+
+
+test('editor follows HA theme changes for native controls',()=>{
+ const {dom}=fixture();try {
+  const editor=dom.window.document.createElement('ha-entity-renamer-editor');
+  editor.setConfig({type:'custom:ha-entity-renamer'});dom.window.document.body.append(editor);
+  editor.hass={language:'en',themes:{darkMode:true}};assert.equal(editor.classList.contains('bento-dark'),true);
+  editor.hass={language:'en',themes:{darkMode:false}};assert.equal(editor.classList.contains('bento-dark'),false);
  }finally{dom.window.close();}
 });

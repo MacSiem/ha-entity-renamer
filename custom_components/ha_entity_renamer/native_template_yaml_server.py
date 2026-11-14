@@ -1,0 +1,1261 @@
+"""Private server-owned registry -> modern Template YAML transaction.
+
+One aggregate YAML graph, one immutable ORIGINAL and one existing journal. This
+is a narrow installed component, not a family readiness or public admission API.
+The Runtime owns its lock and cancellation-drained task through close().
+"""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+from pathlib import Path
+import uuid
+
+from .const import DATA_RUNTIME
+from .transaction import Refused, Plan, Step, PhaseContext, Position
+from .native_template_reverse import _authorize
+from .native_template_forward import _UnchangedConsumers
+from .native_input_baseline import _drained, _Managers, NativeInputBaseline, NativeInputFile
+from .native_input_observation import async_observe_native_inputs
+from .native_registry_receipts import (RegistryReceiptChain, RegistryReceiptError,
+    RegistryRawObservation, native_registry_receipt_store)
+from .native_template_yaml import (NativeTemplateYAMLRuntimeReadback,
+    compose_template_yaml_coordinator)
+from .native_template_composition import TemplateComposition, MixedTemplateComposition, encode_composition
+from .prepared import native_prepared_store, encode_change, decode_change, canonical_digest
+from .journal import native_journal
+
+
+def _need(value, reason):
+    if not value:
+        raise Refused('template_yaml_server_' + reason) from None
+
+
+async def _admit_foreign(server, device_names):
+    """Qualify coexisting native consumers against this exact selection."""
+    if not ({'mqtt', 'rest', 'command_line'} & set(server.hass.config.components)):
+        return
+    from .native_foreign_consumers import NativeForeignConsumers
+    from .yaml_plan import plan_yaml
+    server.foreign = NativeForeignConsumers(server.hass, server.mapping, device_names)
+    root = Path(server.hass.config.config_dir).resolve()
+    yaml = await _drained(server.hass.async_add_executor_job,
+                          lambda: plan_yaml(root, server.mapping))
+    server.foreign.check()
+    _need(yaml.ready, 'foreign_yaml_scope_unverified')
+    await _drained(server.hass.async_add_executor_job,
+                   lambda: server.foreign.bind_sources(yaml, root))
+    server.foreign.check(require_sources=True)
+
+
+def _mixed_composition(value):
+    from .native_template_state_composition import MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition
+    from .native_script_program_composition import ScriptTemplateStateComposition
+    from .native_automation_program_composition import AutomationTemplateStateComposition
+    from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    return type(value) in (MixedTemplateComposition, MixedTemplateStateComposition, ExternalStateComposition, ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ControlledPowercalcComposition, ScriptTemplateStateComposition, AutomationTemplateStateComposition)
+
+
+def _controlled_reload(value):
+    from .native_template_state_composition import ControlledReloadComposition, ControlledReloadEntryComposition, ExternalStateComposition
+    from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    return (type(value) in (ControlledReloadComposition, ControlledReloadEntryComposition, ControlledScriptComposition, ControlledPowercalcComposition)
+            or type(value) is ExternalStateComposition and value.controlled_reload)
+
+
+def _script_prefix_composition(value):
+    from .native_script_program_composition import ScriptTemplateStateComposition
+    from .native_automation_program_composition import AutomationTemplateStateComposition
+    return type(value) in (ScriptTemplateStateComposition, AutomationTemplateStateComposition)
+
+
+def _registry_only_state_plan(plan, composition, receipt):
+    from .native_template_state_composition import TemplateStateComposition
+    return (type(composition) is TemplateStateComposition and not receipt.proposed_files
+            and not receipt.changed_domains and not receipt.unsupported_domains
+            and plan.required_scopes == plan.covered_scopes == plan.verification_adapters == ('registry',)
+            and bool(plan.steps)
+            and all(step.adapter == 'registry' and not step.caused_by for step in plan.steps))
+
+
+def _dashboard_plan(plan):
+    adapters = tuple(step.adapter for step in plan.steps)
+    if (plan.required_scopes != plan.covered_scopes or
+            plan.required_scopes != plan.verification_adapters or
+            any(step.caused_by for step in plan.steps)):
+        return False
+    registry = adapters.count('registry')
+    dashboards = adapters.count('dashboard')
+    if not registry:
+        return False
+    if plan.required_scopes == ('registry', 'dashboard', 'yaml'):
+        return adapters == (('registry',) * registry + ('dashboard',) * dashboards + ('yaml',))
+    if plan.required_scopes == ('registry', 'dashboard'):
+        return adapters == (('registry',) * registry + ('dashboard',) * dashboards)
+    return False
+
+
+def _external_state_plan(plan, composition):
+    from .native_template_state_composition import ExternalStateComposition
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    if type(composition) is ControlledPowercalcComposition:
+        return bool(composition.external_source_proof) and _controlled_powercalc_plan(plan, composition)
+    if (type(composition) is not ExternalStateComposition
+            or plan.required_scopes != plan.covered_scopes
+            or plan.required_scopes != plan.verification_adapters
+            or any(step.caused_by for step in plan.steps)):
+        return False
+    adapters = tuple(step.adapter for step in plan.steps)
+    registries, helpers, dashboards = (adapters.count(key) for key in ('registry', 'helpers', 'dashboard'))
+    external = dict(composition.external_source_proof)
+    scopes = ('registry',) + (('helpers',) if helpers else ()) + (('dashboard',) if dashboards else ()) + ('yaml',)
+    return (bool(registries) and bool(helpers) == ('homekit' in external)
+            and plan.required_scopes == scopes and adapters == (('registry',) * registries
+                + ('helpers',) * helpers + ('dashboard',) * dashboards + ('yaml',)))
+
+
+def _entry_reload_plan(plan, composition):
+    from .native_template_state_composition import ControlledReloadEntryComposition
+    from .controlled_script_composition import ControlledScriptComposition
+    if (type(composition) not in (ControlledReloadEntryComposition, ControlledScriptComposition)
+            or plan.required_scopes != plan.covered_scopes or plan.required_scopes != plan.verification_adapters
+            or any(step.caused_by for step in plan.steps)):
+        return False
+    adapters = tuple(step.adapter for step in plan.steps)
+    registries, dashboards = adapters.count('registry'), adapters.count('dashboard')
+    scopes = ('registry', 'helpers', 'dashboard', 'yaml') if dashboards else ('registry', 'helpers', 'yaml')
+    return bool(registries and plan.required_scopes == scopes and adapters ==
+                ('registry',) * registries + ('helpers',) + ('dashboard',) * dashboards + ('yaml',))
+
+
+def _controlled_powercalc_plan(plan, composition):
+    """Recognize one bounded queue without granting mutation authority."""
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    if (type(composition) is not ControlledPowercalcComposition
+            or plan.required_scopes != plan.covered_scopes
+            or plan.required_scopes != plan.verification_adapters
+            or any(step.caused_by for step in plan.steps)):
+        return False
+    adapters = tuple(step.adapter for step in plan.steps)
+    registry, helpers = adapters.count('registry'), adapters.count('helpers')
+    energy, dashboards = adapters.count('energy'), adapters.count('dashboard')
+    scopes = ('registry',) + (('helpers',) if helpers else ()) + (('energy',) if energy else ()) + (
+        ('dashboard',) if 'dashboard' in plan.required_scopes else ()) + ('yaml',)
+    if composition.previous.core_version in ('2026.11.0', '2026.11.1'):
+        # Each selected native entry has at most one exact helper preparation.
+        helpers_limit = registry + 1 + (len(composition.external_source_proof) if composition.external_source_proof else 0)
+    else:
+        helpers_limit = len(composition.previous.groups) + 1 + (len(composition.external_source_proof) if composition.external_source_proof else 0)
+    return (registry > 0 and helpers <= helpers_limit and energy in (0, 1)
+            and plan.required_scopes == scopes
+            and adapters == ('registry',) * registry + ('helpers',) * helpers
+                + ('energy',) * energy + ('dashboard',) * dashboards + ('yaml',)
+            and ('dashboard' in scopes or not dashboards))
+
+
+def _registry_mapping(changes, composition, *, dashboard_plan=False):
+    """Decode only the immutable server-selected registry field scope."""
+    from .native_template_state_composition import TemplateStateComposition
+    from .native_script_program_composition import ScriptTemplateStateComposition
+    from .native_automation_program_composition import AutomationTemplateStateComposition
+    from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    powercalc = type(composition) is ControlledPowercalcComposition
+    mixed_names = dashboard_plan and type(composition) in (ScriptTemplateStateComposition, AutomationTemplateStateComposition)
+    names = type(composition) is TemplateStateComposition or mixed_names or _controlled_reload(composition)
+    own_template_profile = type(composition) in (TemplateStateComposition, ScriptTemplateStateComposition,
+                                                  AutomationTemplateStateComposition, ControlledScriptComposition, ControlledPowercalcComposition)
+    from .native_registry_transition import (_native_script_default_name_move,
+        _native_script_suggested_move, _native_script_unique_move)
+    own_entity = [change for change in changes
+                  if change.before.get('platform') in ('template', 'automation', 'script') and change.mapping]
+    direct_automation = (_controlled_reload(composition) and len(own_entity) == 1
+                         and own_entity[0].before.get('platform') == 'automation')
+    if own_entity:
+        _need((own_template_profile or direct_automation)
+              and len(own_entity) == 1 and (powercalc or len(changes) in (1, 2)),
+              'own_template_mapping_required')
+    mapping = {}
+    for change in changes:
+        before, after = change.before, change.after
+        delta = {key for key in set(before) | set(after) if before.get(key) != after.get(key)}
+        _need(before.get('id') == after.get('id') == change.identity, 'source_uuid_required')
+        script_move = (change.kind == 'entity' and len(own_entity) == 1
+                       and change is own_entity[0] and own_template_profile
+                       and _native_script_unique_move(before, after))
+        default_name_move = script_move and _native_script_default_name_move(before, after)
+        if change.kind == 'entity':
+            allowed = {'entity_id', 'modified_at'} | ({'name'} if names else set())
+            if powercalc and before.get('platform') == 'powercalc' and change.mapping:
+                from .native_registry_transition import _powercalc_group_suggested_move
+                from .controlled_powercalc_composition import registry_population_kind
+                _need(_powercalc_group_suggested_move(before, after) and registry_population_kind(
+                    composition, before['entity_id'], change.identity,
+                    composition.previous.core_version) is not None, 'powercalc_owned_id_scope_required')
+                allowed.add('suggested_object_id')
+            if script_move:
+                allowed |= {'unique_id', 'previous_unique_id'}
+                if default_name_move:
+                    allowed |= {'name', 'original_name'}
+                if _native_script_suggested_move(before, after):
+                    from homeassistant.const import __version__
+                    _need(__version__ in ('2026.10.2', '2026.10.4'), 'source_mapping_required')
+                    allowed.add('suggested_object_id')
+            _need(delta <= allowed, 'source_mapping_required')
+            if change.mapping:
+                _need(len(change.mapping) == 1
+                      and (before['platform'] not in ('template', 'automation', 'script') or own_template_profile
+                           or direct_automation and change is own_entity[0])
+                      and not set(mapping) & set(change.mapping), 'source_mapping_required')
+                mapping.update(change.mapping)
+            else:
+                _need(names and 'name' in delta and before['platform'] not in ('automation', 'script')
+                      and bool(change.runtime_before_json), 'selected_name_scope_required')
+            if 'name' in delta:
+                _need(default_name_move or names and bool(change.runtime_before_json),
+                      'selected_name_runtime_required')
+                if mixed_names and not default_name_move:
+                    _need(not change.mapping and before.get('platform') not in
+                          ('automation', 'script'), 'selected_name_scope_required')
+        else:
+            _need(names and not mixed_names and change.kind == 'device' and 'name_by_user' in delta
+                  and delta <= {'name_by_user', 'modified_at'} and bool(change.runtime_before_json),
+                  'selected_device_name_scope_required')
+    if own_entity and not powercalc:
+        _need(all(change.kind == 'entity' and change.mapping
+                  and ((change is own_entity[0] and _native_script_unique_move(change.before, change.after))
+                       or {key: value for key, value in change.before.items()
+                           if key not in (('entity_id', 'modified_at', 'name')
+                                          if direct_automation and change.runtime_before_json
+                                          else ('entity_id', 'modified_at'))}
+                          == {key: value for key, value in change.after.items()
+                              if key not in (('entity_id', 'modified_at', 'name')
+                                             if direct_automation and change.runtime_before_json
+                                             else ('entity_id', 'modified_at'))}) for change in changes),
+              'own_template_mapping_required')
+    _need(bool(changes) and len(set(mapping.values())) == len(mapping)
+          and not set(mapping) & set(mapping.values()), 'independent_mapping_required')
+    return mapping
+
+
+def _registry_history_mapping(changes):
+    """Whole selected source/name population from ORIGINAL preparations only."""
+    ids = set()
+    for change in changes:
+        if change.kind == 'entity':
+            ids.update((change.before['entity_id'], change.after['entity_id']))
+        else:
+            # NativeNameObserver captured every associated row before effects.
+            baseline = json.loads(change.runtime_before_json)
+            ids.update(item['row']['entity_id'] for item in baseline['entities'].values())
+    return {key: key for key in sorted(ids)}
+
+
+def _baseline_stamp(value):
+    """Full immutable ORIGINAL identity without repeated JSON/base64 decoding.
+
+    Chain construction already authenticated the native codec and receipt. Hash
+    every retained raw/manager byte and exact typed identity on each check; this
+    never observes or substitutes current native managers/files.
+    """
+    _need(type(value) is NativeInputBaseline and type(value.format) is int
+          and type(value.receipt_json) is bytes and type(value.files) is tuple
+          and len(value.files) == 3, 'original_binding_changed')
+    rows = []
+    for item in value.files:
+        _need(type(item) is NativeInputFile and type(item.key) is str
+              and (item.raw is None or type(item.raw) is bytes)
+              and type(item.manager_json) is bytes
+              and (item.identity is None or (type(item.identity) is tuple
+                   and len(item.identity) == 3 and all(type(v) is int for v in item.identity))),
+              'original_binding_changed')
+        rows.append((item.key, item.identity,
+            None if item.raw is None else hashlib.sha256(item.raw).digest(),
+            hashlib.sha256(item.manager_json).digest()))
+    return value.format, hashlib.sha256(value.receipt_json).digest(), tuple(rows)
+
+
+def _retained_powercalc_preparation_fence(server, reference):
+    """Bind one already authenticated controlled ORIGINAL to this session."""
+    from .controlled_powercalc_composition import ControlledPowercalcComposition
+    from .native_template_state_composition import retain_state_composition
+    from .native_template_state_yaml import _receipt_values
+    from .native_registry_receipts import _exact_json_equal, _freeze_json
+
+    chain, plan, preparations = server.chain, server.plan, server.preparations
+    composition, receipt, baseline = server.composition, server.receipt, chain.baseline
+    if type(composition) is not ControlledPowercalcComposition:
+        return None
+    _need(chain.plan is plan and chain.preparations is preparations
+          and chain.original_receipt is receipt and chain._powercalc_preparations_unchanged(),
+          'original_binding_changed')
+    payload = preparations.resolve(*reference[:2])
+    _need(canonical_digest(payload) == reference[1] and baseline.receipt == receipt,
+          'original_binding_changed')
+    wire, check_composition = retain_state_composition(composition, baseline)
+    _need(_exact_json_equal(wire, _freeze_json(payload.get('composition'))),
+          'composition_changed')
+    frozen_receipt = _freeze_json(_receipt_values(receipt))
+
+    def check():
+        _need(server.chain is chain and server.plan is plan and server.preparations is preparations
+              and server.receipt is receipt and server.composition is composition
+              and type(plan.native_inputs) is tuple and plan.native_inputs == reference
+              and chain._powercalc_preparations_unchanged()
+              and _exact_json_equal(_receipt_values(receipt), frozen_receipt),
+              'original_binding_changed')
+        check_composition(server.composition)
+    return check
+
+
+class NativeTemplateYAMLServer:
+    """Task-local session; all effect capabilities are constructed on the server."""
+
+    def __init__(self):
+        _need(False, 'installed_factory_required')
+
+    @classmethod
+    async def _open(cls, hass, *, guard, refresh, recovering_operation=None, powercalc_scope=False):
+        from . import Runtime
+        from homeassistant.core import HomeAssistant
+        from .native_template_state_server import NativeTemplateStateServer
+        _need(cls in (NativeTemplateYAMLServer, NativeTemplateStateServer) and type(hass) is HomeAssistant
+              and callable(guard) and callable(refresh) and type(powercalc_scope) is bool
+              and (not powercalc_scope or cls is NativeTemplateStateServer), 'installed_scope_required')
+        runtime = hass.data.get(DATA_RUNTIME)
+        _need(type(runtime) is Runtime, 'runtime_required')
+        obj = object.__new__(cls)
+        obj.hass, obj.runtime, obj.guard, obj.refresh = hass, runtime, guard, refresh
+        obj.task, obj.lock = asyncio.current_task(), runtime.operation_lock
+        obj.bound = obj.used = obj.closed = False
+        powercalc_present = 'powercalc' in hass.config.components
+
+        def scope():
+            _authorize(guard)
+            _need(not obj.closed and hass.data.get(DATA_RUNTIME) is runtime
+                  and runtime.loaded and not runtime.unloading
+                  and runtime.operation_lock is obj.lock and obj.lock.locked(), 'runtime_scope_lost')
+            obj.scene_fence.check()
+            _need(('powercalc' in hass.config.components) is powercalc_present
+                  and (not powercalc_scope or powercalc_present), 'powercalc_scope_unsupported')
+            if hasattr(obj, 'foreign'):
+                obj.foreign.check(require_sources=obj.bound)
+            else:
+                _need(not obj.bound or not ({'mqtt', 'rest', 'command_line'}
+                           & set(hass.config.components)), 'other_consumer_scope_unsupported')
+            if hasattr(obj, 'review_foreign_pin'):
+                obj.review_foreign_pin.check(require_sources=True)
+            if hasattr(obj, 'consumers'):
+                obj.consumers.check()
+            if hasattr(obj, 'automation_lifecycle'):
+                obj.automation_lifecycle.check_live()
+            if hasattr(obj, 'controlled_automation'):
+                obj.controlled_automation.check_preserving_enabled()
+            if obj.bound:
+                _need(runtime.journal is obj.journal and runtime.preparations is obj.preparations,
+                      'runtime_cache_replaced')
+                obj._preparation_current()
+        obj._scope = scope
+        from .native_empty_scene import NativeEmptySceneFence
+        obj.scene_fence = NativeEmptySceneFence(hass)
+        try:
+            scope()
+            await refresh()
+            scope()
+            obj.preparations, obj.journal = native_prepared_store(hass), native_journal(hass)
+            await obj.preparations.initialize()
+            scope()
+            await obj.journal.initialize()
+            scope()
+            active = await obj.journal.active()
+            _need(not active or (cls is NativeTemplateStateServer and type(recovering_operation) is str
+                  and len(active) == 1 and active[0].operation_id == recovering_operation),
+                  'other_operation_unresolved')
+            scope()
+            from .native_automation_lifecycle import async_assert_no_pending_automation_lifecycle
+            await async_assert_no_pending_automation_lifecycle(hass, obj.preparations, obj.journal)
+            scope()
+            from .recorder_guard import NativeRecorderGuard
+            from .history_guard import NativeHistoryGuard
+            from .yaml_editor_locks import NativeYAMLEditorLocks
+            obj.recorder = NativeRecorderGuard(hass)
+            obj.history = NativeHistoryGuard(obj.recorder)
+            obj.locks = NativeYAMLEditorLocks(hass)
+            return obj
+        except BaseException:
+            obj.scene_fence.close()
+            raise
+
+    @classmethod
+    async def prepare(cls, hass, mapping, *, guard, refresh, entity_names=None, device_names=None,
+                      review_id=None, _mixed_powercalc=False):
+        from .manifest import parse_manifest
+        _need(type(_mixed_powercalc) is bool and type(mapping) is dict and (bool(mapping) or not _mixed_powercalc)
+              and all(type(k) is str and type(v) is str for k, v in mapping.items()), 'mapping_required')
+        from .native_template_state_server import NativeTemplateStateServer
+        if review_id is not None:
+            from .review_retention import review_lease
+            _need(cls is NativeTemplateStateServer and type(review_id) is str,
+                  'review_scope_required')
+            review_lease(review_id, 'server')  # Validate server-owned namespace.
+        names = {} if entity_names is None else entity_names
+        devices = {} if device_names is None else device_names
+        _need(type(names) is dict and type(devices) is dict
+              and all(type(key) is str and type(value) is str for key, value in names.items())
+              and all(type(key) is str and type(value) is str for key, value in devices.items())
+              and bool(mapping or names or devices)
+              and (not (names or devices) or cls is NativeTemplateStateServer),
+              'selected_registry_names_required')
+        names, devices = dict(names), dict(devices)
+        selected = set(mapping) | set(names)
+        parsed = parse_manifest({'entities': [
+            {'entity_id': old, 'proposed_entity_id': mapping.get(old, old),
+             'proposed_name': names.get(old)} for old in sorted(selected)],
+            'devices': [{'device_id': identity, 'proposed_name': name}
+                        for identity, name in sorted(devices.items())]})
+        _need(len(parsed.entities) == len(selected) and len(parsed.devices) == len(devices)
+              and len(set(mapping.values())) == len(mapping)
+              and not set(mapping) & set(mapping.values()), 'independent_mapping_required')
+        obj = await cls._open(hass, guard=guard, refresh=refresh, powercalc_scope=_mixed_powercalc)
+        obj.mixed_powercalc = _mixed_powercalc
+        obj.mapping, obj.entity_names, obj.device_names = dict(mapping), names, devices
+        obj.review_id = review_id
+        try:
+            await _admit_foreign(obj, devices)
+            async with obj.locks.hold(obj._scope):
+                await obj._prepare()
+            obj._scope()
+            return obj
+        except BaseException:
+            obj.close()
+            raise
+
+    async def _prepare(self):
+        from .yaml_plan import plan_yaml
+        from .yaml_validation import async_validate_proposed_with_sources
+        from .yaml_transaction import _capture
+        from .native_registry import NativeRegistryBridge, NativeRegistryIO
+        from .native_input_baseline import async_capture_native_input_baseline
+        self.consumers = await _UnchangedConsumers.capture(self.hass, self.mapping, guard=self._scope)
+        self._scope()
+        root = Path(self.hass.config.config_dir).resolve()
+        yaml = await _drained(self.hass.async_add_executor_job, lambda: plan_yaml(root, self.mapping))
+        self._scope()
+        _need(yaml.ready and bool(yaml.patches), 'yaml_proposal_required')
+        self.receipt, self.evidence = await async_validate_proposed_with_sources(
+            self.hass, yaml, root.parent)
+        self._scope()
+        domains = self.receipt.changed_domains
+        mixed = domains != ('template',)
+        _need(self.receipt.ready_for_apply and 'template' in domains
+              and set(domains) <= {'automation', 'script', 'template'},
+              'modern_template_only_required')
+        if mixed:
+            from .mixed_yaml_runtime import MixedYAMLConsumers
+            self.consumers = await MixedYAMLConsumers.capture(self.hass, self.mapping, guard=self._scope)
+            self._scope()
+        await self.consumers.bind_sources(self.receipt, self.evidence, guard=self._scope)
+        self._scope()
+        baseline = await async_capture_native_input_baseline(self.hass, self.receipt, guard=self._scope)
+        self._scope()
+        documents = {f.key: json.loads(f.raw) for f in baseline.files}
+        entries = documents['core.config_entries']['data']['entries']
+        _need(not any(row['domain'] == 'template' for row in entries), 'template_entry_unsupported')
+        # Other native helper references also require their own lifecycle route.
+        from .helper_native import inventory
+        plans = inventory(self.hass, self.mapping)
+        _need(not any(p.blocked or p.changes for p in plans), 'helper_dependency_unsupported')
+        rows = documents['core.entity_registry']['data']['entities']
+        bridge = NativeRegistryBridge(NativeRegistryIO(self.hass), self.recorder)
+        registry = []
+        for old, new in sorted(self.mapping.items()):
+            source = [row for row in rows if row['entity_id'] == old]
+            _need(len(source) == 1 and source[0]['platform'] != 'template'
+                  and not any(row['entity_id'] == new for row in rows), 'source_uuid_required')
+            # The dependent observer pins logical automation/script identities.
+            # Renaming one of those sources needs its own accepted identity
+            # handoff; reject before creating any effects until qualified.
+            _need(source[0]['platform'] not in ('automation', 'script'),
+                  'dependent_source_identity_unsupported')
+            registry.append(await bridge.prepare('entity', source[0]['id'], {'entity_id': new}, self._scope))
+            self._scope()
+        change = await _drained(self.hass.async_add_executor_job, lambda: _capture(self.receipt, yaml))
+        self._scope()
+        self.registry_changes, self.change = tuple(registry), change
+        self.operation_id, own = 'template-yaml-' + uuid.uuid4().hex, uuid.uuid4().hex
+        self.digests, steps = {}, []
+        for index, (adapter, item) in enumerate([('registry', c) for c in registry] + [('yaml', change)]):
+            ref = own + '-' + str(index)
+            self.digests[ref] = await self.preparations.create(ref, encode_change(item))
+            self._scope()
+            steps.append(Step(ref, adapter, item.identity, item.before_revision, item.after_revision, ref))
+        from .native_template_consumers import async_observe_template_consumers
+        from .template_physical_identity import is_physical_definition
+        observed = await async_observe_template_consumers(self.hass, self.receipt,
+            self.evidence, guard=self._scope)
+        self._scope()
+        consumers = [row for row in observed.rows if row.kind == 'entity']
+        expected_keys = {(row.domain.removeprefix('template.'), row.native_key)
+                         for row in self.evidence.template_sources.ledger.definitions
+                         if row.domain in ('template.sensor', 'template.binary_sensor')}
+        _need(len(consumers) == len(expected_keys)
+              and {(row.platform, row.key) for row in consumers} == expected_keys
+              and all(row.consumer_verified and row.source_verified for row in consumers),
+              'complete_original_consumer_bijection_required')
+        physical_keys = {(row.domain.removeprefix('template.'), row.native_key)
+                         for row in self.evidence.template_sources.ledger.definitions
+                         if is_physical_definition(row)}
+        physical = tuple(sorted((row.platform, row.key, row.entity_id) for row in consumers
+                                 if (row.platform, row.key) in physical_keys))
+        consumer_ids = {row.entity_id: row.entity_id for row in consumers}
+        if mixed:
+            consumer_ids.update({row.entity_id: row.entity_id
+                                 for row in self.consumers.phases.sample[0]})
+        source_history = await self.history.capture(self.mapping)
+        self._scope()
+        consumer_history = await self.history.capture(consumer_ids)
+        self._scope()
+        composition_type = MixedTemplateComposition if mixed else TemplateComposition
+        self.composition = composition_type(self.evidence, tuple(sorted(self.digests.items())),
+            source_history, consumer_history, self.evidence.sha256, physical)
+        inputs = await self.preparations.create_native_inputs(own + '-original', baseline,
+                                                             composition=self.composition)
+        self._scope()
+        scopes = ('registry', 'yaml')
+        self.plan = Plan(own, scopes, scopes, tuple(steps), self.evidence.sha256, scopes, inputs)
+        self.plan.validate()
+        self.receipt_store = native_registry_receipt_store(self.hass, self.preparations)
+        await self.receipt_store.initialize()
+        self._scope()
+        self.chain = await RegistryReceiptChain.start(self.receipt_store, self.operation_id,
+            self.plan, self.receipt, self.digests)
+        self._scope()
+        self._install()
+        await self._common(False, initial=True)
+        self._scope()
+
+    def _install(self):
+        # The chain has just resolved and strictly decoded this exact immutable
+        # preparation. Keep its existing baseline, not a second decoded cache.
+        reference = self.plan.native_inputs
+        original_stamp = _baseline_stamp(self.chain.baseline)
+        def preparation_current():
+            _need(type(self.plan.native_inputs) is tuple and self.plan.native_inputs == reference,
+                  'original_binding_changed')
+            payload = self.preparations.resolve(*reference[:2])
+            _need(canonical_digest(payload) == reference[1]
+                  and _baseline_stamp(self.chain.baseline) == original_stamp,
+                  'original_binding_changed')
+            _need(self.chain.baseline.receipt == self.receipt
+                  and self._composition_current(payload.get('composition')),
+                  'composition_changed')
+        retained = _retained_powercalc_preparation_fence(self, reference)
+        self._preparation_current = retained if retained is not None else preparation_current
+        self._preparation_current()
+        self.observation_state = self.chain.reconstruct_inputs()
+        self.observer = self._new_observer()
+        self.observer.assert_change(self.change)
+        self.runtime.journal, self.runtime.preparations = self.journal, self.preparations
+        self.bound = True
+
+    async def _install_dashboard_fence(self):
+        from .dashboard_phase import DashboardPhase, DashboardConsumerFence
+        observed = self.consumers.dashboard_observed
+        _need((_dashboard_plan(self.plan) or _controlled_powercalc_plan(self.plan, self.composition)
+               or _external_state_plan(self.plan, self.composition))
+              and observed is not None, 'dashboard_evidence_required')
+        phase = await DashboardPhase.capture(self.hass, observed, self.chain, guard=self._scope)
+        self._scope()
+        _need(bool(phase.yaml_routes) or any(step.adapter == 'dashboard' for step in self.plan.steps),
+              'dashboard_effect_or_route_required')
+        self.dashboard_phase = phase
+        self.consumers.native = DashboardConsumerFence(self.hass, observed, phase, self.consumers.native)
+        self._scope()
+
+    def _new_observer(self):
+        if _mixed_composition(self.composition):
+            from .mixed_yaml_runtime import MixedTemplateYAMLRuntimeReadback
+            return MixedTemplateYAMLRuntimeReadback(self.hass, self.chain, self.evidence,
+                                                     self.consumers, guard=self._scope)
+        return NativeTemplateYAMLRuntimeReadback(self.hass, self.chain, self.evidence,
+                                                guard=self._scope)
+
+    def _composition_current(self, payload):
+        return payload == encode_composition(self.composition, self.chain.baseline)
+
+    async def _observe(self, state=None):
+        self._scope()
+        if state is None:
+            try:
+                self.observation_state = self.chain.reconstruct_inputs()
+            except RegistryReceiptError:
+                _need(self.chain.active is not None, 'unresolved_intent')
+                pending = self.chain.store.read(self.chain.active.reference[0])
+                _need(pending is not None and pending['payload'].get('kind') == 'registry_intent',
+                      'unresolved_intent')
+            state = self.observation_state
+        value = await async_observe_native_inputs(self.hass, self.receipt, guard=self._scope,
+            input_state=state, physical_check=self.consumers.physical)
+        self._scope()
+        return value
+
+    async def _fresh_stores(self, expected, *, allow_active=False):
+        preps, journal = native_prepared_store(self.hass), native_journal(self.hass)
+        await preps.initialize()
+        self._scope()
+        await journal.initialize()
+        self._scope()
+        receipts = native_registry_receipt_store(self.hass, preps)
+        await receipts.initialize()
+        self._scope()
+        _need(preps.plans == self.preparations.plans and receipts.rows == self.receipt_store.rows,
+              'durable_store_changed')
+        actual = await journal.load(self.operation_id)
+        self._scope()
+        active = await journal.active()
+        self._scope()
+        _need(actual == expected and (not active or (allow_active and active == (expected,))),
+              'operation_changed')
+
+    async def _common(self, rollback, *, initial=False):
+        """Independent UUID/runtime/metadata plus full physical/history continuation."""
+        from .native_registry import NativeRegistryBridge, NativeRegistryIO
+        from .native_template_accepted_consumers import async_observe_accepted_template_consumers
+        wanted = Position.BEFORE if rollback or initial else Position.AFTER
+        bridge = NativeRegistryBridge(NativeRegistryIO(self.hass), self.recorder,
+                                       native_images=self.chain.accepted_documents)
+        for change in self.registry_changes:
+            actual = await bridge.inspect(change)
+            self._scope()
+            _need(actual.position == wanted.value, 'source_identity_or_history_changed')
+        state = self.chain.reconstruct_inputs()
+        position = await self.observer.position_at_inputs(self.change, state)
+        self._scope()
+        _need(position is wanted, 'runtime_unconfirmed')
+        witness = self.observer.runtime_check(wanted)
+        actual = await async_observe_accepted_template_consumers(self.hass, self.chain,
+            self.evidence, guard=self._scope)
+        self._scope()
+        entities = [r for r in actual.rows if r.kind == 'entity']
+        _need(actual.yaml_position == ('original' if rollback or initial else 'proposed')
+              and len(entities) == len(self.observer.identities)
+              and {(r.platform, r.key) for r in entities} == set(self.observer.identities)
+              and all(r.consumer_verified and r.source_verified
+                      and (r.entity_id, r.registry_id) == self.observer.identities[r.platform, r.key]
+                      for r in entities) and actual.evidence_sha256 == self.evidence.sha256,
+              'consumer_identity_changed')
+        await self._final_history(state, witness)
+        return True
+
+    async def _final_history(self, state, witness):
+        # Source + finite histories share the LAST physical worker. All native
+        # manager/registration checks are the synchronous suffix on its return.
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.util import session_scope
+        from .history_guard import _read_session as read_history
+        from .recorder_guard import _read_session as read_metadata, verify, verify_rollback
+        await self.recorder.async_synchronize()
+        self._scope()
+        managers = _Managers(self.hass, self.receipt)
+        instance = self.recorder.instance
+        _need(get_instance(self.hass) is instance, 'recorder_replaced')
+        if _mixed_composition(self.composition):
+            consumers = self.observer.history_consumers
+        else:
+            consumers = tuple(sorted(v[0] for v in self.observer.identities.values()))
+        source_ids = tuple(_registry_history_mapping(self.registry_changes))
+        # A selected Template/Automation can also be one of the consumers.
+        # Recorder migrates its metadata to the destination ID, so compare
+        # that consumer's finite ORIGINAL history over both exact reviewed IDs.
+        # The per-registry verify/verify_rollback below still proves the
+        # individual metadata row and rejects foreign destination history.
+        consumer_ids = set(consumers)
+        for change in self.registry_changes:
+            if change.kind == 'entity' and change.mapping:
+                old, new = next(iter(change.mapping.items()))
+                if old in consumer_ids or new in consumer_ids:
+                    consumer_ids.update((old, new))
+        consumers = tuple(sorted(consumer_ids))
+        def physical():
+            self.consumers.physical()
+            self.observer.native.sources()
+            state.assert_current(self.receipt)
+        def compare():
+            physical()
+            with session_scope(session=instance.get_session(), read_only=True) as sql:
+                for ids, snapshot in ((source_ids, self.composition.source_history),
+                                      (consumers, self.composition.consumer_history)):
+                    _need(read_history(sql, snapshot['state_ids'], snapshot['statistic_ids'],
+                                       snapshot['content']) == snapshot['content'], 'history_changed')
+                    metadata = read_metadata(sql, ids)
+                    _need(sorted({r['metadata_id'] for r in metadata['states'].values()}) == snapshot['state_ids']
+                          and sorted({r['id'] for r in metadata['statistics'].values()}) == snapshot['statistic_ids'],
+                          'history_identity_changed')
+                for change in self.registry_changes:
+                    if not change.mapping:
+                        continue
+                    metadata = read_metadata(sql, tuple(sorted(set(change.mapping) | set(change.mapping.values()))))
+                    check = verify_rollback if next(iter(change.mapping)) in metadata['states'] else verify
+                    _need(check(change.mapping, json.loads(change.recorder_before_json), metadata),
+                          'source_metadata_changed')
+            physical()
+        await _drained(self.hass.async_add_executor_job, compare)
+        self._scope()
+        _need(get_instance(self.hass) is instance, 'recorder_replaced')
+        managers.check()
+        _need(state.same_evidence(self.chain.reconstruct_inputs()), 'head_changed')
+        witness.check()
+
+    async def _full(self, rollback):
+        from .native_candidate_validation import (
+            async_revalidate_accepted_candidate, private_candidate_scratch)
+        await self._common(rollback)
+        async with self.locks.hold(self._scope):
+            with private_candidate_scratch(self.receipt.config_root) as scratch:
+                proof = await async_revalidate_accepted_candidate(self.hass, self.chain,
+                    self.journal.load, scratch, self._scope)
+            self._scope()
+            _need(proof.fingerprint == self.plan.fingerprint and proof.head == self.chain.reconstruct_inputs().head
+                  and proof.direction == ('rollback' if rollback else 'forward'), 'candidate_unconfirmed')
+        # Candidate subprocess/lock awaits must not be the final source fence.
+        await self._common(rollback)
+        return True
+
+    def _coordinator(self):
+        from homeassistant.core import Context
+        from .native_registry import NativeRegistryBridge, NativeRegistryIO
+        from .native_registry_transaction import ReceiptedRegistryTransactionAdapter
+        from .native_yaml_transaction import ReceiptedYAMLTransactionAdapter
+        resolver = lambda ref: decode_change(self.preparations.resolve(ref, self.digests[ref]))
+        bridge = NativeRegistryBridge(NativeRegistryIO(self.hass), self.recorder,
+                                       native_images=self.chain.accepted_documents)
+        registry = ReceiptedRegistryTransactionAdapter(bridge, resolver, self.chain, self._observe,
+            self.journal.load, self._scope, full_verify=lambda _: self._common(False),
+            full_verify_rollback=lambda _: self._common(True))
+        yaml = ReceiptedYAMLTransactionAdapter(self.hass, resolver, self.locks, self.observer,
+            self.chain, self._observe, self.journal.load, self._scope, context=Context(),
+            full_verify=lambda _: self._full(False), full_verify_rollback=lambda _: self._full(True))
+        return compose_template_yaml_coordinator({'registry': registry, 'yaml': yaml},
+            self.journal, self._scope, required_scopes=('registry', 'yaml'))
+
+    async def apply(self):
+        self._scope()
+        _need(asyncio.current_task() is self.task and self.bound and not self.used, 'no_replay')
+        self.used = True
+        await self.refresh()
+        self._scope()
+        await self._fresh_stores(None)
+        await self._common(False, initial=True)
+        from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+        if (_controlled_reload(self.composition) and ('automation' in self.receipt.changed_domains
+                or (is_controlled_script(self.composition) and self.hass.data.get('automation') is not None)
+                or any(change.mapping and change.before.get('platform') == 'automation'
+                       for change in self.registry_changes))):
+            from .native_automation_transition import NativeAutomationTransition
+            transition = NativeAutomationTransition(self.hass, allow_running=True)
+            await transition.prepare_preserving_enabled()
+            self.controlled_automation = transition
+            self.observer.controlled_automation = transition
+            self._scope()
+        if (_mixed_composition(self.composition) and not _script_prefix_composition(self.composition)
+                and not _controlled_reload(self.composition)):
+            from .journal import Record
+            from .native_automation_lifecycle import NativeAutomationLifecycle
+            # Persist the ordinary operation BEFORE any native detach, as in
+            # the already qualified ConfigEntry lifecycle. Never replay apply.
+            self.plan.validate()
+            # Native type/idle admission is read-only and precedes even the
+            # operation record; no rejected busy source creates a pending job.
+            self.automation_lifecycle = NativeAutomationLifecycle(self, 'forward')
+            self.observer.automation_lifecycle = self.automation_lifecycle
+            await self.journal.create(Record(self.operation_id, self.plan,
+                phases=('pending',) * len(self.plan.steps), restore_attempted=False))
+            self._scope()
+            await self.automation_lifecycle.start()
+            coordinator = self._coordinator()
+            ready = await coordinator.reconcile(self.operation_id)
+            _need(ready.status == 'ready' and ready.direction == 'forward'
+                  and ready.phases == ('pending',) * len(self.plan.steps), 'initial_effects_not_pristine')
+            result = await coordinator.resume(self.operation_id)
+        else:
+            result = await self._coordinator().apply(self.plan, self.plan.fingerprint, self.operation_id)
+        self._scope()
+        _need(result.status == 'applied', 'apply_unresolved')
+        if hasattr(self, 'automation_lifecycle'):
+            await self.automation_lifecycle.restore()
+        await self._terminal(result, rollback=False)
+        if hasattr(self, 'automation_lifecycle'):
+            await self.automation_lifecycle.complete(result)
+        return result
+
+    @classmethod
+    async def bind_reverse(cls, hass, operation_id, fingerprint, *, guard, refresh, restored=False, inspect_only=False):
+        """Fresh read-only reopen, actual admission, then a DIFFERENT live chain."""
+        from .native_template_state_server import NativeTemplateStateServer
+        powercalc_scope = cls is NativeTemplateStateServer and 'powercalc' in hass.config.components
+        obj = await cls._open(hass, guard=guard, refresh=refresh, recovering_operation=operation_id,
+                              powercalc_scope=powercalc_scope)
+        try:
+            record = await obj.journal.load(operation_id)
+            obj._scope()
+            from .native_template_state_server import _acknowledged_registry_prefix
+            from .native_template_prefix_recovery import acknowledged_powercalc_registry_prefix
+            obj.powercalc_prefix_recovery = acknowledged_powercalc_registry_prefix(record)
+            obj.prefix_recovery = _acknowledged_registry_prefix(record) or obj.powercalc_prefix_recovery
+            from .native_template_prefix_recovery import complete_forward_unknown, complete_forward_unknown_scope
+            obj.complete_unknown_recovery = complete_forward_unknown(record)
+            # Routing shape only. The actual original composition and full
+            # receipt chain must independently admit partial rollback below.
+            from .transaction import Record
+            restored_partial = (type(record) is Record and restored is True
+                and 0 < record.phases.count('undone') < len(record.phases)
+                and record.phases == (('undone',) * record.phases.count('undone')
+                    + ('pending',) * record.phases.count('pending')))
+            _need(type(inspect_only) is bool and not (inspect_only and restored), 'inspection_scope')
+            _need(type(restored) is bool and record is not None and record.operation_id == operation_id
+                  and record.plan.fingerprint == fingerprint
+                  and ((restored and record.restore_attempted is True and record.direction == 'rollback'
+                        and record.status == 'rolled_back'
+                        and (record.phases == ('undone',) * len(record.plan.steps) or restored_partial))
+                       or (not restored and record.direction == 'forward'
+                           and ((record.status == 'applied'
+                                 and record.phases == ('verified',) * len(record.plan.steps))
+                                or obj.prefix_recovery or obj.complete_unknown_recovery))),
+                  'terminal_or_acknowledged_prefix_required')
+            obj.operation_id, obj.plan, obj.record = operation_id, record.plan, record
+            baseline, obj.composition = obj.preparations.resolve_composition(obj.plan.native_inputs)
+            from .controlled_powercalc_composition import ControlledPowercalcComposition
+            obj.powercalc_prefix_recovery = (obj.powercalc_prefix_recovery
+                and type(obj.composition) is ControlledPowercalcComposition)
+            obj.prefix_recovery = _acknowledged_registry_prefix(record) or obj.powercalc_prefix_recovery
+            if obj.prefix_recovery or obj.complete_unknown_recovery:
+                from .native_template_state_composition import TemplateStateComposition
+                from .native_template_state_server import NativeTemplateStateServer
+                from .native_script_program_composition import ScriptTemplateStateComposition
+                from .native_automation_program_composition import AutomationTemplateStateComposition
+                from .controlled_powercalc_composition import ControlledPowercalcComposition
+                _need(cls is NativeTemplateStateServer
+                      and type(obj.composition) in (TemplateStateComposition, ScriptTemplateStateComposition,
+                          AutomationTemplateStateComposition, ControlledPowercalcComposition)
+                      and (not obj.powercalc_prefix_recovery
+                           or type(obj.composition) is ControlledPowercalcComposition),
+                      'prefix_profile_unsupported')
+            obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
+            obj.digests = dict(obj.composition.prepared_digests)
+            from .native_template_state_composition import ExternalStateComposition
+            external_plan = _external_state_plan(obj.plan, obj.composition)
+            _need(not external_plan or inspect_only and record.status == 'applied',
+                  'external_rollback_lifecycle_required')
+            from .controlled_powercalc_composition import ControlledPowercalcComposition
+            is_powercalc = type(obj.composition) is ControlledPowercalcComposition
+            _need(not is_powercalc or powercalc_scope, 'powercalc_runtime_required')
+            registry_only = _registry_only_state_plan(obj.plan, obj.composition, obj.receipt)
+            entry_plan = _entry_reload_plan(obj.plan, obj.composition)
+            powercalc_plan = _controlled_powercalc_plan(obj.plan, obj.composition)
+            dashboard_plan = _dashboard_plan(obj.plan) or ((entry_plan or powercalc_plan or external_plan) and 'dashboard' in obj.plan.required_scopes)
+            standard = (obj.plan.required_scopes == obj.plan.covered_scopes == obj.plan.verification_adapters == ('registry', 'yaml')
+                  and tuple(s.adapter for s in obj.plan.steps) == ('registry',) * (len(obj.plan.steps) - 1) + ('yaml',)
+                  and len(obj.plan.steps) >= 2 and not any(s.caused_by for s in obj.plan.steps))
+            _need(obj.plan.coverage_evidence == obj.composition.coverage_sha256
+                  and (registry_only or standard or dashboard_plan or entry_plan or powercalc_plan or external_plan), 'qualified_plan_required')
+            changes = [decode_change(obj.preparations.resolve(s.prepared_ref, obj.digests[s.prepared_ref]))
+                       for s in obj.plan.steps]
+            obj.registry_changes = tuple(change for step, change in zip(obj.plan.steps, changes, strict=True)
+                                         if step.adapter == 'registry')
+            obj.dashboard_changes = tuple(change for step, change in zip(obj.plan.steps, changes, strict=True)
+                                          if step.adapter == 'dashboard')
+            obj.change = changes[-1] if obj.receipt.proposed_files else obj.registry_changes[-1]
+            _need(set(obj.digests) == {s.prepared_ref for s in obj.plan.steps}, 'preparation_scope')
+            obj.mapping = _registry_mapping(obj.registry_changes, obj.composition, dashboard_plan=dashboard_plan)
+            await _admit_foreign(obj, {change.identity: True for change in obj.registry_changes
+                                       if change.kind == 'device'})
+            from .energy_native import PreparedEnergy
+            energy = [change for step, change in zip(obj.plan.steps, changes, strict=True)
+                      if step.adapter == 'energy']
+            _need(len(energy) <= 1 and all(type(change) is PreparedEnergy for change in energy),
+                  'powercalc_energy_preparation_required')
+            consumer_type = _UnchangedConsumers
+            if _mixed_composition(obj.composition):
+                from .mixed_yaml_runtime import MixedYAMLConsumers
+                consumer_type = MixedYAMLConsumers
+            obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope,
+                _powercalc_energy=energy[0] if energy else None, _dashboard_effects=dashboard_plan,
+                _powercalc_reverse=is_powercalc and not restored and not obj.powercalc_prefix_recovery)
+            obj.consumers.allow_controlled_reload = _controlled_reload(obj.composition)
+            from .native_automation_program_composition import AutomationTemplateStateComposition
+            if type(obj.composition) is AutomationTemplateStateComposition:
+                from .native_automation_owned_graph import OwnedAutomationGraph
+                obj.consumers.owned_automation = await OwnedAutomationGraph.with_duration(hass, guard=obj._scope)
+            obj._scope()
+            obj.receipt_store = native_registry_receipt_store(hass, obj.preparations)
+            await obj.receipt_store.initialize()
+            obj._scope()
+            readonly = RegistryReceiptChain.reopen(obj.receipt_store, operation_id, obj.plan,
+                                                   obj.receipt, obj.digests)
+            _need(not readonly.writable and readonly.active is None, 'readonly_required')
+            obj.chain = readonly
+            if is_powercalc and obj.powercalc_prefix_recovery:
+                # Minimal supported prefix: the completed registry effects are
+                # ordinary sources. Powercalc producer IDs remain ORIGINAL.
+                from .controlled_powercalc_population import PowercalcPopulation
+                count = record.phases.count('verified')
+                _need(all(change.kind == 'entity' and change.before.get('platform') != 'powercalc'
+                          for change in obj.registry_changes[:count]), 'prefix_producer_effect_unsupported')
+                obj.powercalc_population = PowercalcPopulation((),
+                    tuple(sorted(row[0] for row in obj.composition.population)), obj.composition.population)
+            if is_powercalc and not obj.powercalc_prefix_recovery:
+                if not restored:
+                    from .controlled_powercalc_cold_registry import qualify_projection, _costs
+                    from .native_discovery_inputs import async_observe_discovery_inputs, assert_discovery_managers_current
+                    from .native_input_baseline import _drained
+                    observed = await async_observe_discovery_inputs(hass, guard=obj._scope)
+                    states, head, _, completed, pending = readonly._reconstruct()
+                    projection = qualify_projection(readonly, states, head, completed, pending, observed)
+                    if projection is not None:
+                        from homeassistant.components.energy.data import async_get_manager
+                        from .energy_native import NativeEnergy
+                        native = NativeEnergy(hass, await async_get_manager(hass), allow_generated_costs=True)
+                        for cost in _costs(readonly._setup_history):
+                            actual = native._generated_cost(cost['after_source'], cost['after_source'])
+                            _need(actual[1:] == (cost['registry_id'], cost['unique_id'], cost['entity_id'],
+                                                   cost['source_registry_id']), 'cold_cost_identity_changed')
+                        assert_discovery_managers_current(hass, observed, guard=obj._scope)
+                        readonly.install_cold_projection(projection)
+                        projected = readonly.reconstruct_inputs()
+                        await _drained(hass.async_add_executor_job,
+                                       lambda: projected.assert_current(readonly.original_receipt))
+                        obj._scope()
+                from .native_powercalc_accepted_consumers import async_observe_accepted_powercalc_consumers
+                from .powercalc_runtime_observer import capture_powercalc_runtime
+                from .powercalc_source_binding import PowercalcSourceBindings
+                from .controlled_powercalc_population import qualify_population
+                from .native_registry_receipts import _event_id
+                capture = capture_powercalc_runtime(hass, guard=obj._scope)
+                accepted = await async_observe_accepted_powercalc_consumers(
+                    hass, readonly, obj.evidence, capture, guard=obj._scope)
+                bound = PowercalcSourceBindings(accepted.evidence_sha256, accepted.original_runtime_sha256,
+                    accepted.rows, core_version=accepted.version, relationships=accepted.relationships,
+                    energy_settings_sha256=accepted.energy_settings_sha256)
+                aliases = None
+                if not restored:
+                    alias_key = _event_id(['controlled_pc_population', readonly.root_id, 'forward', 'receipt'])
+                    saved = readonly.store.read(alias_key)
+                    from .controlled_powercalc_setup_receipts import validate_handoff
+                    _need(saved is not None, 'powercalc_forward_handoff_missing')
+                    aliases = validate_handoff(readonly, [alias_key, saved['digest']], 'forward')
+                reverse_mapping = {} if restored else {new: old for old, new in obj.mapping.items()}
+                obj.powercalc_population = qualify_population(hass, bound, reverse_mapping,
+                    obj.composition.previous, inverse_aliases=aliases)
+                expected = (obj.composition.population if restored else tuple(sorted(
+                    (obj.mapping.get(name, name), uid, kind) for name, uid, kind in obj.composition.population)))
+                _need(obj.powercalc_population.descriptors == expected, 'powercalc_population_changed')
+                if energy:
+                    from homeassistant.components.energy.data import async_get_manager
+                    from .energy_native import NativeEnergy
+                    obj.native_energy = NativeEnergy(hass, await async_get_manager(hass),
+                                                     allow_generated_costs=True)
+                    obj._scope()
+            if dashboard_plan:
+                await obj._install_dashboard_fence()
+            if restored_partial:
+                if is_powercalc:
+                    from .controlled_powercalc_setup_receipts import validate_restored_prefix
+                    validate_restored_prefix(readonly, record)
+                else:
+                    from .native_template_prefix_recovery import unstarted_rollback_complete
+                    _need(unstarted_rollback_complete(readonly, record), 'restored_prefix_unqualified')
+            if obj.complete_unknown_recovery:
+                _need(complete_forward_unknown_scope(readonly, record), 'complete_unknown_profile_unsupported')
+            obj._install()
+            # Runtime automation/script sources must also match SAME ORIGINAL.
+            # Only accepted physical state differs; no replacement receipt is made.
+            await obj._bind_accepted_sources(rollback=restored or obj.powercalc_prefix_recovery)
+            async def admit():
+                if obj.prefix_recovery:
+                    await obj._prefix_current(record)
+                elif restored_partial and is_powercalc:
+                    from .controlled_powercalc_setup_receipts import validate_restored_prefix
+                    state = validate_restored_prefix(readonly, record)
+                    await obj._common(True)
+                    observed = await obj._observe()
+                    readonly.expected(PhaseContext(record, len(record.plan.steps) - 1), tuple(
+                        RegistryRawObservation(row.key, row.raw, row.identity) for row in observed.files))
+                    _need(await obj.journal.load(operation_id) == record
+                          and state.same_evidence(readonly.reconstruct_inputs()), 'restored_prefix_changed')
+                else:
+                    await obj._terminal(record, rollback=restored)
+            await admit()
+            if external_plan:
+                await obj._inspect_external_consumers()
+            await refresh()
+            obj._scope()
+            await obj._fresh_stores(record, allow_active=obj.prefix_recovery or obj.complete_unknown_recovery)
+            await admit()
+            if external_plan:
+                await obj._inspect_external_consumers()
+            state = readonly.reconstruct_inputs()
+            if inspect_only:
+                return obj  # A read-only inspection never creates a writer.
+            if restored:
+                return obj  # Terminal proof never installs a writer.
+            # Same separated admission pattern as NativeTemplateReverse: the
+            # reopened reader remains readonly. Never set readonly.writable.
+            writer = RegistryReceiptChain(obj.receipt_store, operation_id, obj.plan, obj.receipt, obj.digests)
+            if readonly._cold_projection is not None:
+                writer.install_cold_projection(readonly._cold_projection)
+            _need(writer.root == readonly.root and writer.root_digest == readonly.root_digest
+                  and writer.reconstruct_inputs().same_evidence(state), 'head_changed')
+            writer.writable = True
+            obj.chain = writer
+            retained = _retained_powercalc_preparation_fence(obj, obj.plan.native_inputs)
+            if retained is not None:
+                obj._preparation_current = retained
+            obj.observer.chain = writer
+            if dashboard_plan:
+                obj.dashboard_phase.chain = writer
+            obj.observation_state = state
+            return obj
+        except BaseException:
+            obj.close()
+            raise
+
+    @classmethod
+    async def bind_prepared(cls, hass, operation_id, plan, *, guard, refresh):
+        """Reopen a server-retained review; preserve its exact ORIGINAL/Plan.
+
+        This is an internal capability boundary. Websocket input never contains
+        a Plan, receipt, preparations, root or callback.
+        """
+        from .native_template_state_server import NativeTemplateStateServer
+        powercalc_scope = cls is NativeTemplateStateServer and 'powercalc' in hass.config.components
+        obj = await cls._open(hass, guard=guard, refresh=refresh, powercalc_scope=powercalc_scope)
+        try:
+            obj.operation_id, obj.plan = operation_id, plan
+            plan.validate()
+            baseline, obj.composition = obj.preparations.resolve_composition(plan.native_inputs)
+            from .controlled_powercalc_composition import ControlledPowercalcComposition
+            _need(type(obj.composition) is not ControlledPowercalcComposition or powercalc_scope,
+                  'powercalc_composition_required')
+            obj.receipt, obj.evidence = baseline.receipt, obj.composition.evidence
+            obj.digests = dict(obj.composition.prepared_digests)
+            registry_only = _registry_only_state_plan(plan, obj.composition, obj.receipt)
+            entry_plan = _entry_reload_plan(plan, obj.composition)
+            powercalc_plan = _controlled_powercalc_plan(plan, obj.composition)
+            external_plan = _external_state_plan(plan, obj.composition)
+            from .native_template_state_composition import ExternalStateComposition
+            _need(type(obj.composition) is not ExternalStateComposition or external_plan,
+                  'external_plan_scope_required')
+            dashboard_plan = _dashboard_plan(plan) or ((entry_plan or powercalc_plan or external_plan) and 'dashboard' in plan.required_scopes)
+            standard = (plan.required_scopes == plan.covered_scopes == plan.verification_adapters == ('registry', 'yaml')
+                  and len(plan.steps) >= 2
+                  and tuple(s.adapter for s in plan.steps) == ('registry',) * (len(plan.steps) - 1) + ('yaml',)
+                  and not any(s.caused_by for s in plan.steps))
+            _need(plan.coverage_evidence == obj.composition.coverage_sha256
+                  and (registry_only or standard or dashboard_plan or entry_plan or powercalc_plan or external_plan)
+                  and set(obj.digests) == {s.prepared_ref for s in plan.steps}, 'qualified_plan_required')
+            changes = [decode_change(obj.preparations.resolve(s.prepared_ref, obj.digests[s.prepared_ref]))
+                       for s in plan.steps]
+            obj.registry_changes = tuple(change for step, change in zip(plan.steps, changes, strict=True)
+                                         if step.adapter == 'registry')
+            obj.dashboard_changes = tuple(change for step, change in zip(plan.steps, changes, strict=True)
+                                          if step.adapter == 'dashboard')
+            obj.change = changes[-1] if obj.receipt.proposed_files else obj.registry_changes[-1]
+            obj.mapping = _registry_mapping(obj.registry_changes, obj.composition, dashboard_plan=dashboard_plan)
+            await _admit_foreign(obj, {change.identity: True for change in obj.registry_changes
+                                       if change.kind == 'device'})
+            from .energy_native import PreparedEnergy
+            energy = [change for step, change in zip(plan.steps, changes, strict=True)
+                      if step.adapter == 'energy']
+            _need(len(energy) <= 1 and all(type(change) is PreparedEnergy for change in energy),
+                  'powercalc_energy_preparation_required')
+            consumer_type = _UnchangedConsumers
+            if _mixed_composition(obj.composition):
+                from .mixed_yaml_runtime import MixedYAMLConsumers
+                consumer_type = MixedYAMLConsumers
+            obj.consumers = await consumer_type.capture(hass, obj.mapping, guard=obj._scope,
+                _powercalc_energy=energy[0] if energy else None, _dashboard_effects=dashboard_plan)
+            obj.consumers.allow_controlled_reload = _controlled_reload(obj.composition)
+            obj._scope()
+            bind_sources = (obj.consumers.bind_prefix_sources if _script_prefix_composition(obj.composition)
+                            else obj.consumers.bind_sources)
+            await bind_sources(obj.receipt, obj.evidence, guard=obj._scope)
+            obj._scope()
+            obj.receipt_store = native_registry_receipt_store(hass, obj.preparations)
+            await obj.receipt_store.initialize()
+            obj._scope()
+            readonly = RegistryReceiptChain.reopen(obj.receipt_store, operation_id, plan,
+                                                   obj.receipt, obj.digests)
+            state = readonly.reconstruct_inputs()
+            _need(not readonly.writable and readonly.active is None
+                  and state.head == readonly.root_digest, 'pristine_review_required')
+            obj.chain = readonly
+            if external_plan:
+                await obj._bind_external_consumers()
+                obj._scope()
+            if powercalc_plan:
+                from .powercalc_runtime_observer import capture_powercalc_runtime
+                from .powercalc_source_binding import async_bind_powercalc_sources
+                from .powercalc_previous_state_original import async_capture_powercalc_previous_original
+                from .controlled_powercalc_population import qualify_population
+                obj.powercalc_capture = capture_powercalc_runtime(hass, guard=obj._scope)
+                bound = await async_bind_powercalc_sources(hass, obj.receipt, obj.evidence,
+                    obj.powercalc_capture, guard=obj._scope)
+                previous = await async_capture_powercalc_previous_original(hass, obj.receipt, obj.evidence,
+                    obj.powercalc_capture, guard=obj._scope, allow_live_progress=True)
+                obj.powercalc_population = qualify_population(hass, bound, obj.mapping, previous)
+                _need(obj.powercalc_population.descriptors == obj.composition.population,
+                      'powercalc_population_changed')
+                if energy:
+                    from homeassistant.components.energy.data import async_get_manager
+                    from .energy_native import NativeEnergy
+                    obj.native_energy = NativeEnergy(hass, await async_get_manager(hass),
+                                                     allow_generated_costs=True)
+                    obj._scope()
+            if dashboard_plan:
+                await obj._install_dashboard_fence()
+            obj._install()
+            await refresh()
+            obj._scope()
+            await obj._fresh_stores(None)
+            await obj._common(False, initial=True)
+            # Admission constructs a separate writer; the reader stays readonly.
+            writer = RegistryReceiptChain(obj.receipt_store, operation_id, plan, obj.receipt, obj.digests)
+            _need(writer.root == readonly.root and writer.root_digest == readonly.root_digest
+                  and writer.reconstruct_inputs().same_evidence(state), 'head_changed')
+            writer.writable = True
+            obj.chain = writer
+            retained = _retained_powercalc_preparation_fence(obj, obj.plan.native_inputs)
+            if retained is not None:
+                obj._preparation_current = retained
+            obj.observer.chain = writer
+            if dashboard_plan:
+                obj.dashboard_phase.chain = writer
+            return obj
+        except BaseException:
+            obj.close()
+            raise
+
+    async def _bind_accepted_sources(self, *, rollback=False):
+        from .native_discovery_inputs import async_observe_discovery_inputs
+        from .yaml_source_binding import _RuntimeSourceSampler
+        from .discovery import _runtime_family
+        for domain in ('automation', 'script'):
+            if domain in self.consumers.loaded or self.evidence.ledger.keys_for_native_projection(domain):
+                family, token = _runtime_family(self.hass, domain,
+                    owned_automation=getattr(self.consumers, "owned_automation", None))
+                _need(family.status == 'COMPLETE' and token is not None, 'source_runtime_unqualified')
+        observed = await async_observe_discovery_inputs(self.hass, guard=self._scope)
+        self._scope()
+        sampler = _RuntimeSourceSampler.bind(self.evidence, observed)
+        from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+        if is_controlled_script(self.composition):
+            from .controlled_script_phases import ControlledScriptPhases
+            self.consumers.evidence, self.consumers.observed = self.evidence, observed
+            self.consumers.runtime_sample = None
+            self.consumers.phases = ControlledScriptPhases(self, observed,
+                position=Position.BEFORE if rollback else Position.AFTER)
+            self._scope()
+            return
+        if _script_prefix_composition(self.composition):
+            self.consumers.bind_prefix_phases(self)
+            self._scope()
+            return
+        if _mixed_composition(self.composition):
+            self.consumers.bind_phases(self.receipt, self.evidence, observed, Position.BEFORE if rollback else Position.AFTER)
+            fence = getattr(self, 'own_dependent_fence', None)
+            if fence is not None and fence.native_readd:
+                self.consumers.phases.own_fence = fence
+            self._scope()
+            return
+        sample = sampler.sample(self.hass, self.evidence, observed)
+        _need(not sample[1], 'source_runtime_unqualified')
+        # One synchronous replacement: guards never see a corpus from a
+        # different evidence/observation pair during forward/reverse binding.
+        (self.consumers.evidence, self.consumers.observed,
+         self.consumers.runtime_sample, self.consumers.runtime_sampler) = (
+            self.evidence, observed, sample, sampler)
+        self._scope()
+
+    async def _terminal(self, expected, *, rollback):
+        record = await self.journal.load(self.operation_id)
+        self._scope()
+        _need(record == expected, 'phase_changed')
+        await self._full(rollback)
+        self._scope()
+        observed = await self._observe()
+        self.chain.expected(PhaseContext(record, len(self.plan.steps) - 1), tuple(
+            RegistryRawObservation(r.key, r.raw, r.identity) for r in observed.files))
+        await self._common(rollback)
+        self._scope()
+
+    async def rollback(self):
+        self._scope()
+        _need(asyncio.current_task() is self.task and self.bound and not self.used
+              and hasattr(self, 'record'), 'no_replay')
+        self.used = True
+        await self.refresh()
+        self._scope()
+        prefix = getattr(self, 'prefix_recovery', False)
+        await self._fresh_stores(self.record,
+            allow_active=prefix or getattr(self, 'complete_unknown_recovery', False))
+        if prefix:
+            await self._prefix_current(self.record)
+        else:
+            await self._terminal(self.record, rollback=False)
+        from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
+        if (_controlled_reload(self.composition) and ('automation' in self.receipt.changed_domains
+                or (is_controlled_script(self.composition) and self.hass.data.get('automation') is not None)
+                or any(change.mapping and change.before.get('platform') == 'automation'
+                       for change in self.registry_changes))):
+            from .native_automation_transition import NativeAutomationTransition
+            transition = NativeAutomationTransition(self.hass, allow_running=True)
+            await transition.prepare_preserving_enabled()
+            self.controlled_automation = transition
+            self.observer.controlled_automation = transition
+            self._scope()
+        if (_mixed_composition(self.composition) and not _script_prefix_composition(self.composition)
+                and not _controlled_reload(self.composition)):
+            from .native_automation_lifecycle import NativeAutomationLifecycle
+            self.automation_lifecycle = NativeAutomationLifecycle(self, 'rollback')
+            self.observer.automation_lifecycle = self.automation_lifecycle
+            await self.automation_lifecycle.start()
+        if getattr(self, 'powercalc_prefix_recovery', False):
+            from .controlled_powercalc_prefix_store_inverse import restore_prefix_stores
+            reader = RegistryReceiptChain.reopen(self.receipt_store, self.operation_id,
+                self.plan, self.receipt, self.digests)
+            self.prefix_store_receipt = await restore_prefix_stores(self.hass, self.runtime,
+                self.journal, self.record, reader, guard=self._scope, refresh=self.refresh)
+        result = await self._coordinator().rollback(self.operation_id)
+        self._scope()
+        _need(result.status == 'rolled_back', 'rollback_unresolved')
+        if hasattr(self, 'automation_lifecycle'):
+            await self.automation_lifecycle.restore()
+        if getattr(self, 'powercalc_prefix_recovery', False):
+            await self._common(True)
+        else:
+            await self._terminal(result, rollback=True)
+        if hasattr(self, 'automation_lifecycle'):
+            await self.automation_lifecycle.complete(result)
+        return result
+
+    def close(self):
+        _need(asyncio.current_task() is self.task, 'owner_task_required')
+        try:
+            if hasattr(self, 'controlled_automation'):
+                self.controlled_automation.close_preserving_enabled()
+            if hasattr(self, 'automation_lifecycle'):
+                self.automation_lifecycle.close()
+            consumers = getattr(self, 'consumers', None)
+            phases = getattr(consumers, 'phases', None)
+            from .native_script_prefix_phase import NativeScriptPrefixPhase
+            from .native_automation_prefix_phase import NativeAutomationPrefixPhase
+            if type(phases) in (NativeScriptPrefixPhase, NativeAutomationPrefixPhase):
+                phases.close()
+        finally:
+            if hasattr(self, 'foreign') and not getattr(self, 'foreign_transferred', False):
+                self.foreign.close()
+            self.scene_fence.close()
+            self.bound, self.closed = False, True

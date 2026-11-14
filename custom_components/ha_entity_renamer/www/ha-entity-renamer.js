@@ -1,0 +1,4339 @@
+/* HA Tools split — ha-entity-renamer v5.0.0 (candidate) — single-tool standalone repo */
+(function() {
+'use strict';
+
+// BEGIN HA TOOLS UI V3 source-sha256=54ed3b533163c3b9b704f107fa1697f95476d35ab55ba99265718aea85ec9674
+// HA Tools v3: vendored inside each consumer's own closure, never a window API.
+function createUiV3({ language = 'en' } = {}) {
+  const pl = String(language).startsWith('pl');
+  const states = {
+    success: ['Success', 'Sukces', '✓'],
+    partial: ['Partial', 'Częściowo', '½'],
+    unconfirmed: ['Unconfirmed', 'Niepotwierdzony', '?'],
+    error: ['Error', 'Błąd', '✕'],
+    not_checked: ['Not checked', 'Nie sprawdzono', '–'],
+    no_data: ['No data', 'Brak danych', '∅'],
+  };
+  const status = (value) => {
+    const code = typeof value === 'string' && Object.hasOwn(states, value) ? value : 'not_checked';
+    const row = states[code];
+    return { code, label: row[pl ? 1 : 0], icon: row[2], countsAsSuccess: code === 'success' };
+  };
+  const statusHtml = (value) => {
+    const result = status(value);
+    return `<span class="ht-result-state ht-result-state--${result.code}" data-result-state="${result.code}"><span aria-hidden="true">${result.icon}</span> ${result.label}</span>`;
+  };
+  const parseColor = value => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    const hex = /^#([a-f0-9]{3}|[a-f0-9]{6})$/i.exec(text);
+    if (hex) return (hex[1].length === 3 ? [...hex[1]].map(c=>c+c).join('') : hex[1]).match(/../g).map(c=>parseInt(c,16));
+    const rgb = /^rgba?\(\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)(?:\s*,\s*1(?:\.0+)?)?\s*\)$/i.exec(text);
+    return rgb ? rgb.slice(1,4).map(c=>Math.min(255,Math.round(Number(c)))) : null;
+  };
+  const hexColor = rgb => '#' + rgb.map(c=>c.toString(16).padStart(2,'0')).join('');
+  const luminance = rgb => rgb.map(c=>c/255).map(c=>c <= .04045 ? c/12.92 : ((c+.055)/1.055)**2.4)
+    .reduce((sum,c,i)=>sum+c*[.2126,.7152,.0722][i],0);
+  const ratio = (a,b) => (Math.max(luminance(a),luminance(b))+.05)/(Math.min(luminance(a),luminance(b))+.05);
+  const primaryColors = (value, {dark = false} = {}) => {
+    const original = parseColor(value) || parseColor(dark ? '#818cf8' : '#2563eb');
+    const white = [255,255,255], ink = [15,23,42];
+    const foreground = ratio(original,white) >= ratio(original,ink) ? white : ink;
+    const target = foreground === white ? 0 : 255;
+    let fill = original;
+    // The nearest 5% step keeps a supplied theme color when it is readable.
+    for (let step=1; ratio(fill,foreground)<4.5 && step<=20; step++)
+      fill = original.map(c=>Math.round(c+(target-c)*step*.05));
+    return {fill:hexColor(fill),foreground:hexColor(foreground),contrast:ratio(fill,foreground)};
+  };
+  const applyTheme = host => {
+    const view = host?.ownerDocument?.defaultView;
+    if (!host?.isConnected || !view?.getComputedStyle) return null;
+    const raw = view.getComputedStyle(host).getPropertyValue('--primary-color').trim();
+    let resolved = raw;
+    // Resolve ordinary named colors through the browser without a persistent node.
+    if (raw && !parseColor(raw) && !raw.includes('var(') && raw !== 'transparent' && view.CSS?.supports?.('color',raw)) {
+      const probe = host.ownerDocument.createElement('span');
+      probe.style.display = 'none'; probe.style.color = raw;
+      host.append(probe);
+      try { resolved = view.getComputedStyle(probe).color; } finally { probe.remove(); }
+    }
+    const result = primaryColors(resolved,{dark:host.classList.contains('bento-dark') || host.classList.contains('hat-dark')});
+    for (const [key,value] of [['--hat-primary-fill-computed',result.fill],['--hat-on-primary-computed',result.foreground]])
+      if (host.style.getPropertyValue(key) !== value) host.style.setProperty(key,value);
+    return result;
+  };
+  // v5.3: public tokens stay inheritable; private defaults follow the HA dark flag.
+  const css = `
+:host, .hat {
+  color-scheme: light;
+  /* powierzchnie i tekst — z motywu HA, w nawiasie wartość domyślna */
+  --_hat-bg:       var(--primary-background-color, #f3f4f6);
+  --_hat-card:     var(--ha-card-background, var(--card-background-color, #ffffff));
+  --_hat-chip:     var(--secondary-background-color, #f3f4f6);
+  --_hat-border:   var(--ha-card-border-color, var(--divider-color, #e5e7eb));
+  --_hat-text:     var(--primary-text-color, #111827);
+  --_hat-text-2:   var(--secondary-text-color, #4b5563);
+  --_hat-text-3:   var(--hat-text-3-theme, #6b7280);   /* tylko na tle karty; ≥ 12 px */
+  --_hat-grid:     color-mix(in srgb, var(--hat-text, var(--_hat-text)) 6%, var(--hat-card, var(--_hat-card)));
+  --_hat-radius:   var(--ha-card-border-radius, 12px);
+
+  /* Computed values supplied by the host when available; literals are explicit fallback colors, not dynamic contrast. */
+  --_hat-primary:      var(--primary-color, #2563eb);
+  --_hat-primary-fill: var(--hat-primary-fill-computed, #2563eb);
+  --_hat-on-primary:   var(--hat-on-primary-computed, #ffffff);
+
+  /* stany: wypełnienie (≥ 3:1) i tekst (≥ 4,5:1) */
+  --_hat-good: #0ca30c;  --_hat-good-text: #15803d;
+  --_hat-warn: #fab219;  --_hat-warn-text: #a16207;  --_hat-warn-readout: #9a5b05;
+  --_hat-crit: #d03b3b;  --_hat-crit-text: #b91c1c;
+
+  /* serie (W23) */
+  --_hat-s1: #2a78d6; --_hat-s2: #eb6834; --_hat-s3: #1baf7a; --_hat-s4: #eda100; --_hat-s5: #e87ba4;
+  --_hat-zone-cheap: #1baf7a; --_hat-zone-exp: #2a78d6;
+  --_hat-d1: #eb6834; --_hat-d2: #6250d6; --_hat-d3: #e87ba4; --_hat-d4: #eda100;
+  --_hat-unmeasured: #9ca3af;
+
+  /* typografia (W16: treść ≥ 14, metadane ≥ 12, wersaliki ≥ 11) */
+  --_hat-font: var(--ha-font-family-body, Roboto, Inter, system-ui, sans-serif);
+  --_hat-fs-display: 28px;  --_hat-fs-number2: 20px;  --_hat-fs-title: 16px;
+  --_hat-fs-body: 14px;     --_hat-fs-meta: 12px;     --_hat-fs-caps: 11px;
+  --_hat-fw-regular: 400;   --_hat-fw-medium: 500;    --_hat-fw-bold: 600;
+
+  /* odstępy (siatka 4 px) i rozmiary */
+  --_hat-space-1: 4px; --_hat-space-2: 8px; --_hat-space-3: 12px; --_hat-space-4: 16px; --_hat-space-5: 24px;
+  --_hat-icon-lg: 36px; --_hat-icon-lg-glyph: 20px;   /* nagłówek, kafelek */
+  --_hat-icon-md: 28px; --_hat-icon-md-glyph: 16px;   /* wiersz, launcher */
+  --_hat-icon-sm: 24px; --_hat-icon-sm-glyph: 14px;   /* odznaka */
+  --_hat-tint: 18%;                                   /* tło ikony = akcent 18 % */
+  --_hat-pill-h: 32px;  --_hat-pill-h-mini: 28px;  --_hat-target: 44px;
+  --_hat-row-h: 56px;   --_hat-gap: 8px;           /* siatka Sections HA */
+  --_hat-motion: 150ms ease;
+  font-family: var(--hat-font, var(--_hat-font));
+  color: var(--hat-text, var(--_hat-text));
+}
+
+/* ---------- 2. Tokeny: ciemny (hass.themes.darkMode → klasa .hat-dark) ---------- */
+:host(.hat-dark), :host(.bento-dark), .hat.hat-dark {
+  --_hat-bg:     var(--primary-background-color, #111214);
+  --_hat-card:   var(--ha-card-background, var(--card-background-color, #1c1c1e));
+  --_hat-chip:   var(--secondary-background-color, #26272b);
+  --_hat-border: var(--ha-card-border-color, var(--divider-color, #2e2f33));
+  --_hat-text:   var(--primary-text-color, #e5e7eb);
+  --_hat-text-2: var(--secondary-text-color, #a1a1aa);
+  --_hat-text-3: var(--hat-text-3-theme, #8b8b93);
+  --_hat-primary-fill: var(--hat-primary-fill-computed, #818cf8);
+  --_hat-on-primary:   var(--hat-on-primary-computed, #0f172a);
+  --_hat-good: #22c55e;  --_hat-good-text: #22c55e;
+  --_hat-warn: #fab219;  --_hat-warn-text: #fab219;  --_hat-warn-readout: #fab219;
+  --_hat-crit: #e05252;  --_hat-crit-text: #f87171;
+  --_hat-s1: #3987e5; --_hat-s2: #d95926; --_hat-s3: #199e70; --_hat-s4: #c98500; --_hat-s5: #d55181;
+  --_hat-zone-cheap: #199e70; --_hat-zone-exp: #3987e5;
+  --_hat-d1: #d95926; --_hat-d2: #9085e9; --_hat-d3: #d55181; --_hat-d4: #c98500;
+  --_hat-unmeasured: #6b7280;
+  color-scheme: dark;
+}
+
+
+
+.ht-result-state { display:inline-flex;align-items:center;gap:var(--hat-space-1,4px);min-height:24px;padding:0 10px;border:1px solid currentColor;border-radius:999px;font-size:var(--hat-fs-meta,12px);font-weight:600;line-height:16px;white-space:normal;background:transparent; }
+.ht-result-state--success { color:var(--hat-good-text, var(--_hat-good-text)); }
+.ht-result-state--partial,.ht-result-state--unconfirmed { color:var(--hat-warn-text, var(--_hat-warn-text)); }
+.ht-result-state--error { color:var(--hat-crit-text, var(--_hat-crit-text)); }
+.ht-result-state--not_checked,.ht-result-state--no_data { color:var(--hat-text-2, var(--_hat-text-2)); }
+.ht-result-state--no_data { border-style:dashed; }
+`;
+  return { status, statusHtml, css, primaryColors, applyTheme };
+}
+// END HA TOOLS UI V3
+
+// BEGIN HA TOOLS EXPORT V3 source-sha256=1f9e9c5444ec3b6de44eec136f14ae9e7d89dae1002650b33f746ab9633982f1
+/**
+ * W6 export dialog. Pure ES module; vendor this factory INSIDE each consumer's
+ * own IIFE (remove only the `export` keyword). Never attach it to window.
+ * Construction is inert. open() appends only its own container to root.
+ *
+ * Required dependency injection:
+ * root: Element/ShadowRoot; getLanguage(): 'pl'|'en'; createUiV3: existing W4 factory.
+ * getContext(): {role,userId,connectionId,datasetId,revision,connected,canExport,
+ *                sourceConfirmed}. Identities/revision are nonempty scalar values;
+ * bump revision monotonically for source/filter/selection/identity changes,
+ * including a restored source; never reuse an old revision. Never return tokens or data.
+ * policy: {id,allowlistedFields:string[],neverInclude:[tokens,users,addresses,raw_config]}.
+ * formats: explicit subset of ['json','csv','txt']; defaults must be explicit valid choices.
+ * buildPayload({context,draft,policy,signal}): read-only, Promise or sync result:
+ * {serialized:string,confirmed:true,sourceConfirmed:true,status:'success'|'partial',
+ *  included:string[],excluded:string[],sourceLimit:string}.
+ * Included/Excluded/sourceLimit describe the REVIEWED CONSUMER policy and actual
+ * source limitations in the current language. The consumer MUST explicitly select
+ * allowed fields, exclude tokens/users/addresses/raw configuration under EVERY
+ * private opt-in, and sanitize CSV formula cells where applicable. A generic
+ * recursive export/redactor of arbitrary raw state/config is NOT a valid consumer.
+ * This factory cannot inspect or truthfully sanitize an unknown arbitrary schema.
+ * For partial reports the consumer also encodes the partial status, inclusion
+ * scope and source limitations IN its allowlisted file schema, not only UI text.
+ * performDownload({serialized,blob,filename,format,context,signal}): explicit Save
+ * only. Return {outcome:'initiated'|'saved'|'unknown'}; 'saved' requires actual
+ * adapter confirmation, never infer disk persistence from an anchor click.
+ * Optional clock(): monotonic milliseconds; setTimer(fn,ms), clearTimer(handle).
+ *
+ * Returned API: open({opener}), cancel(), contextChanged(), destroy(). Every open
+ * resets private consent. contextChanged() discards bytes/consent immediately;
+ * owner also calls cancel/destroy on disconnect. Save ALWAYS rechecks context.
+ * One preview on open, explicit Refresh thereafter; bounded 10s, no automatic
+ * retries/downloads/persistence. AbortSignal is advisory; late results are ignored.
+ */
+function createExportDialog(options) {
+  const { root, getContext, getLanguage, createUiV3, buildPayload, performDownload,
+    clock = () => globalThis.performance.now(), setTimer = (fn, ms) => globalThis.setTimeout(fn, ms),
+    clearTimer = id => globalThis.clearTimeout(id), defaultFormat, defaultFilename } = options || {};
+  const allowedFormats = ['json', 'csv', 'txt', 'yaml'];
+  const excludedCategories = ['tokens', 'users', 'addresses', 'raw_config'];
+  const strings = value => Array.isArray(value) && value.length > 0 && value.every(v => typeof v === 'string' && v.trim());
+  if (!root?.append || !root.ownerDocument || [getContext, getLanguage, createUiV3, buildPayload, performDownload, clock, setTimer, clearTimer].some(fn => typeof fn !== 'function')) {
+    throw new TypeError('root and injected getContext/getLanguage/createUiV3/buildPayload/performDownload/clock/timers are required');
+  }
+  const suppliedPolicy = options.policy;
+  if (!suppliedPolicy || typeof suppliedPolicy.id !== 'string' || !suppliedPolicy.id.trim() || !strings(suppliedPolicy.allowlistedFields) || !strings(suppliedPolicy.neverInclude) || excludedCategories.some(key => !suppliedPolicy.neverInclude.includes(key))) {
+    throw new TypeError('Explicit reviewed consumer policy with allowlistedFields and neverInclude is required');
+  }
+  const policy = Object.freeze({ id: suppliedPolicy.id, allowlistedFields: Object.freeze([...suppliedPolicy.allowlistedFields]), neverInclude: Object.freeze([...suppliedPolicy.neverInclude]) });
+  if (!strings(options.formats) || options.formats.some(f => !allowedFormats.includes(f)) || new Set(options.formats).size !== options.formats.length || !options.formats.includes(defaultFormat) || typeof defaultFilename !== 'string') {
+    throw new TypeError('Explicit formats/defaultFormat/defaultFilename are required');
+  }
+  const formats = Object.freeze([...options.formats]);
+  const doc = root.ownerDocument;
+  const mime = { json: 'application/json;charset=utf-8', csv: 'text/csv;charset=utf-8', txt: 'text/plain;charset=utf-8', yaml: 'application/yaml;charset=utf-8' };
+  const copy = {
+    en: { title: 'Export', filename: 'Filename', format: 'Format', private: 'Include reviewed private fields (this export only)', included: 'Included in the file', excluded: 'Excluded from the file', source: 'Source and limits', preview: 'Exact file content', save: 'Save', refresh: 'Refresh preview', cancel: 'Cancel', busy: 'Building preview… Save waits for confirmed bytes.', changed: 'Choices changed. Refresh preview before Save.', context: 'Source or access changed. Review the source and refresh preview.', unavailable: 'Source unavailable or unconfirmed. Reconnect or confirm the source, then refresh.', invalidFormat: 'Choose an allowed format: JSON, CSV, TXT or YAML as offered.', invalidName: 'Use a basename of 1–128 characters: no paths, control characters, reserved names or leading/trailing spaces.', extension: 'Filename must end with the selected extension. Edit the filename, then refresh.', timeout: 'Preview exceeded 10 seconds. Check the source and explicitly refresh.', buildError: 'Could not build a confirmed preview. Check the source and refresh.', unconfirmed: 'Bytes or source metadata are unconfirmed. Confirm the source and refresh.', noData: 'No confirmed file content. Select available data and refresh.', saving: 'Handing off the confirmed preview… Wait for the adapter result.', initiated: 'Download initiated. Saving to the filesystem is not confirmed. Refresh only for a new export intent.', saved: 'Save confirmed by the download adapter.', unknown: 'Download result unconfirmed. Check the previous attempt before explicitly refreshing for a new export intent.' },
+    pl: { title: 'Eksport', filename: 'Nazwa pliku', format: 'Format', private: 'Dołącz sprawdzone pola prywatne (tylko ten eksport)', included: 'W pliku jest', excluded: 'W pliku nie ma', source: 'Źródło i ograniczenia', preview: 'Dokładna zawartość pliku', save: 'Zapisz', refresh: 'Odśwież podgląd', cancel: 'Anuluj', busy: 'Przygotowywanie podglądu… Zapis wymaga potwierdzonej zawartości.', changed: 'Wybór zmieniony. Odśwież podgląd przed zapisem.', context: 'Źródło lub uprawnienia zmienione. Sprawdź źródło i odśwież podgląd.', unavailable: 'Źródło niedostępne lub niepotwierdzone. Połącz lub potwierdź źródło i odśwież.', invalidFormat: 'Wybierz dostępny format: JSON, CSV, TXT lub YAML z listy.', invalidName: 'Użyj nazwy pliku o długości 1–128 znaków: bez ścieżek, znaków sterujących, nazw zastrzeżonych i skrajnych spacji.', extension: 'Nazwa pliku musi mieć rozszerzenie wybranego formatu. Popraw nazwę i odśwież.', timeout: 'Podgląd przekroczył 10 sekund. Sprawdź źródło i jawnie odśwież.', buildError: 'Nie udało się przygotować potwierdzonego podglądu. Sprawdź źródło i odśwież.', unconfirmed: 'Zawartość lub opis źródła niepotwierdzony. Potwierdź źródło i odśwież.', noData: 'Brak potwierdzonej zawartości pliku. Wybierz dostępne dane i odśwież.', saving: 'Przekazywanie potwierdzonego podglądu… Poczekaj na wynik zapisu.', initiated: 'Pobieranie rozpoczęte. Zapis na dysku nie jest potwierdzony. Odśwież tylko dla nowej próby eksportu.', saved: 'Adapter pobierania potwierdził zapis.', unknown: 'Wynik pobierania niepotwierdzony. Sprawdź poprzednią próbę przed jawnym odświeżeniem dla nowego eksportu.' },
+  };
+  const css = `
+[data-ha-tools-export] { container-type:inline-size;min-width:0;max-width:100%;color:var(--primary-text-color,inherit);font:inherit; }
+[data-ha-tools-export] * { box-sizing:border-box; }
+[data-ha-tools-export] [role=dialog] { width:100%;min-width:0;border:1px solid var(--divider-color,#aaa);border-radius:12px;background:var(--card-background-color,#fff);padding:16px; }
+[data-ha-tools-export] h2,[data-ha-tools-export] h3,[data-ha-tools-export] p,[data-ha-tools-export] li { overflow-wrap:anywhere;white-space:normal; }
+[data-ha-tools-export] h2 { margin:0 0 12px;font-size:1.25em; }
+[data-ha-tools-export] h3 { margin:12px 0 6px;font-size:1em; }
+[data-ha-tools-export] .ht-export-fields { display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px; }
+[data-ha-tools-export] label { display:flex;flex-direction:column;gap:4px;min-width:0;overflow-wrap:anywhere; }
+[data-ha-tools-export] .ht-export-private { flex-direction:row;align-items:center;min-height:44px;margin-top:12px; }
+[data-ha-tools-export] input:not([type=checkbox]),[data-ha-tools-export] select,[data-ha-tools-export] button { font:inherit;min-width:44px;min-height:44px;max-width:100%; }
+[data-ha-tools-export] input:not([type=checkbox]),[data-ha-tools-export] select { width:100%;color:inherit;background:var(--secondary-background-color,var(--card-background-color,#f5f5f5));border:1px solid var(--divider-color,#aaa);border-radius:6px;padding:8px; }
+[data-ha-tools-export] input[type=checkbox] { width:24px;height:24px;flex:none;margin:10px; }
+[data-ha-tools-export] button { padding:8px 12px;white-space:normal;overflow-wrap:anywhere;cursor:pointer;border:1px solid var(--divider-color,#aaa);border-radius:6px;color:inherit;background:var(--secondary-background-color,var(--card-background-color,#f5f5f5)); }
+[data-ha-tools-export] :focus-visible { outline:3px solid var(--primary-color,#1769aa);outline-offset:2px; }
+[data-ha-tools-export] button:disabled { cursor:default;opacity:.6; }
+[data-ha-tools-export] .ht-export-actions { display:flex;flex-wrap:wrap;gap:8px;margin-top:16px; }
+[data-ha-tools-export] pre { max-width:100%;min-width:0;max-height:320px;overflow:auto;white-space:pre;margin:0;padding:12px;border:1px solid var(--divider-color,#aaa);background:var(--secondary-background-color,var(--card-background-color,#f5f5f5)); }
+[data-ha-tools-export] ul { padding-inline-start:22px;margin:0; }
+@container (max-width:499px) { [data-ha-tools-export] .ht-export-fields { grid-template-columns:minmax(0,1fr); } }
+@container (max-width:319px) { [data-ha-tools-export] [role=dialog] { padding:10px; } [data-ha-tools-export] .ht-export-actions button { flex:1 1 100%; } }
+`;
+  let container, nodes, L, ui, opener, alive = false, destroyed = false, serial = 0;
+  let pending = null, handoff = null, ready = null, observed = null;
+  const listeners = [];
+  const on = (target, event, handler, capture = false) => {
+    target.addEventListener(event, handler, capture);
+    listeners.push(() => target.removeEventListener(event, handler, capture));
+  };
+  const contextKeys = ['role', 'userId', 'connectionId', 'datasetId', 'revision'];
+  function readContext() {
+    try {
+      const value = getContext();
+      if (!value || contextKeys.some(k => !['string', 'number'].includes(typeof value[k]) || String(value[k]).trim() === '' || (typeof value[k] === 'number' && !Number.isFinite(value[k])))) return null;
+      return Object.freeze(Object.fromEntries([...contextKeys, 'connected', 'canExport', 'sourceConfirmed'].map(k => [k, value[k]])));
+    } catch { return null; }
+  }
+  const same = (a, b) => !!a && !!b && [...contextKeys, 'connected', 'canExport', 'sourceConfirmed'].every(k => a[k] === b[k]);
+  const available = c => !!c && c.connected === true && c.canExport === true && c.sourceConfirmed === true;
+  const draft = () => Object.freeze({ filename: nodes.filename.value, format: nodes.format.value, includePrivate: nodes.private.checked });
+  const sameDraft = (a, b) => a.filename === b.filename && a.format === b.format && a.includePrivate === b.includePrivate;
+  function validation(value) {
+    if (!formats.includes(value.format)) return 'invalidFormat';
+    const name = value.filename;
+    if (!name || [...name].length > 128 || name !== name.trim() || /[\p{Cc}\p{Cf}/\\<>:"|?*]/u.test(name) || /[. ]$/.test(name) || /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(?:\.|$)/i.test(name)) return 'invalidName';
+    if (!name.endsWith(`.${value.format}`) || name.length <= value.format.length + 1) return 'extension';
+    return null;
+  }
+  function status(code, message) {
+    if (!alive) return;
+    const result = ui.status(code); // exact existing W4 labels/icons/codes
+    nodes.status.className = `ht-result-state ht-result-state--${result.code}`;
+    nodes.status.dataset.resultState = result.code;
+    nodes.status.replaceChildren();
+    const icon = doc.createElement('span'); icon.setAttribute('aria-hidden', 'true'); icon.textContent = result.icon;
+    nodes.status.append(icon, doc.createTextNode(` ${result.label}`));
+    nodes.message.textContent = ` ${L[message]}`;
+    nodes.save.disabled = !ready || !!pending || !!handoff;
+    nodes.refresh.disabled = !!pending || !!handoff;
+  }
+  function stop(job) {
+    if (!job) return;
+    if (job.timer !== null) clearTimer(job.timer);
+    job.timer = null; job.controller.abort();
+  }
+  function discard(resetPrivate = false) {
+    serial++; stop(pending); pending = null; ready = null;
+    if (alive) {
+      nodes.preview.textContent = ''; nodes.included.replaceChildren(); nodes.excluded.replaceChildren(); nodes['source-limit'].textContent = '';
+      if (resetPrivate) nodes.private.checked = false;
+    }
+  }
+  function contextChanged() {
+    if (!alive) return;
+    observed = readContext(); discard(true);
+    // Once a handoff began we cannot retract a browser download. Ignore its late
+    // callback and retain the prohibition on a second write until it settles.
+    if (handoff) handoff.controller.abort();
+    status(root.isConnected && available(observed) ? 'unconfirmed' : 'no_data', 'context');
+  }
+  function validContext(original) {
+    const current = readContext();
+    if (!root.isConnected || !same(original, current) || !available(current)) { contextChanged(); return false; }
+    return true;
+  }
+  function changeDraft() {
+    if (!alive) return;
+    if (!same(observed, readContext())) { contextChanged(); return; }
+    discard();
+    const error = validation(draft()); status(error ? 'error' : 'not_checked', error || 'changed');
+  }
+  function fillList(node, items) {
+    node.replaceChildren(...items.map(text => { const li = doc.createElement('li'); li.textContent = text; return li; }));
+  }
+  async function refresh() {
+    if (!alive || pending || handoff) return;
+    const current = readContext();
+    if (!same(observed, current)) { observed = current; discard(true); }
+    const value = draft(), error = validation(value);
+    discard();
+    if (error) { status('error', error); return; }
+    if (!root.isConnected || !available(current)) { status(!root.isConnected || current?.connected === false ? 'no_data' : 'unconfirmed', 'unavailable'); return; }
+    observed = current;
+    const job = { id: serial, context: current, draft: value, started: clock(), controller: new globalThis.AbortController(), timer: null };
+    pending = job; status('not_checked', 'busy');
+    const timeout = () => {
+      if (!alive || pending !== job) return;
+      discard(); status('unconfirmed', 'timeout');
+    };
+    job.timer = setTimer(timeout, 10000);
+    try {
+      const payload = await buildPayload(Object.freeze({ context: current, draft: value, policy, signal: job.controller.signal }));
+      if (!alive || pending !== job || job.id !== serial) return;
+      if (clock() - job.started >= 10000) { timeout(); return; }
+      if (!validContext(current)) return;
+      clearTimer(job.timer); job.timer = null;
+      if (!sameDraft(value, draft())) { changeDraft(); return; }
+      const { serialized, confirmed, sourceConfirmed, status: resultState, included, excluded, sourceLimit } = payload || {};
+      if (resultState === 'no_data' || serialized === '') { pending = null; status('no_data', 'noData'); return; }
+      if (confirmed !== true || sourceConfirmed !== true || !['success', 'partial'].includes(resultState) || typeof serialized !== 'string' || !strings(included) || !strings(excluded) || typeof sourceLimit !== 'string' || !sourceLimit.trim()) {
+        pending = null; status('unconfirmed', 'unconfirmed'); return;
+      }
+      // Freeze the only serialized bytes and build the only Blob NOW; Save never
+      // re-runs serialization or builds a second payload from potentially newer data.
+      ready = Object.freeze({ serialized, blob: new globalThis.Blob([serialized], { type: mime[value.format] }), context: current, draft: value });
+      nodes.preview.textContent = ready.serialized;
+      fillList(nodes.included, [...included]); fillList(nodes.excluded, [...excluded]);
+      nodes['source-limit'].textContent = sourceLimit;
+      pending = null; status(resultState, 'changed'); nodes.message.textContent = '';
+    } catch {
+      if (!alive || pending !== job || job.id !== serial) return;
+      if (clock() - job.started >= 10000) { timeout(); return; }
+      if (!validContext(current)) return;
+      discard(); status('error', 'buildError');
+    }
+  }
+  async function save() {
+    if (!alive || !ready || pending || handoff) return;
+    if (!validContext(ready.context)) return;
+    const value = draft(), error = validation(value);
+    if (error || !sameDraft(value, ready.draft) || nodes.preview.textContent !== ready.serialized) {
+      discard(); status(error ? 'error' : 'unconfirmed', error || 'changed'); return;
+    }
+    const snapshot = ready; ready = null; // consume intent BEFORE invoking adapter
+    const job = { id: serial, context: snapshot.context, controller: new globalThis.AbortController() };
+    handoff = job; status('unconfirmed', 'saving');
+    // choices cannot initiate another preview while the adapter result is unknown
+    for (const key of ['filename', 'format', 'private']) nodes[key].disabled = true;
+    try {
+      const result = await performDownload(Object.freeze({ serialized: snapshot.serialized, blob: snapshot.blob, filename: snapshot.draft.filename, format: snapshot.draft.format, context: snapshot.context, signal: job.controller.signal }));
+      if (!alive || handoff !== job || job.id !== serial || !validContext(job.context)) return;
+      status(result?.outcome === 'saved' ? 'success' : 'unconfirmed', result?.outcome === 'saved' ? 'saved' : result?.outcome === 'initiated' ? 'initiated' : 'unknown');
+    } catch {
+      if (alive && handoff === job && job.id === serial && validContext(job.context)) status('unconfirmed', 'unknown');
+    } finally {
+      if (handoff === job) {
+        handoff = null;
+        if (alive) {
+          for (const key of ['filename', 'format', 'private']) nodes[key].disabled = false;
+          nodes.refresh.disabled = false; nodes.save.disabled = true;
+          if (job.id !== serial) status('unconfirmed', 'unknown');
+        }
+      }
+    }
+  }
+  function focusable() {
+    return Array.from(nodes.dialog.querySelectorAll('input,select,button,[tabindex="0"]')).filter(el => !el.disabled);
+  }
+  function keydown(event) {
+    if (!alive) return;
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancel(); }
+    if (event.key === 'Tab') {
+      const items = focusable(), first = items[0], last = items.at(-1);
+      const active = nodes.dialog.getRootNode().activeElement || root.activeElement || doc.activeElement;
+      if (event.shiftKey && (active === first || !nodes.dialog.contains(active))) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && (active === last || !nodes.dialog.contains(active))) { event.preventDefault(); first?.focus(); }
+    }
+  }
+  function cancel() {
+    if (!alive) return;
+    discard(true); if (handoff) handoff.controller.abort();
+    alive = false; listeners.splice(0).forEach(off => off()); container.remove();
+    container = null; nodes = null; observed = null;
+    // A pending handoff remains latched until settled: reopening never repeats it.
+    if (opener?.isConnected && typeof opener.focus === 'function') opener.focus();
+    opener = null;
+  }
+  function open({ opener: target } = {}) {
+    if (destroyed) throw new Error('Export dialog destroyed');
+    if (alive) return;
+    const language = String(getLanguage());
+    L = copy[language.startsWith('pl') ? 'pl' : 'en'];
+    ui = createUiV3({ language });
+    opener = target || root.activeElement || doc.activeElement;
+    container = doc.createElement('div'); container.setAttribute('data-ha-tools-export', '');
+    // The own shadow boundary contains CSS and local IDs; adjacent W4 status
+    // elements retain their existing styling. Consumers can query this open root.
+    const shadow = container.attachShadow({ mode: 'open' });
+    if (root.host?.classList.contains('bento-dark')) container.classList.add('bento-dark');
+    const style = doc.createElement('style'); style.textContent = ':host{display:block;min-width:0;max-width:100%;}' + css + '\n' + ui.css;
+    shadow.append(style);
+    const shell = doc.createElement('div'); shell.setAttribute('data-ha-tools-export', ''); shadow.append(shell);
+    nodes = {};
+    const make = (tag, key, parent, text) => { const node = doc.createElement(tag); if (key) { node.dataset.export = key; nodes[key] = node; } if (text) node.textContent = text; parent.append(node); return node; };
+    const dialog = make('section', 'dialog', shell); dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true');
+    const title = make('h2', 'title', dialog, L.title);
+    // Locally unique IDs, no random or global counters/persistent state.
+    const prefix = `ht-export-${String(clock()).replace(/\W/g, '')}`;
+    title.id = prefix + '-title'; dialog.setAttribute('aria-labelledby', title.id);
+    const fields = make('div', null, dialog); fields.className = 'ht-export-fields';
+    const filenameLabel = make('label', null, fields); make('span', null, filenameLabel, L.filename);
+    const filename = make('input', 'filename', filenameLabel); filename.type = 'text'; filename.value = defaultFilename; filename.autocomplete = 'off';
+    const formatLabel = make('label', null, fields); make('span', null, formatLabel, L.format);
+    const format = make('select', 'format', formatLabel);
+    formats.forEach(value => { const option = make('option', null, format, value.toUpperCase()); option.value = value; }); format.value = defaultFormat;
+    const privateLabel = make('label', null, dialog); privateLabel.className = 'ht-export-private';
+    const privateInput = make('input', 'private', privateLabel); privateInput.type = 'checkbox'; privateInput.checked = false; make('span', null, privateLabel, L.private);
+    const statusLine = make('p', null, dialog); statusLine.setAttribute('role', 'status'); statusLine.setAttribute('aria-live', 'polite');
+    make('span', 'status', statusLine); make('span', 'message', statusLine);
+    for (const key of ['included', 'excluded']) { make('h3', null, dialog, L[key]); make('ul', key, dialog); }
+    make('h3', null, dialog, L.source); make('p', 'source-limit', dialog);
+    const previewHeading = make('h3', null, dialog, L.preview); previewHeading.id = prefix + '-preview';
+    const preview = make('pre', 'preview', dialog); preview.tabIndex = 0; preview.setAttribute('aria-labelledby', previewHeading.id);
+    const actions = make('div', null, dialog); actions.className = 'ht-export-actions';
+    for (const key of ['refresh', 'save', 'cancel']) { const button = make('button', key, actions, L[key]); button.type = 'button'; }
+    root.append(container); alive = true; observed = readContext();
+    for (const [key, event] of [['filename', 'input'], ['format', 'change'], ['private', 'change']]) on(nodes[key], event, changeDraft);
+    on(nodes.refresh, 'click', refresh); on(nodes.save, 'click', save); on(nodes.cancel, 'click', cancel);
+    on(doc, 'keydown', keydown, true);
+    on(doc, 'focusin', event => {
+      if (alive && !event.composedPath().includes(nodes.dialog)) focusable()[0]?.focus();
+    }, true);
+    // The consumer supplies exact opener even when its shadow DOM hides activeElement.
+    filename.focus();
+    if (handoff) {
+      for (const key of ['filename', 'format', 'private']) nodes[key].disabled = true;
+      preview.focus();
+      status('unconfirmed', 'saving');
+    } else { status('not_checked', 'changed'); void refresh(); }
+  }
+  function destroy() { cancel(); destroyed = true; }
+  return Object.freeze({ open, cancel, contextChanged, destroy });
+}
+// END HA TOOLS EXPORT V3
+
+// BEGIN HA RENAMER REPORTS V1 source-sha256=8eb67bff7938388cd42213168e8ae56b91a355f647f5becb2d5e972fb424d7e6
+// Reviewed completed-history projection. Never serialize arbitrary log/state/config.
+function createRenameReports() {
+  const entityId = value => typeof value === 'string' && value.length <= 255 && /^[a-z][a-z0-9_]*\.[a-z0-9_]+$/.test(value) ? value : null;
+  const timestamp = row => {
+    for (const key of ['completedAt', 'attemptedAt']) {
+      if (typeof row[key] !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(row[key])) continue;
+      const date = new Date(row[key]);
+      if (Number.isFinite(date.getTime()) && date.toISOString() === row[key]) return row[key];
+    }
+    return typeof row.time === 'string' && /^(?:[01]?\d|2[0-3]):[0-5]\d:[0-5]\d(?: (?:AM|PM))?$/.test(row.time) ? row.time : null;
+  };
+  const referenceTypes = ['automations', 'scripts', 'scenes', 'dashboards'];
+  function snapshot(log, includePrivate = false) {
+    const rows = [], aliases = new Map();
+    const alias = (value, fallback) => {
+      if (!value) return fallback;
+      if (!aliases.has(value)) aliases.set(value, `entity-${aliases.size + 1}`);
+      return aliases.get(value);
+    };
+    let omitted = 0;
+    for (const entry of Array.isArray(log) ? log : []) {
+      if (!entry || typeof entry !== 'object' || !['ok', 'error'].includes(entry.status)
+        || typeof entry.oldId !== 'string' || typeof entry.newId !== 'string') { omitted++; continue; }
+      const old = entityId(entry.oldId), next = entityId(entry.targetEntityId) || entityId(entry.newId);
+      const phase = ['not_started', 'attempted', 'acknowledged', 'readback_confirmed'].includes(entry.writePhase) ? entry.writePhase : null;
+      // ACK is never a readback. Legacy error text cannot prove rejection before a write.
+      const verified = entry.status === 'ok' && phase === 'readback_confirmed' && entry.verification === 'independent_registry_list_exact_fields';
+      const status = verified ? 'applied' : entry.status === 'error' && phase === 'not_started' ? 'failed' : 'unknown';
+      const reason = verified ? 'registry_readback_confirmed' : status === 'failed' ? 'preflight_rejected' : phase === 'attempted' ? 'write_outcome_unconfirmed' : entry.status === 'ok' ? 'ack_without_readback' : 'legacy_error_without_phase';
+      const references = Object.fromEntries(referenceTypes.map(type => [type, Array.isArray(entry.impact?.[type]) ? entry.impact[type].length : null]));
+      const dashboardCoverage = ['complete', 'partial', 'unavailable'].includes(entry.impact?.dashboardCoverage) ? entry.impact.dashboardCoverage : 'unknown';
+      if (dashboardCoverage === 'unavailable' || dashboardCoverage === 'partial' && references.dashboards === 0) references.dashboards = null;
+      const hasKnownReferences = Object.values(references).some(count => typeof count === 'number' && count > 0);
+      rows.push({index: rows.length + 1, timestamp: timestamp(entry), timestampScope: typeof entry.completedAt === 'string' && timestamp(entry) === entry.completedAt ? 'utc_completion' : typeof entry.attemptedAt === 'string' && timestamp(entry) === entry.attemptedAt ? 'utc_attempt_intent' : timestamp(entry) ? 'local_time_date_unknown' : 'unknown',
+        kind: entry.operationKind === 'device' ? 'device' : old && next ? 'entity' : 'unreviewed_identifier',
+        old: includePrivate ? old : alias(old, `record-${rows.length + 1}-source`),
+        new: includePrivate ? next : alias(next, `record-${rows.length + 1}-target`), status, reason,
+        references, dashboardCoverage, referenceCoverage: 'known_readable_hits_only_completeness_unknown',
+        manualRepair: status === 'failed' ? 'no_change_confirmed_no_repair_claim' : old && next && old !== next && hasKnownReferences ? 'verify_registry_then_review_known_references' : 'verify_registry_no_reference_coverage_claim'});
+    }
+    return {rows, omitted};
+  }
+  function build({log, format, includePrivate = false, language = 'en'}) {
+    const {rows, omitted} = snapshot(log, includePrivate), pl = language === 'pl';
+    if (!rows.length) return {serialized: '', status: 'no_data', confirmed: true, sourceConfirmed: true};
+    const limits = pl
+      ? 'Tylko ukończone wpisy lokalnej historii. ACK nie potwierdza zmiany. Czas UTC oznacza obserwowany koniec próby albo jej początkową intencję; brak obserwowanego końca pozostaje nieznany. Applied wymaga zapisanego, niezależnego odczytu rejestru ze zgodną stałą tożsamością i wszystkimi żądanymi polami. Starsze błędy bez fazy zapisu są unknown. Pochodzenie konta, pełna data starszych wpisów i kompletność odwołań nie są potwierdzone. Liczby obejmują tylko zapisane trafienia z search/related i czytelnych dashboardów Lovelace; null oznacza brak danych, 0 zapisany brak trafień. Eksport nie wykonuje odczytów ani zmian HA.'
+      : 'Completed entries in local history only. ACK alone does not confirm a change. UTC time identifies observed attempt completion or attempt intent; an unobserved completion remains unknown. Applied requires recorded independent registry readback with matching stable identity and all requested fields. Legacy errors without a write phase are unknown. Account origin, full dates of legacy entries and reference completeness are unconfirmed. Counts cover recorded search/related and readable Lovelace hits only; null means unavailable, 0 recorded no hits. Export performs no HA reads or changes.';
+    const instructions = pl
+      ? 'Dla unknown sprawdź aktualny rejestr przed kolejną zmianą. Dla zapisanych trafień po potwierdzeniu zmiany ID ręcznie sprawdź automatyzacje, skrypty, sceny i dashboardy w HA; popraw stare odwołania i przetestuj. Failed dotyczy wyłącznie odrzuconej próby przed zapisem. Raport nie uruchamia naprawy, undo ani kolejnej zmiany nazw.'
+      : 'For unknown, verify the current registry before another change. For recorded hits, after confirming an ID change manually inspect automations, scripts, scenes and dashboards in HA, update old references and test. Failed covers only rejection before a write. This report performs no repair, undo or repeat rename.';
+    const included = [pl ? 'Liczby applied/failed/unknown, bezpieczny czas/status/powód, liczby znanych odwołań i ręczne kroki.' : 'Applied/failed/unknown counts, reviewed time/status/reason, known reference counts and manual steps.',
+      includePrivate ? (pl ? 'Tylko ścisłe identyfikatory old/new entity_id; pozostałe identyfikatory jako null.' : 'Strict old/new entity_id only; other identifiers are null.') : (pl ? 'Powiązane pseudonimy old → new; bez prawdziwych ID.' : 'Paired old → new pseudonyms; no real IDs.')];
+    const excluded = [pl ? 'Tokeny, użytkownicy, adresy, nazwy, surowe błędy/wiadomości, konfiguracja, YAML i szablony.' : 'Tokens, users, addresses, names, raw errors/messages, configuration, YAML and templates.', pl ? 'Propozycje w kolejce, niepotwierdzony sukces i automatyczne naprawy.' : 'Queued proposals, unconfirmed success and automatic repairs.'];
+    const report = {schema: 'ha-entity-renamer.completed-history.v1', status: 'partial', source: 'native_completed_local_history', method: 'recorded_registry_attempts_with_optional_verified_readback',
+      privateIds: includePrivate === true, counts: {total: rows.length, applied: rows.filter(row => row.status === 'applied').length, failed: rows.filter(row => row.status === 'failed').length, unknown: rows.filter(row => row.status === 'unknown').length, omitted}, included, excluded, limits, instructions, rows};
+    let serialized;
+    if (format === 'json') serialized = JSON.stringify(report, null, 2) + '\n';
+    else if (format === 'csv') {
+      const cell = value => {
+        let text = value === null ? 'null' : String(value);
+        if (/^[\s]*[=+\-@]/.test(text) || /^[\t\r\n]/.test(text)) text = "'" + text;
+        return '"' + text.replace(/"/g, '""') + '"';
+      };
+      const records = [['record', 'index', 'timestamp', 'timestamp_scope', 'kind', 'old', 'new', 'status', 'reason', ...referenceTypes, 'dashboard_coverage', 'reference_coverage', 'manual_repair']];
+      for (const key of ['schema', 'status', 'source', 'method', 'privateIds', 'limits', 'instructions']) records.push(['meta', key, report[key]]);
+      for (const [key, value] of Object.entries(report.counts)) records.push(['count', key, value]);
+      for (const key of ['included', 'excluded']) report[key].forEach(value => records.push([key, value]));
+      rows.forEach(row => records.push(['row', row.index, row.timestamp, row.timestampScope, row.kind, row.old, row.new, row.status, row.reason, ...referenceTypes.map(type => row.references[type]), row.dashboardCoverage, row.referenceCoverage, row.manualRepair]));
+      serialized = records.map(values => values.map(cell).join(',')).join('\r\n') + '\r\n';
+    } else if (format === 'txt') {
+      serialized = [report.schema, `status: ${report.status}`, `source: ${report.source}`, `method: ${report.method}`, `privateIds: ${report.privateIds}`, `counts: ${JSON.stringify(report.counts)}`, ...included.map(text => 'included: ' + text), ...excluded.map(text => 'excluded: ' + text), `limits: ${limits}`, `instructions: ${instructions}`,
+        ...rows.map(row => JSON.stringify(row))].join('\n') + '\n';
+    } else throw new TypeError('Unreviewed report format');
+    return {serialized, confirmed: true, sourceConfirmed: true, status: 'partial', included, excluded, sourceLimit: limits};
+  }
+  return Object.freeze({snapshot, build});
+}
+// END HA RENAMER REPORTS V1
+const renameReports = createRenameReports();
+
+// Component-local persistence: never reads from or publishes a global helper.
+const haToolsPersistence = {
+  setHass() {},
+  async save(key, data) {
+    try { localStorage.setItem(`ha-tools-${key}`, JSON.stringify(data)); } catch (e) { console.debug('[ha-entity-renamer] caught:', e); }
+  },
+  loadSync(key) {
+    try { const value = localStorage.getItem(`ha-tools-${key}`); return value ? JSON.parse(value) : null; } catch (e) { return null; }
+  },
+};
+const _esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+// Only separator boundaries wrap; the full literal ID remains selectable and titled.
+const _entityIdHtml = value => `<span class="registry-id" title="${_esc(value)}">${_esc(value).replace(/([._])/g,'$1<wbr>')}</span>`;
+
+
+/**
+ * HA Entity Renamer – Device & Entity Rename Tool
+ * Renames devices/entities and scans readable resources for references requiring manual updates.
+ * Part of HA Tools suite.
+ */
+/* ===== HA Tools split — inline shared infrastructure ===== */
+// Bento Design System CSS (inline copy — keeps tool standalone)
+const HA_ENTITY_RENAMER_BENTO_CSS = `
+/* ═══════════════════════════════════════════════
+   HA Tools — Bento Design System v2.0 (Premium)
+   ═══════════════════════════════════════════════ */
+
+/* keyboard a11y */
+:focus-visible { outline: 2px solid var(--bento-primary, #6366f1); outline-offset: 2px; border-radius: 3px; }
+
+:host {
+  /* Brand palette — diamond top, gradient-friendly */
+  --bento-primary: #6366f1;
+  --bento-primary-2: #8b5cf6;
+  --bento-primary-3: #ec4899;
+  --bento-primary-hover: #4f46e5;
+  --bento-primary-light: rgba(99, 102, 241, 0.08);
+  --bento-primary-glow: rgba(99, 102, 241, 0.35);
+  --bento-success: #10B981;
+  --bento-success-light: rgba(16, 185, 129, 0.10);
+  --bento-success-border: rgba(16, 185, 129, 0.25);
+  --bento-error: #EF4444;
+  --bento-error-light: rgba(239, 68, 68, 0.10);
+  --bento-error-border: rgba(239, 68, 68, 0.25);
+  --bento-warning: #F59E0B;
+  --bento-warning-light: rgba(245, 158, 11, 0.10);
+  --bento-warning-border: rgba(245, 158, 11, 0.25);
+  --bento-info: #06b6d4;
+  --bento-info-light: rgba(6, 182, 212, 0.10);
+  --bento-info-border: rgba(6, 182, 212, 0.25);
+
+  /* Theme */
+  --bento-bg:     var(--primary-background-color, #fafaf9);
+  --bento-bg-2:   var(--card-background-color, #f5f5f4);
+  --bento-card:   var(--card-background-color, #ffffff);
+  --bento-glass:  rgba(255, 255, 255, 0.7);
+  --bento-border: var(--divider-color, #e7e5e4);
+  --bento-border-strong: rgba(0, 0, 0, 0.08);
+  --bento-text:           var(--primary-text-color,   #0c0a09);
+  --bento-text-secondary: var(--secondary-text-color, #57534e);
+  --bento-text-muted:     var(--disabled-text-color,  #a8a29e);
+
+  /* Radii */
+  --bento-radius-xs: 8px;
+  --bento-radius-sm: 12px;
+  --bento-radius-md: 18px;
+  --bento-radius-lg: 24px;
+  --bento-radius-pill: 999px;
+
+  /* Shadows — modern, layered */
+  --bento-shadow-sm: 0 1px 2px rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.02);
+  --bento-shadow-md: 0 4px 12px rgba(0,0,0,0.05), 0 2px 6px rgba(0,0,0,0.03);
+  --bento-shadow-lg: 0 24px 48px -12px rgba(0,0,0,0.10), 0 12px 24px -8px rgba(0,0,0,0.05);
+  --bento-shadow-glow: 0 0 0 1px rgba(99,102,241,0.15), 0 8px 32px -8px rgba(99,102,241,0.25);
+
+  /* Gradients */
+  --bento-grad-primary: linear-gradient(135deg, #6366f1, #8b5cf6);
+  --bento-grad-rainbow: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #ec4899 100%);
+  --bento-grad-success: linear-gradient(135deg, #10b981, #34d399);
+  --bento-grad-error:   linear-gradient(135deg, #ef4444, #f87171);
+  --bento-grad-warning: linear-gradient(135deg, #f59e0b, #fbbf24);
+
+  /* Motion */
+  --bento-trans-fast: 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  --bento-trans:      0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  --bento-trans-slow: 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Typography */
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+  font-feature-settings: "cv11" 1, "ss01" 1;
+  letter-spacing: -0.01em;
+  display: block;
+  color: var(--bento-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Dark mode ───────────────────────────────── */
+:host(.bento-dark) {
+    --bento-bg:     var(--primary-background-color, #0a0a0f);
+    --bento-bg-2:   var(--card-background-color,    #111119);
+    --bento-card:   var(--card-background-color,    #16161f);
+    --bento-glass:  rgba(22, 22, 31, 0.7);
+    --bento-border: var(--divider-color,            #27272f);
+    --bento-border-strong: rgba(255, 255, 255, 0.08);
+    --bento-text:           var(--primary-text-color,   #fafaf9);
+    --bento-text-secondary: var(--secondary-text-color, #d6d3d1);
+    --bento-text-muted:     var(--disabled-text-color,  #78716c);
+    --bento-primary:        #818cf8;
+    --bento-primary-2:      #a78bfa;
+    --bento-primary-3:      #f472b6;
+    --bento-primary-light:  rgba(129, 140, 248, 0.12);
+    --bento-primary-glow:   rgba(129, 140, 248, 0.45);
+    --bento-success: #34d399;
+    --bento-success-light:  rgba(52, 211, 153, 0.12);
+    --bento-success-border: rgba(52, 211, 153, 0.30);
+    --bento-error:   #f87171;
+    --bento-error-light:    rgba(248, 113, 113, 0.12);
+    --bento-error-border:   rgba(248, 113, 113, 0.30);
+    --bento-warning: #fbbf24;
+    --bento-warning-light:  rgba(251, 191, 36, 0.12);
+    --bento-warning-border: rgba(251, 191, 36, 0.30);
+    --bento-info:    #22d3ee;
+    --bento-info-light:     rgba(34, 211, 238, 0.12);
+    --bento-info-border:    rgba(34, 211, 238, 0.30);
+    --bento-shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+    --bento-shadow-md: 0 4px 12px rgba(0,0,0,0.4), 0 2px 6px rgba(0,0,0,0.2);
+    --bento-shadow-lg: 0 24px 48px -12px rgba(0,0,0,0.6), 0 12px 24px -8px rgba(0,0,0,0.3);
+    --bento-shadow-glow: 0 0 0 1px rgba(129,140,248,0.2), 0 8px 32px -8px rgba(129,140,248,0.5);
+    --bento-grad-primary: linear-gradient(135deg, #818cf8, #a78bfa);
+    --bento-grad-rainbow: linear-gradient(135deg, #818cf8, #a78bfa 50%, #f472b6);
+    color-scheme: dark !important;
+  }
+:host(.bento-dark) .card, :host(.bento-dark) .card-container, :host(.bento-dark) .main-card, :host(.bento-dark) .panel-card {
+    background: var(--bento-card) !important; color: var(--bento-text) !important; border-color: var(--bento-border) !important;
+  }
+:host(.bento-dark) input, :host(.bento-dark) select, :host(.bento-dark) textarea { background: var(--bento-bg-2); color: var(--bento-text); border-color: var(--bento-border); }
+:host(.bento-dark) table th { background: var(--bento-bg-2); color: var(--bento-text-secondary); border-color: var(--bento-border); }
+:host(.bento-dark) table td { color: var(--bento-text); border-color: var(--bento-border); }
+:host(.bento-dark) pre, :host(.bento-dark) code { background: #1e1e2e !important; color: #e2e8f0 !important; }
+
+/* ── Reset & motion preferences ──────────────── */
+* { box-sizing: border-box; }
+@media (prefers-reduced-motion: reduce) { * { animation-duration: 0s !important; transition-duration: 0s !important; } }
+
+/* ── Main Card Wrapper ───────────────────────── */
+.card {
+  background: var(--bento-card);
+  border: 1px solid var(--bento-border);
+  border-radius: var(--bento-radius-md);
+  box-shadow: var(--bento-shadow-md);
+  color: var(--bento-text);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  position: relative;
+  transition: box-shadow var(--bento-trans), border-color var(--bento-trans);
+}
+
+/* ── Header ──────────────────────────────────── */
+.header {
+  padding: 20px 24px 0;
+  display: flex; align-items: center; gap: 12px;
+}
+.header-icon { font-size: 24px; }
+.header-title {
+  font-size: 18px; font-weight: 700; letter-spacing: -0.02em;
+  color: var(--bento-text);
+}
+.header-badge {
+  margin-left: auto;
+  background: var(--bento-grad-primary); color: #fff;
+  font-size: 12px; padding: 4px 10px; border-radius: var(--bento-radius-pill);
+  font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  box-shadow: 0 4px 14px -2px var(--bento-primary-glow);
+}
+.content { padding: 20px 24px 24px; }
+
+/* ── Tabs (modern pill style) ────────────────── */
+.tabs, .tab-bar, .tab-nav, .tab-header {
+  display: flex !important; gap: 4px !important;
+  padding: 4px !important;
+  background: var(--bento-bg-2) !important;
+  border-radius: var(--bento-radius-pill) !important;
+  margin-bottom: 20px !important;
+  overflow: visible !important;
+  -webkit-overflow-scrolling: touch !important;
+  flex-wrap: wrap !important; border-bottom: 0 !important;
+  width: 100%; max-width: 100%; box-sizing: border-box;
+}
+.tab, .tab-btn, .tab-button, .dtab {
+  padding: 8px 16px !important;
+  border: none !important; background: transparent !important; cursor: pointer !important;
+  font-size: 13px !important; font-weight: 600 !important;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, system-ui, sans-serif !important;
+  color: var(--bento-text-secondary) !important;
+  border-radius: var(--bento-radius-pill) !important;
+  margin-bottom: 0 !important;
+  transition: all var(--bento-trans) !important;
+  white-space: nowrap !important; flex: 1 1 auto !important; text-align: center !important; min-height: 40px !important;
+  letter-spacing: -0.005em !important;
+}
+.tab:hover, .tab-btn:hover, .tab-button:hover, .dtab:hover {
+  color: var(--bento-text) !important;
+  background: var(--bento-card) !important;
+}
+.tab.active, .tab-btn.active, .tab-button.active, .dtab.active {
+  background: var(--bento-card) !important;
+  color: var(--bento-primary) !important;
+  box-shadow: var(--bento-shadow-sm) !important;
+  font-weight: 700 !important;
+}
+.tab-content { display: block; }
+.tab-content.active { animation: bentoFadeIn 0.35s cubic-bezier(0.4, 0, 0.2, 1); }
+@keyframes bentoFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Stat / KPI cards (premium) ──────────────── */
+.stat-card, .stat-item, .metric-card, .kpi-card {
+  background: var(--bento-bg-2) !important;
+  border: 1px solid var(--bento-border) !important;
+  border-radius: var(--bento-radius-sm) !important;
+  padding: 18px !important;
+  text-align: left !important;
+  transition: transform var(--bento-trans), box-shadow var(--bento-trans), border-color var(--bento-trans);
+  position: relative; overflow: hidden;
+}
+.stat-card::before, .metric-card::before, .kpi-card::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--bento-grad-primary);
+  opacity: 0; transition: opacity var(--bento-trans);
+}
+.stat-card:hover, .stat-item:hover, .metric-card:hover, .kpi-card:hover {
+  transform: translateY(-2px); box-shadow: var(--bento-shadow-lg); border-color: var(--bento-primary-light);
+}
+.stat-card:hover::before, .metric-card:hover::before, .kpi-card:hover::before { opacity: 1; }
+.stat-icon { font-size: 22px; margin-bottom: 6px; opacity: 0.85; }
+.stat-value, .stat-val, .metric-value, .kpi-val {
+  font-size: 26px; font-weight: 800; line-height: 1.1;
+  letter-spacing: -0.02em; color: var(--bento-text);
+  font-feature-settings: "tnum" 1;
+}
+.stat-label, .stat-lbl, .metric-label, .kpi-lbl {
+  font-size: 12px; color: var(--bento-text-secondary);
+  margin-top: 4px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+}
+.stat-num {
+  font-size: 24px; font-weight: 800; color: var(--bento-primary);
+  font-feature-settings: "tnum" 1; letter-spacing: -0.02em;
+}
+.stat-sub { font-size: 12px; color: var(--bento-text-muted); font-weight: 500; }
+
+/* ── Overview grid ───────────────────────────── */
+.overview-grid, .stats-grid, .summary-grid, .stat-cards, .kpi-grid, .metrics-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px; margin-bottom: 20px;
+}
+
+/* ── Section headers ─────────────────────────── */
+.section-header, .section-title {
+  display: flex; align-items: center; justify-content: space-between;
+  position: relative; padding-left: 12px;
+  font-size: 12px; font-weight: 700; color: var(--bento-text-secondary);
+  text-transform: uppercase; letter-spacing: 0.08em;
+  margin: 16px 0 10px;
+}
+.section-header::before, .section-title::before {
+  content: ""; width: 4px; height: 4px; border-radius: 50%; background: var(--bento-primary);
+  position: absolute; left: 0; top: 50%; transform: translateY(-50%); flex-shrink: 0;
+}
+
+/* ── Loading / Empty / Info ──────────────────── */
+.loading-bar {
+  height: 3px; border-radius: var(--bento-radius-pill);
+  background: linear-gradient(90deg, var(--bento-primary), var(--bento-primary-2), transparent);
+  background-size: 200% 100%;
+  animation: bentoLoad 1.5s linear infinite; margin-bottom: 12px;
+}
+@keyframes bentoLoad { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+.empty-state, .no-data, .no-results {
+  text-align: center; color: var(--bento-text-secondary);
+  padding: 40px 20px; font-size: 14px;
+  background: var(--bento-bg-2); border-radius: var(--bento-radius-md);
+  border: 1px dashed var(--bento-border);
+}
+.info-note, .tip-box {
+  font-size: 13px; color: var(--bento-text-secondary);
+  background: var(--bento-primary-light);
+  border-radius: var(--bento-radius-sm); padding: 12px 14px;
+  border-left: 3px solid var(--bento-primary); margin-top: 12px;
+  line-height: 1.55;
+}
+.last-updated {
+  font-size: 12px; color: var(--bento-text-muted);
+  text-align: right; margin-top: 12px; font-feature-settings: "tnum" 1;
+}
+
+/* ── Buttons (premium) ───────────────────────── */
+.refresh-btn {
+  background: var(--bento-bg-2); border: 1px solid var(--bento-border);
+  border-radius: var(--bento-radius-pill); padding: 6px 14px;
+  font-size: 12px; color: var(--bento-text-secondary);
+  cursor: pointer; font-weight: 600; transition: all var(--bento-trans);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, system-ui, sans-serif;
+}
+.refresh-btn:hover {
+  background: var(--bento-card); color: var(--bento-primary);
+  border-color: var(--bento-primary); transform: translateY(-1px);
+  box-shadow: var(--bento-shadow-sm);
+}
+.toggle-btn, .action-btn {
+  background: var(--bento-grad-primary); border: none;
+  border-radius: var(--bento-radius-xs); padding: 8px 16px;
+  font-size: 13px; color: #fff; cursor: pointer; font-weight: 600;
+  transition: all var(--bento-trans); font-family: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, system-ui, sans-serif;
+  letter-spacing: -0.005em;
+  box-shadow: 0 4px 12px -2px var(--bento-primary-glow);
+}
+.toggle-btn:hover, .action-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px -4px var(--bento-primary-glow);
+}
+.send-btn, .btn-primary {
+  width: 100%;
+  background: var(--bento-grad-primary); color: #fff;
+  border: none; border-radius: var(--bento-radius-sm);
+  padding: 12px 20px; font-size: 14px; font-weight: 700;
+  cursor: pointer; font-family: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, system-ui, sans-serif;
+  letter-spacing: -0.01em;
+  transition: all var(--bento-trans);
+  box-shadow: 0 4px 14px -2px var(--bento-primary-glow);
+}
+.send-btn:hover, .btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 28px -6px var(--bento-primary-glow);
+}
+.send-btn:active, .btn-primary:active { transform: translateY(0); }
+.send-btn:disabled, .btn-primary:disabled {
+  opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none;
+}
+
+/* ── Badges / Status (modern pill) ───────────── */
+.badge, .status-badge, .tag, .chip {
+  padding: 4px 12px; border-radius: var(--bento-radius-pill);
+  font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; gap: 5px;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  border: 1px solid;
+}
+.badge-ok, .badge-success { background: var(--bento-success-light); color: var(--bento-success); border-color: var(--bento-success-border); }
+.badge-er, .badge-error   { background: var(--bento-error-light);   color: var(--bento-error);   border-color: var(--bento-error-border); }
+.badge-warn, .badge-warning { background: var(--bento-warning-light); color: var(--bento-warning); border-color: var(--bento-warning-border); }
+.badge-info { background: var(--bento-info-light); color: var(--bento-info); border-color: var(--bento-info-border); }
+
+.count-badge {
+  font-size: 12px; font-weight: 700; padding: 3px 10px;
+  border-radius: var(--bento-radius-pill); display: inline-flex; align-items: center;
+  font-feature-settings: "tnum" 1;
+}
+.error-badge { background: var(--bento-error-light); color: var(--bento-error); border: 1px solid var(--bento-error-border); }
+.warn-badge  { background: var(--bento-warning-light); color: var(--bento-warning); border: 1px solid var(--bento-warning-border); }
+.info-badge  { background: var(--bento-primary-light); color: var(--bento-primary); border: 1px solid var(--bento-border); }
+.ok-badge    { background: var(--bento-success-light); color: var(--bento-success); border: 1px solid var(--bento-success-border); }
+
+/* ── Tables (modern) ─────────────────────────── */
+table { width: 100%; border-collapse: separate; border-spacing: 0; }
+th {
+  background: var(--bento-bg-2); color: var(--bento-text-secondary);
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 12px 16px; text-align: left;
+  border-bottom: 1px solid var(--bento-border);
+}
+th:first-child { border-top-left-radius: var(--bento-radius-sm); }
+th:last-child  { border-top-right-radius: var(--bento-radius-sm); }
+td {
+  padding: 14px 16px; border-bottom: 1px solid var(--bento-border);
+  color: var(--bento-text); font-size: 13px;
+}
+tr { transition: background var(--bento-trans-fast); }
+tr:hover td { background: var(--bento-primary-light); }
+tr:last-child td { border-bottom: 0; }
+
+/* ── Forms / Inputs ──────────────────────────── */
+input, select, textarea {
+  padding: 10px 14px; border: 1.5px solid var(--bento-border);
+  border-radius: var(--bento-radius-xs);
+  background: var(--bento-card); color: var(--bento-text);
+  font-size: 14px; font-family: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, system-ui, sans-serif;
+  transition: all var(--bento-trans); outline: none;
+  letter-spacing: -0.005em;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--bento-primary);
+  box-shadow: 0 0 0 4px var(--bento-primary-light);
+}
+input::placeholder, textarea::placeholder { color: var(--bento-text-muted); }
+
+/* ── Code blocks ─────────────────────────────── */
+code {
+  background: var(--bento-bg-2); padding: 2px 6px;
+  border-radius: 4px; font-size: 12px;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  border: 1px solid var(--bento-border);
+}
+pre {
+  background: #1e1e2e; color: #e2e8f0;
+  padding: 16px; border-radius: var(--bento-radius-sm);
+  font-size: 12.5px; overflow-x: auto; line-height: 1.65;
+  white-space: pre-wrap; word-break: break-word;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  box-shadow: var(--bento-shadow-md);
+}
+
+/* ── Grid layouts ────────────────────────────── */
+.schedule-grid, .send-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+}
+.schedule-card, .send-card, .info-card {
+  background: var(--bento-bg-2); border: 1px solid var(--bento-border);
+  border-radius: var(--bento-radius-sm); padding: 16px;
+  transition: all var(--bento-trans);
+}
+.schedule-card:hover, .send-card:hover, .info-card:hover {
+  border-color: var(--bento-primary-light); transform: translateY(-1px);
+  box-shadow: var(--bento-shadow-md);
+}
+
+/* ── Log entries ─────────────────────────────── */
+.log-entry {
+  display: flex; flex-wrap: wrap; align-items: flex-start;
+  gap: 4px 8px; padding: 10px 12px;
+  border-radius: var(--bento-radius-sm); margin-bottom: 6px;
+  font-size: 12.5px; min-width: 0; overflow: hidden;
+  border: 1px solid transparent; transition: all var(--bento-trans-fast);
+}
+.error-entry { background: var(--bento-error-light); border-color: var(--bento-error-border); }
+.warn-entry  { background: var(--bento-warning-light); border-color: var(--bento-warning-border); }
+.log-time { color: var(--bento-text-muted); font-feature-settings: "tnum" 1; flex-shrink: 0; font-family: "JetBrains Mono", monospace; }
+.log-domain {
+  font-weight: 700; flex-shrink: 1; min-width: 0; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; word-break: break-all;
+}
+.error-domain { color: var(--bento-error); }
+.warn-domain  { color: var(--bento-warning); }
+.log-msg {
+  color: var(--bento-text-secondary); flex-basis: 100%;
+  word-break: break-word; overflow-wrap: anywhere;
+  white-space: pre-wrap; min-width: 0; line-height: 1.55;
+}
+
+/* ── Send status ─────────────────────────────── */
+.send-status {
+  padding: 12px 16px; border-radius: var(--bento-radius-sm);
+  margin-top: 14px; font-size: 13px; font-weight: 600;
+  text-align: center; letter-spacing: -0.005em;
+  border: 1px solid;
+}
+.send-status.sending { background: var(--bento-primary-light); color: var(--bento-primary); border-color: var(--bento-border); }
+.send-status.success { background: var(--bento-success-light); color: var(--bento-success); border-color: var(--bento-success-border); }
+.send-status.error   { background: var(--bento-error-light);   color: var(--bento-error);   border-color: var(--bento-error-border); }
+
+/* ── Scrollbar ───────────────────────────────── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bento-border); border-radius: var(--bento-radius-pill); border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--bento-text-muted); background-clip: content-box; }
+
+/* ── Animations ──────────────────────────────── */
+@keyframes bentoSpin  { to { transform: rotate(360deg); } }
+@keyframes bentoPulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
+@keyframes bentoSlideIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes bentoStaggerIn { from { opacity: 0; transform: translateY(12px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+
+/* Apply stagger to grids of stat-cards */
+.stats-grid > *, .overview-grid > *, .summary-grid > * {
+  animation: bentoStaggerIn 0.35s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.stats-grid > *:nth-child(1)  { animation-delay: 0.02s; }
+.stats-grid > *:nth-child(2)  { animation-delay: 0.06s; }
+.stats-grid > *:nth-child(3)  { animation-delay: 0.10s; }
+.stats-grid > *:nth-child(4)  { animation-delay: 0.14s; }
+.stats-grid > *:nth-child(5)  { animation-delay: 0.18s; }
+.stats-grid > *:nth-child(6)  { animation-delay: 0.22s; }
+
+/* ── Mobile — 768 px ─────────────────────────── */
+@media (max-width: 768px) {
+  .content { padding: 16px; }
+  .header { padding: 16px 16px 0; }
+  .tabs { gap: 2px !important; padding: 3px !important; }
+  .tab, .tab-button, .tab-btn { padding: 6px 12px !important; font-size: 12px !important; }
+  .overview-grid, .stats-grid, .summary-grid, .stat-cards, .kpi-grid, .metrics-grid {
+    grid-template-columns: repeat(2, 1fr); gap: 10px;
+  }
+  .stat-value, .stat-val, .kpi-val, .metric-val { font-size: 22px; }
+  .stat-label, .stat-lbl, .kpi-lbl, .metric-lbl { font-size: 12px; }
+  .send-grid, .schedule-grid { grid-template-columns: 1fr; }
+  .log-entry { flex-wrap: wrap; gap: 2px 6px; padding: 8px 10px; }
+  .log-domain { max-width: 60%; font-size: 12px; }
+  .log-msg { flex-basis: 100%; max-width: 100%; font-size: 12px; }
+  pre { padding: 12px; font-size: 12px; }
+  h2 { font-size: 18px; }
+  h3 { font-size: 15px; }
+  table { font-size: 12.5px; }
+  th, td { padding: 10px 12px; }
+}
+@media (max-width: 480px) {
+  .tabs { gap: 1px !important; padding: 2px !important; }
+  .tab, .tab-button, .tab-btn { padding: 5px 10px !important; font-size: 12px !important; }
+  .overview-grid, .stats-grid, .summary-grid { grid-template-columns: 1fr 1fr; }
+  .stat-value, .stat-val, .kpi-val { font-size: 18px; }
+}
+`;
+// Card-owned support footer. Never mutates document or foreign cards.
+const _LOCAL_INTRO_KEY = 'ha-intro-dismissed-ha-entity-renamer';
+const _LOCAL_INTRO = {
+  headline: "Bulk-rename HA entities + friendly names.",
+  steps: ["Pick an entity and preview its new ID or friendly name.","Bulk pattern: sensor.old_* → sensor.new_*.","Review affected references and update dashboards or automations manually."]
+};
+const _LOCAL_INTRO_PL = {
+  headline: 'Masowa zmiana identyfikatorów encji i ich nazw.',
+  steps: ['Wybierz encję i ustaw nowy identyfikator.', 'Zmiana prefiksu: sensor.old_* → sensor.new_*.', 'Sprawdź i w razie potrzeby popraw odwołania w dashboardach Lovelace.']
+};
+const _LOCAL_SUPPORT_KEY = 'ha-entity-renamer-support-dismissed';
+const _LOCAL_DONATE_HTML = '<div class="donate-section" data-source="own-card" style="margin:8px 0 0;padding:4px 0;background:none;border:0;box-shadow:none;min-height:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex-direction:row;justify-content:flex-start;text-align:left"><a href="https://buymeacoffee.com/macsiem" target="_blank" rel="noopener noreferrer" style="font-size:12px;color:var(--secondary-text-color,#64748b);font-weight:400;text-decoration:underline">Optional support for HA Tools</a><button type="button" class="support-dismiss" aria-label="Dismiss support link" style="margin-left:auto;padding:2px 6px;min-height:0;line-height:1;border:0;background:none;color:var(--secondary-text-color,#64748b);cursor:pointer">×</button></div>';
+function _localSupportDismissed() { try { return localStorage.getItem(_LOCAL_SUPPORT_KEY) === '1'; } catch (_) { return false; } }
+function _bindLocalSupportDismiss(root) { root.querySelector('.support-dismiss')?.addEventListener('click', () => { try { localStorage.setItem(_LOCAL_SUPPORT_KEY, '1'); } catch (_) {} root.querySelector('.donate-section[data-source="own-card"]')?.remove(); }); }
+/* ============================================================ */
+
+
+// BEGIN HA TOOLS FORMAT V4 source-sha256=74439e388c76e03837890852840a3df6104c8756dfbce6cd5c0bf173903f12a2
+// Localized presentation; raw values remain available to callers for details/export.
+function createFormatUi(language = 'en', timeZone = 'UTC', preferences = {}) {
+  const hourCycle = preferences.hourCycle || 'h23';
+  const dateLanguage = preferences.dateLanguage || language;
+  const stamp = value => typeof value === 'number' ? (Number.isFinite(value) ? value : NaN) : typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value) ? Date.parse(value) : NaN;
+  const localized = (value, options, locale = language) => {
+    const time = stamp(value);
+    if (!Number.isFinite(time)) return null;
+    try { return new Intl.DateTimeFormat(locale, {timeZone, ...options}).format(time); } catch (_) { return null; }
+  };
+  const clock = (value, withOffset = false) => localized(value, {hour:'2-digit', minute:'2-digit', hourCycle, ...(withOffset ? {timeZoneName:'shortOffset'} : {})});
+  const date = (value, short = false) => localized(value, {day:'numeric', month:'short', ...(short ? {} : {year:'numeric'})}, dateLanguage);
+  const pointLabel = value => localized(value, {year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hourCycle, timeZoneName:'shortOffset'}, dateLanguage);
+  const chartLabels = (values, resolution = 'hour') => {
+    const showDate = resolution === 'day' || values.length > 1 && stamp(values.at(-1)) - stamp(values[0]) >= 86400000;
+    const labels = values.map(value => resolution === 'day' ? date(value, true) : `${showDate ? date(value, true) + ' ' : ''}${clock(value)}`);
+    const counts = new Map();
+    for (const label of labels) counts.set(label, (counts.get(label) || 0) + 1);
+    return labels.map((label, index) => counts.get(label) < 2 ? label : resolution === 'day' ? pointLabel(values[index])
+      : `${showDate ? date(values[index], true) + ' ' : ''}${clock(values[index], true)}`);
+  };
+  const key = JSON.stringify([language, timeZone, hourCycle, dateLanguage]);
+  const numbers = new Intl.NumberFormat(language);
+  const plurals = new Intl.PluralRules(language);
+  const count = (value, forms) => `${numbers.format(value)} ${forms[plurals.select(value)] || forms.other}`;
+  const dateTime = value => {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(value)) return null;
+    const time = Date.parse(value);
+    if (!Number.isFinite(time)) return null;
+    try { return new Intl.DateTimeFormat(dateLanguage, {timeZone, dateStyle:'medium', timeStyle:'short', hourCycle}).format(new Date(time)); }
+    catch (_) { return null; }
+  };
+  const range = (from, to) => {
+    const first = Date.parse(from), last = Date.parse(to);
+    if (!Number.isFinite(first) || !Number.isFinite(last) || last < first) return null;
+    try {
+      const day = new Intl.DateTimeFormat(dateLanguage, {timeZone, dateStyle:'medium'});
+      const clock = new Intl.DateTimeFormat(language, {timeZone, hour:'2-digit', minute:'2-digit', hourCycle});
+      return day.format(first) === day.format(last)
+        ? `${day.format(first)} (${clock.format(first)}–${clock.format(last)})`
+        : `${dateTime(from)} – ${dateTime(to)}`;
+    } catch (_) { return null; }
+  };
+  const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const periodMarkup = ({start, end, label, source, measured, expected, unit, details = '', sourceTimeZone = ''}) => {
+    const local = range(start, end);
+    if (!local) return '';
+    const coverage = typeof measured === 'number' && Number.isFinite(measured) && typeof expected === 'number' && Number.isFinite(expected)
+      ? `${numbers.format(measured)}/${numbers.format(expected)} ${unit}` : '';
+    const pl = String(language).startsWith('pl');
+    return `<div class="energy-period-v4" style="overflow-wrap:anywhere"><p data-energy-period-summary>${[source, label, local, coverage, timeZone].filter(Boolean).map(escape).join(' · ')}</p><details data-energy-period-details data-energy-period-key="${escape(start + '|' + end)}"><summary style="min-height:44px;box-sizing:border-box;padding:12px 0;display:list-item;list-style-position:inside;cursor:pointer">${pl ? 'Źródło i szczegóły czasu' : 'Source and time details'}</summary><p>${escape(details)}</p>${sourceTimeZone && sourceTimeZone !== timeZone ? `<p>${escape(pl ? 'Strefa pomiarów i granic okresu' : 'Measurement calendar time zone')}: ${escape(sourceTimeZone)}</p>` : ''}<p>UTC: ${escape(start)} — ${escape(end)}</p></details></div>`;
+  };
+  const capturePeriods = (root, previous, current) => {
+    if (!previous || ['epoch','connection','user'].some(key => previous[key] !== current[key])) return [];
+    return [...root.querySelectorAll('[data-energy-period-key]')].map(element => ({
+      key:element.dataset.energyPeriodKey, open:element.open, focused:root.activeElement === element.querySelector('summary')
+    }));
+  };
+  const restorePeriods = (root, records) => {
+    for (const element of root.querySelectorAll('[data-energy-period-key]')) {
+      const record = records.find(row => row.key === element.dataset.energyPeriodKey);
+      if (!record) continue;
+      element.open = record.open;
+      if (record.focused) element.querySelector('summary')?.focus({preventScroll:true});
+    }
+  };
+  return {timeZone, key, clock, date, pointLabel, chartLabels, number:(value, options)=>options ? new Intl.NumberFormat(language, options).format(value) : numbers.format(value), count, dateTime, range, periodMarkup, capturePeriods, restorePeriods};
+}
+// Presentation follows the HA profile; measurement and tariff calendars remain separate.
+createFormatUi.forHass = hass => {
+  const locale = hass?.locale || {};
+  const systemLanguage = typeof navigator !== 'undefined' ? navigator.language : undefined;
+  const language = locale.language || hass?.language || systemLanguage || 'en';
+  const validZone = value => {
+    if (typeof value !== 'string' || !(value === 'UTC' || value.includes('/')) || /^[+-]/.test(value)) return null;
+    try { new Intl.DateTimeFormat('en', {timeZone:value}).format(0); return value; } catch (_) { return null; }
+  };
+  let systemZone;
+  try { systemZone = validZone(Intl.DateTimeFormat().resolvedOptions().timeZone); } catch (_) {}
+  const serverZone = validZone(hass?.config?.time_zone);
+  const timeZone = (locale.time_zone === 'server' ? serverZone : systemZone) || serverZone || 'UTC';
+  const clockLanguage = locale.time_format === 'system' ? systemLanguage || language : language;
+  const hourCycle = locale.time_format === '12' ? 'h12' : locale.time_format === '24' ? 'h23'
+    : new Intl.DateTimeFormat(clockLanguage, {hour:'numeric'}).resolvedOptions().hourCycle;
+  return createFormatUi(language, timeZone, {hourCycle, dateLanguage:locale.date_format === 'system' ? systemLanguage || language : language});
+};
+// END HA TOOLS FORMAT V4
+
+// BEGIN HA TOOLS LISTS V4 source-sha256=f669abcd1c151f99ff2bee1ba93ba508aef1ce93b1fcb7b1cb3a91cf7973296d
+// Shared list presentation. No registry writes, storage or global state.
+function createListUi(language = 'en') {
+  const collator = new Intl.Collator(language, {numeric:true, sensitivity:'base'});
+  const compare = (a,b) => collator.compare(String(a ?? ''), String(b ?? ''));
+  const createdAt = value => {
+    if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? value * 1000 : 0;
+    if (typeof value !== 'string' || !value.trim() || /^0(?:\.0+)?$/.test(value.trim())) return 0;
+    const time = Date.parse(value);
+    return Number.isFinite(time) && time > 0 ? time : 0;
+  };
+  const isNew = (value, now = Date.now()) => {
+    const time = createdAt(value);
+    return time > 0 && time <= now && now - time < 7 * 86400000;
+  };
+  return {compare, createdAt, isNew};
+}
+// END HA TOOLS LISTS V4
+
+const FAMILY_NAV='.tabs',FAMILY_ATTR='data-tab',FAMILY_ACTIVE='active';
+
+// Adapted from Config/YAML family15: options come only from current native buttons.
+// Observe the actual navigation parent's content box, not the global viewport.
+function _rememberFamilyFocus(card) {
+  const active = card.shadowRoot?.activeElement;
+  const nav = card.shadowRoot?.querySelector(FAMILY_NAV);
+  if (active?.id === 'ha-tools-tab-picker') return { picker:true };
+  if (nav?.contains(active)) return { tab:active.getAttribute(FAMILY_ATTR) };
+  return null;
+}
+function _disconnectFamilyNavigation(card) {
+  card._familyNavObserver?.disconnect();card._familyNavObserver=null;card._familyNavTarget=null;
+}
+function _bindFamilyNavigation(card, restoreFocus=null) {
+  const root=card.shadowRoot, nav=root?.querySelector(FAMILY_NAV);
+  if (!nav) { _disconnectFamilyNavigation(card);return; }
+  let label=root.querySelector('.ht-tab-picker');
+  if (!label) {
+    label=card.ownerDocument.createElement('div');label.className='ht-tab-picker';
+    const text=card.ownerDocument.createElement('label');text.htmlFor='ha-tools-tab-picker';label.append(text);
+    const select=card.ownerDocument.createElement('select');select.id='ha-tools-tab-picker';label.append(select);nav.before(label);
+    select.addEventListener('change',()=>{
+      const button=Array.from(root.querySelectorAll(FAMILY_NAV+' button['+FAMILY_ATTR+']')).find(item=>item.getAttribute(FAMILY_ATTR)===select.value&&!item.disabled&&!item.hidden);
+      if(button)button.click(); // The original handler owns navigation, history and guards.
+      _bindFamilyNavigation(card);
+    });
+  }
+  label.firstElementChild.textContent=card._lang==='pl'?'Zakładka':'Tab';
+  const select=label.querySelector('select');
+  const buttons=Array.from(nav.querySelectorAll('button['+FAMILY_ATTR+']')).filter(button=>!button.hidden&&!button.disabled);
+  const options=Array.from(select.options);
+  if(options.length!==buttons.length||buttons.some((button,index)=>options[index]?.value!==button.getAttribute(FAMILY_ATTR))) {
+    select.replaceChildren(...buttons.map(button=>{const option=card.ownerDocument.createElement('option');option.value=button.getAttribute(FAMILY_ATTR);return option;}));
+  }
+  buttons.forEach((button,index)=>{select.options[index].textContent=button.getAttribute('aria-label')||button.textContent.trim();});
+  const selected=buttons.find(button=>button.classList.contains(FAMILY_ACTIVE));select.value=selected?.getAttribute(FAMILY_ATTR)||'';
+  nav.setAttribute('role','tablist');
+  buttons.forEach((button,index)=>{
+    button.setAttribute('role','tab');button.setAttribute('aria-selected',String(button===selected));button.tabIndex=button===selected?0:-1;
+    if(button.dataset.tabKeysBound)return;
+    button.dataset.tabKeysBound='true';
+    button.addEventListener('keydown',event=>{
+      if(event.altKey||event.ctrlKey||event.metaKey||!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+      event.preventDefault();
+      const next=event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowRight'?1:-1)+buttons.length)%buttons.length;
+      const id=buttons[next].getAttribute(FAMILY_ATTR);buttons[next].click();
+      Array.from(card.shadowRoot.querySelectorAll(FAMILY_NAV+' button')).find(item=>item.getAttribute(FAMILY_ATTR)===id)?.focus({preventScroll:true});
+    });
+  });
+  const target=card;
+  const applyWidth=width=>{
+    const currentNav=root.querySelector(FAMILY_NAV),currentLabel=root.querySelector('.ht-tab-picker');if(!currentNav||!currentLabel)return;
+    const input=currentLabel.querySelector('select'),active=root.activeElement;
+    const style=getComputedStyle(currentNav);
+    const available=width-(parseFloat(style.paddingLeft)||0)-(parseFloat(style.paddingRight)||0);
+    const narrow=available>0&&available<280,fromTab=currentNav.contains(active),fromPicker=active===input;
+    currentNav.hidden=narrow;currentLabel.hidden=!narrow;
+    if(!narrow){
+      const tab=currentNav.querySelector('button.'+FAMILY_ACTIVE);
+      if(tab){const a=tab.getBoundingClientRect(),b=currentNav.getBoundingClientRect();
+        if(a.left<b.left)currentNav.scrollLeft-=b.left-a.left;
+        else if(a.right>b.right)currentNav.scrollLeft+=a.right-b.right;
+      }
+    }
+    if(narrow&&fromTab)input.focus({preventScroll:true});
+    else if(!narrow&&fromPicker)currentNav.querySelector('button.'+FAMILY_ACTIVE)?.focus({preventScroll:true});
+  };
+  if(card._familyNavTarget!==target) {
+    _disconnectFamilyNavigation(card);
+    const style=getComputedStyle(target);
+    const measured=target.getBoundingClientRect().width-(parseFloat(style.paddingLeft)||0)-(parseFloat(style.paddingRight)||0)-(parseFloat(style.borderLeftWidth)||0)-(parseFloat(style.borderRightWidth)||0);
+    if(measured>0)card._familyNavWidth=measured;
+    if(typeof ResizeObserver==='function'&&card.isConnected) {
+      card._familyNavTarget=target;
+      card._familyNavObserver=new ResizeObserver(entries=>{
+        if(!card.isConnected||card._familyNavTarget!==target)return;
+        const entry=entries.find(item=>item.target===target);if(!entry)return;
+        card._familyNavWidth=entry.contentRect.width;applyWidth(card._familyNavWidth);
+        card._syncHelpWidth(card._familyNavWidth);
+      });
+      card._familyNavObserver.observe(target);
+    }
+  }
+  applyWidth(card._familyNavWidth||900);
+  // Without ResizeObserver keep the initially measured navigation usable.
+  if(restoreFocus) {
+    const button=buttons.find(item=>item.getAttribute(FAMILY_ATTR)===restoreFocus.tab)||selected;
+    if(nav.hidden)select.focus({preventScroll:true});else button?.focus({preventScroll:true});
+  }
+}
+
+function _rememberFamilyDrafts(card) {
+  const root=card.shadowRoot, active=root?.activeElement;
+  return Array.from(root?.querySelectorAll('input[id]:not([type=checkbox]):not([type=radio]),textarea[id]')||[],field=>({
+    id:field.id,context:field.getAttribute('data-family-draft-context'),value:field.value,focused:field===active,start:field.selectionStart,end:field.selectionEnd,direction:field.selectionDirection,scrollTop:field.scrollTop,
+  }));
+}
+function _restoreFamilyDrafts(card, fields) {
+  for(const saved of fields) {
+    const field=card.shadowRoot.getElementById(saved.id);if(!field||field.disabled||field.getAttribute('data-family-draft-context')!==saved.context)continue;
+    field.value=saved.value;field.scrollTop=saved.scrollTop;
+    if(saved.focused){field.focus({preventScroll:true});if(typeof saved.start==='number'&&typeof field.setSelectionRange==='function')field.setSelectionRange(saved.start,saved.end,saved.direction||'none');}
+  }
+}
+
+const _FAMILY_CONTROL_CSS = `
+/* Family15: native touch targets; checkbox indicators remain small inside labels. */
+:host button,:host summary,:host a[href],:host [role=button],
+:host input:not([type=checkbox]):not([type=radio]),:host select,:host textarea {
+  box-sizing:border-box;min-height:44px !important;min-width:44px !important;max-width:100%;
+}
+:host button,:host summary,:host a[href] { white-space:normal !important;overflow-wrap:anywhere; }
+:host a[href] { display:inline-flex;align-items:center; }
+:host label:has(input[type=checkbox]) { min-height:44px !important;min-width:44px;display:flex;align-items:center;gap:8px;cursor:pointer; }
+:host input[type=checkbox] { width:18px;height:18px;flex:none; }
+:host button:focus-visible,:host summary:focus-visible,:host a:focus-visible,:host input:focus-visible,:host select:focus-visible,:host textarea:focus-visible,:host [role=button]:focus-visible {
+  outline:2px solid #fff !important;outline-offset:2px;box-shadow:0 0 0 5px #111827;
+}
+.intro-banner { padding-right:64px !important; }
+.ht-tab-picker { min-width:0;display:flex;flex-direction:column;gap:6px;padding:8px;margin:0 0 8px; }
+.ht-tab-picker select { width:100%;font:inherit;color:var(--primary-text-color,inherit);background:var(--card-background-color,transparent);padding:8px;border:1px solid var(--divider-color,#aaa);border-radius:8px; }
+.ht-tab-picker[hidden],.tabs[hidden],.det-tabs[hidden] { display:none !important; }
+.tabs,.det-tabs { display:flex;flex-wrap:wrap !important;overflow:visible !important;min-width:0;max-width:100%; }
+:host .tabs button,:host .det-tabs button { min-height:44px !important;min-width:44px !important;white-space:normal !important;overflow-wrap:anywhere; }
+.device-header { width:100%; border:0; background:transparent; color:inherit; font:inherit; text-align:left; }
+`;
+
+
+// Forward native key activation to the original action, without repeat or shortcut clicks.
+function _bindFamilyRowKeys(root, selector) {
+  root.querySelectorAll(selector).forEach(row => row.addEventListener('keydown', event => {
+    if (event.target !== row || !['Enter', ' '].includes(event.key) || event.altKey || event.ctrlKey || event.metaKey) return;
+    event.preventDefault();
+    if (!event.repeat) row.click();
+  }));
+}
+function _rememberFamilyRowFocus(card, kinds) {
+  const active = card.shadowRoot.activeElement;
+  const kind = active && kinds.find(([selector]) => active.matches(selector));
+  return kind ? { selector:kind[0], attr:kind[1], key:active.getAttribute(kind[1]) } : null;
+}
+function _restoreFamilyRowFocus(card, saved) {
+  if (!saved) return;
+  Array.from(card.shadowRoot.querySelectorAll(saved.selector))
+    .find(row => row.getAttribute(saved.attr) === saved.key)?.focus({preventScroll:true});
+}
+
+// Keep the active list's viewport when its rows are replaced. Scrollable HA
+// ancestors survive the card render; the Devices list itself does not.
+function _rememberListViewport(card) {
+  const root = card.shadowRoot;
+  const list = root.querySelector('.device-list');
+  if (!(card._activeTab === 'devices' && list)
+      && !(card._activeTab === 'automatic' && root.querySelector('.automatic-tab'))) return null;
+  const active = root.activeElement;
+  const entity = active?.getAttribute('data-auto-entity') || active?.getAttribute('data-remove-queue');
+  const device = active?.getAttribute('data-auto-device') || active?.getAttribute('data-device-id');
+  const anchor = active?.closest('.rename-preview-row') || active?.closest('.device-header');
+  const parents = [];
+  for (let element = card; element; element = element.parentElement || element.getRootNode()?.host) {
+    if (element.scrollTop) parents.push({element, top:element.scrollTop});
+  }
+  return {listTop:list?.scrollTop, parents, entity, device,
+    group:active?.closest('[data-auto-group]')?.getAttribute('data-auto-group'),
+    anchorKind:anchor?.matches('.rename-preview-row') ? 'entity' : 'header',
+    anchorTop:anchor?.getBoundingClientRect().top};
+}
+
+function _restoreListViewport(card, saved) {
+  if (!saved) return;
+  const root = card.shadowRoot;
+  let action;
+  if (saved.entity) action = Array.from(root.querySelectorAll('[data-auto-entity],[data-remove-queue],[data-add-single]'))
+    .find(element => !element.disabled && ['data-auto-entity','data-remove-queue','data-add-single']
+      .some(attr => element.getAttribute(attr) === saved.entity));
+  else if (saved.device) action = Array.from(root.querySelectorAll('[data-auto-device],[data-device-id]'))
+    .find(element => !element.disabled && ['data-auto-device','data-device-id']
+      .some(attr => element.getAttribute(attr) === saved.device));
+  if (!action && saved.group) action = Array.from(root.querySelectorAll('[data-auto-group]'))
+    .find(group => group.getAttribute('data-auto-group') === saved.group)?.querySelector('summary');
+  action?.focus({preventScroll:true});
+  const list = root.querySelector('.device-list');
+  if (list && saved.listTop !== undefined) list.scrollTop = saved.listTop;
+  for (const {element, top} of saved.parents) if (element.isConnected) element.scrollTop = top;
+  const anchor = action?.closest('.rename-preview-row') || action?.closest('.device-header');
+  const scroller = list && saved.listTop ? list : saved.parents.find(item => item.element.isConnected)?.element;
+  const anchorKind = anchor?.matches('.rename-preview-row') ? 'entity' : 'header';
+  // A vanished entity may hand focus to its group, but the header is not the
+  // same viewport anchor. Preserve the restored scroll without a row delta.
+  if (anchor && anchorKind === saved.anchorKind && scroller && Number.isFinite(saved.anchorTop)) {
+    const delta = anchor.getBoundingClientRect().top - saved.anchorTop;
+    if (Math.abs(delta) > 1) scroller.scrollTop += delta;
+  }
+}
+
+// In-memory, connection-scoped read handoff; no review or consent crosses cards.
+const _recoveryCardScopes = new WeakMap();
+const _RENAMER_TABS = ['devices', 'automatic', 'queue', 'log'];
+function _configuredTabs(config) {
+  const tabs = Array.isArray(config?.tabs) ? _RENAMER_TABS.filter(tab => config.tabs.includes(tab)) : _RENAMER_TABS;
+  return tabs.length ? tabs : _RENAMER_TABS;
+}
+function _defaultTab(config) {
+  const tabs = _configuredTabs(config);
+  return tabs.includes(config?.default_tab) ? config.default_tab : tabs[0];
+}
+
+class HAEntityRenamer extends HTMLElement {
+  static getConfigElement() { return document.createElement('ha-entity-renamer-editor'); }
+  getCardSize() { return 8; }
+
+  getGridOptions() { return { columns: 12, min_rows: 3, min_columns: 6 }; }
+
+  static getStubConfig() { return { type: 'custom:ha-entity-renamer', title: 'Entity Renamer' }; }
+  setConfig(config) {
+    const next = { ...(config || {}) };
+    const signature = JSON.stringify([_configuredTabs(next), _defaultTab(next)]);
+    if (signature !== this._navigationConfig) this._activeTab = _defaultTab(next);
+    this._navigationConfig = signature;
+    this._config = next;
+    if (this._hass) { this._registerRecoveryCard(); this.render(); }
+  }
+  _visibleTabs() {
+    const configured = _configuredTabs(this._config);
+    // Internal transaction flows may need Queue or Log even on a restricted card.
+    return _RENAMER_TABS.filter(tab => configured.includes(tab) || tab === this._activeTab);
+  }
+  _helpPreference() {
+    const account = this._hass?.user?.id || null;
+    if (!this._helpState || this._helpState.account !== account) {
+      const key = account ? `${_LOCAL_INTRO_KEY}:${encodeURIComponent(account)}` : null;
+      let closed = false;
+      try { closed = key && localStorage.getItem(key) === '1'; } catch (_) {}
+      this._helpState = { account, key, closed, open: false, width: null };
+    }
+    return this._helpState;
+  }
+  _renderHelp() {
+    if (this._config?.show_help === false) return '';
+    const state = this._helpPreference();
+    const intro = this._lang === 'pl' ? _LOCAL_INTRO_PL : _LOCAL_INTRO;
+    const label = this._lang === 'pl' ? 'Jak to działa?' : 'How does it work?';
+    return `<details class="renamer-help" ${state.open ? 'open' : ''}><summary>ⓘ ${label}</summary>
+      <p>${_esc(intro.headline)}</p><ol>${intro.steps.map(step => `<li>${_esc(step)}</li>`).join('')}</ol></details>`;
+  }
+  _syncHelpWidth(width) {
+    const help = this.shadowRoot.querySelector('details.renamer-help');
+    if (!help || !(width > 0)) return;
+    const state = this._helpPreference();
+    if (state.width === width) return;
+    if (state.width === null) state.open = width >= 500 && !state.closed;
+    else if (width < 500) state.open = false;
+    state.width = width;
+    help.open = state.open;
+  }
+  _bindHelp() {
+    const help = this.shadowRoot.querySelector('details.renamer-help');
+    help?.querySelector('summary')?.addEventListener('click', event => {
+      if (event.defaultPrevented) return;
+      const state = this._helpPreference();
+      state.open = !help.open;
+      // The native details default action provides keyboard and pointer behavior.
+      if (!state.open) {
+        state.closed = true;
+        try { if (state.key) localStorage.setItem(state.key, '1'); } catch (_) {}
+      }
+    });
+    if (this._familyNavWidth > 0) this._syncHelpWidth(this._familyNavWidth);
+  }
+  constructor() {
+    super();
+    this._toolId = this.tagName.toLowerCase().replace('ha-', '');
+    this.attachShadow({ mode: 'open' });
+    this._lang = 'en';
+    this._hass = null;
+    this._devices = [];
+    this._entities = [];
+    this._selectedDevice = null;
+    this._searchQuery = '';
+    this._automaticSearch = '';
+    this._listFilters = {devices:'all', automatic:'all'};
+    this._listSort = 'name';
+    this._queueUndo = null;
+    this._renameQueue = []; // {oldId, newId, newName?, entityObj}
+    this._previewMode = false;
+    this._deviceRenameQueue = {}; // deviceId -> newName
+    this._impactResults = null;
+    this._loading = false;
+    this._registryRefreshPending = false;
+    this._message = null;
+    this._confirmDialogOpen = false;
+    this._confirmation = null;
+    this._entityEditor = null;
+    this._migration = null; // Retained review; consumed intents are never replayed.
+    this._recoveryInventory = null;
+    this._applyOperation = null;
+    this._readEpoch = 0;
+    this._authorityEpoch = 0;
+    this._historyScope = null;
+    this._legacyReviewLog = [];
+    this._lastApplyResult = null;
+    this._activeTab = 'devices'; // devices | queue | log
+    this._automaticRows = [];
+    this._automaticNull = [];
+    this._automaticLoaded = false;
+    this._renameLog = [];
+    this._exportDialog = null;
+    this._exportRevision = 0;
+    this._exportFingerprint = null;
+    this._exportSourceArray = null;
+    this._exportConnections = new WeakMap();
+    this._exportConnectionSerial = 0;
+    this._exportEventCleanups = [];
+    this._exportBoundConnection = null;
+    this._exportConnectionOnline = false;
+    this._exportBrowserOnline = navigator.onLine === true;
+    this._expandedDevices = new Set();
+    this._loadHistoryFromStorage();
+  }
+
+  _historyKey(hass = this._hass) {
+    const id = hass?.user?.id;
+    return hass?.user?.is_admin === true && typeof id === 'string' && id.trim()
+      ? 'entity-renamer-history-v2-' + encodeURIComponent(JSON.stringify([location.origin, id])) : null;
+  }
+
+  _loadHistoryFromStorage() {
+    this._historyScope = this._historyKey();
+    this._legacyReviewLog = [];
+    this._renameLog = [];
+    // Old history has no proven account origin. Preserve it in place, never
+    // attribute it to the first administrator to open this upgraded card.
+    this._legacyHistoryPresent = Array.isArray(haToolsPersistence.loadSync('entity-renamer-history'));
+    if (!this._historyScope) return;
+    const stored = haToolsPersistence.loadSync(this._historyScope);
+    if (Array.isArray(stored)) this._renameLog = stored;
+  }
+
+  _saveHistoryToStorage(scope = this._historyKey(), log = this._renameLog) {
+    if (!scope) return;
+    if (log === this._renameLog && scope === this._historyKey()) {
+      this._historyScope = scope;
+      this._invalidateRenameExport();
+    }
+    // Captured original scope is also used for uncertain in-flight writes;
+    // they never enter the newly authenticated account's array or storage.
+    haToolsPersistence.save(scope, log);
+  }
+
+  _renameAuthorityAvailable() {
+    return this.isConnected && this._hass?.user?.is_admin === true
+      && !!this._historyKey() && this._hass?.connection?.connected === true
+      && this._exportConnectionOnline === true && this._exportBrowserOnline === true
+      && navigator.onLine === true;
+  }
+
+  _cancelRenameAuthority() {
+    if (this._migration) {
+      const m = this._migration;
+      clearTimeout(m.pollTimer);
+      // Consent expires on every authority fence. Retain attempted identity only
+      // for same-account status/inspect, never to revive apply consent.
+      if (m.lifecycleEntry && (m.inspecting || m.lifecycleEntry.pending?.kind === 'inspect' || m.lifecycleEntry.inspectionObserved))
+        m.lifecycleEntry.inspectionInterrupted = true;
+      this._migration = m.attempted ? {owner: m.owner, operation_id: m.operation_id,
+        fingerprint: m.fingerprint, review: m.review, identities: m.identities, attempted: true,
+        recoveredIdentity: m.recoveredIdentity, restoreAttempted: m.restoreAttempted, restoreRevoked: true,
+        lifecycleEntry: m.lifecycleEntry,
+        inspectionIssue: (m.inspecting || m.lifecycleEntry?.inspectionInterrupted) ? 'interrupted' : m.inspectionIssue,
+        stage: 'unknown', invalidated: true, busy: false} : null;
+    }
+    this._recoveryInventory = null;
+    this._clearQueueUndo();
+    if (this._loading && !this._applyOperation) this._registryRefreshPending = true;
+    this._legacyReviewLog = [];
+    this._authorityEpoch++;
+    this._readEpoch++;
+    if (this._applyOperation) this._applyOperation.cancelled = true;
+    else this._loading = false;
+    this._confirmation = null;
+    this._confirmDialogOpen = false;
+    this._entityEditor = null;
+    this._lastApplyResult = null;
+    this._message = null;
+    this._invalidateRenameExport();
+  }
+
+  get _t() {
+    const T = {
+      pl: {
+        deviceEntityRenamer: 'Device & Entity Renamer',
+        devices: 'Urządzenia',
+        entities: 'Encje',
+        queue: 'Kolejka',
+        log: 'Historia',
+        inQueue: 'W kolejce',
+        noResults: 'Brak wyników',
+        searchPlaceholder: 'Szukaj urządzeń lub encji...',
+        newDeviceName: 'Nowa nazwa urządzenia',
+        changeName: 'Zmień nazwę',
+        prefixChange: 'Zmiana prefiksu entity_id dla wszystkich encji',
+        oldPrefix: 'Stary prefiks',
+        newPrefix: 'Nowy prefiks',
+        apply: 'Zastosuj',
+        queueEmpty: 'Kolejka jest pusta.\nDodaj encje z zakładki Urządzenia.',
+        devicesToRename: 'Urządzenia do zmiany nazwy:',
+        clear: 'Wyczyść',
+        analyzeImpact: 'Analizuj wpływ',
+        executeRenames: 'Wykonaj zmiany',
+        errorLoadingData: 'Błąd ładowania danych: ',
+        analyzing: 'Analizuję wpływ zmian...',
+        analyzing2: 'Analizuję wpływ i zmieniam nazwy...',
+        renameSuccess: 'Zmieniono {ok} encji{devCount}{fail}{impact}. Sprawdź powiązania zmienionych encji.',
+        editEntity: 'Zmień encję', queueEdit: 'Dodaj do kolejki', noIdChange: 'Bez zmiany entity_id',
+        newEntity: 'Nowy entity_id (object_id) – zostaw bez zmian jeśli chcesz zmienić tylko friendly name:',
+        newFriendly: 'Nowy friendly name (zostaw puste = bez zmian):',
+        confirmRename: 'Czy na pewno chcesz zmienić nazwy {count} encji? Ta operacja jest nieodwracalna.',
+        confirmRenameTitle: 'Potwierdź zmiany',
+        confirmRenameBody: 'Zmiany w rejestrze encji zostaną zapisane w Home Assistant dopiero po kliknięciu „Zmień nazwy”.',
+        confirmRenameCount: 'Encje do zmiany: {count}',
+        confirmDeviceCount: 'Urządzenia do zmiany: {count}',
+        confirmNoEntityChanges: 'Brak zmian entity_id w kolejce.',
+        confirmMore: '…i jeszcze {count}',
+        cancel: 'Anuluj',
+        rename: 'Zmień nazwy',
+        resultTitle: 'Wynik zmian',
+        resultSucceeded: 'Udane zapisy: {ok} z {total}',
+        resultFailures: 'Błędy:',
+        noHistory: 'Brak historii zmian.\nWykonaj zmiany z zakładki Kolejka.',
+        usedIn: 'Używane w:',
+        notUsed: 'Nie znaleziono powiązań w dostępnych zasobach',
+        deviceAdded: 'Nazwa urządzenia "{name}" dodana do kolejki.',
+        automatic: 'Automatyczne ID', loadAutomatic: 'Porównaj z Recreate entity IDs',
+        automaticInfo: 'Podgląd jest tylko do odczytu. HA wylicza ID według bieżącego języka i formatu. Powiązań w automatyzacjach ani dashboardach karta nie zmienia.',
+        automaticUnknown: 'Brak automatycznego ID', addAllAutomatic: 'Dodaj wszystkie', addDeviceAutomatic: 'Dodaj urządzenie',
+        automaticEmpty: 'Brak różnic do dodania.', automaticConflict: 'Kolizja docelowego ID',
+        adminRequired: 'Zmiany rejestru wymagają konta administratora HA.',
+        removeFromQueue: 'Usuń z kolejki',
+      },
+      en: {
+        deviceEntityRenamer: 'Device & Entity Renamer',
+        devices: 'Devices',
+        entities: 'Entities',
+        queue: 'Queue',
+        log: 'Log',
+        inQueue: 'In Queue',
+        noResults: 'No results',
+        searchPlaceholder: 'Search devices or entities...',
+        newDeviceName: 'New device name',
+        changeName: 'Rename',
+        prefixChange: 'Change entity_id prefix for all entities',
+        oldPrefix: 'Old prefix',
+        newPrefix: 'New prefix',
+        apply: 'Apply',
+        queueEmpty: 'Queue is empty.\nAdd entities from the Devices tab.',
+        devicesToRename: 'Devices to rename:',
+        clear: 'Clear',
+        analyzeImpact: 'Analyze Impact',
+        executeRenames: 'Apply Changes',
+        errorLoadingData: 'Error loading data: ',
+        analyzing: 'Analyzing impact...',
+        analyzing2: 'Analyzing impact and changing names...',
+        renameSuccess: 'Renamed {ok} entities{devCount}{fail}{impact}. Review any affected references.',
+        editEntity: 'Edit entity', queueEdit: 'Add to queue', noIdChange: 'No entity_id change',
+        newEntity: 'New entity_id (object_id) – leave unchanged if you only want to change the friendly name:',
+        newFriendly: 'New friendly name (leave empty = no change):',
+        confirmRename: 'Are you sure you want to rename {count} entities? This operation is irreversible.',
+        confirmRenameTitle: 'Confirm rename',
+        confirmRenameBody: 'Entity registry changes are written to Home Assistant only after you click Rename.',
+        confirmRenameCount: 'Entities to rename: {count}',
+        confirmDeviceCount: 'Devices to rename: {count}',
+        confirmNoEntityChanges: 'No entity_id changes queued.',
+        confirmMore: '…and {count} more',
+        cancel: 'Cancel',
+        rename: 'Rename',
+        resultTitle: 'Rename result',
+        resultSucceeded: 'Succeeded writes: {ok} of {total}',
+        resultFailures: 'Failed writes:',
+        noHistory: 'No rename history.\nMake changes from the Queue tab.',
+        usedIn: 'Used in:',
+        notUsed: 'No references found in readable resources',
+        deviceAdded: 'Device name "{name}" added to queue.',
+        automatic: 'Automatic IDs', loadAutomatic: 'Compare with Recreate entity IDs',
+        automaticInfo: 'Preview is read-only. HA calculates IDs using the current language and format. This card does not rewrite automation or dashboard references.',
+        automaticUnknown: 'No automatic ID', addAllAutomatic: 'Queue all', addDeviceAutomatic: 'Queue device',
+        automaticEmpty: 'No differences to queue.', automaticConflict: 'Target ID collision',
+        adminRequired: 'Registry changes require a Home Assistant administrator account.',
+        removeFromQueue: 'Remove from queue',
+      }
+    };
+    return T[this._lang] || T.en;
+  }
+
+  connectedCallback() {
+    this._bindRenameExportEvents();
+    this._lang = (this._hass?.language || navigator.language || '').startsWith('pl') ? 'pl' : 'en';
+    _bindFamilyNavigation(this);
+    // HA may detach/reparent a card while its initial registry read is pending.
+    // Retry only reads; a cancelled rename or export never resumes here.
+    if (this._hass && !this._applyOperation && (this._loading || (!this._entities.length && !this._devices.length))) this._registryRefreshPending = true;
+    this._registerRecoveryCard();
+    this._resumePermittedRegistryRead();
+  }
+
+  _unregisterRecoveryCard(orphan = false) {
+    const scope = this._recoveryCardScope;
+    if (!scope) return;
+    scope.cards.delete(this);
+    for (const entry of scope.entries) if (entry.owner === this) {
+      if (orphan) {
+        if (entry.pending?.kind === 'inspect' || entry.inspectionObserved) entry.inspectionInterrupted = true;
+        entry.owner = null;
+      } else scope.entries.delete(entry);
+    }
+    this._recoveryCardScope = null;
+    this._offerRecoveryCards(scope);
+  }
+
+  _registerRecoveryCard() {
+    const hass = this._hass, connection = hass?.connection;
+    let key;
+    try { key = JSON.stringify([hass?.user?.id, this._config || {}]); } catch (_) { key = null; }
+    if (!this.isConnected || hass?.user?.is_admin !== true || !hass.user.id || !connection || !key) {
+      this._unregisterRecoveryCard(); return;
+    }
+    let scopes = _recoveryCardScopes.get(connection);
+    if (!scopes) _recoveryCardScopes.set(connection, scopes = new Map());
+    let scope = scopes.get(key);
+    if (!scope) scopes.set(key, scope = {cards: new Set(), entries: new Set()});
+    if (this._recoveryCardScope !== scope) {
+      this._unregisterRecoveryCard(); this._recoveryCardScope = scope; scope.cards.add(this);
+    }
+    this._offerRecoveryCards(scope);
+  }
+
+  _offerRecoveryCards(scope) {
+    const entries = [...scope.entries].filter(entry => !entry.owner);
+    const cards = [...scope.cards].filter(card => card._renameAuthorityAvailable()
+      && (!card._migration || card._migration.invalidated));
+    // Multiple possible operations or cards require the existing inventory choice.
+    if (entries.length !== 1 || cards.length !== 1) return;
+    const entry = entries[0], card = cards[0];
+    entry.owner = card;
+    const m = {owner: entry.actor, operation_id: entry.operation_id, fingerprint: entry.fingerprint,
+      attempted: true, recoveredIdentity: true, restoreRevoked: true, stage: 'unknown',
+      epoch: card._authorityEpoch, session: card._readSession(), invalidated: false,
+      observation: 1, busy: !!entry.pending, inspecting: entry.pending?.kind === 'inspect',
+      inspectionIssue: entry.inspectionInterrupted ? 'interrupted' : null, lifecycleEntry: entry};
+    card._migration = m; card.render();
+    void card._refreshMigrationProgress(m, card._hass);
+  }
+
+  _trackRecoveryOperation(m) {
+    const scope = this._recoveryCardScope;
+    if (!scope || !m?.attempted) return null;
+    if (m.lifecycleEntry && scope.entries.has(m.lifecycleEntry)) return m.lifecycleEntry;
+    const entry = {owner: this, actor: m.owner, operation_id: m.operation_id,
+      fingerprint: m.fingerprint, pending: null, scope};
+    scope.entries.add(entry); m.lifecycleEntry = entry; return entry;
+  }
+
+  _startRecoveryRead(m, kind) {
+    const entry = this._trackRecoveryOperation(m);
+    if (!entry) return null;
+    const token = {kind}; entry.pending = token;
+    if (kind === 'inspect') { entry.inspectionInterrupted = false; entry.inspectionObserved = false; }
+    return {entry, token, original: m, origin: this};
+  }
+
+  _endRecoveryRead(read) {
+    if (!read || read.entry.pending !== read.token) return;
+    const entry = read.entry; entry.pending = null;
+    if (read.token.kind === 'inspect') {
+      if (!read.origin._migrationCurrent(read.original)) entry.inspectionInterrupted = true;
+      else entry.inspectionObserved = true;
+    }
+    // Observers see completion, never the old response or consent.
+    for (const card of new Set([...entry.scope.cards, ...(entry.watchers || [])])) {
+      const m = card._migration;
+      if (m && m !== read.original && m.lifecycleEntry === entry) {
+        if (read.token.kind === 'inspect' && entry.inspectionInterrupted) m.inspectionIssue = 'interrupted';
+        m.inspecting = false; m.busy = false; clearTimeout(m.pollTimer); m.pollTimer = null;
+        if (card._migrationCurrent(m)) card.render();
+      }
+    }
+    entry.watchers?.clear();
+  }
+
+  _invalidateRenameExport() {
+    this._exportRevision++;
+    this._exportDialog?.contextChanged();
+  }
+
+  _bindRenameExportEvents() {
+    const connection = this._hass?.connection;
+    if (this._exportEventCleanups.length && connection === this._exportBoundConnection) return;
+    this._exportEventCleanups.splice(0).forEach(off => off());
+    this._exportBoundConnection = connection;
+    this._exportConnectionOnline = connection?.connected === true;
+    const listen = (target, event, handler) => {
+      if (typeof target?.addEventListener !== 'function' || typeof target?.removeEventListener !== 'function') return;
+      target.addEventListener(event, handler);
+      this._exportEventCleanups.push(() => target.removeEventListener(event, handler));
+    };
+    listen(window, 'offline', () => { this._exportBrowserOnline = false; this._cancelRenameAuthority(); this.render(); });
+    listen(window, 'online', () => { this._exportBrowserOnline = navigator.onLine === true; this._restoreRenameAvailability(); });
+    listen(connection, 'ready', () => { this._exportConnectionOnline = true; this._restoreRenameAvailability(); });
+    listen(connection, 'disconnected', () => { this._exportConnectionOnline = false; this._cancelRenameAuthority(); this.render(); });
+  }
+
+  _rebindRecoveryObservation() {
+    const m = this._migration, entry = m?.lifecycleEntry;
+    if (!m?.invalidated || !entry || entry.actor !== this._hass?.user?.id || !this._renameAuthorityAvailable()) return;
+    // Rebind observation only. Results and consent from the prior epoch stay revoked.
+    m.epoch = this._authorityEpoch; m.session = this._readSession(); m.invalidated = false;
+    m.observation = (m.observation || 0) + 1;
+    m.busy = !!entry.pending; m.inspecting = entry.pending?.kind === 'inspect';
+    if (entry.inspectionInterrupted) m.inspectionIssue = 'interrupted';
+    if (m.busy) {
+      // A changed connection is a new scope, but its predecessor must drain.
+      if (this._recoveryCardScope !== entry.scope) (entry.watchers ||= new Set()).add(this);
+      void this._refreshMigrationProgress(m, this._hass);
+    }
+  }
+
+  _restoreRenameAvailability() {
+    this._invalidateRenameExport();
+    // A handoff may have been waiting for this connection to become available.
+    this._registerRecoveryCard();
+    this._rebindRecoveryObservation();
+    if (this._migration?.attempted) this.render();
+    else {
+      // Update the authority-dependent control without replacing unrelated drafts.
+      const button = this.shadowRoot.getElementById('findMigrationRecovery');
+      if (button) button.disabled = !!this._recoveryInventory?.busy || !this._renameAuthorityAvailable();
+    }
+    this._resumePermittedRegistryRead();
+  }
+
+  _renameExportContext() {
+    // Changes to reviewed source fields are checked at refresh AND at Save.
+    // No registry, reference scan or mutation is triggered by this projection.
+    const fingerprint = JSON.stringify(renameReports.snapshot(this._visibleRenameHistory(), true));
+    if (this._exportSourceArray !== this._renameLog || fingerprint !== this._exportFingerprint) {
+      this._exportSourceArray = this._renameLog; this._exportFingerprint = fingerprint; this._exportRevision++;
+    }
+    const connection = this._hass?.connection;
+    const objectConnection = connection !== null && (typeof connection === 'object' || typeof connection === 'function');
+    if (objectConnection && !this._exportConnections.has(connection)) this._exportConnections.set(connection, ++this._exportConnectionSerial);
+    const admin = this._hass?.user?.is_admin;
+    return {role: admin === true ? 'admin' : admin === false ? 'member' : 'unresolved',
+      userId: typeof this._hass?.user?.id === 'string' ? this._hass.user.id : '',
+      connectionId: objectConnection ? this._exportConnections.get(connection) : 'unresolved',
+      datasetId: 'native-completed-local-rename-history', revision: this._exportRevision,
+      connected: this.isConnected && objectConnection && connection.connected === true && this._exportConnectionOnline === true && this._exportBrowserOnline === true && navigator.onLine === true,
+      canExport: admin === true && !this._loading && !this._applyOperation,
+      sourceConfirmed: Array.isArray(this._renameLog)};
+  }
+
+  _visibleRenameHistory() {
+    return this._legacyReviewLog?.length ? this._renameLog.concat(this._legacyReviewLog) : this._renameLog;
+  }
+
+  _reviewLegacyHistory() {
+    if (!this._renameAuthorityAvailable() || this._applyOperation) return;
+    if (this._legacyReviewLog.length) this._legacyReviewLog = [];
+    else {
+      const legacy = haToolsPersistence.loadSync('entity-renamer-history');
+      this._legacyReviewLog = Array.isArray(legacy) ? legacy : [];
+    }
+    this._invalidateRenameExport();
+    this.render();
+    this.shadowRoot.getElementById('reviewLegacyHistory')?.focus();
+  }
+
+  _buildRenameReport({draft}) {
+    return renameReports.build({log: this._visibleRenameHistory(), format: draft.format, includePrivate: draft.includePrivate === true, language: this._lang});
+  }
+
+  async _downloadRenameReport({blob, filename, signal, format}) {
+    if (signal.aborted) return {outcome: 'unknown'};
+    if (typeof window.showSaveFilePicker === 'function') {
+      let writable;
+      try {
+        // Invoke within the Save gesture, before any asynchronous processing.
+        const mime = {json: 'application/json', csv: 'text/csv', txt: 'text/plain'};
+        const handle = await window.showSaveFilePicker({suggestedName: filename,
+          types: [{description: format.toUpperCase(), accept: {[mime[format]]: ['.' + format]}}]});
+        if (signal.aborted || handle.name.normalize('NFC') !== filename.normalize('NFC')) return {outcome: 'unknown'};
+        writable = await handle.createWritable();
+        if (signal.aborted) { await writable.abort(); writable = null; return {outcome: 'unknown'}; }
+        await writable.write(blob);
+        if (signal.aborted) { await writable.abort(); writable = null; return {outcome: 'unknown'}; }
+        await writable.close(); writable = null;
+        if (signal.aborted) return {outcome: 'unknown'};
+        const file = await handle.getFile();
+        const [expected, actual] = await Promise.all([blob.arrayBuffer(), file.arrayBuffer()]);
+        const left = new Uint8Array(expected), right = new Uint8Array(actual);
+        if (signal.aborted || left.length !== right.length || !left.every((byte, i) => byte === right[i])) return {outcome: 'unknown'};
+        return {outcome: 'saved'};
+      } catch {
+        if (writable) { try { await writable.abort(); } catch {} }
+        // A cancelled or uncertain save must never trigger a second download.
+        return {outcome: 'unknown'};
+      }
+    }
+    const url = URL.createObjectURL(blob), anchor = document.createElement('a');
+    anchor.href = url; anchor.download = filename; anchor.hidden = true;
+    try {
+      document.body.append(anchor); anchor.click();
+      // The browser only confirms initiating a download, never a disk write.
+      return {outcome: 'initiated'};
+    } finally { anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
+  }
+
+  _openRenameExport(opener) {
+    this._bindRenameExportEvents();
+    if (!this._exportDialog) this._exportDialog = createExportDialog({
+      root: this.shadowRoot, getContext: () => this._renameExportContext(), getLanguage: () => this._lang, createUiV3,
+      formats: ['json', 'csv', 'txt'], defaultFormat: 'json', defaultFilename: 'rename-history.json',
+      policy: {id: 'renamer.completed-history.v1', allowlistedFields: ['counts', 'timestamp', 'status', 'reason', 'paired_pseudonyms', 'strict_entity_ids_opt_in', 'reference_type_counts', 'manual_repair_enum'],
+        neverInclude: ['tokens', 'users', 'addresses', 'raw_config', 'names', 'raw_errors', 'yaml', 'templates']},
+      buildPayload: request => this._buildRenameReport(request), performDownload: request => this._downloadRenameReport(request),
+    });
+    this._exportDialog.open({opener});
+  }
+
+  _sanitize(str) {
+    if (!str) return str;
+    try { return decodeURIComponent(escape(str)); } catch(e) { return str; }
+  }
+
+  // Session identity follows the tested Device Health / Network Map pattern.
+  _readSession(hass = this._hass) {
+    return { connection: hass?.connection, userId: hass?.user?.id, admin: hass?.user?.is_admin };
+  }
+
+  _sameReadSession(a, b) {
+    return a.connection === b.connection && a.userId === b.userId && a.admin === b.admin;
+  }
+
+  _captureRead() {
+    const hass = this._hass;
+    const session = this._readSession(hass);
+    const epoch = this._readEpoch;
+    return { hass, current: () => epoch === this._readEpoch && this._sameReadSession(session, this._readSession()) };
+  }
+
+  _sourceIdentity(entry) {
+    return entry && JSON.stringify([entry.id, entry.platform, entry.unique_id, entry.device_id]);
+  }
+
+  _migrationEntityIdentityMatches(row, identity, change, side) {
+    let expected;
+    try { expected = JSON.parse(identity); } catch (_) { return false; }
+    if (!Array.isArray(expected) || expected.length !== 4 || !expected[0]
+        || row.id !== expected[0] || row.platform !== expected[1]
+        || (row.device_id ?? null) !== (expected[3] ?? null)) return false;
+    // YAML Script own-ID changes its native unique_id with the service key.
+    const ids = change.fields?.entity_id;
+    if (side === 'after' && expected[1] === 'script'
+        && typeof ids?.before === 'string' && typeof ids?.after === 'string'
+        && ids.before.startsWith('script.') && ids.after.startsWith('script.')
+        && expected[2] === ids.before.slice('script.'.length)) {
+      return row.unique_id === ids.after.slice('script.'.length);
+    }
+    return row.unique_id === expected[2];
+  }
+
+  set hass(hass) {
+    const previousFormatKey = this._displayFormatKey || this._formatUi.key;
+    const previousLanguage = this._lang;
+    const previousAdmin = this._hass?.user?.is_admin === true;
+    const previousSession = this._lastSession || this._readSession();
+    const nextSession = this._readSession(hass);
+    const sessionChanged = this._hass && !this._sameReadSession(previousSession, nextSession);
+    const suspended = this._suspendedRecoveryEntry;
+    if (suspended && (nextSession.connection !== suspended.connection
+        || (nextSession.userId && nextSession.userId !== suspended.entry.actor)
+        || nextSession.admin === false)) {
+      if (!suspended.entry.owner) suspended.entry.scope.entries.delete(suspended.entry);
+      this._suspendedRecoveryEntry = null;
+    }
+    // A temporarily missing user/role is not a new actor. Hide and revoke all
+    // authority now, retaining only a same-connection identity handoff.
+    const unresolved = sessionChanged && previousSession.admin === true && previousSession.userId
+      && previousSession.connection === nextSession.connection
+      && (!nextSession.userId || nextSession.userId === previousSession.userId)
+      && nextSession.admin !== false && (!nextSession.userId || nextSession.admin !== true);
+    if (unresolved && this._migration?.attempted && this._migration.lifecycleEntry) {
+      this._suspendedRecoveryEntry = {connection: previousSession.connection, entry: this._migration.lifecycleEntry};
+      this._unregisterRecoveryCard(true);
+    }
+    this._lastSession = nextSession;
+    if (sessionChanged) {
+      this._cancelRenameAuthority();
+      if (!this._applyOperation) this._loading = false;
+      if (this._applyOperation) this._applyOperation.cancelled = true;
+      this._confirmation = null;
+      this._entityEditor = null;
+      this._confirmDialogOpen = false;
+      this._automaticLoaded = false;
+      this._automaticRows = [];
+      this._automaticNull = [];
+      this._impactResults = null;
+      // A connection replacement alone cancels consent; account/role changes
+      // additionally remove every retained private projection from this UI.
+      if (previousSession.userId !== nextSession.userId || previousSession.admin !== nextSession.admin) {
+        this._migration = null;
+        this._entities = []; this._devices = []; this._deviceEntities = {};
+        this._renameQueue = []; this._deviceRenameQueue = {};
+        this._renameLog = []; this._historyScope = null;
+        this._expandedDevices.clear(); this._selectedDevice = null;
+        this._searchQuery = ''; this._automaticSearch = ''; this._listFilters = {devices:'all',automatic:'all'}; this._prefixOld = ''; this._prefixNew = '';
+        this._exportDialog?.cancel();
+        this.shadowRoot.replaceChildren(); // do not carry private form drafts into the next authority
+      }
+    }
+    try {
+      var _bg = (getComputedStyle(this).getPropertyValue('--card-background-color') || getComputedStyle(this).getPropertyValue('--primary-background-color') || '').trim();
+      var _d = false;
+      if (_bg) {
+        var _h, _r, _g, _b, _m;
+        if (_bg.charAt(0) === '#') { _h = _bg.slice(1); if (_h.length === 3) _h = _h.replace(/(.)/g, '$1$1'); _r = parseInt(_h.slice(0,2),16); _g = parseInt(_h.slice(2,4),16); _b = parseInt(_h.slice(4,6),16); }
+        else { _m = _bg.match(/[\d.]+/g); if (_m) { _r = +_m[0]; _g = +_m[1]; _b = +_m[2]; } }
+        if (_r != null) _d = (0.2126*_r + 0.7152*_g + 0.0722*_b) / 255 < 0.5;
+      } else if (hass && hass.themes) { _d = !!hass.themes.darkMode; }
+      this.classList.toggle('bento-dark', _d);
+      createUiV3({language:this._lang}).applyTheme(this);
+    } catch (e) {}
+    const first = !this._hass;
+    this._hass = hass;
+    if (first || (sessionChanged && (previousSession.userId !== nextSession.userId || previousSession.admin !== nextSession.admin))) this._loadHistoryFromStorage();
+    this._bindRenameExportEvents();
+    if (sessionChanged) this._invalidateRenameExport();
+    this._registerRecoveryCard();
+    this._rebindRecoveryObservation();
+    if (hass?.language) this._lang = hass.language.startsWith('pl') ? 'pl' : 'en';
+    const displayFormatKey = this._formatUi.key;
+    this._displayFormatKey = displayFormatKey;
+    if (previousLanguage !== this._lang) { this._invalidateRenameExport(); this._exportDialog?.cancel(); }
+    if (!hass) return;
+    if (first) this._init();
+    else if (sessionChanged || previousAdmin !== (hass.user?.is_admin === true)) {
+      const identityChanged = previousSession.userId !== nextSession.userId || previousSession.admin !== nextSession.admin;
+      if (identityChanged) this._registryRefreshPending = [true, false].includes(nextSession.admin);
+      this._confirmDialogOpen = false;
+      this.render();
+      this._resumePermittedRegistryRead();
+    } else if (previousLanguage !== this._lang || previousFormatKey !== displayFormatKey) this._renderLocalePreservingDrafts();
+  }
+
+  _renderLocalePreservingDrafts() {
+    const fields = Array.from(this.shadowRoot.querySelectorAll('input[id],textarea[id],select[id]'), field => ({
+      id: field.id, value: field.value, checked: field.checked, scrollTop: field.scrollTop,
+    }));
+    const active = this.shadowRoot.activeElement;
+    const focus = active?.id ? { id: active.id, start: active.selectionStart, end: active.selectionEnd, direction: active.selectionDirection } : null;
+    this.render();
+    for (const saved of fields) {
+      const field = this.shadowRoot.getElementById(saved.id);
+      if (!field) continue;
+      field.value = saved.value;
+      if (typeof saved.checked === 'boolean') field.checked = saved.checked;
+      field.scrollTop = saved.scrollTop;
+    }
+    const current = focus && this.shadowRoot.getElementById(focus.id);
+    if (current) {
+      current.focus({ preventScroll: true });
+      if (typeof focus.start === 'number' && typeof current.setSelectionRange === 'function') {
+        current.setSelectionRange(focus.start, focus.end, focus.direction || 'none');
+      }
+    }
+  }
+
+  _resumePermittedRegistryRead() {
+    if (!this._registryRefreshPending || this._applyOperation || !this.isConnected
+      || ![true, false].includes(this._hass?.user?.is_admin)
+      || this._exportConnectionOnline !== true || this._exportBrowserOnline !== true) return;
+    this._registryRefreshPending = false;
+    this._init(); // Only registry reads; no rename, old consent or impact retry.
+  }
+
+  async _init() {
+    const { current } = this._captureRead();
+    this.render();
+    await this._loadData();
+    if (current()) this.render();
+  }
+
+  async _loadData() {
+    // Keep authorized read-only browsing; unresolved authority cannot fetch.
+    if (![true, false].includes(this._hass?.user?.is_admin)) return null;
+    const { hass, current } = this._captureRead();
+    let receipt = null;
+    this._loading = true;
+    this.render();
+    try {
+      const [devResult, entResult] = await Promise.all([
+        hass.callWS({ type: 'config/device_registry/list' }),
+        hass.callWS({ type: 'config/entity_registry/list' }),
+      ]);
+      if (!current()) return;
+      if (!Array.isArray(devResult) || !Array.isArray(entResult)) throw new Error('Malformed registry read');
+      this._devices = [...devResult].sort((a,b) => this._compareDevices(a,b));
+      this._entities = entResult;
+      // Build device->entities map
+      this._deviceEntities = Object.create(null);
+      for (const ent of this._entities) {
+        const did = ent.device_id;
+        if (!did) continue;
+        if (!this._deviceEntities[did]) this._deviceEntities[did] = [];
+        this._deviceEntities[did].push(ent);
+      }
+      // Sort entities within each device
+      for (const did of Object.keys(this._deviceEntities)) {
+        this._deviceEntities[did].sort((a, b) => this._listUi.compare(a.entity_id,b.entity_id));
+      }
+      receipt = {devices: devResult, entities: entResult, session: this._readSession(hass)};
+    } catch (e) {
+      if (!current()) return;
+      this._message = { type: 'error', text: this._t.errorLoadingData + e.message };
+    }
+    if (current()) this._loading = false;
+    return receipt;
+  }
+
+  async _loadAutomaticIds() {
+    if (this._loading || ![true, false].includes(this._hass?.user?.is_admin)) return;
+    const { hass, current } = this._captureRead();
+    const entities = this._entities.map(entry => ({ ...entry }));
+    this._loading = true;
+    this._automaticLoaded = false;
+    this._message = null;
+    this.render();
+    try {
+      const ids = entities.filter(ent => ent.device_id).map(ent => ent.entity_id);
+      const mapping = {};
+      for (let i = 0; i < ids.length; i += 100) {
+        const batch = ids.slice(i, i + 100);
+        const result = await hass.callWS({ type: 'config/entity_registry/get_automatic_entity_ids', entity_ids: batch });
+        if (!current()) return;
+        for (const id of batch) {
+          if (!Object.prototype.hasOwnProperty.call(result, id)) throw new Error('Incomplete HA automatic ID response');
+          mapping[id] = result[id];
+        }
+      }
+      const occupied = new Set(entities.map(ent => ent.entity_id));
+      const seenTargets = new Set();
+      const rows = [];
+      const noId = [];
+      for (const ent of entities.filter(entry => entry.device_id)) {
+        const target = mapping[ent.entity_id];
+        if (target === null) { noId.push(ent); continue; }
+        if (!target || target === ent.entity_id) continue;
+        const conflict = occupied.has(target) || seenTargets.has(target);
+        seenTargets.add(target);
+        rows.push({ oldId: ent.entity_id, newId: target, deviceId: ent.device_id, uniqueId: ent.unique_id, sourceIdentity: this._sourceIdentity(ent), conflict });
+      }
+      this._automaticRows = rows;
+      this._automaticNull = noId;
+      this._automaticLoaded = true;
+    } catch (error) {
+      if (!current()) return;
+      this._automaticRows = [];
+      this._automaticNull = [];
+      this._message = { type: 'error', text: this._formatError(error) };
+    } finally {
+      if (current()) { this._loading = false; this.render(); }
+    }
+  }
+
+  _queueAutomaticIds(deviceId = null, oldId = null) {
+    if (this._loading || this._migration) return;
+    const queued = new Set(this._renameQueue.map(row => row.oldId));
+    for (const row of this._visibleAutomaticRows()) {
+      if (row.conflict || queued.has(row.oldId)) continue;
+      if (deviceId && row.deviceId !== deviceId) continue;
+      if (oldId && row.oldId !== oldId) continue;
+      this._renameQueue.push({ ...row, automatic: true, source: 'automatic', newName: null });
+      queued.add(row.oldId);
+    }
+    this._confirmation = null;
+    this._confirmDialogOpen = false;
+    this._impactResults = null;
+    this.render();
+  }
+
+
+  _getDeviceName(d) { return d.unassigned ? (this._lang === 'pl' ? 'Bez urządzenia' : 'No device') : d.name_by_user || d.name || d.id; }
+
+  get _listUi() {
+    const language = this._hass?.language || this._lang;
+    if (this._listUiLanguage !== language) {
+      this._listUiLanguage = language;
+      this._cachedListUi = createListUi(language);
+    }
+    return this._cachedListUi;
+  }
+
+  get _formatUi() { return createFormatUi.forHass(this._hass || {language:this._lang}); }
+
+  _registryCount(value,kind) {
+    const pl=this._lang==='pl';
+    const forms=kind==='device' ? (pl?{one:'urządzenie',few:'urządzenia',many:'urządzeń',other:'urządzenia'}:{one:'device',other:'devices'}) : (pl?{one:'encja',few:'encje',many:'encji',other:'encji'}:{one:'entity',other:'entities'});
+    return this._formatUi.count(value,forms);
+  }
+
+  _compareDevices(a,b) {
+    const natural = this._listUi.compare(this._getDeviceName(a),this._getDeviceName(b)) || this._listUi.compare(a.id,b.id);
+    if (this._listSort === 'newest') return this._listUi.createdAt(b.created_at)-this._listUi.createdAt(a.created_at) || natural;
+    return this._listSort === 'reverse' ? -natural : natural;
+  }
+
+  _entityMatches(entity, filter) {
+    const queued = this._renameQueue.some(row=>row.oldId===entity.entity_id);
+    const automatic = this._automaticRows.find(row=>row.oldId===entity.entity_id);
+    if (filter === 'queued') return queued;
+    if (filter === 'available') return !queued && !automatic?.conflict;
+    if (filter === 'conflicts') return automatic?.conflict === true;
+    if (filter === 'new') return this._listUi.isNew(entity.created_at);
+    return true;
+  }
+
+  _deviceRows(device, filter=this._listFilters.devices) {
+    const query = this._searchQuery.trim().toLocaleLowerCase(this._hass?.language || this._lang);
+    const matchesDevice = this._getDeviceName(device).toLocaleLowerCase(this._hass?.language || this._lang).includes(query);
+    return (device.unassigned ? this._entities.filter(entity => !entity.device_id) : this._deviceEntities[device.id] || []).filter(entity =>
+      (matchesDevice || [entity.entity_id,entity.name,entity.original_name].some(value=>String(value||'').toLocaleLowerCase(this._hass?.language || this._lang).includes(query))) &&
+      (filter === 'new' && this._listUi.isNew(device.created_at) || this._entityMatches(entity,filter))
+    ).sort((a,b)=>this._listUi.compare(a.entity_id,b.entity_id));
+  }
+
+  _getFilteredDevices() {
+    const groups = [...this._devices];
+    if (this._entities.some(entity => !entity.device_id)) groups.push({id: '__renamer_unassigned__', unassigned: true});
+    return groups.filter(device=>this._deviceRows(device).length).sort((a,b)=>this._compareDevices(a,b));
+  }
+
+  _visibleAutomaticRows(filter=this._listFilters.automatic) {
+    const query = this._automaticSearch.trim().toLocaleLowerCase(this._hass?.language || this._lang);
+    return this._automaticRows.filter(row=> {
+      const device = this._devices.find(device=>device.id===row.deviceId) || {id:row.deviceId};
+      const entity = this._entities.find(entity=>entity.entity_id===row.oldId) || {entity_id:row.oldId};
+      return [this._getDeviceName(device),row.oldId,row.newId].some(value=>String(value||'').toLocaleLowerCase(this._hass?.language || this._lang).includes(query)) &&
+        (filter === 'new' && this._listUi.isNew(device.created_at) || this._entityMatches(entity,filter));
+    });
+  }
+
+  _visibleAutomaticNull() {
+    const filter=this._listFilters.automatic;
+    if (filter==='available'||filter==='conflicts') return [];
+    const query=this._automaticSearch.trim().toLocaleLowerCase(this._hass?.language||this._lang);
+    return this._automaticNull.filter(entity=>{
+      const device=this._devices.find(d=>d.id===entity.device_id)||{id:entity.device_id||''};
+      return [entity.entity_id,entity.name,this._getDeviceName(device)].some(value=>String(value||'').toLocaleLowerCase(this._hass?.language||this._lang).includes(query)) &&
+        (filter==='new'&&this._listUi.isNew(device.created_at)||this._entityMatches(entity,filter));
+    });
+  }
+
+  _newBadge(value) {
+    return this._listUi.isNew(value) ? `<span class="new-badge">${this._lang==='pl'?'Nowe':'New'}</span>` : '';
+  }
+
+  _renderListControls(automatic=false) {
+    const pl=this._lang==='pl',scope=automatic?'automatic':'devices';
+    const keys=['all','available','queued','conflicts','new'];
+    const labels=pl?['Wszystkie','Do dodania','W kolejce','Konflikty','Nowe']:['All','To queue','In queue','Conflicts','New'];
+    const count=filter=>automatic?this._visibleAutomaticRows(filter).length:
+      [...this._devices,{id:'__renamer_unassigned__',unassigned:true}].reduce((n,d)=>n+this._deviceRows(d,filter).length,0);
+    return `<div class="list-toolbar"><input type="search" id="${automatic?'automaticSearch':'searchInput'}" aria-label="${_esc(this._t.searchPlaceholder)}" placeholder="🔍 ${_esc(this._t.searchPlaceholder)}" value="${_esc(automatic?this._automaticSearch:this._searchQuery)}">
+      <label>${pl?'Sortowanie':'Sort'} <select id="listSort">${[['name',pl?'Nazwa A–Z':'Name A–Z'],['reverse',pl?'Nazwa Z–A':'Name Z–A'],['newest',pl?'Najnowsze':'Newest']].map(([key,label])=>`<option value="${key}" ${this._listSort===key?'selected':''}>${label}</option>`).join('')}</select></label></div>
+      <div class="list-chips" role="group" aria-label="${pl?'Filtry encji':'Entity filters'}">${keys.map((key,i)=>`<button type="button" class="btn btn-sm btn-outline" data-list-filter="${key}" data-list-scope="${scope}" aria-pressed="${this._listFilters[scope]===key}">${labels[i]} (${count(key)})</button>`).join('')}</div>
+      <div class="list-expand"><button type="button" class="btn btn-sm btn-outline" data-expand-list="true">${pl?'Rozwiń wszystkie':'Expand all'}</button></div>`;
+  }
+
+  _syncListExpansion() {
+    const root=this.shadowRoot,button=root.querySelector('[data-expand-list]');
+    if(!button)return;
+    const groups=Array.from(root.querySelectorAll(this._activeTab==='automatic'?'[data-auto-group]':'[data-device-id]'));
+    const allOpen=groups.length>0&&groups.every(group=>this._activeTab==='automatic'?group.open:this._expandedDevices.has(group.dataset.deviceId));
+    button.dataset.expandList=String(!allOpen);
+    button.textContent=this._lang==='pl'?(allOpen?'Zwiń wszystkie':'Rozwiń wszystkie'):(allOpen?'Collapse all':'Expand all');
+    button.setAttribute('aria-expanded',String(allOpen));
+    button.disabled=groups.length===0;
+  }
+
+  _clearQueueUndo() {
+    clearTimeout(this._queueUndoTimer);
+    this._queueUndoTimer = null;
+    this._queueUndo = null;
+  }
+
+  _rememberQueueRemoval(value) {
+    this._clearQueueUndo();
+    this._queueUndo={...value,until:Date.now()+8000};
+    this._queueUndoTimer=setTimeout(()=>{this._clearQueueUndo();this.shadowRoot.querySelector('.queue-undo')?.remove();},8000);
+  }
+
+  _undoQueueRemoval() {
+    const undo = this._queueUndo;
+    if ((this._loading || this._migration) || !undo) return;
+    if (Date.now() < undo.until) {
+      if (undo.kind==='batch') {
+        const existing = new Set(this._renameQueue.map(row => row.oldId));
+        this._renameQueue = [...undo.entities.filter(row => !existing.has(row.oldId)), ...this._renameQueue];
+        this._deviceRenameQueue = {...undo.devices, ...this._deviceRenameQueue};
+      } else if (undo.kind==='device') {
+        if(!Object.hasOwn(this._deviceRenameQueue,undo.row.oldId)) {
+          const entries=Object.entries(this._deviceRenameQueue);
+          entries.splice(Math.min(undo.index,entries.length),0,[undo.row.oldId,undo.row.newId]);
+          this._deviceRenameQueue=Object.fromEntries(entries);
+        }
+      } else if (!this._renameQueue.some(row=>row.oldId===undo.row.oldId)) this._renameQueue.splice(Math.min(undo.index,this._renameQueue.length),0,undo.row);
+      this._confirmation=null; this._confirmDialogOpen=false; this._impactResults=null;
+    }
+    this._clearQueueUndo(); this.render();
+  }
+
+  _removeDeviceFromQueue(id) {
+    if((this._loading || this._migration) || !Object.hasOwn(this._deviceRenameQueue,id)) return;
+    this._rememberQueueRemoval({kind:'device',row:{oldId:id,newId:this._deviceRenameQueue[id]},index:Object.keys(this._deviceRenameQueue).indexOf(id)});
+    delete this._deviceRenameQueue[id];
+    this._confirmation=null;this._confirmDialogOpen=false;this._lastApplyResult=null;this._impactResults=null;
+    this.render();
+  }
+
+  _queueGroups() {
+    const groups=new Map();
+    const group=id=>{
+      if(!groups.has(id)) groups.set(id,{device:this._devices.find(d=>d.id===id)||{id,name:id|| (this._lang==='pl'?'Bez urządzenia':'No device')},rows:[]});
+      return groups.get(id);
+    };
+    for(const [id,name] of Object.entries(this._deviceRenameQueue)) group(id).nameChange=name;
+    for (const row of this._renameQueue) {
+      const id=row.deviceId || row.entity?.device_id || this._entities.find(e=>e.entity_id===row.oldId)?.device_id || '';
+      group(id).rows.push(row);
+    }
+    return [...groups.values()].sort((a,b)=>this._listUi.compare(this._getDeviceName(a.device),this._getDeviceName(b.device))||this._listUi.compare(a.device.id,b.device.id));
+  }
+
+  _findCommonPrefix(entityIds) {
+    if (!entityIds.length) return '';
+    // Strip domain prefix (e.g. sensor.) and find common prefix of object_ids
+    const objectIds = entityIds.map(id => id.split('.')[1] || id);
+    if (objectIds.length === 1) return objectIds[0];
+    let prefix = objectIds[0];
+    for (let i = 1; i < objectIds.length; i++) {
+      while (objectIds[i].indexOf(prefix) !== 0) {
+        prefix = prefix.substring(0, prefix.length - 1);
+        if (!prefix) return '';
+      }
+    }
+    // Trim trailing _ or .
+    return prefix.replace(/[_.]$/, '');
+  }
+
+  _selectDevice(deviceId) {
+    this._selectedDevice = deviceId === this._selectedDevice ? null : deviceId;
+    this._prefixOld = '';
+    this._prefixNew = '';
+    if (this._selectedDevice) {
+      const ents = this._deviceEntities[this._selectedDevice] || [];
+      this._prefixOld = this._findCommonPrefix(ents.map(e => e.entity_id));
+    }
+    this.render();
+  }
+
+
+  _addToQueue(oldId, newId, newName, source='manual') {
+    if (this._loading || this._migration) return;
+    // Allow adding if EITHER entity_id changed OR friendly_name/alias changed
+    if (oldId === newId && !newName) return;
+    this._confirmDialogOpen = false;
+    this._confirmation = null;
+    this._lastApplyResult = null;
+    if (this._renameQueue.some(r => r.oldId === oldId)) {
+      this._renameQueue = this._renameQueue.map(r => r.oldId === oldId ? { ...r, newId, automatic:false, source, ...(newName !== undefined ? { newName } : {}) } : r);
+    } else {
+      const ent = this._entities.find(e => e.entity_id === oldId);
+      this._renameQueue.push({ oldId, newId, newName: newName || null, automatic:false, source, entity: ent, sourceIdentity: this._sourceIdentity(ent) });
+    }
+    this.render();
+  }
+
+  _removeFromQueue(oldId) {
+    if (this._loading || this._migration) return;
+    this._confirmDialogOpen = false;
+    this._confirmation = null;
+    this._lastApplyResult = null;
+    const index=this._renameQueue.findIndex(row=>row.oldId===oldId);
+    if(index>=0) {
+      this._rememberQueueRemoval({row:this._renameQueue[index],index});
+      this._renameQueue.splice(index,1);
+      this._impactResults=null;
+    }
+    this.render();
+  }
+
+  _clearQueue() {
+    if (this._loading || this._migration) return;
+    this._areaPrefixEpoch = (this._areaPrefixEpoch || 0) + 1;
+    if (this._renameQueue.length || Object.keys(this._deviceRenameQueue).length) {
+      this._rememberQueueRemoval({kind:'batch',entities:[...this._renameQueue],devices:{...this._deviceRenameQueue},row:{oldId:this._lang==='pl'?'Cała kolejka':'Entire queue'}});
+    } else this._clearQueueUndo();
+    this._confirmDialogOpen = false;
+    this._confirmation = null;
+    this._lastApplyResult = null;
+    this._renameQueue = [];
+    this._deviceRenameQueue = {};
+    this._impactResults = null;
+    this.render();
+  }
+
+  async _addAreaPrefix() {
+    if ((this._loading || this._migration) || this._areaPrefixPending || !this._selectedDevice || ![true,false].includes(this._hass?.user?.is_admin)) return;
+    const { hass, current } = this._captureRead();
+    const deviceId = this._selectedDevice;
+    const areaEpoch = this._areaPrefixEpoch || 0;
+    const applicable = () => current() && (this._areaPrefixEpoch || 0) === areaEpoch && this._selectedDevice === deviceId && !this._loading && !this._confirmDialogOpen;
+    this._areaPrefixPending = true;
+    this.render();
+    try {
+      const areas = await hass.callWS({type:'config/area_registry/list'});
+      if (!applicable()) return;
+      if (!Array.isArray(areas)) throw new Error('Invalid area registry');
+      // Area assignments may change in HA while this card remains open. Reuse
+      // the authorized registry refresh before composing drafts from those IDs.
+      const registries = await this._loadData();
+      if (!applicable()) return;
+      if (!registries) throw new Error('Could not refresh registry assignments');
+      const device = this._devices.find(item => item.id === deviceId);
+      const queued = new Set(this._renameQueue.map(row => row.oldId));
+      let count = 0;
+      for (const entity of this._deviceEntities[deviceId] || []) {
+        if (queued.has(entity.entity_id)) continue;
+        const areaId = entity.area_id || device?.area_id;
+        const area = areas.find(item => item.area_id === areaId);
+        if (!area || typeof area.name !== 'string') continue;
+        const prefix = area.name.toLowerCase().replace(/ł/g,'l').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+        if (!prefix) continue;
+        const [domain,objectId] = entity.entity_id.split('.');
+        if (!objectId || objectId.startsWith(prefix + '_')) continue;
+        this._addToQueue(entity.entity_id, `${domain}.${prefix}_${objectId}`, undefined, 'area');
+        if (this._renameQueue.some(row => row.oldId === entity.entity_id && row.newId === `${domain}.${prefix}_${objectId}` && row.source === 'area')) count++;
+      }
+      this._message = {type:'info',text:this._lang==='pl'
+        ? `Dodano propozycje z obszarów: ${count}. Istniejące propozycje pozostawiono bez zmian.`
+        : `Area proposals added: ${count}. Existing proposals were kept.`};
+    } catch (_) {
+      if (applicable()) this._message = {type:'error',text:this._lang==='pl'?'Nie udało się odczytać obszarów. Spróbuj ponownie.':'Could not read areas. Try again.'};
+    } finally {
+      this._areaPrefixPending = false;
+      if (current()) this.render();
+    }
+  }
+
+  _addPrefixRename() {
+    if (this._loading || this._migration) return;
+    if (!this._prefixOld || !this._prefixNew || this._prefixOld === this._prefixNew) return;
+    const ents = this._deviceEntities[this._selectedDevice] || [];
+    for (const ent of ents) {
+      const objId = ent.entity_id.split('.')[1] || '';
+      if (objId.startsWith(this._prefixOld)) {
+        const domain = ent.entity_id.split('.')[0];
+        const newObjId = this._prefixNew + objId.substring(this._prefixOld.length);
+        const newId = domain + '.' + newObjId;
+        this._addToQueue(ent.entity_id, newId, undefined, 'prefix');
+      }
+    }
+    this.render();
+  }
+
+
+  async _analyzeImpact() {
+    if (![true, false].includes(this._hass?.user?.is_admin)) return;
+    if ((this._loading || this._migration) || !this._renameQueue.length) return;
+    this._areaPrefixEpoch = (this._areaPrefixEpoch || 0) + 1;
+    const { hass, current } = this._captureRead();
+    const queue = this._renameQueue.map(row => ({ ...row }));
+    this._loading = true;
+    this._message = { type: 'info', text: this._t.analyzing };
+    this.render();
+
+    const impact = {};
+    // 1. Use search/related WS API for each entity (automations, scripts, scenes, areas)
+    let searchResults;
+    try { searchResults = await this._loadRelatedResults(queue, hass); }
+    catch (error) {
+      if (!current()) return;
+      this._loading = false;
+      this._message = { type: 'error', text: 'Impact lookup failed: ' + this._formatError(error) };
+      this.render();
+      return;
+    }
+
+    // Build friendly names lookup for automations/scripts
+    if (!current()) return;
+    for (const { oldId, result } of searchResults) {
+      const hits = { automations: [], scripts: [], dashboards: [], scenes: [] };
+      // Automations
+      if (result.automation) {
+        for (const autoId of result.automation) {
+          const state = hass.states[autoId];
+          hits.automations.push(state ? state.attributes.friendly_name : autoId.replace('automation.', ''));
+        }
+      }
+      // Scripts
+      if (result.script) {
+        for (const scriptId of result.script) {
+          const state = hass.states[scriptId];
+          hits.scripts.push(state ? state.attributes.friendly_name : scriptId.replace('script.', ''));
+        }
+      }
+      // Scenes
+      if (result.scene) {
+        for (const sceneId of result.scene) {
+          const state = hass.states[sceneId];
+          hits.scenes.push(state ? state.attributes.friendly_name : sceneId.replace('scene.', ''));
+        }
+      }
+      impact[oldId] = hits;
+    }
+
+    // 2. Also scan dashboards (search/related doesn't cover lovelace)
+    try {
+      const lovelaceConfig = await this._loadLovelaceConfigs(hass);
+      const dashboardText = lovelaceConfig.map(dash => ({ title: dash.title || dash.url_path || 'default', text: JSON.stringify(dash.config || {}) }));
+      if (!current()) return;
+      for (const rename of queue) {
+        if (!impact[rename.oldId]) continue;
+        impact[rename.oldId].dashboardCoverage = lovelaceConfig.dashboardCoverage || 'unknown';
+        for (const dash of dashboardText) {
+          if (dash.text.includes(rename.oldId)) {
+            impact[rename.oldId].dashboards.push(dash.title);
+          }
+        }
+      }
+    } catch(e) { console.debug('[ha-entity-renamer] caught:', e); }
+
+    if (!current()) return;
+    this._impactResults = impact;
+    this._loading = false;
+    this._message = null;
+    this._activeTab = 'queue';
+    this.render();
+  }
+
+  async _loadRelatedResults(rows, hass = this._hass, current = () => true) {
+    const results = [];
+    for (let i = 0; i < rows.length; i += 20) {
+      if (!current()) return [];
+      const batch = rows.slice(i, i + 20);
+      const related = await Promise.all(batch.map(async row => ({
+        oldId: row.oldId,
+        result: await hass.callWS({ type: 'search/related', item_type: 'entity', item_id: row.oldId })
+      })));
+      if (!current()) return [];
+      results.push(...related);
+    }
+    return results;
+  }
+
+  async _loadLovelaceConfigs(hass = this._hass) {
+    const configs = [];
+    configs.dashboardCoverage = 'unavailable';
+    let dashboards;
+    try {
+      dashboards = await hass.callWS({ type: 'lovelace/dashboards/list' });
+      if (!Array.isArray(dashboards)) return configs;
+    } catch (_) { return configs; }
+    let failed = 0;
+    const read = async (request, meta) => {
+      try {
+        const config = await hass.callWS(request);
+        if (!config || typeof config !== 'object' || !Array.isArray(config.views)) { failed++; return; }
+        configs.push({ ...meta, config });
+      } catch (_) { failed++; }
+    };
+    await read({ type: 'lovelace/config', force: false }, { url_path: 'default', title: 'Default' });
+    for (const dash of dashboards) {
+      if (!dash || typeof dash.url_path !== 'string') { failed++; continue; }
+      await read({ type: 'lovelace/config', url_path: dash.url_path }, { url_path: dash.url_path, title: dash.title || dash.url_path });
+    }
+    configs.dashboardCoverage = configs.length === 0 ? 'unavailable' : failed > 0 ? 'partial' : 'complete';
+    return configs;
+  }
+
+  _dashboardCoverageHtml(impact) {
+    if (!impact || !['partial', 'unavailable'].includes(impact.dashboardCoverage)) return '';
+    const partial = impact.dashboardCoverage === 'partial', pl = this._lang === 'pl';
+    const text = partial ? (pl ? 'Dashboardy: częściowy odczyt. Zapisano tylko trafienia w dostępnych widokach.' : 'Dashboards: partial read. Only hits in readable views are recorded.')
+      : (pl ? 'Dashboardy: odczyt niedostępny. Liczba odwołań nie jest znana.' : 'Dashboards: read unavailable. Reference count is unknown.');
+    return `<p class="dashboard-coverage" style="font-size:14px;line-height:1.5;overflow-wrap:anywhere;">${_esc(text)}</p>`;
+  }
+
+  _formatError(e) {
+    if (!e) return 'Unknown error';
+    if (typeof e === 'string') return e;
+    if (e.message) return e.message;
+    try { return JSON.stringify(e); } catch(err) { return String(e); }
+  }
+
+  _confirmRenameReadback(completed, snapshot) {
+    let confirmed = 0;
+    for (const target of completed) {
+      let matches = false;
+      if (target.deviceId) matches = snapshot.devices.some(row => row?.id === target.deviceId && row.name_by_user === target.name);
+      else {
+        let identity;
+        try { identity = JSON.parse(target.identity); } catch (_) { continue; }
+        if (!Array.isArray(identity) || typeof identity[0] !== 'string' || !identity[0]) continue;
+        const rows = snapshot.entities.filter(row => row?.id === identity[0]);
+        matches = rows.length === 1 && rows[0].entity_id === target.entityId && this._sourceIdentity(rows[0]) === target.identity
+          && (target.name === null || rows[0].name === target.name);
+      }
+      if (!matches || !this._renameLog.includes(target.entry)) continue;
+      target.entry.writePhase = 'readback_confirmed';
+      target.entry.verification = 'independent_registry_list_exact_fields';
+      confirmed++;
+    }
+    return confirmed;
+  }
+
+  _recordMigrationHistory(m, outcome) {
+    // Only the currently authenticated owner may create or revise their log.
+    // The operation ID and reviewed row position make repeated inspection idempotent.
+    if (!this._migrationCurrent(m) || !m.review || !this._historyKey()) return;
+    const entries = m.review.changes;
+    const now = new Date().toISOString();
+    entries.forEach((change, index) => {
+      let entry = this._renameLog.find(row => row?.operationId === m.operation_id
+        && row?.operationFingerprint === m.fingerprint && row?.operationIndex === index);
+      if (!entry && outcome !== 'attempted') return;
+      if (!entry) {
+        const device = typeof change.device_id === 'string';
+        const oldId = device ? '📱 ' + change.device_id.substring(0, 8) + '...'
+          : change.fields.entity_id?.before || change.entity_id;
+        const newId = device ? '📱 ' + (change.fields.name_by_user?.after || '')
+          : change.fields.entity_id?.after || change.entity_id;
+        const dashboardSource = m.review.dependencies.coverage?.find(row => row.source === 'dashboard');
+        const dashboardRows = Array.isArray(m.review.dependencies.dashboards)
+          ? m.review.dependencies.dashboards.filter(row => row.references?.some(ref => ref.before === oldId))
+          : [];
+        const dashboardCoverage = dashboardSource?.status === 'COMPLETE' && !dashboardSource.blockers?.length
+          ? 'complete' : dashboardRows.length ? 'partial' : 'unavailable';
+        const impact = {dashboardCoverage};
+        if (dashboardRows.length || dashboardCoverage === 'complete') {
+          impact.dashboards = dashboardRows.map(row => row.route
+            || this._migrationText('Default dashboard', 'Domyślny pulpit'));
+        }
+        entry = {operationId: m.operation_id, operationFingerprint: m.fingerprint, operationIndex: index, oldId, newId,
+          operationKind: device ? 'device' : 'entity', status: 'error',
+          writePhase: 'attempted', attemptedAt: now, impact};
+        this._renameLog.unshift(entry);
+      }
+      if (outcome === 'applied' && entry.writePhase !== 'readback_confirmed') {
+        entry.status = 'ok'; entry.writePhase = 'readback_confirmed';
+        entry.verification = 'independent_registry_list_exact_fields'; entry.completedAt = now;
+      } else if (outcome === 'refused' && entry.writePhase !== 'readback_confirmed') {
+        entry.status = 'error'; entry.writePhase = 'not_started'; entry.completedAt = now;
+      }
+    });
+    this._saveHistoryToStorage();
+  }
+
+  async _applyEntityRename(rename, hass = this._hass) {
+    const update = { type: 'config/entity_registry/update', entity_id: rename.oldId };
+    if (rename.newId && rename.newId !== rename.oldId) update.new_entity_id = rename.newId;
+    if (rename.newName) update.name = rename.newName;
+    // HA applies both properties to the same registry entry in one transaction.
+    await hass.callWS(update);
+  }
+
+  async _revalidateAutomaticQueue(rows = this._renameQueue, hass = this._hass, isCurrent = () => true) {
+    const automatic = rows.filter(row => row.automatic);
+    const failures = new Map();
+    if (!automatic.length) return failures;
+    try {
+      const current = await hass.callWS({ type: 'config/entity_registry/list' });
+      if (!isCurrent()) return failures;
+      const byId = new Map(current.map(row => [row.entity_id, row]));
+      const ids = automatic.map(row => row.oldId);
+      const targets = {};
+      for (let i = 0; i < ids.length; i += 100) {
+        Object.assign(targets, await hass.callWS({
+          type: 'config/entity_registry/get_automatic_entity_ids', entity_ids: ids.slice(i, i + 100)
+        }));
+        if (!isCurrent()) return failures;
+      }
+      const reserved = new Set();
+      for (const row of automatic) {
+        const entry = byId.get(row.oldId);
+        if (!entry || entry.unique_id !== row.uniqueId || entry.device_id !== row.deviceId || (row.sourceIdentity && this._sourceIdentity(entry) !== row.sourceIdentity)) {
+          failures.set(row.oldId, 'Source entity changed since preview');
+        } else if (targets[row.oldId] !== row.newId) {
+          failures.set(row.oldId, 'Automatic ID changed since preview');
+        } else if (byId.has(row.newId) || reserved.has(row.newId)) {
+          failures.set(row.oldId, 'Target ID collision');
+        } else {
+          reserved.add(row.newId);
+        }
+      }
+    } catch (error) {
+      for (const row of automatic) failures.set(row.oldId, 'Could not revalidate automatic ID: ' + this._formatError(error));
+    }
+    return failures;
+  }
+
+  _showRenameConfirmation() {
+    if (this._migration) return;
+    this._clearQueueUndo();
+    if (!this._renameAuthorityAvailable()) {
+      this._confirmDialogOpen = false;
+      this._message = { type: 'error', text: this._t.adminRequired };
+      this.render();
+      return;
+    }
+    if (this._loading || (!this._renameQueue.length && !Object.keys(this._deviceRenameQueue || {}).length)) return;
+    this._areaPrefixEpoch = (this._areaPrefixEpoch || 0) + 1;
+    this._confirmation = {
+      session: this._readSession(),
+      epoch: this._authorityEpoch,
+      entities: this._renameQueue.map(row => ({ ...row })),
+      devices: { ...this._deviceRenameQueue },
+    };
+    this._confirmDialogOpen = true;
+    this._lastApplyResult = null;
+    this._activeTab = 'queue';
+    this.render();
+    this.shadowRoot.getElementById('cancelRenameDialog')?.focus();
+  }
+
+  _cancelRenameConfirmation() {
+    if (this._migration?.attempted) return;
+    this._migration = null;
+    this._confirmation = null;
+    this._confirmDialogOpen = false;
+    this.render();
+    this.shadowRoot.getElementById('executeRenames')?.focus();
+  }
+
+  async _executeRenames(confirmed = false) {
+    if (this._migration) return; // Never fall back from migration to registry-only.
+    if (this._loading || this._applyOperation) return;
+    if (!this._renameQueue.length && !Object.keys(this._deviceRenameQueue).length) return;
+    if (!this._renameAuthorityAvailable()) {
+      this._confirmDialogOpen = false;
+      this._message = { type: 'error', text: this._t.adminRequired };
+      this.render();
+      return;
+    }
+    if (!confirmed) {
+      this._showRenameConfirmation();
+      return;
+    }
+    await this._prepareMigration();
+  }
+
+  render() {
+    if (!this._hass) return;
+    createUiV3({language:this._lang}).applyTheme(this);
+    const listViewport = _rememberListViewport(this);
+    const openAutomaticDevices = new Set(Array.from(this.shadowRoot.querySelectorAll('[data-auto-group][open]'), group => group.dataset.autoGroup));
+    const familyFocus=_rememberFamilyFocus(this), familyDrafts=_rememberFamilyDrafts(this);
+    const familyRowFocus=_rememberFamilyRowFocus(this, [['.device-header[data-device-id]','data-device-id']]);
+    this._exportDialog?.cancel();
+    const devices = this._getFilteredDevices();
+    const queueCount = this._renameQueue.length + Object.keys(this._deviceRenameQueue).length;
+    const t = this._t;
+
+    this.shadowRoot.innerHTML = `
+    <style>${HA_ENTITY_RENAMER_BENTO_CSS}${createUiV3({language:this._lang}).css}
+/* === HA Tools split — premium banners (donate / intro / prereq) === */
+
+/* Donation footer — diamond top */
+.donate-section {  margin: 24px 0 4px; padding: 20px 24px; position: relative; overflow: hidden;  background: linear-gradient(135deg, rgba(99,102,241,0.06), rgba(236,72,153,0.06));  border: 1px solid rgba(99,102,241,0.18); border-radius: var(--bento-radius-md, 18px);  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 18px;  font-family: 'Inter', -apple-system, sans-serif;}
+.donate-section:not([data-source="own-card"])::before {  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;  background: linear-gradient(90deg, #6366f1, #8b5cf6, #ec4899);}
+.donate-section .donate-text { flex: 1; min-width: 240px; }
+.donate-section h3 {  margin: 0 0 6px; font-size: 16px; font-weight: 700; letter-spacing: -0.02em;  background: linear-gradient(135deg, #6366f1, #ec4899);  -webkit-background-clip: text; background-clip: text; color: transparent;}
+.donate-section p { margin: 0; font-size: 13px; line-height: 1.55; color: var(--bento-text-secondary, #57534e); letter-spacing: -0.005em; }
+.donate-buttons { display: flex; gap: 10px; flex-wrap: wrap; }
+.donate-btn {  display: inline-flex; align-items: center; gap: 6px; padding: 10px 18px;  border-radius: 12px; font-weight: 700; font-size: 13px; letter-spacing: -0.005em;  text-decoration: none; transition: transform 0.2s cubic-bezier(0.4,0,0.2,1), box-shadow 0.2s, filter 0.2s;  border: 1px solid transparent;}
+.donate-btn:hover { transform: translateY(-2px); filter: brightness(1.05); }
+.donate-btn.coffee {  background: linear-gradient(135deg, #FFDD00, #FFC700); color: #000;  box-shadow: 0 4px 14px -2px rgba(255, 221, 0, 0.4);}
+.donate-btn.coffee:hover { box-shadow: 0 8px 24px -4px rgba(255, 221, 0, 0.55); }
+.donate-btn.paypal {  background: linear-gradient(135deg, #0070ba, #005ea6); color: #fff;  box-shadow: 0 4px 14px -2px rgba(0, 112, 186, 0.45);}
+.donate-btn.paypal:hover { box-shadow: 0 8px 24px -4px rgba(0, 112, 186, 0.6); }
+:host(.bento-dark) .donate-section { background: linear-gradient(135deg, rgba(129,140,248,0.10), rgba(244,114,182,0.10)); border-color: rgba(129,140,248,0.25); }
+:host(.bento-dark) .donate-section h3 { background: linear-gradient(135deg, #a5b4fc, #f9a8d4); -webkit-background-clip: text; background-clip: text; color: transparent; }
+:host(.bento-dark) .donate-section p { color: #d6d3d1; }
+@media (max-width: 600px) {  .donate-section { flex-direction: column; text-align: center; padding: 18px; }  .donate-buttons { justify-content: center; width: 100%; } }
+
+/* Prereq banner — premium */
+.prereq-banner {  display: flex; align-items: flex-start; gap: 14px; padding: 16px 20px;  border-radius: var(--bento-radius-sm, 12px); margin: 0 0 16px;  font-size: 13px; line-height: 1.55; border: 1px solid;  font-family: 'Inter', sans-serif; letter-spacing: -0.005em;  position: relative; overflow: hidden;}
+.prereq-banner::before {  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;}
+.prereq-banner.prereq-error { background: rgba(239,68,68,0.06); border-color: rgba(239,68,68,0.25); color: #991b1b; }
+.prereq-banner.prereq-error::before { background: linear-gradient(180deg, #ef4444, #f87171); }
+.prereq-banner.prereq-info  { background: rgba(99,102,241,0.06); border-color: rgba(99,102,241,0.25); color: #4338ca; }
+.prereq-banner.prereq-info::before  { background: linear-gradient(180deg, #6366f1, #8b5cf6); }
+.prereq-banner .prereq-icon { font-size: 22px; line-height: 1; padding-top: 2px; flex-shrink: 0; }
+.prereq-banner .prereq-text { flex: 1; min-width: 0; }
+.prereq-banner .prereq-text strong { font-weight: 700; letter-spacing: -0.01em; }
+.prereq-banner code {  background: rgba(0,0,0,0.06); padding: 1px 7px; border-radius: 5px;  font-size: 12px; font-family: 'JetBrains Mono', ui-monospace, monospace;  border: 1px solid rgba(0,0,0,0.08);}
+.prereq-banner .prereq-cta {  display: inline-flex; align-items: center; padding: 8px 16px; border-radius: 10px;  background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff !important;  text-decoration: none; font-weight: 700; font-size: 12.5px; flex-shrink: 0;  letter-spacing: -0.005em;  box-shadow: 0 4px 14px -2px rgba(99,102,241,0.45);  transition: all 0.2s cubic-bezier(0.4,0,0.2,1);}
+.prereq-banner .prereq-cta:hover { transform: translateY(-1px); box-shadow: 0 8px 24px -4px rgba(99,102,241,0.6); }
+:host(.bento-dark) .prereq-banner.prereq-error { background: rgba(248,113,113,0.10); border-color: rgba(248,113,113,0.30); color: #fca5a5; }
+:host(.bento-dark) .prereq-banner.prereq-info { background: rgba(129,140,248,0.10); border-color: rgba(129,140,248,0.30); color: #c7d2fe; }
+:host(.bento-dark) .prereq-banner code { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.10); }
+@media (max-width: 600px) {  .prereq-banner { flex-direction: column; align-items: stretch; padding-left: 20px; }  .prereq-banner .prereq-cta { align-self: flex-start; } }
+
+/* First-run intro banner — premium */
+.intro-banner {  position: relative; padding: 18px 52px 18px 22px; margin: 0 0 18px;  background: linear-gradient(135deg, rgba(99,102,241,0.08), rgba(236,72,153,0.06));  border: 1px solid rgba(99,102,241,0.20);  border-radius: var(--bento-radius-sm, 12px);  font-size: 13px; line-height: 1.55; overflow: hidden;  font-family: 'Inter', sans-serif; letter-spacing: -0.005em;  animation: bentoSlideIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);}
+.intro-banner::before {  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;  background: linear-gradient(90deg, #6366f1, #8b5cf6, #ec4899);}
+.intro-banner .intro-headline {  font-weight: 700; font-size: 14.5px; margin-bottom: 10px; letter-spacing: -0.02em;  background: linear-gradient(135deg, #6366f1, #ec4899);  -webkit-background-clip: text; background-clip: text; color: transparent;  display: flex; align-items: center; gap: 8px;}
+.intro-banner .intro-steps {  margin: 8px 0 0; padding: 0; list-style: none; counter-reset: introstep;}
+.intro-banner .intro-steps li {  margin-bottom: 8px; line-height: 1.55; color: var(--bento-text, #0c0a09);  padding-left: 32px; position: relative; counter-increment: introstep;  font-size: 12.5px;}
+.intro-banner .intro-steps li::before {  content: counter(introstep); position: absolute; left: 0; top: -1px;  width: 22px; height: 22px; border-radius: 50%;  background: var(--bento-card, #fff); border: 1px solid rgba(99,102,241,0.25);  display: flex; align-items: center; justify-content: center;  font-size: 12px; font-weight: 800; color: #6366f1;  font-family: 'JetBrains Mono', ui-monospace, monospace;  font-feature-settings: 'tnum' 1;}
+.intro-banner .intro-dismiss {  position: absolute; top: 12px; right: 14px;  background: var(--bento-card, transparent); border: 1px solid var(--bento-border, transparent);  cursor: pointer; font-size: 14px; line-height: 1;  color: var(--bento-text-secondary, #64748B);  padding: 4px 8px; border-radius: 999px;  transition: all 0.15s ease;}
+.intro-banner .intro-dismiss:hover {  background: var(--bento-bg-2, #e7e5e4); color: var(--bento-text, #0c0a09);  transform: rotate(90deg);}
+:host(.bento-dark) .intro-banner { background: linear-gradient(135deg, rgba(129,140,248,0.14), rgba(244,114,182,0.10)); border-color: rgba(129,140,248,0.30); }
+:host(.bento-dark) .intro-banner .intro-headline { background: linear-gradient(135deg, #a5b4fc, #f9a8d4); -webkit-background-clip: text; background-clip: text; color: transparent; }
+:host(.bento-dark) .intro-banner .intro-steps li { color: #fafaf9; }
+:host(.bento-dark) .intro-banner .intro-steps li::before { background: #16161f; border-color: rgba(129,140,248,0.35); color: #a5b4fc; }
+:host(.bento-dark) .intro-banner .intro-dismiss { background: #16161f; border-color: #27272f; color: #d6d3d1; }
+:host(.bento-dark) .intro-banner .intro-dismiss:hover { background: #27272f; color: #fafaf9; }
+
+
+
+/* ===== BENTO DESIGN SYSTEM (local fallback) ===== */
+
+:host {
+  --bento-primary: #3B82F6;
+  --bento-primary-hover: #2563EB;
+  --bento-primary-light: rgba(59, 130, 246, 0.08);
+  --bento-success: #10B981;
+  --bento-success-light: rgba(16, 185, 129, 0.08);
+  --bento-error: #EF4444;
+  --bento-error-light: rgba(239, 68, 68, 0.08);
+  --bento-warning: #F59E0B;
+  --bento-warning-light: rgba(245, 158, 11, 0.08);
+  --bento-bg: var(--primary-background-color, #F8FAFC);
+  --bento-card: var(--card-background-color, #FFFFFF);
+  --bento-border: var(--divider-color, #E2E8F0);
+  --bento-text: var(--primary-text-color, #1E293B);
+  --bento-text-secondary: var(--secondary-text-color, #64748B);
+  --bento-text-muted: var(--disabled-text-color, #94A3B8);
+  --bento-radius-xs: 6px;
+  --bento-radius-sm: 10px;
+  --bento-radius-md: 16px;
+  --bento-shadow-sm: 0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.06);
+  --bento-shadow-md: 0 4px 12px rgba(0,0,0,0.05), 0 2px 4px rgba(0,0,0,0.04);
+  --bento-shadow-lg: 0 8px 25px rgba(0,0,0,0.06), 0 4px 10px rgba(0,0,0,0.04);
+  --bento-transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+:host { display: block; font-family: 'Inter', var(--paper-font-body1_-_font-family, sans-serif); }
+      * { box-sizing: border-box; }
+      .card {
+        background: var(--bento-card, var(--card-background-color, #1E293B));
+        border: 1px solid var(--bento-border, var(--divider-color, #334155));
+        border-radius: var(--bento-radius-sm, 14px);
+        padding: 24px; color: var(--bento-text, var(--primary-text-color, #E2E8F0));
+        box-sizing: border-box; max-width: 100%; overflow: hidden;
+      }
+      h1 { margin: 0 0 4px; font-size: 22px; font-weight: 700; }
+      .subtitle { color: var(--bento-text-secondary, var(--secondary-text-color, #94A3B8)); font-size: 13px; margin-bottom: 16px; }
+      .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; }
+      .msg.info { background: var(--bento-primary-light); color: var(--bento-primary); border: 1px solid var(--bento-primary); }
+      .msg.success { background: var(--bento-success-light); color: var(--bento-success); border: 1px solid var(--bento-success); }
+      .msg.error { background: var(--bento-error-light); color: var(--bento-error); border: 1px solid var(--bento-error); }
+      .msg.warning { background: var(--bento-warning-light); color: var(--bento-warning); border: 1px solid var(--bento-warning); }
+
+      .rename-confirm, .apply-result {
+        margin: 0 0 16px; padding: 16px; border-radius: 10px;
+        border: 1px solid var(--bento-border, #334155);
+        background: var(--bento-bg, rgba(59,130,246,0.06));
+      }
+      .rename-confirm h2 {
+        margin: 0 0 4px; font-size: 16px; font-weight: 700;
+      }
+      .rename-confirm p {
+        margin: 0; color: var(--bento-text-secondary, #94A3B8);
+        font-size: 12px; line-height: 1.5;
+      }
+      .rename-confirm-counts {
+        display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0;
+      }
+      .rename-confirm-counts span {
+        padding: 4px 10px; border-radius: 999px;
+        background: rgba(59,130,246,0.12); color: var(--bento-primary, #3B82F6);
+        font-size: 12px; font-weight: 700;
+      }
+      .rename-preview {
+        max-height: 260px; overflow-y: auto; border: 1px solid var(--bento-border, #334155);
+        border-radius: 8px; background: rgba(0,0,0,0.03);
+      }
+      .rename-preview-row {
+        display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        gap: 8px; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.05);
+        align-items: center; font-size: 12px; font-family: 'JetBrains Mono', monospace;
+      }
+      .rename-preview-row:last-child { border-bottom: 0; }
+      .rename-preview-old, .rename-preview-new {
+        min-width: 0; overflow-wrap: anywhere;
+      }
+      .rename-preview-old { color: #FCA5A5; }
+      .rename-preview-new { color: #86EFAC; }
+      .rename-preview-arrow { color: var(--bento-text-secondary, #94A3B8); }
+      .rename-preview-detail {
+        grid-column: 1 / -1; color: var(--bento-text, var(--primary-text-color, #E2E8F0)); font-family: inherit; font-size: 12px;
+      }
+      .rename-preview-more, .rename-preview-empty {
+        padding: 10px; color: var(--bento-text-secondary, #94A3B8);
+        font-size: 12px; text-align: center;
+      }
+      .rename-confirm-actions {
+        display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 14px;
+      }
+      :host .rename-confirm-actions .btn {
+        width: auto; flex: 0 0 auto; white-space: nowrap !important;
+        overflow-wrap: normal;
+      }
+      .apply-result {
+        background: var(--bento-success-light, rgba(16,185,129,0.08));
+        border-color: var(--bento-success, #10B981);
+      }
+      .apply-result.migration-pending {
+        background: var(--bento-warning-light, rgba(245,158,11,0.08));
+        border-color: var(--bento-warning, #F59E0B);
+      }
+      .apply-result.has-failures {
+        background: var(--bento-warning-light, rgba(245,158,11,0.08));
+        border-color: var(--bento-warning, #F59E0B);
+      }
+      .apply-result-title { font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+      .apply-result-ok { font-size: 12px; color: var(--bento-text, #E2E8F0); }
+      .apply-result-failures { margin-top: 10px; }
+      .apply-result-failures-title {
+        font-size: 12px; font-weight: 700; color: var(--bento-warning, #F59E0B);
+        text-transform: uppercase; margin-bottom: 6px;
+      }
+      .apply-result-failure {
+        display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px;
+        padding: 8px 0; border-top: 1px solid rgba(255,255,255,0.06);
+        font-size: 12px;
+      }
+      .apply-result-path {
+        color: var(--bento-text, #E2E8F0); font-family: 'JetBrains Mono', monospace;
+        overflow-wrap: anywhere;
+      }
+      .apply-result-error { color: #FCA5A5; overflow-wrap: anywhere; }
+
+
+
+      .search-bar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+      .search-bar input {
+        flex: 1; min-width: 140px; padding: 10px 14px; border-radius: 8px; font-size: 13px;
+        border: 1px solid var(--bento-border, #334155);
+        background: var(--bento-bg, var(--primary-background-color, #0F172A));
+        color: var(--bento-text, #E2E8F0); outline: none;
+        box-sizing: border-box; width: 100%; max-width: 100%;
+      }
+      .search-bar input:focus { border-color: var(--bento-primary, #3B82F6); }
+
+      .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: 12px; margin-bottom: 20px; }
+      .stat-card .num { font-size: 26px; font-weight: 700; }
+      .stat-card .label { font-size: 12px; text-transform: uppercase; color: var(--bento-text-secondary, #94A3B8); margin-top: 4px; overflow-wrap: anywhere; }
+
+      .device-list { max-height: 60vh; overflow-y: auto; }
+      .device-item {
+        border: 1px solid var(--bento-border, #334155); border-radius: 10px;
+        margin-bottom: 8px; overflow: hidden; transition: border-color 0.15s;
+      }
+      .device-item.selected { border-color: var(--bento-primary, #3B82F6); }
+      .device-header {
+        display: flex; align-items: center; gap: 10px; padding: 12px 16px;
+        cursor: pointer; user-select: none;
+      }
+      .device-header:hover { background: rgba(59,130,246,0.05); }
+      .device-name { flex: 1; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .device-meta { font-size: 12px; color: var(--bento-text-secondary, #94A3B8); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .device-expand { font-size: 12px; transition: transform 0.2s; }
+      .device-expand.open { transform: rotate(90deg); }
+      .entity-list { padding: 0 16px 12px; }
+      .entity-row {
+        display: flex; align-items: center; gap: 8px; padding: 6px 0;
+        border-top: 1px solid var(--bento-border,var(--divider-color)); font-size: 12px;
+      }
+      .entity-id { flex: 1; font-family: 'JetBrains Mono', 'Fira Code', monospace; color: var(--bento-text-secondary, #94A3B8); word-break: break-all; }
+      .entity-name { flex: 1; min-width: 120px; }
+      .entity-domain { font-size: 12px; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.12); color: var(--bento-text, var(--primary-text-color, #E2E8F0)); }
+
+      .btn {
+        padding: 8px 16px; border: none; border-radius: 8px; cursor: pointer;
+        font-size: 12px; font-weight: 600; font-family: inherit; transition: all 0.15s;
+      }
+      .btn-primary { background: var(--bento-primary, #3B82F6); color: white; }
+      .btn-primary:hover { opacity: 0.85; }
+      .btn-danger { background:transparent;color:#b91c1c;border:1px solid currentColor; }
+      :host(.bento-dark) .btn-danger { color:#fca5a5; }
+      .btn-danger:hover { opacity: 0.85; }
+      .btn-sm { padding: 4px 10px; font-size: 12px; }
+      .btn-outline {
+        background: transparent; border: 1px solid var(--bento-border, #334155);
+        color: var(--bento-text, #E2E8F0);
+      }
+      .btn-outline:hover { border-color: var(--bento-primary, #3B82F6); color: var(--bento-primary, #3B82F6); }
+      .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+      .automatic-tab .btn:disabled { opacity: 1; }
+
+      .prefix-section {
+        background: rgba(59,130,246,0.06); border: 1px solid rgba(59,130,246,0.15);
+        border-radius: 10px; padding: 14px; margin: 12px 0;
+      }
+      .prefix-section h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+      .prefix-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .prefix-row input {
+        padding: 6px 10px; border-radius: 6px; font-size: 13px; width: 180px;
+        border: 1px solid var(--bento-border, #334155);
+        background: var(--bento-bg, #0F172A); color: var(--bento-text, #E2E8F0);
+        font-family: 'JetBrains Mono', monospace;
+      }
+      .prefix-row .arrow { color: var(--bento-text-secondary, #94A3B8); }
+
+      .queue-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      .queue-table th { text-align: left; padding: 8px; font-size: 12px; text-transform: uppercase; color: var(--bento-text-secondary, #94A3B8); border-bottom: 1px solid var(--bento-border, #334155); }
+      .queue-table td { padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.04); font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+      .queue-table .old { color: #FCA5A5; text-decoration: line-through; }
+      .queue-table .new { color: #86EFAC; }
+      .queue-table .impact { font-family: inherit; font-size: 12px; }
+      .impact-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 12px; margin: 1px; }
+      .impact-badge.automation { background: rgba(168,85,247,0.15); color: #C084FC; }
+      .impact-badge.script { background: rgba(245,158,11,0.15); color: #FCD34D; }
+      .impact-badge.dashboard { background: rgba(59,130,246,0.15); color: var(--bento-text, var(--primary-text-color, #E2E8F0)); }
+      .impact-badge.scene { background: rgba(16,185,129,0.15); color: #6EE7B7; }
+      .queue-actions { display: flex; gap: 8px; margin-bottom: 12px; justify-content: flex-end; }
+
+      .log-entry { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 12px; }
+      .log-time { color: var(--bento-text-secondary, #94A3B8); font-size: 12px; }
+      .log-ok { color: #86EFAC; }
+      .log-err { color: #FCA5A5; }
+
+      .empty-state { text-align: center; padding: 40px; color: var(--bento-text-secondary, #94A3B8); }
+      .empty-state .icon { font-size: 40px; margin-bottom: 8px; }
+      .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.2); border-top-color: var(--bento-primary, #3B82F6); border-radius: 50%; animation: spin 0.8s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+        :host(.bento-dark) {
+            --bento-bg: var(--primary-background-color, #1a1a2e);
+            --bento-card: var(--card-background-color, #16213e);
+            --bento-text: var(--primary-text-color, #e2e8f0);
+            --bento-text-secondary: var(--secondary-text-color, #94a3b8);
+            --bento-border: var(--divider-color, #334155);
+            --bento-shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
+            --bento-shadow-md: 0 4px 12px rgba(0,0,0,0.4);
+          }
+
+
+        .tabs, .tab-bar { scrollbar-width: thin; scrollbar-color: var(--bento-border, #E2E8F0) transparent; }
+        .tabs::-webkit-scrollbar, .tab-bar::-webkit-scrollbar { height: 4px; }
+        .tabs::-webkit-scrollbar-track, .tab-bar::-webkit-scrollbar-track { background: transparent; }
+        .tabs::-webkit-scrollbar-thumb, .tab-bar::-webkit-scrollbar-thumb { background: var(--bento-border, #E2E8F0); border-radius: 4px; }
+@media (max-width: 600px) {
+          .card { padding: 16px; }
+          h1 { font-size: 18px; }
+          .stats-row { grid-template-columns: repeat(auto-fit, minmax(70px, 1fr)); gap: 8px; }
+          .stat-card .num { font-size: 20px; }
+          .stat-card .label { font-size: 12px; }
+          .device-header { padding: 10px 12px; gap: 8px; }
+          .device-name { font-size: 13px; }
+          .device-meta { font-size: 12px; }
+          .entity-row { gap: 4px; padding: 4px 0; font-size: 12px; }
+          .entity-id { min-width: 0; }
+          .entity-name { min-width: 80px; font-size: 12px; }
+          .btn { padding: 6px 12px; font-size: 12px; }
+          .btn-sm { padding: 3px 8px; font-size: 12px; }
+          .prefix-row { gap: 6px; }
+          .prefix-row input { width: 100%; max-width: 140px; padding: 5px 8px; font-size: 12px; }
+          .queue-table { font-size: 12px; }
+          .queue-table th { padding: 6px; font-size: 12px; }
+          .queue-table td { padding: 6px; }
+          .queue-actions { flex-wrap: wrap; justify-content: center; }
+          .log-entry { font-size: 12px; padding: 4px 0; }
+        }
+        .rename-preview-row { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center; }
+        .automatic-row-ids { min-width:0;overflow-wrap:anywhere;font-size:12px;line-height:1.6; }
+        .automatic-row-ids code { padding:0;border:0;background:transparent !important;white-space:normal;overflow-wrap:anywhere;font-size:12px; }
+        .automatic-target { color:var(--bento-text-secondary); }
+        .automatic-row-actions { display:flex;gap:8px;align-items:center;justify-content:flex-end; }
+        .automatic-row-actions .btn { margin:0; }
+        .automatic-tab .device-item > summary { list-style:none; }
+        .automatic-tab .device-item > summary::-webkit-details-marker { display:none; }
+        .automatic-tab .device-item[open] .device-expand { transform:rotate(90deg); }
+        .device-name { min-width:0;white-space:normal;overflow-wrap:anywhere; }
+        .device-meta { white-space:normal; }
+        .automatic-tab .entity-list { padding-bottom:12px; }
+        .automatic-device-action { margin-top:8px; }
+        @container (max-width:520px) { .automatic-row-actions { flex-direction:column;align-items:flex-end;gap:4px; } }
+        .queue-bar { position:sticky;bottom:8px;z-index:1;background:var(--bento-card,var(--card-background-color));box-shadow:var(--bento-shadow-md); }
+        .list-toolbar,.list-chips,.list-expand,.queue-bar,.queue-undo { display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0;min-width:0; }
+        .list-toolbar input { flex:1;min-width:120px;max-width:100%;box-sizing:border-box; }
+        .list-toolbar select { max-width:100%;min-height:44px;color:inherit;background:var(--bento-card,var(--card-background-color));border:1px solid var(--bento-border,var(--divider-color));border-radius:8px;padding:8px; }
+        .list-chips button[aria-pressed="true"] { color:var(--primary-color,#3b82f6);border-color:currentColor; }
+        .queue-bar,.queue-undo { padding:12px;border:1px solid var(--bento-border,var(--divider-color));border-radius:10px;justify-content:space-between;overflow-wrap:anywhere; }
+        .new-badge,.queued-badge,.proposal-source { font-size:12px;border-radius:6px;padding:3px 6px;border:1px solid currentColor; }
+        .new-badge { display:inline-block;white-space:nowrap;color:var(--primary-color,#3b82f6);margin-left:6px; }
+        .queued-badge { color:var(--primary-text-color,inherit);border-color:var(--success-color,#16a34a); }
+        .queue-group-heading { display:flex;justify-content:space-between;gap:8px;overflow-wrap:anywhere;font-size:14px; }
+        ${_FAMILY_CONTROL_CSS}
+        .tabs { flex-wrap:nowrap !important;overflow-x:auto !important;overflow-y:hidden !important;scrollbar-width:thin; }
+        :host .tabs button { flex:0 0 auto !important;white-space:nowrap !important;font-size:14px !important; }
+        .list-chips { flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin; }
+        :host .list-chips button { flex:0 0 auto;white-space:nowrap !important; }
+        .card { max-width:1200px;margin-inline:auto;font-size:14px;line-height:1.5; }
+        .device-name,.entity-name,.btn,.list-toolbar input,.list-toolbar select,.prefix-section h3,.prefix-row input { font-size:14px; }
+        .registry-id { display:inline-block;max-width:100%;min-width:0;vertical-align:bottom;white-space:normal;word-break:normal;overflow-wrap:anywhere;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
+        .stat-card .num,.stat-card .label { display:block; }
+        .stats-row .stat-card { min-width:0; }
+        @container (max-width:500px) {
+          .list-toolbar input { flex:1 0 100%;width:100%; }
+          .device-header { display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:4px 8px; }
+          .device-header .device-expand { grid-column:1;grid-row:1; }
+          .device-header .device-name { grid-column:2 / -1;grid-row:1; }
+          .device-header .device-meta { grid-column:2;grid-row:2; }
+          .device-header .new-badge { grid-column:3;grid-row:2;margin-left:0;justify-self:end; }
+          .stats-row { grid-template-columns:repeat(2,minmax(0,1fr)); }
+          .entity-row { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px; }
+          .entity-row .entity-name { grid-column:1;grid-row:1;min-width:0;overflow-wrap:anywhere; }
+          .entity-row .entity-id { grid-column:1;grid-row:2;min-width:0;word-break:normal; }
+          .entity-row .entity-domain { display:none; }
+          .entity-row > .btn { grid-column:2;grid-row:1 / span 2; }
+          .entity-row > .queued-badge { grid-column:1;grid-row:3;justify-self:start; }
+        }
+        .automatic-target { display:flex;align-items:flex-start;gap:4px; }
+        .rename-target { display:flex;align-items:flex-start;gap:8px;min-width:0;flex:1 1 180px; }
+        .rename-target code { flex:1; }
+        .automatic-target code { min-width:0;flex:1; }
+        .confirm-dialog code { min-width:0;max-width:100%; }
+        .confirm-dialog [tabindex="0"]:focus-visible { outline:3px solid var(--primary-color,#1769aa);outline-offset:2px; }
+
+        :host .btn-primary { background:var(--_hat-primary-fill);color:var(--_hat-on-primary); }
+        :host input[type=checkbox] { accent-color:var(--_hat-primary-fill); }
+        :host .btn:disabled { opacity:1;background:transparent;color:var(--bento-text,var(--primary-text-color));border:1px dashed var(--bento-border,var(--divider-color));box-shadow:none;cursor:not-allowed; }
+        :host .tabs .tab-button.active { color:var(--bento-text,var(--primary-text-color)) !important; }
+
+        /* Semantic labels carry status; theme text keeps them readable on both backgrounds. */
+        .rename-preview-old,.rename-preview-new,.apply-result-error,.queue-table .old,.queue-table .new,
+        .impact-badge.automation,.impact-badge.script,.impact-badge.scene,.log-ok,.log-err,.log-error-detail {
+          color:var(--bento-text,var(--primary-text-color));
+        }
+        .rename-confirm-counts span,.new-badge,.list-chips button[aria-pressed="true"],.msg.info,.msg.success,.msg.error,.msg.warning {
+          color:var(--bento-text,var(--primary-text-color));
+        }
+        button:focus-visible,summary:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[role=button]:focus-visible {
+          outline:2px solid #fff !important;outline-offset:2px;box-shadow:0 0 0 5px #111827 !important;
+        }
+        .renamer-help { margin:8px 0 12px;font-size:14px; }
+        .renamer-help summary { cursor:pointer;min-height:44px;align-content:center; }
+        .renamer-help summary:focus-visible { outline:3px solid var(--primary-color);outline-offset:2px; }
+        .renamer-help p { margin:8px 0; }
+        .renamer-help ol { padding-inline-start:24px; }
+        .card { min-width:0;container-type:inline-size; }
+        .prefix-row,.queue-actions { flex-wrap:wrap; }
+        .device-header { min-height:44px;min-width:44px; }
+        .prefix-row input,.device-detail input { min-width:44px;max-width:100%; }
+        </style>
+    <div class="card" ${this._writeWarning ? 'inert' : ''}>
+      <h1>📱️ ${_esc(typeof this._config?.title === 'string' && this._config.title.trim() ? this._config.title : t.deviceEntityRenamer)}</h1>
+      <div class="subtitle">${this._registryCount(this._devices.length,'device')} • ${this._registryCount(this._entities.length,'entity')}
+        </div>
+
+      ${this._renderHelp()}
+      ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${this._message.outcome ? createUiV3({language:this._lang}).statusHtml(this._message.outcome) : ''} ${_esc(this._message.text || '')}</div>` : ''}
+      ${this._renderApplyResult()}
+      ${this._renderRecoveryInventory()}
+      ${this._confirmDialogOpen ? this._renderRenameConfirmation() : ''}
+      ${this._renderEntityEditor()}
+
+      <div class="tabs">
+        ${this._visibleTabs().map(tab => `<button class="tab-button ${this._activeTab === tab ? 'active' : ''}" data-tab="${tab}">${({devices:'📱',automatic:'↻',queue:'📋',log:'📜'})[tab]} ${t[tab]}${tab === 'queue' && queueCount > 0 ? ` (${queueCount})` : ''}</button>`).join('')}
+      </div>
+
+      ${this._activeTab === 'devices' ? this._renderDevicesTab(devices) : ''}
+      ${this._activeTab === 'automatic' ? this._renderAutomaticTab() : ''}
+      ${this._activeTab === 'queue' ? this._renderQueueTab() : ''}
+      ${this._activeTab === 'log' ? this._renderLogTab() : ''}
+      ${this._activeTab!=='queue' && queueCount ? `<div class="queue-bar"><span>${t.inQueue}: ${queueCount}</span><button type="button" class="btn btn-primary" id="openQueue">${this._lang==='pl'?'Przejdź do kolejki →':'Go to queue →'}</button></div>`:''}
+      ${this._queueUndo && Date.now()<this._queueUndo.until ? `<div class="queue-undo" role="status"><span>${this._lang==='pl'?'Usunięto z kolejki:':'Removed from queue:'} ${_esc(this._queueUndo.row.oldId)}</span><button type="button" class="btn btn-outline" id="undoQueueRemoval">${this._lang==='pl'?'Cofnij':'Undo'}</button></div>`:''}
+    </div>
+    <div ${this._writeWarning ? 'inert' : ''}>${this._hass?.user?.is_admin && this._config?.show_support !== false && !_localSupportDismissed() ? _LOCAL_DONATE_HTML : ''}</div>
+    ${this._writeWarning ? this._renderWriteWarning() : ''}`;
+
+    this._bindHelp();
+    _bindLocalSupportDismiss(this.shadowRoot);
+    this._attachEvents();
+    if (this._migration) {
+      this.shadowRoot.querySelectorAll('#applyPrefix,#executeRenames,#clearQueue,#analyzeImpact,#undoQueueRemoval,#applyDeviceName,#addAreaPrefix,#queueAllAutomatic,#queueEntityEdit,[data-auto-entity],[data-auto-device],[data-add-single],[data-remove-queue],[data-remove-dev-queue]').forEach(button => { button.disabled = true; });
+    }
+    for (const group of this.shadowRoot.querySelectorAll('[data-auto-group]')) group.open = openAutomaticDevices.has(group.dataset.autoGroup);
+    this._syncListExpansion();
+    _restoreFamilyDrafts(this,familyDrafts);
+    _bindFamilyNavigation(this,familyFocus);
+    if (this._familyNavWidth > 0) this._syncHelpWidth(this._familyNavWidth);
+    _restoreFamilyRowFocus(this,familyRowFocus);
+    _restoreListViewport(this,listViewport);
+  }
+
+
+
+  _showEntityEditor(oldId) {
+    if ((this._loading || this._migration) || this._hass?.user?.is_admin !== true) return;
+    const entity = this._entities.find(e => e.entity_id === oldId);
+    if (!entity) return;
+    const objectId = oldId.split('.')[1] || '';
+    const currentName = entity.name || entity.original_name || '';
+    this._entityEditor = { oldId, objectId, currentName, objectIdDraft: objectId, nameDraft: currentName };
+    this.render();
+    this.shadowRoot.getElementById('entityEditObjectId')?.focus();
+  }
+
+  _renderEntityEditor() {
+    if (!this._entityEditor) return '';
+    const t = this._t;
+    const draft = this._entityEditor;
+    return `<form id="entityEditForm" aria-labelledby="entityEditHeading" style="margin:16px 0;padding:16px;border:1px solid var(--bento-border,var(--divider-color,#ddd));border-radius:12px;min-width:0;">
+      <h2 id="entityEditHeading" style="font-size:16px;margin:0 0 8px;">${t.editEntity}</h2>
+      <p style="min-width:0;margin:0 0 12px;">${_entityIdHtml(draft.oldId)}</p>
+      <label for="entityEditObjectId" style="display:block;">${t.newEntity}</label>
+      <input id="entityEditObjectId" data-family-draft-context="${_esc(draft.oldId)}" type="text" value="${_esc(draft.objectIdDraft)}" style="display:block;width:100%;min-width:0;box-sizing:border-box;margin:6px 0 12px;" ${this._loading ? 'disabled' : ''}>
+      <label for="entityEditName" style="display:block;">${t.newFriendly}</label>
+      <input id="entityEditName" data-family-draft-context="${_esc(draft.oldId)}" type="text" value="${_esc(draft.nameDraft)}" style="display:block;width:100%;min-width:0;box-sizing:border-box;margin:6px 0 12px;" ${this._loading ? 'disabled' : ''}>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;">
+        <button id="queueEntityEdit" type="submit" class="btn btn-primary" ${this._loading ? 'disabled' : ''}>${t.queueEdit}</button>
+        <button id="cancelEntityEdit" type="button" class="btn btn-outline">${t.cancel}</button>
+      </div>
+    </form>`;
+  }
+
+  _renderRenameConfirmation() {
+    // render() calls this whenever _confirmDialogOpen is true (Apply Changes).
+    // It was never implemented, so the call threw "is not a function" and
+    // blanked the card — same regression class as _renderApplyResult below.
+    if (this._migration) return this._renderMigrationReview();
+    const t = this._t;
+    const queue = this._confirmation?.entities || this._renameQueue || [];
+    const idChanges = queue.filter(r => (r.newId && r.newId !== r.oldId) || r.newName);
+    const devEntries = Object.entries(this._confirmation?.devices || this._deviceRenameQueue || {});
+    const MAX = 8;
+    const rowStyle = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--bento-border,#e5e7eb);font-size:12.5px';
+    const codeStyle = 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--bento-bg-2,#f3f4f6);padding:2px 6px;border-radius:6px';
+    const sub = 'color:var(--bento-text-secondary,#6b7280)';
+    const entityRow = r => `
+        <div style="${rowStyle}">
+          <code style="${codeStyle}">${_entityIdHtml(r.oldId)}</code>
+          <span class="rename-target"><span style="opacity:.6">&rarr;</span><code style="${codeStyle}">${_entityIdHtml(r.newId || r.oldId)}</code></span>
+          ${r.newName ? `<span style="${sub}">"${_esc(r.newName)}"</span>` : ''}
+        </div>`;
+    const deviceRow = ([id, name]) => `
+        <div style="${rowStyle}"><span>&#128295;</span><span>${_esc(this._getDeviceName(this._devices.find(d => d.id === id) || { id }))} → ${_esc(String(name))}</span></div>`;
+    const fill = (s, n) => _esc(String(s || '').replace('{count}', n));
+    const reviewRows = (items, row) => {
+      const first = items.slice(0, MAX).map(row).join('');
+      if (items.length <= MAX) return first;
+      const label = this._lang === 'pl'
+        ? `Pokaż pozostałe zmiany (${items.length - MAX})`
+        : `Review remaining changes (${items.length - MAX})`;
+      return first + `<details class="rename-review-more"><summary style="cursor:pointer;min-height:44px;display:flex;align-items:center">${_esc(label)}</summary>${items.slice(MAX).map(row).join('')}</details>`;
+    };
+    return `
+      <div class="confirm-dialog" role="dialog" aria-labelledby="renameConfirmTitle" style="border:1px solid var(--bento-primary,#3B82F6);border-radius:var(--bento-radius-md,14px);background:var(--bento-card,#fff);padding:16px 18px;margin:12px 0;box-shadow:var(--bento-shadow-md)">
+        <div id="renameConfirmTitle" style="font-weight:700;font-size:14px;margin-bottom:6px">&#9888;&#65039; ${_esc(t.confirmRenameTitle)}</div>
+        <div style="font-size:12.5px;${sub};margin-bottom:10px">${_esc(t.confirmRenameBody)}</div>
+        <div style="font-size:12.5px;font-weight:600;margin-bottom:4px">${fill(t.confirmRenameCount, idChanges.length)}</div>
+        ${idChanges.length ? reviewRows(idChanges, entityRow) : `<div style="font-size:12.5px;${sub}">${_esc(t.confirmNoEntityChanges)}</div>`}
+        ${devEntries.length ? `<div style="font-size:12.5px;font-weight:600;margin:10px 0 4px">${fill(t.confirmDeviceCount, devEntries.length)}</div>${reviewRows(devEntries, deviceRow)}` : ''}
+        <p style="font-size:12px;${sub}">${this._lang === 'pl' ? 'Przygotuj przegląd zmian i wykrytych zależności.' : 'Prepare a review of changes and detected dependencies.'}</p>
+        <div class="rename-confirm-actions">
+          <button id="cancelRenameDialog" class="btn btn-outline">${_esc(t.cancel)}</button>
+          <button type="button" id="prepareMigration" class="btn btn-primary">${this._lang === 'pl' ? 'Przygotuj przegląd' : 'Prepare review'}</button>
+        </div>
+      </div>`;
+  }
+
+  _migrationText(en, pl) { return this._lang === 'pl' ? pl : en; }
+
+  _requestWriteWarning(kind) {
+    if (this._writeWarning) return;
+    this._writeWarning = kind;
+    this.render();
+    this.shadowRoot.getElementById('cancelWriteWarning')?.focus();
+  }
+
+  _cancelWriteWarning() {
+    const kind = this._writeWarning;
+    this._writeWarning = null;
+    this.render();
+    this.shadowRoot.getElementById(({registry: 'confirmRenameApply', migration: 'applyMigration', restore: 'restoreMigration'})[kind])?.focus();
+  }
+
+  _continueWriteWarning() {
+    const kind = this._writeWarning;
+    if (!kind) return;
+    this._writeWarning = null;
+    this.render();
+    if (kind === 'registry') void this._executeRenames(true);
+    else if (kind === 'migration') void this._applyMigration();
+    else if (kind === 'restore') void this._restoreMigration();
+  }
+
+  _renderWriteWarning() {
+    return `<div class="write-warning-backdrop" style="position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:16px">
+      <section role="dialog" aria-modal="true" aria-labelledby="writeWarningTitle" aria-describedby="writeWarningBody" style="background:var(--card-background-color,#fff);color:var(--primary-text-color,#111);border-radius:14px;padding:20px;max-width:36rem;max-height:90vh;overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.4)">
+        <h2 id="writeWarningTitle">${this._migrationText('Before continuing', 'Przed kontynuacją')}</h2>
+        <div id="writeWarningBody"><p>${this._migrationText('We recommend making a full Home Assistant backup before continuing.', 'Zalecamy wykonanie pełnej kopii zapasowej Home Assistant przed kontynuacją.')}</p>
+        <p>${this._migrationText('This tool has been tested on multiple versions and installations with different data, but cannot guarantee coverage of every configuration. Please report problems on', 'Narzędzie testowano na wielu wersjach i instalacjach z różnymi danymi, ale nie można zagwarantować obsługi każdej konfiguracji. Zgłoś problem na')} <a href="https://github.com/MacSiem/ha-entity-renamer/issues/new" target="_blank" rel="noopener noreferrer">GitHub</a>.</p>
+        <p>${this._migrationText('A required integration reload may interrupt running automations and scripts.', 'Wymagane przeładowanie integracji może przerwać trwające automatyzacje i skrypty.')}</p></div>
+        <button type="button" class="btn btn-outline" id="cancelWriteWarning">${this._migrationText('Cancel', 'Anuluj')}</button>
+        <button type="button" class="btn btn-danger" id="continueWriteWarning">${this._migrationText('Continue', 'Kontynuuj')}</button>
+      </section></div>`;
+  }
+
+  async _findMigrationRecovery() {
+    if (this._migration || this._recoveryInventory?.busy || !this._renameAuthorityAvailable()) return;
+    const epoch = this._authorityEpoch, session = this._readSession(), hass = this._hass;
+    const inventory = {busy: true}; this._recoveryInventory = inventory; this.render();
+    try {
+      const result = await this._migrationRequest(hass, {type: 'ha_entity_renamer/status'});
+      if (this._recoveryInventory !== inventory || this._migration || epoch !== this._authorityEpoch
+          || !this._sameReadSession(session, this._readSession()) || !this._renameAuthorityAvailable()) return;
+      if (!Array.isArray(result?.operations)) throw new Error('invalid_inventory');
+      inventory.entries = result.operations.filter(row => row
+        && /^[A-Za-z0-9_-]{1,80}$/.test(row.operation_id || '')
+        && /^[0-9a-f]{64}$/.test(row.fingerprint || '') && typeof row.status === 'string');
+    } catch (_) { if (this._recoveryInventory === inventory) inventory.failed = true; }
+    finally {
+      if (this._recoveryInventory === inventory && epoch === this._authorityEpoch) {
+        inventory.busy = false; this.render();
+      }
+    }
+  }
+
+  _selectMigrationRecovery(index) {
+    const row = this._recoveryInventory?.entries?.[index];
+    if (!row || this._migration || !this._renameAuthorityAvailable()) return;
+    this._confirmation = null; this._confirmDialogOpen = false; this._entityEditor = null;
+    this._migration = {owner: this._hass.user.id, operation_id: row.operation_id,
+      fingerprint: row.fingerprint, attempted: true, recoveredIdentity: true,
+      restoreRevoked: true, stage: 'unknown', invalidated: true, busy: false,
+      journal: JSON.parse(JSON.stringify(row))};
+    const scope = this._recoveryCardScope;
+    const matches = [...(scope?.entries || [])].filter(entry => entry.operation_id === row.operation_id
+      && entry.fingerprint === row.fingerprint && entry.actor === this._hass.user.id);
+    if (matches.length === 1) {
+      const entry = matches[0], m = this._migration;
+      m.lifecycleEntry = entry; m.epoch = this._authorityEpoch; m.session = this._readSession();
+      m.invalidated = false; m.observation = 1; m.busy = !!entry.pending; m.inspecting = entry.pending?.kind === 'inspect';
+      m.inspectionIssue = entry.inspectionInterrupted ? 'interrupted' : null;
+      if (!entry.owner) entry.owner = this;
+      if (entry.pending) void this._refreshMigrationProgress(m, this._hass);
+    } else this._trackRecoveryOperation(this._migration);
+    this._recoveryInventory = null; this.render();
+  }
+
+  _renderRecoveryInventory() {
+    if (this._migration || this._hass?.user?.is_admin !== true) return '';
+    const inventory = this._recoveryInventory;
+    return `<section aria-label="${this._migrationText('Find previous operations', 'Znajdź poprzednie operacje')}">
+      <button type="button" class="btn btn-outline" id="findMigrationRecovery" ${inventory?.busy || !this._renameAuthorityAvailable() ? 'disabled' : ''}>${this._migrationText('Find previous operations', 'Znajdź poprzednie operacje')}</button>
+      ${inventory?.busy ? `<p role="status">${this._migrationText('Reading server inventory…', 'Odczytywanie listy serwera…')}</p>` : ''}
+      ${inventory?.failed ? `<p role="status">${this._migrationText('Server inventory unavailable.', 'Lista serwera jest niedostępna.')}</p>` : ''}
+      ${inventory?.entries ? `<p>${this._migrationText('Select an operation to inspect. Inventory does not prove success or permit a restore.', 'Wybierz operację do inspekcji. Lista nie potwierdza sukcesu ani prawa do wycofania.')}</p>${inventory.entries.map((row,index) => `<button type="button" class="btn btn-outline" data-recovery-index="${index}">${_esc(row.operation_id)} — ${_esc(row.status)}</button>`).join('')}` : ''}
+    </section>`;
+  }
+
+  _migrationCurrent(m) {
+    return this._migration === m && !m.invalidated && m.epoch === this._authorityEpoch
+      && this._sameReadSession(m.session, this._readSession()) && this._renameAuthorityAvailable();
+  }
+
+  _migrationRequest(hass, message) {
+    // HA owns connection failure handling. A long native operation must not be
+    // mistaken for a transport failure or retried due to a client deadline.
+    try { return Promise.resolve(hass.callWS(message)); }
+    catch (error) { return Promise.reject(error); }
+  }
+
+  async _refreshMigrationProgress(m = this._migration, hass = this._hass) {
+    if (!m?.attempted || !this._migrationCurrent(m)) return;
+    const observation = m.observation;
+    if (m.progressObservation && m.progressObservation.observation === observation) return;
+    clearTimeout(m.pollTimer); m.pollTimer = null;
+    const progress = {observation}; m.progressObservation = progress;
+    try {
+      const status = await this._migrationRequest(hass, {type: 'ha_entity_renamer/status'});
+      if (!this._migrationCurrent(m) || m.observation !== observation) return;
+      const rows = status?.operations;
+      m.journal = (Array.isArray(rows) ? rows.find(row => row?.operation_id === m.operation_id
+        && row?.fingerprint === m.fingerprint) : null) || null;
+    } catch (_) {
+      // Do not present an older snapshot as the current observation.
+      if (this._migrationCurrent(m) && m.observation === observation) m.journal = null;
+    } finally {
+      if (m.progressObservation === progress) m.progressObservation = null;
+      if (this._migrationCurrent(m) && m.observation === observation) {
+        const journal = this.shadowRoot.getElementById('migrationJournal');
+        if (m.busy) { if (journal) journal.innerHTML = this._renderMigrationProgress(m); }
+        else this.render();
+        if (m.applying || m.restoring || m.inspecting) m.pollTimer = setTimeout(() => this._refreshMigrationProgress(m, hass), 2000);
+      }
+    }
+  }
+
+  _validMigrationReview(result) {
+    const validChange = change => change && typeof (change.entity_id || change.device_id) === 'string'
+        && change.fields && typeof change.fields === 'object' && !Array.isArray(change.fields)
+        && Object.keys(change.fields).length > 0 && Object.entries(change.fields).every(([key, field]) =>
+          (change.device_id ? ['name_by_user'] : ['entity_id', 'name']).includes(key)
+          && field && ['before', 'after'].every(side => field[side] === null || typeof field[side] === 'string'));
+    return !(!result || !/^[A-Za-z0-9_-]{1,80}$/.test(result.operation_id || '')
+        || !/^[0-9a-f]{64}$/.test(result.fingerprint || '')
+        || !Array.isArray(result.changes) || !result.changes.length || !result.changes.every(validChange)
+        || !result.dependencies || !Array.isArray(result.dependencies.domains)
+        || !result.dependencies.domains.every(domain => typeof domain === 'string')
+        || (result.dependencies.coverage !== undefined &&
+          (!Array.isArray(result.dependencies.coverage) || result.dependencies.coverage.length > 1000
+            || !result.dependencies.coverage.every(row => row && ['source', 'status', 'reason'].every(k =>
+              typeof row[k] === 'string' && row[k].length <= 255)
+              && ['COMPLETE', 'UNKNOWN', 'DENIED'].includes(row.status)
+              && Array.isArray(row.blockers) && row.blockers.length <= 100
+              && row.blockers.every(value => typeof value === 'string' && value.length <= 255))))
+        || (result.dependencies.domains.includes('dashboard') &&
+          (!Array.isArray(result.dependencies.dashboards) || !result.dependencies.dashboards.length))
+        || (result.dependencies.dashboards !== undefined &&
+          (!Array.isArray(result.dependencies.dashboards)
+            || !result.dependencies.dashboards.every(row => row
+              && (row.route === null || typeof row.route === 'string' && row.route.length > 0)
+              && Array.isArray(row.references) && row.references.length > 0
+              && row.references.every(ref => ref && typeof ref.before === 'string'
+                && typeof ref.after === 'string' && Number.isSafeInteger(ref.occurrences)
+                && ref.occurrences > 0))))
+        || !Number.isSafeInteger(result.dependencies.yaml_file_count)
+        || !Number.isSafeInteger(result.dependencies.template_consumer_count)
+        || result.dependencies.yaml_file_count < 0 || result.dependencies.template_consumer_count < 0
+        || (result.dependencies.config_entries !== undefined
+          && (!Array.isArray(result.dependencies.config_entries)
+            || !result.dependencies.config_entries.every(entry => entry
+              && (entry.kind === undefined || entry.kind === 'powercalc')
+              && ['entity_id', 'before', 'after'].every(key => typeof entry[key] === 'string' && entry[key].length > 0))))
+        || !Array.isArray(result.dependencies.files)
+        || result.dependencies.files.length !== result.dependencies.yaml_file_count
+        || new Set(result.dependencies.files.map(file => file?.path)).size !== result.dependencies.files.length
+        || !result.dependencies.files.every(file => file && typeof file.path === 'string'
+          && Number.isSafeInteger(file.edit_count) && file.edit_count > 0
+          && Array.isArray(file.references) && file.references.length > 0
+          && file.references.every(ref => ref && typeof ref.before === 'string' && typeof ref.after === 'string'
+            && (ref.kind === undefined || ref.kind === 'script_key'
+                && /^[a-z0-9_]+$/.test(ref.before) && /^[a-z0-9_]+$/.test(ref.after))
+            && Number.isSafeInteger(ref.occurrences) && ref.occurrences > 0)));
+  }
+
+  async _prepareMigration() {
+    const c = this._confirmation;
+    if (this._migration || this._loading || !this._renameAuthorityAvailable() || !c
+      || c.epoch !== this._authorityEpoch || !this._sameReadSession(c.session, this._readSession())) return;
+    this._clearQueueUndo();
+    this._areaPrefixEpoch = (this._areaPrefixEpoch || 0) + 1;
+    const m = {owner: this._hass.user.id, epoch: c.epoch, session: c.session,
+      stage: 'preparing', busy: true, attempted: false};
+    this._migration = m;
+    const hass = this._hass;
+    this.render();
+    this.shadowRoot.getElementById('cancelRenameDialog')?.focus();
+    try {
+      const current = () => this._migrationCurrent(m);
+      const automaticFailures = await this._revalidateAutomaticQueue(c.entities, hass, current);
+      if (!current()) return;
+      if (automaticFailures.size) throw new Error('stale_automatic_selection');
+      if (c.entities.some(row => row.sourceIdentity)) {
+        const rows = await hass.callWS({type: 'config/entity_registry/list'});
+        if (!current()) return;
+        if (!Array.isArray(rows) || c.entities.some(row => row.sourceIdentity
+          && this._sourceIdentity(rows.find(entry => entry.entity_id === row.oldId)) !== row.sourceIdentity)) {
+          throw new Error('stale_source_identity');
+        }
+      }
+      const result = await this._migrationRequest(hass, {
+        type: 'ha_entity_renamer/prepare',
+        entities: c.entities.map(r => ({entity_id: r.oldId,
+          ...(r.newId && r.newId !== r.oldId ? {new_entity_id: r.newId} : {}),
+          ...(r.newName ? {name: r.newName} : {})})),
+        devices: Object.entries(c.devices).map(([device_id, name_by_user]) => ({device_id, name_by_user})),
+      });
+      if (!this._migrationCurrent(m)) return;
+      if (!this._validMigrationReview(result)) throw new Error('invalid_review');
+      // A source may be replaced while server prepare is pending. Bind the
+      // reviewed operation to the selection the user actually confirmed.
+      if (c.entities.some(row => row.sourceIdentity)) {
+        const rows = await hass.callWS({type: 'config/entity_registry/list'});
+        if (!current()) return;
+        if (!Array.isArray(rows) || c.entities.some(row => row.sourceIdentity
+          && this._sourceIdentity(rows.find(entry => entry.entity_id === row.oldId)) !== row.sourceIdentity)) {
+          throw new Error('stale_source_identity');
+        }
+      }
+      // Full detached public projection; never construct or send a client Plan.
+      m.review = JSON.parse(JSON.stringify({changes: result.changes, dependencies: result.dependencies}));
+      m.identities = m.review.changes.map(change => change.device_id ? change.device_id
+        : this._sourceIdentity(this._entities.find(row => row.entity_id === change.entity_id)));
+      m.operation_id = result.operation_id; m.fingerprint = result.fingerprint;
+      m.stage = 'review';
+    } catch (error) {
+      if (!this._migrationCurrent(m)) return;
+      m.refusalCode = ['unsupported_template_reference', 'unsupported_template_family', 'unsupported_powercalc_scope', 'unsupported_automation_scope', 'unsupported_config_entry', 'unsupported_script_state_trigger'].includes(error?.code) ? error.code : null;
+      if (m.refusalCode === 'unsupported_config_entry') {
+        try {
+          const parsed = JSON.parse(error.message);
+          if (Array.isArray(parsed.sources) && parsed.sources.length <= 100 && parsed.sources.every(row =>
+              row && ['domain', 'entry_id'].every(key => typeof row[key] === 'string' && row[key].length <= 255)
+              && ['references', 'reasons'].every(key => Array.isArray(row[key]) && row[key].length <= 100
+                && row[key].every(value => typeof value === 'string' && value.length <= 255)))) m.refusalDetails = parsed.sources;
+        } catch (_) { /* Refuse without exposing malformed server data. */ }
+      }
+      if (m.refusalCode === 'unsupported_script_state_trigger') {
+        try {
+          const parsed = JSON.parse(error.message);
+          if (/^automation\.[a-z0-9_]+$/.test(parsed.automation) && /^script\.[a-z0-9_]+$/.test(parsed.script))
+            m.scriptTriggerDetails = parsed;
+        } catch (_) { /* Keep the refusal when details cannot be validated. */ }
+      }
+      m.stage = 'refused'; // Cancel explicitly; no registry-only fallback.
+    } finally {
+      if (this._migrationCurrent(m)) {
+        m.busy = false; this.render();
+        this.shadowRoot.getElementById('cancelRenameDialog')?.focus();
+      }
+    }
+  }
+
+  async _applyMigration() {
+    const m = this._migration;
+    if (!m || m.stage !== 'review' || m.busy || m.attempted || !this._migrationCurrent(m)) return;
+    // Consume locally before the first await, including transport failures.
+    m.attempted = true; m.stage = 'applying'; m.busy = true; m.applying = true;
+    this._recordMigrationHistory(m, 'attempted');
+    const lifecycleRead = this._startRecoveryRead(m, 'apply');
+    this._confirmation = null; this._confirmDialogOpen = false;
+    const hass = this._hass;
+    this.render();
+    void this._refreshMigrationProgress(m, hass);
+    try {
+      const result = await this._migrationRequest(hass, {type: 'ha_entity_renamer/apply',
+        operation_id: m.operation_id, fingerprint: m.fingerprint});
+      if (!this._migrationCurrent(m)) return;
+      if (result?.operation_id === m.operation_id && result?.fingerprint === m.fingerprint) m.applyState = result.state;
+    } catch (_) {
+      // Missing ACK remains UNKNOWN, even a refusal after review consumption.
+    } finally {
+      this._endRecoveryRead(lifecycleRead);
+      m.applying = false; clearTimeout(m.pollTimer);
+      if (this._migrationCurrent(m)) { m.stage = 'unknown'; m.busy = false; await this._inspectMigration(); }
+    }
+  }
+
+  _canRestoreMigration(m = this._migration) {
+    return !!m && m.attempted && !m.busy && !m.restoreAttempted && !m.restoreRevoked && !!m.review
+      && this._migrationCurrent(m)
+      && ((m.stage === 'applied' && m.inspection?.state === 'applied')
+        || (m.stage === 'unknown' && m.inspection?.state === 'recoverable_complete'
+          && m.registryMatches && m.journal?.status === 'unknown'
+          && m.journal?.direction === 'forward'))
+      && m.inspection?.operation_id === m.operation_id && m.inspection?.fingerprint === m.fingerprint
+      && m.inspection?.eligible === true && m.inspection?.restore_attempt_available === true;
+  }
+
+  _reviewMigrationRestore() {
+    const m = this._migration;
+    if (!this._canRestoreMigration(m)) return;
+    m.restoreConsent = true;
+    this.render();
+    this.shadowRoot.getElementById('cancelMigrationRestore')?.focus();
+  }
+
+  _cancelMigrationRestore() {
+    const m = this._migration;
+    if (!m?.restoreConsent || m.restoreAttempted) return;
+    m.restoreConsent = false;
+    this.render();
+    this.shadowRoot.getElementById('reviewMigrationRestore')?.focus();
+  }
+
+  async _restoreMigration() {
+    const m = this._migration;
+    if (!m?.restoreConsent || !this._canRestoreMigration(m)) return;
+    // Consume before IO. Neither failed transport nor inspection can revive consent.
+    m.restoreConsent = false; m.restoreAttempted = true; m.restoreAcknowledged = false;
+    m.stage = 'restoring'; m.busy = true; m.restoring = true; m.registryMatches = false;
+    const lifecycleRead = this._startRecoveryRead(m, 'restore');
+    const hass = this._hass;
+    this.render();
+    void this._refreshMigrationProgress(m, hass);
+    try {
+      const result = await this._migrationRequest(hass, {type: 'ha_entity_renamer/recovery/restore',
+        operation_id: m.operation_id, fingerprint: m.fingerprint});
+      if (!this._migrationCurrent(m)) return;
+      m.restoreAcknowledged = result?.operation_id === m.operation_id
+        && result?.fingerprint === m.fingerprint && result?.state === 'rolled_back';
+    } catch (_) {
+      // A missing ACK or refusal remains UNKNOWN. Never replay or use registry writes.
+    } finally {
+      this._endRecoveryRead(lifecycleRead);
+      m.restoring = false; clearTimeout(m.pollTimer);
+      if (this._migrationCurrent(m)) {
+        m.stage = 'unknown'; m.busy = false;
+        // These reads begin only after the restore response, independently of its ACK.
+        await this._inspectMigration();
+      }
+    }
+  }
+
+  async _inspectMigration() {
+    const m = this._migration;
+    if (!m?.attempted || m.busy || m.lifecycleEntry?.pending || m.owner !== this._hass?.user?.id || !this._renameAuthorityAvailable()) return;
+    const read = this._startRecoveryRead(m, 'inspect');
+    try { return await this._runMigrationInspection(m); }
+    catch (_) {
+      if (this._migrationCurrent(m)) {
+        m.inspectionIssue = 'unavailable'; m.inspection = null; m.registryRead = false; m.registryMatches = false;
+        m.stage = 'unknown'; m.busy = false; m.inspecting = false; clearTimeout(m.pollTimer); m.pollTimer = null; this.render();
+      }
+    } finally { this._endRecoveryRead(read); }
+  }
+
+  async _runMigrationInspection(m) {
+    m.restoreConsent = false;
+    // Rebind read authority only. This cannot revive apply or restore consent.
+    m.epoch = this._authorityEpoch; m.session = this._readSession(); m.invalidated = false;
+    m.observation = (m.observation || 0) + 1;
+    m.busy = true; m.inspecting = true; m.inspection = null; m.inspectionIssue = null;
+    m.registryRead = false; m.registryMatches = false; this.render();
+    const hass = this._hass;
+    // Status is independently readable while inspection waits for the operation lock.
+    void this._refreshMigrationProgress(m, hass);
+    const [inspectionResult] = await Promise.allSettled([
+      this._migrationRequest(hass, {type: 'ha_entity_renamer/recovery/inspect', operation_id: m.operation_id, fingerprint: m.fingerprint}),
+    ]);
+    if (!this._migrationCurrent(m)) return;
+    // Registry verification must be newer than the inspection, not concurrent with it.
+    const results = await Promise.allSettled([
+      this._migrationRequest(hass, {type: 'config/entity_registry/list'}),
+      this._migrationRequest(hass, {type: 'config/device_registry/list'}),
+    ]);
+    if (!this._migrationCurrent(m)) return;
+    const value = i => results[i].status === 'fulfilled' ? results[i].value : null;
+    const inspection = inspectionResult.status === 'fulfilled' ? inspectionResult.value : null;
+    m.inspection = inspection?.operation_id === m.operation_id && inspection?.fingerprint === m.fingerprint ? inspection : null;
+    if (!m.inspection) m.inspectionIssue = 'unavailable';
+    if ((m.recoveredIdentity || m.restoreAttempted) && m.inspection
+        && ((m.inspection.eligible === true && ['applied', 'recoverable_complete'].includes(m.inspection.state))
+          || (m.inspection.state === 'rolled_back' && m.inspection.reason === 'restored_verified'))) {
+      const frozen = m.inspection.frozen_review;
+      const projection = frozen && {...frozen, operation_id: m.operation_id, fingerprint: m.fingerprint};
+      if (this._validMigrationReview(projection) && Array.isArray(frozen.identities)
+          && frozen.identities.length === frozen.changes.length
+          && frozen.identities.every((identity, i) => frozen.changes[i].device_id
+            ? typeof identity === 'string' && identity === frozen.changes[i].device_id
+            : Array.isArray(identity) && identity.length === 4 && identity.every(value => value === null || typeof value === 'string'))) {
+        m.review = JSON.parse(JSON.stringify({changes: frozen.changes, dependencies: frozen.dependencies}));
+        m.identities = frozen.identities.map(identity => Array.isArray(identity) ? JSON.stringify(identity) : identity);
+        if (m.inspection.state === 'rolled_back') m.restoreAttempted = true;
+        else if (m.recoveredIdentity && !m.restoreAttempted && m.inspection.restore_attempt_available === true)
+          m.restoreRevoked = false; // New explicit confirmation is still required.
+      }
+    }
+    // Fresh reads refresh the projection; they do not prove dependencies.
+    const entities = value(0), devices = value(1);
+    m.registryRead = Array.isArray(entities) && Array.isArray(devices);
+    if (!m.registryRead && !m.inspectionIssue) m.inspectionIssue = 'registry';
+    m.registryMatches = false;
+    if (m.registryRead) {
+      this._entities = entities; this._devices = devices;
+      this._deviceEntities = Object.create(null);
+      for (const row of entities) {
+        if (row.device_id) (this._deviceEntities[row.device_id] ||= []).push(row);
+      }
+      m.registryMatches = !!m.review && m.review.changes.every((change, index) => {
+        const side = m.restoreAttempted ? 'before' : 'after';
+        const rows = change.device_id ? devices.filter(r => r.id === change.device_id)
+          : entities.filter(r => r.entity_id === (change.fields.entity_id?.[side] || change.entity_id));
+        const row = rows.length === 1 ? rows[0] : null;
+        return row && (change.device_id ? row.id === m.identities?.[index]
+          : entities.filter(item => item.id === row.id).length === 1
+            && !!m.identities?.[index] && this._migrationEntityIdentityMatches(row, m.identities[index], change, side))
+          && Object.entries(change.fields).every(([key, field]) => (row[key] ?? null) === field[side]);
+      });
+    }
+    m.stage = m.inspection?.state === 'refused' && m.inspection?.reason === 'prewrite_refused' ? 'refused'
+      : m.restoreAttempted ? ((m.restoreAcknowledged || (m.inspection?.state === 'rolled_back'
+        && m.inspection?.reason === 'restored_verified')) && m.registryMatches ? 'restored' : 'unknown')
+      : m.inspection?.state === 'applied' && m.registryMatches ? 'applied' : 'unknown';
+    if (!m.restoreAttempted && m.stage === 'applied') this._recordMigrationHistory(m, 'applied');
+    else if (!m.restoreAttempted && m.stage === 'refused') this._recordMigrationHistory(m, 'refused');
+    m.inspecting = false; clearTimeout(m.pollTimer); m.pollTimer = null;
+    m.busy = false; this.render();
+  }
+
+  _finishMigration() {
+    const m = this._migration;
+    if (!m || m.busy || !['applied', 'restored', 'refused'].includes(m.stage) || m.restoreConsent || !this._migrationCurrent(m)) return;
+    if (!m.recoveredIdentity && m.stage !== 'refused') { this._renameQueue = []; this._deviceRenameQueue = {}; this._impactResults = null; }
+    if (m.lifecycleEntry) this._recoveryCardScope?.entries.delete(m.lifecycleEntry);
+    this._migration = null; this.render();
+  }
+
+  _renderMigrationReview(inverse = false) {
+    const m = this._migration;
+    if (!m || (m.attempted && !inverse)) return '';
+    const review = inverse ? {
+      changes: m.review.changes.map(change => ({...change, entity_id: change.device_id ? change.entity_id : (change.fields.entity_id?.after || change.entity_id), fields: Object.fromEntries(
+        Object.entries(change.fields).map(([key, field]) => [key, {before: field.after, after: field.before}]))})),
+      dependencies: {...m.review.dependencies, files: m.review.dependencies.files.map(file => ({...file,
+        references: file.references.map(ref => ({...ref, before: ref.after, after: ref.before}))})),
+        dashboards: (m.review.dependencies.dashboards || []).map(row => ({...row,
+          references: row.references.map(ref => ({...ref, before: ref.after, after: ref.before}))})),
+        config_entries: (m.review.dependencies.config_entries || []).map(entry => ({...entry, before: entry.after, after: entry.before}))},
+    } : m.review;
+    const title = inverse ? this._migrationText('Restore this operation', 'Wycofaj tę operację') : this._migrationText('Dependency update plan', 'Plan aktualizacji zależności');
+    const body = inverse ? this._migrationText('Confirm only the inverse changes below for this current operation. Other operations are excluded.', 'Potwierdź wyłącznie poniższe zmiany odwrotne bieżącej operacji. Inne operacje są wykluczone.') : m.stage === 'preparing' ? this._migrationText('Preparing server review…', 'Przygotowywanie przeglądu na serwerze…')
+      : m.stage === 'refused' && m.refusalCode === 'unsupported_script_state_trigger' ? this._migrationText('An enabled automation monitors this script’s state. This dependency cannot yet be migrated safely. Nothing was applied.', 'Włączona automatyzacja obserwuje stan tego skryptu. Tej zależności nie można jeszcze bezpiecznie przenieść. Niczego nie zastosowano.')
+      : m.stage === 'refused' && m.refusalCode === 'unsupported_automation_scope' ? this._migrationText('Automation state or configuration could not be safely verified. Nothing was applied.', 'Nie można bezpiecznie sprawdzić stanu lub konfiguracji automatyzacji. Niczego nie zastosowano.')
+      : m.stage === 'refused' && m.refusalCode === 'unsupported_config_entry' ? this._migrationText('A configuration entry has a reference or dynamic expression that cannot be safely migrated. Nothing was applied.', 'Wpis konfiguracji zawiera odwołanie lub wyrażenie dynamiczne, którego nie można bezpiecznie przenieść. Niczego nie zastosowano.')
+      : m.stage === 'refused' && m.refusalCode === 'unsupported_powercalc_scope' ? this._migrationText('Powercalc is loaded and its dependencies cannot be verified for this plan. Nothing was applied.', 'Powercalc jest załadowany i nie można sprawdzić jego zależności dla tego planu. Niczego nie zastosowano.')
+      : m.stage === 'refused' && m.refusalCode === 'unsupported_template_reference' ? this._migrationText('A Template reference could not be safely interpreted. Nothing was applied.', 'Nie można bezpiecznie rozpoznać odwołania Template. Niczego nie zastosowano.')
+      : m.stage === 'refused' && m.refusalCode === 'unsupported_template_family' ? this._migrationText('An affected Template form is not supported. Nothing was applied.', 'Dotknięta postać Template nie jest obsługiwana. Niczego nie zastosowano.')
+      : m.stage === 'refused' ? this._migrationText('The selection was refused or could not be verified. Nothing was applied. Cancel to review your queue. No registry-only fallback was performed.', 'Zakres został odrzucony lub nie udało się go zweryfikować. Niczego nie zastosowano. Anuluj, aby wrócić do kolejki. Nie wykonano zastępczego zapisu samego rejestru.')
+      : this._migrationText('Review every server change and the admitted dependency scope. Coverage of all dependency families is not confirmed.', 'Sprawdź wszystkie zmiany serwera i przyjęty zakres zależności. Pokrycie wszystkich rodzin zależności nie jest potwierdzone.');
+    const fieldName = key => ({entity_id: 'Entity ID', name: this._migrationText('Entity name', 'Nazwa encji'), name_by_user: this._migrationText('Device name', 'Nazwa urządzenia')}[key] || key);
+    const valueText = value => value === null ? this._migrationText('(default)', '(domyślna)') : value;
+    const rows = review?.changes.flatMap(change => Object.entries(change.fields).map(([key, field]) =>
+      `<tr><td>${_esc(change.entity_id || change.device_id)}</td><td>${_esc(fieldName(key))}</td><td>${_esc(valueText(field.before))}</td><td>${_esc(valueText(field.after))}</td></tr>`)).join('') || '';
+    const domains = review?.dependencies.domains.map(domain => ({template: 'Template', automation: this._migrationText('Automations', 'Automatyzacje'), script: this._migrationText('Scripts', 'Skrypty'), dashboard: this._migrationText('Dashboards', 'Pulpity')}[domain] || domain)).join(', ');
+    const coverageSource = source => ({external: this._migrationText('External consumers', 'Odbiorcy zewnętrzni'),
+      yaml_sources: this._migrationText('YAML and includes', 'YAML i pliki dołączane'),
+      config_entries: this._migrationText('Integration configuration entries', 'Wpisy konfiguracji integracji'),
+      automation: this._migrationText('Automations', 'Automatyzacje'), script: this._migrationText('Scripts', 'Skrypty'),
+      dashboard: this._migrationText('Dashboards', 'Pulpity'), energy: this._migrationText('Energy', 'Energia')}[source] || source);
+    const coverageReason = row => row.reason === 'integration_code_not_enumerated'
+      ? this._migrationText('Custom integration code was not inspected.', 'Kod integracji niestandardowej nie został sprawdzony.')
+      : row.reason === 'dynamic_reference_unverified' ? this._migrationText('A dynamic or unsupported field could not be resolved.', 'Nie można ustalić zawartości pola dynamicznego lub nieobsługiwanego.')
+      : row.source === 'external' ? this._migrationText('External consumers were not enumerated.', 'Odbiorcy zewnętrzni nie zostali zinwentaryzowani.')
+      : row.status === 'DENIED' ? this._migrationText('Access was denied.', 'Odmówiono dostępu.')
+      : this._migrationText('Coverage is incomplete or unverified.', 'Zakres jest niepełny lub niesprawdzony.');
+    return `<section class="confirm-dialog" role="dialog" aria-labelledby="migrationReviewTitle" aria-busy="${m.busy}">
+      <h2 id="migrationReviewTitle">${title}</h2><p role="status">${body}</p>
+      ${review ? `<h3 id="migrationChangesTitle">${this._migrationText('Server changes', 'Zmiany serwera')}</h3>
+        <div role="region" tabindex="0" aria-labelledby="migrationChangesTitle" style="max-width:100%;overflow:auto"><table class="queue-table"><thead><tr><th scope="col">${this._migrationText('Target', 'Cel')}</th><th scope="col">${this._migrationText('Field', 'Pole')}</th><th scope="col">${this._migrationText('Before', 'Przed')}</th><th scope="col">${this._migrationText('After', 'Po')}</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <h3>${this._migrationText('Dependencies', 'Zależności')}</h3><p>${_esc(domains || this._migrationText('None admitted', 'Brak przyjętych'))}</p>
+        <p>${this._migrationText('YAML files', 'Pliki YAML')}: ${review.dependencies.yaml_file_count}. ${this._migrationText('Template consumers', 'Odbiorcy Template')}: ${review.dependencies.template_consumer_count}.</p>
+        ${(review.dependencies.config_entries || []).map(entry => `<p>${entry.kind === 'powercalc' ? this._migrationText('Powercalc group', 'Grupa Powercalc') : this._migrationText('Template entry', 'Wpis Template')}: <code>${_esc(entry.entity_id)}</code> — <code>${_esc(entry.before)}</code> → <code>${_esc(entry.after)}</code></p>`).join('')}
+        ${(review.dependencies.dashboards || []).map(row => `<details open><summary>${this._migrationText('Dashboard', 'Pulpit')}: <code>${_esc(row.route ?? this._migrationText('Default', 'Domyślny'))}</code></summary><ul>${row.references.map(ref => `<li><code>${_entityIdHtml(ref.before)}</code> → <code>${_entityIdHtml(ref.after)}</code> (${ref.occurrences} ${this._migrationText('references', 'odwołań')})</li>`).join('')}</ul></details>`).join('')}
+        ${review.dependencies.files.map(file => `<details open><summary><code>${_esc(file.path)}</code> — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li>${ref.kind === 'script_key' ? this._migrationText('Script key', 'Klucz skryptu') + ': ' : ''}<code>${_entityIdHtml(ref.before)}</code> → <code>${_entityIdHtml(ref.after)}</code> (${ref.occurrences} ${ref.kind === 'script_key' ? this._migrationText('definition', 'definicja') : this._migrationText('references', 'odwołań')})</li>`).join('')}</ul></details>`).join('')}
+        ${(review.dependencies.coverage || []).length ? `<h3>${this._migrationText('Scan limitations', 'Ograniczenia skanowania')}</h3><p>${this._migrationText('These sources are not fully verified. Their presence does not by itself prove a dependency.', 'Te źródła nie zostały w pełni sprawdzone. Sama ich obecność nie dowodzi zależności.')}</p><ul>${review.dependencies.coverage.map(row => `<li><code>${_esc(coverageSource(row.source))}</code> — ${_esc(coverageReason(row))}</li>`).join('')}</ul>` : ''}` : ''}
+      ${m.stage === 'refused' && m.scriptTriggerDetails ? `<p>${this._migrationText('Automation', 'Automatyzacja')}: <code>${_esc(m.scriptTriggerDetails.automation)}</code>; ${this._migrationText('Script', 'Skrypt')}: <code>${_esc(m.scriptTriggerDetails.script)}</code></p>` : ''}
+      ${m.stage === 'refused' && m.refusalDetails ? `<ul>${m.refusalDetails.map(row => `<li>${this._migrationText('Configuration entry', 'Wpis konfiguracji')}: <code>${_esc(row.domain)}</code> / <code>${_esc(row.entry_id)}</code> — ${this._migrationText('unsupported or dynamic reference', 'nieobsługiwane lub dynamiczne odwołanie')}${row.references.length ? `; ${this._migrationText('references', 'odwołania')}: ${row.references.map(value => `<code>${_entityIdHtml(value)}</code>`).join(', ')}` : ''}</li>`).join('')}</ul>` : ''}
+      <button type="button" class="btn btn-outline" id="${inverse ? 'cancelMigrationRestore' : 'cancelRenameDialog'}">${_esc(this._t.cancel)}</button>
+      ${inverse ? `<button type="button" class="btn btn-danger" id="restoreMigration">${this._migrationText('Restore this scope once', 'Wycofaj ten zakres jeden raz')}</button>` : ''}
+      ${!inverse && m.stage === 'review' ? `<button type="button" class="btn btn-danger" id="applyMigration">${this._migrationText('Apply this plan once', 'Zastosuj ten plan jeden raz')}</button>` : ''}
+    </section>`;
+  }
+
+  _renderMigrationProgress(m) {
+    const observation = this._migrationText('Journal entry not returned or read unavailable; inspection and registry results above are separate.', 'Nie zwrócono wpisu dziennika lub jego odczyt jest niedostępny; wyniki inspekcji i rejestru powyżej są osobne.');
+    const progress = m.journal?.progress;
+    // Persisted step observations do not establish the final verifier result.
+    const states = {
+      prepared: this._migrationText('Prepared', 'Przygotowano'),
+      refused: this._migrationText('Refused before write', 'Odmowa przed zapisem'),
+      applying: this._migrationText('Applying', 'Wykonywanie'),
+      applied: this._migrationText('Applied', 'Zastosowano'),
+      unknown: this._migrationText('Unknown', 'Nieustalony'),
+      ready: this._migrationText('Ready for recovery', 'Gotowość do odzyskania'),
+      rollback_ready: this._migrationText('Ready for rollback', 'Gotowość do wycofania'),
+      rolling_back: this._migrationText('Rolling back', 'Wycofywanie'),
+      rolled_back: this._migrationText('Rolled back', 'Wycofano'),
+    };
+    const phases = {
+      pending: this._migrationText('waiting', 'oczekuje'),
+      intent: this._migrationText('write intent recorded; outcome not yet verified', 'zapisano zamiar zapisu; wynik jeszcze niezweryfikowany'),
+      verified: this._migrationText('step verified', 'krok zweryfikowany'),
+      undo_intent: this._migrationText('restore intent recorded; outcome not yet verified', 'zapisano zamiar wycofania; wynik jeszcze niezweryfikowany'),
+      undone: this._migrationText('step undone', 'krok wycofany'),
+    };
+    const state = m.journal?.status;
+    return `      <h3>${this._migrationText('Journal progress', 'Postęp dziennika')}</h3>
+      <p>${state ? `${this._migrationText('State', 'Stan')}: ${_esc(`${states[state] || state} (${state})`)}.` : _esc(observation)}</p>
+      ${progress ? `<p>${this._migrationText('Verified steps', 'Zweryfikowane kroki')}: ${_esc(String(progress.verified_steps))} / ${_esc(String(progress.total_steps))}. ${this._migrationText('Undone steps', 'Wycofane kroki')}: ${_esc(String(progress.undone_steps))}.</p>
+      <p>${this._migrationText('Verified step count does not confirm the final outcome; final verification and inspection are separate.', 'Liczba zweryfikowanych kroków nie potwierdza końcowego wyniku; końcowa weryfikacja i inspekcja są osobne.')}</p>` : ''}
+      <ul>${(Array.isArray(m.journal?.phases) ? m.journal.phases : []).map(row => `<li>${_esc(String(row.adapter))}: ${_esc(phases[row.phase] || String(row.phase))} (${_esc(String(row.phase))})</li>`).join('')}</ul>`;
+  }
+
+  _renderApplyResult() {
+    const m = this._migration;
+    if (!m?.attempted || m.owner !== this._hass?.user?.id || this._hass?.user?.is_admin !== true) return '';
+    if (m.restoreConsent) return this._renderMigrationReview(true);
+    const observation = this._migrationText('unavailable', 'niedostępny');
+    const restoreGuidance = m.restoreAttempted
+      ? this._migrationText('A restore was already attempted. Inspect the outcome; do not repeat the write.', 'Podjęto już próbę wycofania. Sprawdź wynik; nie powtarzaj zapisu.')
+      : this._canRestoreMigration(m)
+        ? this._migrationText('Fresh inspection allows review of this operation’s restore scope. Review and confirm it separately before any restore.', 'Świeża inspekcja pozwala sprawdzić zakres wycofania tej operacji. Przed wycofaniem osobno sprawdź i potwierdź zakres.')
+        : this._migrationText('Restore is unavailable until a fresh inspection permits it. Check status and inspect; do not repeat the write.', 'Wycofanie jest niedostępne, dopóki świeża inspekcja go nie dopuści. Sprawdź stan i inspekcję; nie powtarzaj zapisu.');
+    return `<section class="apply-result ${['applied', 'restored'].includes(m.stage) && !m.busy ? '' : 'migration-pending'}" aria-labelledby="migrationResultTitle" aria-busy="${m.busy}">
+      <h2 id="migrationResultTitle">${this._migrationText('Dependency operation', 'Operacja zależności')}</h2>
+      <p role="status">${m.stage === 'applying' ? this._migrationText('Applying the reviewed plan… This may take several minutes. Do not repeat the operation.', 'Wykonywanie zatwierdzonego planu… Może to potrwać kilka minut. Nie powtarzaj operacji.') : m.stage === 'restoring' ? this._migrationText('Restoring the confirmed scope… This may take several minutes. Do not repeat the operation.', 'Wycofywanie potwierdzonego zakresu… Może to potrwać kilka minut. Nie powtarzaj operacji.') : m.busy ? this._migrationText('Checking current status, inspection and registry… This may take several minutes. Do not repeat the operation.', 'Sprawdzanie bieżącego stanu, inspekcji i rejestru… Może to potrwać kilka minut. Nie powtarzaj operacji.') : m.stage === 'refused' ? this._migrationText('The server confirmed refusal before applying any changes.', 'Serwer potwierdził odmowę przed zastosowaniem zmian.') : m.stage === 'restored' ? this._migrationText('Restored scope confirmed; original registry fields independently verified.', 'Wycofanie zakresu potwierdzone; oryginalne pola rejestru niezależnie zweryfikowane.') : m.stage === 'applied' ? this._migrationText('Applied scope independently inspected; requested registry fields match.', 'Zastosowany zakres niezależnie sprawdzony; żądane pola rejestru są zgodne.') : m.inspectionIssue === 'interrupted' ? (m.lifecycleEntry?.pending?.kind === 'inspect' ? this._migrationText('The previous inspection is still in progress after the card or authority changed. Its result cannot be used; wait for it to finish before checking again.', 'Poprzednia inspekcja nadal trwa po zmianie karty lub uprawnień. Jej wynik nie może zostać użyty; poczekaj na zakończenie przed ponownym sprawdzeniem.') : this._migrationText('A previous inspection result cannot be used after the card or authority changed. The outcome remains unconfirmed. Check status and inspect again.', 'Wynik poprzedniej inspekcji nie może zostać użyty po zmianie karty lub uprawnień. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.')) : m.inspectionIssue === 'unavailable' ? this._migrationText('Inspection failed or returned a mismatched response. The outcome remains unconfirmed. Check status and inspect again.', 'Inspekcja nie powiodła się lub zwróciła niedopasowaną odpowiedź. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.') : m.inspectionIssue === 'registry' ? this._migrationText('Inspection returned, but a fresh registry read failed. The outcome remains unconfirmed. Check status and inspect again.', 'Inspekcja zwróciła wynik, ale świeży odczyt rejestru nie powiódł się. Wynik pozostaje niepotwierdzony. Sprawdź stan i inspekcję ponownie.') : m.recoveredIdentity && !m.inspection ? this._migrationText('Previous operation selected. Check status and inspect; do not repeat the write.', 'Wybrano poprzednią operację. Sprawdź stan i inspekcję; nie powtarzaj zapisu.') : this._migrationText('Partial or unknown outcome. Check status and inspect; do not repeat the write.', 'Wynik częściowy lub nieustalony. Sprawdź stan i inspekcję; nie powtarzaj zapisu.')}</p>
+      <p>${this._migrationText('Full dependency coverage is unconfirmed. Restore covers only this current operation.', 'Pełne pokrycie zależności jest niepotwierdzone. Wycofanie obejmuje tylko bieżącą operację.')}</p>
+      ${m.recoveredIdentity ? `<p>${this._migrationText('A previous operation is available for fresh inspection. Apply consent was not retained; do not repeat the write.', 'Poprzednia operacja jest dostępna do świeżej inspekcji. Zgoda na zastosowanie nie została zachowana; nie powtarzaj zapisu.')}</p>` : ''}
+      <code>${_esc(m.operation_id)}</code>
+      <p>${this._migrationText('Apply observation', 'Obserwacja zapisu')}: ${_esc(m.applyState || (m.busy || (m.recoveredIdentity && !m.inspection) ? observation : 'UNKNOWN'))}. ${this._migrationText('Inspection', 'Inspekcja')}: ${_esc(m.inspection?.state || observation)}.</p>
+      <p>${this._migrationText('Registry read', 'Odczyt rejestru')}: ${m.registryRead ? this._migrationText('received', 'otrzymany') : observation}. ${this._migrationText('Requested fields match', 'Zgodność żądanych pól')}: ${m.registryMatches ? this._migrationText('yes', 'tak') : this._migrationText('unconfirmed', 'niepotwierdzona')}.</p>
+      ${m.recoveredIdentity && m.review ? `<details><summary>${this._migrationText('Admitted original review (read-only)', 'Dopuszczony oryginalny przegląd (tylko odczyt)')}</summary>
+        <ul>${m.review.changes.flatMap(change => Object.entries(change.fields).map(([field, value]) => `<li>${_esc(change.entity_id || change.device_id)} — ${_esc(field)}: ${_esc(value.before ?? '(default)')} → ${_esc(value.after ?? '(default)')}</li>`)).join('')}</ul>
+        <p>${this._migrationText('Dependencies', 'Zależności')}: ${_esc(m.review.dependencies.domains.join(', '))}. ${this._migrationText('Template consumers', 'Odbiorcy Template')}: ${m.review.dependencies.template_consumer_count}.</p>
+        ${(m.review.dependencies.config_entries || []).map(entry => `<p>${entry.kind === 'powercalc' ? this._migrationText('Powercalc group', 'Grupa Powercalc') : this._migrationText('Template entry', 'Wpis Template')}: <code>${_esc(entry.entity_id)}</code> — <code>${_esc(entry.before)}</code> → <code>${_esc(entry.after)}</code></p>`).join('')}
+        ${m.review.dependencies.files.map(file => `<details><summary>${_esc(file.path)} — ${file.edit_count} ${this._migrationText('edits', 'zmian')}</summary><ul>${file.references.map(ref => `<li>${_esc(ref.before)} → ${_esc(ref.after)} (${ref.occurrences})</li>`).join('')}</ul></details>`).join('')}
+      </details>` : ''}
+      <div id="migrationJournal" aria-live="polite">${this._renderMigrationProgress(m)}</div>
+      ${!m.busy && m.stage !== 'restored' ? `<p>${restoreGuidance}</p>` : ''}
+      <button type="button" class="btn btn-outline" id="inspectMigration" ${m.busy || !this._renameAuthorityAvailable() ? 'disabled' : ''}>${this._migrationText('Check status and inspect', 'Sprawdź stan i inspekcję')}</button>
+      <button type="button" class="btn btn-outline" id="reviewMigrationRestore" ${this._canRestoreMigration(m) ? '' : 'disabled'}>${this._migrationText('Review restore scope', 'Sprawdź zakres wycofania')}</button>
+      ${['applied', 'restored', 'refused'].includes(m.stage) ? `<button type="button" class="btn btn-primary" id="finishMigration">${m.recoveredIdentity ? this._migrationText('Finish operation', 'Zakończ operację') : m.stage === 'refused' ? this._migrationText('Finish and review queue', 'Zakończ i sprawdź kolejkę') : m.stage === 'restored' ? this._migrationText('Finish and clear restored queue', 'Zakończ i wyczyść wycofaną kolejkę') : this._migrationText('Finish and clear applied queue', 'Zakończ i wyczyść zastosowaną kolejkę')}</button>` : ''}
+    </section>`;
+  }
+
+  _renderAutomaticTab() {
+    const t = this._t;
+    const queued = new Set(this._renameQueue.map(row => row.oldId));
+    const groups = new Map();
+    for (const row of this._visibleAutomaticRows()) {
+      if (!groups.has(row.deviceId)) groups.set(row.deviceId, []);
+      groups.get(row.deviceId).push(row);
+    }
+    const eligible = row => !row.conflict && !queued.has(row.oldId);
+    const visibleRows=this._visibleAutomaticRows();
+    const canQueue = visibleRows.some(eligible);
+    const deviceName = id => this._getDeviceName(this._devices.find(item => item.id === id) || {id});
+    const deviceHtml = [...groups].sort(([a], [b]) => this._compareDevices(this._devices.find(d=>d.id===a)||{id:a},this._devices.find(d=>d.id===b)||{id:b})).map(([deviceId, rows]) => {
+      const device = this._devices.find(item => item.id === deviceId);
+      const deviceQueued = rows.some(row => !row.conflict) && rows.filter(row => !row.conflict).every(row => queued.has(row.oldId));
+      return `<details class="device-item" data-auto-group="${_esc(deviceId)}">
+        <summary class="device-header"><span class="device-expand" aria-hidden="true">▶</span><span class="device-name">${_esc(device ? this._getDeviceName(device) : deviceId)}</span>${this._newBadge(device?.created_at)}<span class="device-meta">${this._registryCount(rows.length,'entity')} · ${rows.filter(row=>queued.has(row.oldId)).length} ${t.inQueue.toLowerCase()}</span></summary>
+        <div class="entity-list">${[...rows].sort((a,b)=>this._listUi.compare(a.oldId,b.oldId)).map(row => `<div class="rename-preview-row entity-row">
+          <div class="automatic-row-ids"><div><code>${_entityIdHtml(row.oldId)}</code>${this._listUi.isNew(device?.created_at) ? '' : this._newBadge(this._entities.find(e=>e.entity_id===row.oldId)?.created_at)}</div><div class="automatic-target">→ <code>${_entityIdHtml(row.newId)}</code></div></div>
+          <div class="automatic-row-actions">
+          ${queued.has(row.oldId)?`<span class="queued-badge">✓ ${t.inQueue}</span><button class="btn btn-sm btn-outline" data-remove-queue="${_esc(row.oldId)}" aria-label="${_esc(t.removeFromQueue)}">${this._lang==='pl'?'Usuń':'Remove'}</button>`:row.conflict ? `<span>${t.automaticConflict}</span>` : `<button class="btn btn-sm btn-outline" data-auto-entity="${_esc(row.oldId)}" ${this._loading ? 'disabled' : ''}>+ ${t.queue}</button>`}
+          </div>
+        </div>`).join('')}
+        <button class="btn btn-sm btn-outline automatic-device-action" data-auto-device="${_esc(deviceId)}" ${rows.some(eligible) && !this._loading ? '' : 'disabled'}>${deviceQueued ? '✓ ' + t.inQueue : t.addDeviceAutomatic}</button></div>
+      </details>`;
+    }).join('');
+    return `<div class="automatic-tab">
+      ${this._renderListControls(true)}
+      <p>${this._lang==='pl'?'Rejestry HA · bieżący odczyt · propozycje identyfikatorów':'HA registries · current read · ID proposals'}</p>
+      <details class="source-limits"><summary>${this._lang==='pl'?'Źródło i ograniczenia':'Source and limits'}</summary><p>${t.automaticInfo}</p></details>
+      <button class="btn btn-outline" id="loadAutomatic" ${this._loading ? 'disabled' : ''}>${this._loading ? '…' : t.loadAutomatic}</button>
+      ${this._automaticLoaded ? `<p>${this._automaticRows.length} ${t.automatic}; ${this._automaticNull.length} ${t.automaticUnknown}</p>
+        ${this._automaticRows.some(row => !row.conflict) ? `<button class="btn ${canQueue ? 'btn-primary' : 'btn-outline'}" id="queueAllAutomatic" ${canQueue && !this._loading ? '' : 'disabled'}>${canQueue ? (this._lang==='pl'?'Dodaj widoczne':'Queue visible')+' ('+visibleRows.filter(eligible).length+')' : '✓ ' + t.inQueue}</button>` : `<p>${t.automaticEmpty}</p>`}
+        ${deviceHtml}
+        ${this._visibleAutomaticNull().length ? `<details><summary>${t.automaticUnknown} (${this._visibleAutomaticNull().length})</summary>${this._visibleAutomaticNull().map(ent => `<div><code>${_entityIdHtml(ent.entity_id)}</code></div>`).join('')}</details>` : ''}` : ''}
+    </div>`;
+  }
+
+  _renderDevicesTab(devices) {
+    const t = this._t;
+    return `
+      ${this._renderListControls()}
+      <div class="stats-row">
+        <div class="stat-card"><div class="num">${this._devices.length}</div><div class="label">${t.devices}</div></div>
+        <div class="stat-card"><div class="num">${this._entities.length}</div><div class="label">${t.entities}</div></div>
+        <div class="stat-card"><div class="num">${this._renameQueue.length}</div><div class="label">${t.inQueue}</div></div>
+        <button type="button" class="stat-card btn btn-outline" data-list-filter="new" data-list-scope="devices"><span class="num">${this._devices.filter(d=>this._listUi.isNew(d.created_at)).length}</span><span class="label">${this._lang==='pl'?'Nowe (7 dni)':'New (7 days)'}</span></button>
+      </div>
+      <div class="device-list">
+        ${devices.length === 0 ? `<div class="empty-state"><div class="icon">🔍</div>${t.noResults}</div>` :
+          devices.map(d => {
+            const ents = this._deviceRows(d);
+            const isExpanded = this._expandedDevices.has(d.id);
+            const isSelected = this._selectedDevice === d.id;
+            return `
+            <div class="device-item ${isSelected ? 'selected' : ''}">
+              <button type="button" class="device-header" data-device-id="${_esc(d.id)}" role="button" tabindex="0" aria-expanded="${isExpanded}" aria-label="${_esc((this._lang === 'pl' ? 'Szczegóły urządzenia: ' : 'Device details: ') + this._getDeviceName(d))}">
+                <span class="device-expand ${isExpanded ? 'open' : ''}">▶</span>
+                <span class="device-name">${_esc(this._getDeviceName(d))}</span>${this._newBadge(d.created_at)}
+                <span class="device-meta">${this._registryCount(ents.length,'entity')} · ${(d.unassigned ? this._entities.filter(e=>!e.device_id) : this._deviceEntities[d.id]||[]).filter(e=>this._renameQueue.some(r=>r.oldId===e.entity_id)).length} ${t.inQueue.toLowerCase()}</span>
+              </button>
+              ${isExpanded ? `
+              <div class="entity-list">
+                ${ents.map(e => {
+                  const domain = e.entity_id.split('.')[0];
+                  const inQueue = this._renameQueue.some(r => r.oldId === e.entity_id);
+                  return `
+                  <div class="entity-row">
+                    <span class="entity-name">${_esc(e.name || e.original_name || '')}</span>
+                    <span class="entity-domain">${_esc(domain)}</span>
+                    <span class="entity-id">${_entityIdHtml(e.entity_id)}${this._listUi.isNew(d.created_at) ? '' : this._newBadge(e.created_at)}</span>
+                    ${inQueue
+                      ? '<span class="queued-badge">✓ ' + t.inQueue + '</span><button class="btn btn-sm btn-outline" data-remove-queue="' + _esc(e.entity_id) + '" aria-label="' + _esc(t.removeFromQueue) + '">' + (this._lang==='pl'?'Usuń':'Remove') + '</button>'
+                      : `<button class="btn btn-sm btn-outline" data-add-single="${_esc(e.entity_id)}">+ ${t.queue}</button>`
+                    }
+                  </div>`;
+                }).join('')}
+              </div>
+              ${isSelected && !d.unassigned ? `
+              <div class="prefix-section">
+                <h3>📱 ${t.newDeviceName}</h3>
+                <div class="prefix-row" style="margin-bottom:12px">
+                  <input type="text" id="deviceName" data-family-draft-context="${_esc(d.id)}" aria-label="${_esc(t.newDeviceName)}" value="${_esc(this._deviceRenameQueue[d.id] || this._getDeviceName(d))}" placeholder="${t.newDeviceName}" style="width:300px;font-family:inherit">
+                  <button class="btn btn-primary btn-sm" id="applyDeviceName" data-device-id="${_esc(d.id)}">${t.changeName}</button>
+                </div>
+                <button type="button" class="btn btn-outline" id="addAreaPrefix" ${this._areaPrefixPending || this._loading ? 'disabled' : ''}>${this._lang==='pl'?'Dodaj prefiksy obszarów do kolejki':'Queue area prefixes'}</button>
+                <h3>📄 ${t.prefixChange}</h3>
+                <div class="prefix-row">
+                  <input type="text" id="prefixOld" data-family-draft-context="${_esc(d.id)}" aria-label="${_esc(t.oldPrefix)}" value="${_esc(this._prefixOld || '')}" placeholder="${t.oldPrefix}">
+                  <span class="arrow">→</span>
+                  <input type="text" id="prefixNew" data-family-draft-context="${_esc(d.id)}" aria-label="${_esc(t.newPrefix)}" value="${_esc(this._prefixNew || '')}" placeholder="${t.newPrefix}">
+                  <button class="btn btn-primary btn-sm" id="applyPrefix">${t.apply}</button>
+                </div>
+              </div>` : ''}
+              ` : ''}
+            </div>`;
+          }).join('')}
+      </div>`;
+  }
+
+  _renderQueueTab() {
+    const t = this._t;
+    if (!this._renameQueue.length && !Object.keys(this._deviceRenameQueue || {}).length) {
+      return `<div class="empty-state"><div class="icon">📋</div>${t.queueEmpty}</div>`;
+    }
+    const devEntries = Object.entries(this._deviceRenameQueue);
+    return `
+      <div class="queue-actions">
+        <button class="btn btn-outline" id="clearQueue" ${this._loading ? 'disabled' : ''}>🗑️ ${t.clear}</button>
+        <button class="btn btn-outline" id="analyzeImpact" ${this._loading ? 'disabled' : ''}>🔍 ${t.analyzeImpact}</button>
+        <button class="btn btn-danger" id="executeRenames" ${this._loading || this._hass?.user?.is_admin !== true ? 'disabled' : ''} ${this._loading ? 'aria-busy="true"' : ''}>🚀 ${t.executeRenames} (${this._renameQueue.length + devEntries.length})</button>
+        ${this._hass?.user?.is_admin !== true ? `<span>${t.adminRequired}</span>` : ''}
+      </div>
+      <div class="queue-list">
+          ${this._queueGroups().map(group => `<section data-queue-group="${_esc(group.device.id)}"><h3 class="queue-group-heading"><span>${_esc(this._getDeviceName(group.device))}</span><span>${group.rows.length+(group.nameChange!==undefined?1:0)}</span></h3>${group.nameChange!==undefined?`<div class="queue-device-name"><strong>${t.newDeviceName}</strong>: <span class="old">${_esc(this._getDeviceName(group.device))}</span> → <span class="new">${_esc(group.nameChange)}</span> <span class="proposal-source">${this._lang==='pl'?'Ręcznie':'Manual'}</span> <button type="button" class="btn btn-sm btn-outline" data-remove-dev-queue="${_esc(group.device.id)}" aria-label="${_esc(t.removeFromQueue)}">${this._lang==='pl'?'Usuń':'Remove'}</button></div>`:''}${group.rows.map(r => {
+            const imp = this._impactResults ? this._impactResults[r.oldId] : null;
+            const hasImpact = imp && (imp.automations.length || imp.scripts.length || imp.dashboards.length || (imp.scenes||[]).length);
+            return `<div style="border:1px solid var(--bento-border,#334155);border-radius:8px;padding:12px;margin-bottom:8px;">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                <span class="old" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:12px;">${_entityIdHtml(r.oldId)}</span>
+                <button class="btn btn-sm btn-outline" style="flex-shrink:0;" data-remove-queue="${_esc(r.oldId)}" aria-label="${_esc(t.removeFromQueue)}">✕</button>
+              </div>
+              <div style="display:flex;align-items:flex-start;gap:8px;">
+                <span style="color:var(--bento-text-secondary,#94A3B8);">→</span>
+                <span class="new" style="flex:1;min-width:0;overflow-wrap:anywhere;font-family:'JetBrains Mono',monospace;font-size:12px;">${r.newId !== r.oldId ? _entityIdHtml(r.newId) : '<span>' + t.noIdChange + '</span>'}</span>
+              </div>
+              <span class="proposal-source">${r.automatic ? t.automatic : r.source==='area' ? (this._lang==='pl'?'Obszar':'Area') : r.source==='prefix' ? (this._lang==='pl'?'Prefiks':'Prefix') : (this._lang==='pl'?'Ręcznie':'Manual')}</span>
+              ${r.newName ? '<div style="margin:6px 0 0 24px;min-width:0;overflow-wrap:anywhere;font-size:12px;color:var(--bento-text, var(--primary-text-color, #E2E8F0));">📝 ' + _esc(r.newName) + '</div>' : ''}
+              ${hasImpact ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.05);">
+                <span style="font-size:12px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
+                ${imp.automations.map(a => '<span class="impact-badge automation">⚙ ' + _esc(a) + '</span>').join('')}
+                ${imp.scripts.map(s => '<span class="impact-badge script">📜 ' + _esc(s) + '</span>').join('')}
+                ${imp.dashboards.map(d => '<span class="impact-badge dashboard">📊 ' + _esc(d) + '</span>').join('')}
+                ${(imp.scenes||[]).map(s => '<span class="impact-badge scene">🎬 ' + _esc(s) + '</span>').join('')}
+              </div>` : (imp && imp.dashboardCoverage !== 'unavailable' ? `<div style="margin-top:4px;font-size:14px;color:var(--bento-text-secondary,#94A3B8);">${t.notUsed}</div>` : '')}
+              ${this._dashboardCoverageHtml(imp)}
+            </div>`;
+          }).join('')}</section>`).join('')}
+      </div>
+`;
+  }
+
+  _renderLogTab() {
+    const t = this._t, ui = createUiV3({language:this._lang});
+    if (this._hass?.user?.is_admin !== true || !this._historyKey()) return `<div class="empty-state">${t.adminRequired}</div>`;
+    const legacyNotice = this._legacyHistoryPresent ? `<p>${this._lang === 'pl'
+      ? 'Starsza historia ma nieznane pochodzenie konta. Zachowano ją lokalnie. Możesz jawnie przejrzeć i wyeksportować te wpisy; nie zostaną przypisane do Twojego konta.'
+      : 'Legacy history has unknown origin. It is preserved locally. You can explicitly review and export these entries; they will not be assigned to your account.'}</p><button id="reviewLegacyHistory" type="button" class="btn btn-outline" style="min-height:44px;min-width:44px;margin-bottom:12px;max-width:100%;white-space:normal;">${this._legacyReviewLog.length ? (this._lang === 'pl' ? 'Ukryj starszą historię' : 'Hide legacy history') : (this._lang === 'pl' ? 'Przejrzyj starszą historię z tej przeglądarki' : 'Review legacy history from this browser')}</button>` : '';
+    const visibleHistory = this._visibleRenameHistory();
+    const exportButton = `<button id="exportRenameLog" type="button" class="btn btn-outline" style="min-height:44px;min-width:44px;margin:0 0 12px;max-width:100%;white-space:normal;overflow-wrap:anywhere;">${this._lang === 'pl' ? 'Eksport historii zmian' : 'Export completed history'}</button>`;
+    if (!visibleHistory.length) {
+      return legacyNotice + exportButton + `<div class="empty-state"><div class="icon">📜</div>${t.noHistory}</div>`;
+    }
+    return legacyNotice + exportButton + `
+      <div>
+        ${visibleHistory.filter(l => l && typeof l === 'object' && typeof l.oldId === 'string' && typeof l.newId === 'string').map(l => {
+          const reported = renameReports.snapshot([l], true).rows[0]?.status;
+          const resultState = reported === 'applied' ? 'success' : reported === 'failed' ? 'error' : 'unconfirmed';
+          const imp = l.impact;
+          const automations = Array.isArray(imp?.automations) ? imp.automations : [];
+          const scripts = Array.isArray(imp?.scripts) ? imp.scripts : [];
+          const dashboards = Array.isArray(imp?.dashboards) ? imp.dashboards : [];
+          const scenes = Array.isArray(imp?.scenes) ? imp.scenes : [];
+          const hasImpact = automations.length || scripts.length || dashboards.length || scenes.length;
+          return `
+          <div class="log-entry" style="padding:8px 0;${hasImpact ? 'padding-bottom:12px;' : ''}">
+            <span class="log-time">${_esc(this._formatUi.dateTime(l.completedAt || l.attemptedAt) || String(l.time || '—') + (this._lang==='pl'?' · data nieznana':' · date unknown'))}</span>
+            ${this._formatUi.dateTime(l.completedAt || l.attemptedAt) ? `<details><summary>${this._lang==='pl'?'Szczegóły czasu':'Time details'}</summary>UTC: <code>${_esc(l.completedAt || l.attemptedAt)}</code> · ${this._lang==='pl'?'Strefa wyświetlania':'Display time zone'}: ${_esc(this._formatUi.timeZone)}</details>`:''}
+            <span class="${resultState === 'success' ? 'log-ok' : resultState === 'error' ? 'log-err' : ''}">
+              ${ui.statusHtml(resultState)} ${_entityIdHtml(l.oldId)} → ${_entityIdHtml(l.newId)}
+            </span>
+            ${l.error ? `<br><small class="log-error-detail">${_esc(l.error)}</small>` : ''}
+            ${this._dashboardCoverageHtml(imp)}
+            ${hasImpact ? `<div style="margin-top:4px;padding-left:24px;">
+              <span style="font-size:12px;color:var(--bento-text-secondary,#94A3B8);">⚠️ ${t.usedIn}</span>
+              ${automations.map(a => '<span class="impact-badge automation">⚙ ' + _esc(a) + '</span>').join('')}
+              ${scripts.map(s => '<span class="impact-badge script">📜 ' + _esc(s) + '</span>').join('')}
+              ${dashboards.map(d => '<span class="impact-badge dashboard">📊 ' + _esc(d) + '</span>').join('')}
+              ${scenes.map(s => '<span class="impact-badge scene">🎬 ' + _esc(s) + '</span>').join('')}
+            </div>` : ''}
+          </div>`;
+        }).join('')}
+      </div>`;
+  }
+
+  _attachEvents() {
+    const root = this.shadowRoot;
+    const t = this._t;
+    root.getElementById('exportRenameLog')?.addEventListener('click', e => this._openRenameExport(e.currentTarget));
+    root.getElementById('reviewLegacyHistory')?.addEventListener('click', () => this._reviewLegacyHistory());
+
+    // Tab switching
+    root.querySelectorAll('.tab-button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._activeTab = btn.dataset.tab;
+        history.replaceState(null, '', location.pathname + '#' + this._toolId + '/' + this._activeTab);
+        this.render();
+      });
+    });
+
+    root.getElementById('openQueue')?.addEventListener('click',()=>this.setActiveTab('queue'));
+    root.getElementById('undoQueueRemoval')?.addEventListener('click',()=>this._undoQueueRemoval());
+    root.getElementById('listSort')?.addEventListener('change',event=>{this._listSort=event.target.value;this.render();this.shadowRoot.getElementById('listSort')?.focus();});
+    root.querySelectorAll('[data-list-filter]').forEach(button=>button.addEventListener('click',()=>{
+      this._listFilters[button.dataset.listScope]=button.dataset.listFilter;
+      this.render();
+      Array.from(this.shadowRoot.querySelectorAll('[data-list-filter]')).find(el=>el.dataset.listFilter===button.dataset.listFilter)?.focus();
+    }));
+    root.querySelectorAll('[data-expand-list]').forEach(button=>button.addEventListener('click',()=>{
+      const expand=button.dataset.expandList==='true';
+      if(this._activeTab==='automatic') root.querySelectorAll('[data-auto-group]').forEach(group=>{group.open=expand;});
+      else {this._getFilteredDevices().forEach(device=>expand?this._expandedDevices.add(device.id):this._expandedDevices.delete(device.id));this.render();}
+      this._syncListExpansion();
+      this.shadowRoot.querySelector('[data-expand-list]')?.focus({preventScroll:true});
+    }));
+    root.querySelectorAll('[data-auto-group]').forEach(group=>group.addEventListener('toggle',()=>this._syncListExpansion()));
+    root.getElementById('automaticSearch')?.addEventListener('input',event=>{
+      const caret=event.target.selectionStart;this._automaticSearch=event.target.value;this.render();
+      const field=this.shadowRoot.getElementById('automaticSearch');field?.focus();if(field)field.setSelectionRange(caret,caret);
+    });
+
+    const loadAutomatic = root.getElementById('loadAutomatic');
+    if (loadAutomatic) loadAutomatic.addEventListener('click', () => this._loadAutomaticIds());
+    const queueAllAutomatic = root.getElementById('queueAllAutomatic');
+    if (queueAllAutomatic) queueAllAutomatic.addEventListener('click', () => this._queueAutomaticIds());
+    root.querySelectorAll('[data-auto-device]').forEach(btn => btn.addEventListener('click', () => this._queueAutomaticIds(btn.dataset.autoDevice)));
+    root.querySelectorAll('[data-auto-entity]').forEach(btn => btn.addEventListener('click', () => this._queueAutomaticIds(null, btn.dataset.autoEntity)));
+
+    // Search
+    const searchInput = root.getElementById('searchInput');
+    if (searchInput) {
+      searchInput.addEventListener('input', (e) => {
+        this._searchQuery = e.target.value;
+        this.render();
+        // Restore focus and cursor position
+        const el = this.shadowRoot.getElementById('searchInput');
+        if (el) { el.focus(); el.selectionStart = el.selectionEnd = e.target.selectionStart; }
+      });
+    }
+
+    // Device headers – toggle expand + select
+    root.querySelectorAll('.device-header[data-device-id]').forEach(hdr => {
+      hdr.addEventListener('click', () => {
+        const did = hdr.dataset.deviceId;
+        if (this._expandedDevices.has(did)) {
+          this._expandedDevices.delete(did);
+          this._selectedDevice = null;
+        } else {
+          this._expandedDevices.add(did);
+          this._selectDevice(did);
+          return; // _selectDevice calls render
+        }
+        this.render();
+      });
+    });
+
+    _bindFamilyRowKeys(root, '.device-header[data-device-id]');
+
+    // Device rename
+    const applyDeviceName = root.getElementById('applyDeviceName');
+    if (applyDeviceName) {
+      applyDeviceName.addEventListener('click', () => {
+        if (this._loading || this._migration) return;
+        const devId = applyDeviceName.dataset.deviceId;
+        const newName = (root.getElementById('deviceName') || {}).value || '';
+        if (newName) {
+          this._confirmDialogOpen = false;
+          this._confirmation = null;
+          this._lastApplyResult = null;
+          this._deviceRenameQueue[devId] = newName;
+          this._message = { type: 'info', text: t.deviceAdded.replace('{name}', newName) };
+          this.render();
+        }
+      });
+    }
+
+    // Stage manual changes in the card; registry writes still require confirmation.
+    root.querySelectorAll('[data-add-single]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._showEntityEditor(btn.dataset.addSingle);
+      });
+    });
+    const editor = root.getElementById('entityEditForm');
+    if (editor) {
+      editor.addEventListener('submit', e => {
+        e.preventDefault();
+        if (this._loading || this._migration || !this._entityEditor) return;
+        const { oldId, objectId, currentName } = this._entityEditor;
+        const newObjectId = root.getElementById('entityEditObjectId').value || objectId;
+        const name = root.getElementById('entityEditName').value;
+        this._entityEditor = null;
+        this._addToQueue(oldId, oldId.split('.')[0] + '.' + newObjectId, name && name !== currentName ? name : null);
+        this.render();
+      });
+      root.getElementById('cancelEntityEdit').addEventListener('click', () => {
+        this._entityEditor = null; this.render();
+      });
+      for (const [id, key] of [['entityEditObjectId','objectIdDraft'], ['entityEditName','nameDraft']]) {
+        root.getElementById(id).addEventListener('input', e => { if (this._entityEditor) this._entityEditor[key] = e.target.value; });
+      }
+      editor.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { e.preventDefault(); this._entityEditor = null; this.render(); }
+      });
+    }
+
+    // Remove from queue
+    root.querySelectorAll('[data-remove-queue]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._removeFromQueue(btn.dataset.removeQueue);
+      });
+    });
+
+    // Remove device from queue
+    root.querySelectorAll('[data-remove-dev-queue]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._removeDeviceFromQueue(btn.dataset.removeDevQueue);
+      });
+    });
+
+    root.getElementById('addAreaPrefix')?.addEventListener('click',()=>this._addAreaPrefix());
+
+    // Prefix rename
+    const applyPrefix = root.getElementById('applyPrefix');
+    if (applyPrefix) {
+      applyPrefix.addEventListener('click', () => {
+        this._prefixOld = (root.getElementById('prefixOld') || {}).value || '';
+        this._prefixNew = (root.getElementById('prefixNew') || {}).value || '';
+        this._addPrefixRename();
+      });
+    }
+
+    // Queue actions
+    const clearQueue = root.getElementById('clearQueue');
+    if (clearQueue) clearQueue.addEventListener('click', () => this._clearQueue());
+
+    const analyzeImpact = root.getElementById('analyzeImpact');
+    if (analyzeImpact) analyzeImpact.addEventListener('click', () => this._analyzeImpact());
+
+    for (const [id, method] of [['prepareMigration', '_prepareMigration'], ['inspectMigration', '_inspectMigration'], ['finishMigration', '_finishMigration'], ['reviewMigrationRestore', '_reviewMigrationRestore'], ['cancelMigrationRestore', '_cancelMigrationRestore']]) {
+      root.getElementById(id)?.addEventListener('click', () => this[method]());
+    }
+    root.getElementById('applyMigration')?.addEventListener('click', () => this._requestWriteWarning('migration'));
+    root.getElementById('restoreMigration')?.addEventListener('click', () => this._requestWriteWarning('restore'));
+    root.getElementById('cancelWriteWarning')?.addEventListener('click', () => this._cancelWriteWarning());
+    root.getElementById('continueWriteWarning')?.addEventListener('click', () => this._continueWriteWarning());
+    root.querySelector('.write-warning-backdrop [role="dialog"]')?.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this._cancelWriteWarning(); }
+      else if (e.key === 'Tab') {
+        e.preventDefault(); e.stopPropagation();
+        const controls = Array.from(e.currentTarget.querySelectorAll('a[href], button:not(:disabled)'));
+        const current = controls.indexOf(root.activeElement);
+        const next = current < 0 ? (e.shiftKey ? controls.length - 1 : 0)
+          : (current + (e.shiftKey ? -1 : 1) + controls.length) % controls.length;
+        controls[next]?.focus();
+      }
+    });
+    const cancelRenameDialog = root.getElementById('cancelRenameDialog');
+    if (cancelRenameDialog) {
+      cancelRenameDialog.addEventListener('click', () => this._cancelRenameConfirmation());
+    }
+
+    root.querySelector('.confirm-dialog')?.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {
+        e.preventDefault(); e.stopPropagation();
+        if (this._migration?.restoreConsent) this._cancelMigrationRestore();
+        else this._cancelRenameConfirmation();
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+        const controls = Array.from(e.currentTarget.querySelectorAll('summary, button:not(:disabled), [tabindex="0"]'));
+        const current = controls.indexOf(root.activeElement);
+        const next = current < 0 ? (e.shiftKey ? controls.length - 1 : 0)
+          : (current + (e.shiftKey ? -1 : 1) + controls.length) % controls.length;
+        controls[next]?.focus();
+      }
+    });
+
+    root.getElementById('findMigrationRecovery')?.addEventListener('click', () => this._findMigrationRecovery());
+    root.querySelectorAll('[data-recovery-index]').forEach(button => button.addEventListener('click', () => this._selectMigrationRecovery(Number(button.dataset.recoveryIndex))));
+
+    const confirmRenameApply = root.getElementById('confirmRenameApply');
+    if (confirmRenameApply) {
+      confirmRenameApply.addEventListener('click', () => {
+        this._requestWriteWarning('registry');
+      });
+    }
+
+    const executeRenames = root.getElementById('executeRenames');
+    if (executeRenames) {
+      executeRenames.addEventListener('click', () => this._showRenameConfirmation());
+    }
+  }
+
+  disconnectedCallback() {
+    this._unregisterRecoveryCard(true);
+    this._cancelRenameAuthority();
+    _disconnectFamilyNavigation(this);this._familyNavWidth=null;
+    this._exportDialog?.cancel();
+    this._exportEventCleanups.splice(0).forEach(off => off());
+    this._exportBoundConnection = null;
+    this._exportRevision++;
+    this._entityEditor = null;
+    this._readEpoch++;
+    if (this._applyOperation) this._applyOperation.cancelled = true;
+    this._confirmation = null;
+    this._confirmDialogOpen = false;
+    // Cleanup any active event listeners or timers
+  }
+
+  setActiveTab(tabId) {
+    if (!_RENAMER_TABS.includes(tabId)) return;
+    this._activeTab = tabId;
+    this.render();
+  }
+}
+
+if (!customElements.get('ha-entity-renamer')) customElements.define('ha-entity-renamer', HAEntityRenamer);
+
+class HaEntityRenamerEditor extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._config = {};
+  }
+  setConfig(config) {
+    this._config = { ...config };
+    this._render();
+  }
+  set hass(hass) {
+    this._hass = hass;
+    this.classList.toggle('bento-dark', hass?.themes?.darkMode === true);
+    this._updateTitleLabel();
+    this._syncOptions();
+  }
+  _titleLabel() {
+    const language = typeof this._config?.language === 'string' ? this._config.language : this._hass?.language || navigator.language || 'en';
+    return language.startsWith('pl') ? 'Tytuł' : 'Title';
+  }
+  _updateTitleLabel() {
+    const label = this.shadowRoot.querySelector('label[for="cf_title"]');
+    if (label) label.textContent = this._titleLabel();
+  }
+  _optionLabels() {
+    const pl = (this._config.language || this._hass?.language || navigator.language || 'en').startsWith('pl');
+    return pl ? {default_tab:'Domyślna zakładka',tabs:'Widoczne zakładki',show_help:'Pokaż pomoc',show_support:'Pokaż link wsparcia',devices:'Urządzenia',automatic:'Automatyczne',queue:'Kolejka',log:'Historia'}
+      : {default_tab:'Default tab',tabs:'Visible tabs',show_help:'Show help',show_support:'Show support link',devices:'Devices',automatic:'Automatic',queue:'Queue',log:'History'};
+  }
+  _syncOptions() {
+    const root = this.shadowRoot, labels = this._optionLabels(), tabs = _configuredTabs(this._config);
+    root.querySelectorAll('[data-option-label]').forEach(node => { node.textContent = labels[node.dataset.optionLabel]; });
+    for (const name of ['show_help','show_support']) {
+      const input = root.querySelector('#cf_' + name);
+      if (input) input.checked = this._config[name] !== false;
+    }
+    root.querySelectorAll('[data-config-tab]').forEach(input => { input.checked = tabs.includes(input.dataset.configTab); });
+    const select = root.querySelector('#cf_default_tab');
+    if (select) {
+      for (const option of select.options) { option.textContent = labels[option.value]; option.disabled = !tabs.includes(option.value); }
+      if (select.value !== _defaultTab(this._config)) select.value = _defaultTab(this._config);
+    }
+  }
+  _bindOptions() {
+    const root = this.shadowRoot;
+    for (const name of ['show_help','show_support']) root.querySelector('#cf_' + name)?.addEventListener('change', event => {
+      this._config = {...this._config, [name]:event.target.checked}; this._dispatch();
+    });
+    root.querySelector('#cf_default_tab')?.addEventListener('change', event => {
+      this._config = {...this._config,default_tab:event.target.value}; this._dispatch();
+    });
+    root.querySelectorAll('[data-config-tab]').forEach(input => input.addEventListener('change', () => {
+      const tabs = Array.from(root.querySelectorAll('[data-config-tab]:checked'), node => node.dataset.configTab);
+      if (!tabs.length) { input.checked = true; return; }
+      const next = {...this._config,tabs};
+      this._config = {...next, default_tab:_defaultTab(next)};
+      this._syncOptions(); this._dispatch();
+    }));
+  }
+  _dispatch() {
+    this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: this._config }, bubbles: true, composed: true }));
+  }
+  _render() {
+    const title = this.shadowRoot.querySelector('#cf_title');
+    const value = String(this._config.title ?? 'Entity Renamer');
+    if (title) {
+      // Reuse the Config Auditor editor fix: equal HA echoes must not reset selection.
+      if (title.value !== value) title.value = value;
+      this._updateTitleLabel();
+      this._syncOptions();
+      return;
+    }
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host { display:block; padding:16px; color-scheme:light; }
+        :host(.bento-dark) { color-scheme:dark; }
+        h3 { margin:0 0 16px; font-size:15px; font-weight:600; color:var(--bento-text, var(--primary-text-color,#1e293b)); }
+        label { display:flex;align-items:center;gap:8px;font-size:14px; }
+        fieldset { margin:12px 0;border:1px solid var(--divider-color);border-radius:8px; }
+        select { display:block;width:100%;min-height:44px;font:inherit;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:8px; }
+        input { box-sizing:border-box;min-height:44px;min-width:44px;max-width:100%;transition:border-color .2s; }
+            input:focus-visible,select:focus-visible { outline:2px solid #fff;outline-offset:2px;box-shadow:0 0 0 5px #111827; }
+        input:focus { border-color:var(--bento-primary, var(--primary-color,#3b82f6)); }
+      </style>
+      <h3>Entity Renamer</h3>
+            <div style="margin-bottom:12px;">
+              <label for="cf_title" style="display:block;font-weight:500;margin-bottom:4px;font-size:13px;">${this._titleLabel()}</label>
+              <input type="text" id="cf_title" value="${_esc(value)}"
+                style="width:100%;padding:8px 12px;border:1px solid var(--divider-color,#e2e8f0);border-radius:8px;background:var(--card-background-color,#fff);color:var(--primary-text-color,#1e293b);font-size:14px;box-sizing:border-box;">
+            </div>
+      <label for="cf_default_tab" data-option-label="default_tab"></label>
+      <select id="cf_default_tab">${_RENAMER_TABS.map(tab => `<option value="${tab}"></option>`).join('')}</select>
+      <fieldset><legend data-option-label="tabs"></legend>
+        ${_RENAMER_TABS.map(tab => `<label><input type="checkbox" data-config-tab="${tab}"><span data-option-label="${tab}"></span></label>`).join('')}
+      </fieldset>
+      ${['show_help','show_support'].map(name => `<label><input type="checkbox" id="cf_${name}"><span data-option-label="${name}"></span></label>`).join('')}
+    `;
+        this._syncOptions();
+        this._bindOptions();
+        const f_title = this.shadowRoot.querySelector('#cf_title');
+        if (f_title) f_title.addEventListener('input', (e) => {
+          this._config = { ...this._config, title: e.target.value };
+          this._dispatch();
+        });
+  }
+  connectedCallback() { this._render(); }
+}
+if (!customElements.get('ha-entity-renamer-editor')) { customElements.define('ha-entity-renamer-editor', HaEntityRenamerEditor); }
+
+})();
+
+window.customCards = window.customCards || [];
+window.customCards.push({ type: 'ha-entity-renamer', name: 'Entity Renamer', description: 'Rename entities and devices, then review affected references', preview: false });
