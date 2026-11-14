@@ -170,20 +170,24 @@ def _source_image(chain, evidence, state):
     excluded = {'.storage/' + key for key in _KEYS}
     dashboard_indexes = [index for index, step in enumerate(chain.plan.steps)
                          if step.adapter == 'dashboard']
+    dashboard_sources = {}
     if dashboard_indexes:
-        # Dashboard storage is a separate native transaction. Only the SAME
-        # fully reconstructed receipt head can authorize excluding its paths;
-        # replay validates each physical preimage and acknowledged postimage.
-        _need(state.same_evidence(chain.reconstruct_inputs()), 'accepted_dashboard_head_changed')
+        # Receipt replay supplies each exact physical dashboard postimage. The
+        # callers separately fence actual files with state.assert_current().
+        replayed = chain.reconstruct_inputs()
+        _need(state.same_evidence(replayed), 'accepted_dashboard_head_changed')
+        replayed_sources = replayed.sources()
+        receipt_paths = {row[0] for row in receipt.source_files}
         for index in dashboard_indexes:
             change = chain._original_change(index)
             path = '.storage/' + change.before.dashboard.key
-            _need(path in {row[0] for row in receipt.source_files},
+            _need(path in receipt_paths and path in replayed_sources,
                   'accepted_dashboard_source_missing')
-            excluded.add(path)
+            dashboard_sources[path] = replayed_sources[path][0]
     if has_energy:
         excluded.add('.storage/energy')
     original_files = {path: digest for path, digest, *_ in receipt.source_files if path not in excluded}
+    original_files.update(dashboard_sources)
     current_files = {path: row[0] for path, row in state.sources().items() if path not in excluded}
     energy_position = 'original'
     if has_energy:
