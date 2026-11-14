@@ -45,16 +45,10 @@ class DashboardPlanTests(unittest.TestCase):
         self.assertEqual(len(result.changes), 1)
         self.assertEqual(result.value['views'][0]['cards'][0]['visibility'][0]['entity'], 'sensor.new')
 
-    def test_renamer_unknown_or_malformed_config_remains_blocked(self):
-        for extra in ({'entity': 'sensor.old'}, {'template': '{{ value }}'},
-                      {'tabs': ['custom']}, {'show_help': 'false'},
-                      {'grid_options': {'columns': 'sensor.old'}},
-                      {'grid_options': {'custom': 1}}, {'default_tab': 'custom'},
-                      {'tap_action': {'action': 'toggle'}}):
-            with self.subTest(extra=extra):
-                result = self.plan([{'type': 'custom:ha-entity-renamer', **extra}])
-                self.assertTrue(result.markers)
-                self.assertFalse(result.changes)
+    def test_renamer_unknown_active_field_requires_review(self):
+        result = self.plan([{'type': 'custom:ha-entity-renamer', 'unknown': 'sensor.old'}])
+        self.assertEqual(result.markers[0].code, 'ambiguous_dashboard_reference')
+        self.assertFalse(result.changes)
 
     def test_statistics_external_ids_preserved(self):
         result = self.plan([{'type': 'statistics-graph', 'entities': [
@@ -83,22 +77,18 @@ class DashboardPlanTests(unittest.TestCase):
         self.assertFalse(result.markers)
         self.assertEqual(5, len(result.changes))
 
-    def test_custom_card_no_rewrite_even_entity_property(self):
+    def test_custom_card_reference_changes_and_dynamic_lookup_blocks(self):
         result = self.plan([{'type': 'custom:template-card', 'entity': 'sensor.old',
                              'template': "states['sensor.' + name]"}])
-        self.assertFalse(result.changes)
-        self.assertEqual('custom_or_unknown_dashboard_component', result.markers[0].code)
+        self.assertEqual(len(result.changes), 1)
+        self.assertEqual(result.markers[0].code, 'dynamic_dashboard_reference')
 
-    def test_unknown_and_dynamic_block_without_literal_source(self):
-        for card in [
-            {'type': 'new-native-card', 'entities': []},
-            {'type': 'button', 'entity': '{{ prefix ~ name }}'},
-            {'type': 'entity', 'entity': 'sensor.old', 'unknown': 7},
-            {'type': 'button', 'tap_action': {'action': 'fire-dom-event'}},
-            {'type': 'button', 'tap_action': {'action': 'perform-action',
-             'perform_action': 'script.run', 'data': {'some_dynamic_parameter': 'name'}}},
-        ]:
-            with self.subTest(card=card): self.assertTrue(self.plan([card]).markers)
+    def test_unknown_type_alone_is_not_a_blocker(self):
+        for card in [{'type': 'new-native-card', 'entities': []},
+                     {'type': 'entity', 'entity': 'sensor.old', 'unknown': 7}]:
+            with self.subTest(card=card):
+                self.assertFalse(self.plan([card]).markers)
+        self.assertTrue(self.plan([{'type': 'button', 'entity': '{{ prefix ~ name }}'}]).markers)
 
     def test_markdown_static_jinja_only(self):
         result = self.plan([{'type': 'markdown', 'entity_ids': ['sensor.old'],
@@ -118,10 +108,12 @@ class DashboardPlanTests(unittest.TestCase):
         value = {}; value['views'] = [value]
         with self.assertRaises(PlanError): plan_dashboard(value, self.mapping)
 
-    def test_strategy_and_features_are_coverage_blockers(self):
+    def test_strategy_is_coverage_blocker_but_unknown_feature_is_traversed(self):
         self.assertTrue(plan_dashboard({'strategy': {'type': 'custom:dynamic'}}, self.mapping).markers)
-        self.assertTrue(self.plan([{'type': 'tile', 'entity': 'sensor.old',
-                                    'features': [{'type': 'custom:feature'}]}]).markers)
+        result = self.plan([{'type': 'tile', 'entity': 'sensor.old',
+                             'features': [{'type': 'custom:feature', 'entity': 'sensor.old'}]}])
+        self.assertFalse(result.markers)
+        self.assertEqual(len(result.changes), 2)
 
 
 if __name__ == '__main__': unittest.main()

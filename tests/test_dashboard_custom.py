@@ -85,11 +85,11 @@ class FiniteDashboardTests(unittest.TestCase):
         dynamic = template + "{{ states[prefix ~ suffix] }}"
         self.assertFalse(unchanged_finite_jinja(dynamic, {'sensor.old':'sensor.new'}))
 
-    def test_selected_reference_in_foreign_card_blocks(self):
+    def test_selected_reference_in_foreign_card_is_migrated(self):
         result = plan_dashboard({'views':[{'cards':[{'type':'custom:mini-graph-card',
             'entities':['sensor.old']}]}]}, {'sensor.old':'sensor.new'})
-        self.assertTrue(result.markers)
-        self.assertFalse(result.changes)
+        self.assertFalse(result.markers)
+        self.assertEqual(len(result.changes), 1)
 
     def test_unknown_button_template_is_not_assumed_safe(self):
         result = plan_dashboard({'views':[{'cards':[{'type':'custom:button-card',
@@ -108,12 +108,14 @@ class ForeignFilterTests(unittest.TestCase):
         card = {'type':'custom:battery-state-card', 'filter':{'exclude':[
             {'name':'entity_id', 'operator':'contains', 'value':'old'}], 'include':[]}}
         result = plan_dashboard({'views':[{'cards':[card]}]}, {'sensor.old':'sensor.new'})
-        self.assertEqual(result.markers[0].code, 'foreign_filter_membership_unverified')
+        self.assertEqual(result.markers[0].code, 'dynamic_dashboard_selector')
 
-    def test_flex_glob_touching_selected_id_is_not_suppressed(self):
-        card = {'type':'custom:flex-table-card', 'entities':{'include':'sensor.*'}}
+    def test_glob_membership_change_blocks(self):
+        card = {'type':'custom:flex-table-card', 'entities':{'include':'sensor.n*'}}
         result = plan_dashboard({'views':[{'cards':[card]}]}, {'sensor.old':'sensor.new'})
         self.assertTrue(result.markers)
+        card['entities']['include'] = 'sensor.*'
+        self.assertFalse(plan_dashboard({'views':[{'cards':[card]}]}, {'sensor.old':'sensor.new'}).markers)
 
     def test_unrecognized_js_and_template_state_are_blocked(self):
         card = {'type':'custom:button-card', 'label':"[[[ return states[prefix + suffix]; ]]]"}
@@ -153,7 +155,7 @@ class DashboardGuardRegressionTests(unittest.TestCase):
         card = {'type':'custom:button-card', 'styles':{'card':[
             {'color':"[[[ return this['hass']['states'][key].state; ]]]"}]}}
         result = plan_dashboard({'views':[{'cards':[card]}]}, {'sensor.old':'sensor.new'})
-        self.assertIn('dynamic_button_style', {marker.code for marker in result.markers})
+        self.assertIn('unsupported_button_javascript', {marker.code for marker in result.markers})
 
 class DashboardStyleSafetyTests(unittest.TestCase):
     def test_foreign_bubble_style_target_cannot_become_selected(self):

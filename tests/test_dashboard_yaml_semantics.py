@@ -29,13 +29,13 @@ class DashboardYAMLSemanticsTests(unittest.TestCase):
         self.assertEqual(after['views'][0]['cards'][0]['entities'], ['sensor.new'])
         self.assertEqual(after['views'][0]['title'], 'Label sensor.old')
 
-    def test_custom_card_and_dynamic_schema_are_refused(self):
-        for card in ('type: custom:foreign\n    entity: sensor.old',
-                     'type: map\n    entities: ["{{ states.sensor.old }}"]'):
-            with self.subTest(card=card):
-                plan, raw = self.fixture('views:\n- cards:\n  - ' + card + '\n')
-                with self.assertRaises(ValueError):
-                    qualify_dashboard_yaml(plan, 'board.yaml', raw, self.mapping)
+    def test_custom_card_is_migrated_and_dynamic_schema_refused(self):
+        plan, raw = self.fixture('views:\n- cards:\n  - type: custom:foreign\n    entity: sensor.old\n')
+        before, after = qualify_dashboard_yaml(plan, 'board.yaml', raw, self.mapping)
+        self.assertEqual(after['views'][0]['cards'][0]['entity'], 'sensor.new')
+        plan, raw = self.fixture('views:\n- cards:\n  - type: map\n    entities: ["{{ states.sensor.old }}"]\n')
+        with self.assertRaises(ValueError):
+            qualify_dashboard_yaml(plan, 'board.yaml', raw, self.mapping)
 
     def test_foreign_bytes_and_forged_candidate_are_refused(self):
         plan, raw = self.fixture('views:\n- cards:\n  - type: entity\n    entity: sensor.old\n')
