@@ -179,6 +179,76 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
             await self.test_registry_device_with_unrelated_automation_script_apply_inverse()
         self.assertEqual(len(injected), 2)
 
+    async def test_retry_refuses_foreign_source_change_before_effect(self):
+        runtime, mapping, _, _, _ = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        native = self.module('native_discovery_inputs')
+        original = native.async_observe_discovery_inputs
+        injected = False
+        async def observe(hass, *, guard, settle=False, on_settle=None):
+            nonlocal injected
+            if settle and not injected:
+                injected = True
+                hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 0.05)
+                def changed(value):
+                    path = self.f.root / 'configuration.yaml'
+                    path.write_bytes(path.read_bytes() + b'\n# foreign change\n')
+                    on_settle(value)
+                on_settle = changed
+            return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
+        async def refresh(): pass
+        error = self.module('yaml_validation').YAMLValidationError
+        with patch.object(native, 'async_observe_discovery_inputs', observe):
+            with self.assertRaises(error):
+                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                    guard=lambda: None, refresh=refresh)
+        self.assertTrue(injected)
+        self.assertIsNotNone(self.f.entity.async_get(old))
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+
+    async def test_cancel_before_retry_reclaims_lease_without_effect(self):
+        runtime, mapping, _, _, _ = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        native = self.module('native_discovery_inputs')
+        retention = self.module('review_retention')
+        original_observe, original_reclaim = native.async_observe_discovery_inputs, retention.async_reclaim_reviews
+        entered = asyncio.Event()
+        injected = False
+        calls = 0
+        async def observe(hass, *, guard, settle=False, on_settle=None):
+            nonlocal injected
+            if settle and not injected:
+                injected = True
+                hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 0.05)
+            return await original_observe(hass, guard=guard, settle=settle, on_settle=on_settle)
+        async def reclaim(hass, *, keep=(), guard):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                entered.set()
+                await asyncio.Event().wait()
+            return await original_reclaim(hass, keep=keep, guard=guard)
+        async def refresh(): pass
+        with patch.object(native, 'async_observe_discovery_inputs', observe), \
+             patch.object(retention, 'async_reclaim_reviews', reclaim):
+            task = asyncio.create_task(runtime.native_yaml_prepare(hass, mapping,
+                actor_id='synthetic-admin', guard=lambda: None, refresh=refresh))
+            await asyncio.wait_for(entered.wait(), 120)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError): await task
+        self.assertIsNotNone(self.f.entity.async_get(old))
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+        async with runtime.operation_lock:
+            stores, _ = await original_reclaim(hass, keep=runtime.reviews, guard=lambda: None)
+        self.assertFalse(any(row['payload'].get('kind') == 'ordinary_review_lease'
+                             for row in stores.plans.values() if type(row['payload']) is dict))
+
     async def test_prepare_refuses_missing_selected_entity_and_device(self):
         runtime, mapping, uuids, original, device = await self.restored_source()
         hass = self.f.hass
