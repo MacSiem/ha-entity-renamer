@@ -1,5 +1,6 @@
 """Focused Core 11 admission through real prepare, apply and recovery."""
 from datetime import timedelta
+import asyncio
 import logging
 import unittest
 
@@ -80,8 +81,16 @@ class NativeForeignApplyTests(unittest.IsolatedAsyncioTestCase):
             inspection = await runtime.recovery_inspect(hass, **binding,
                 guard=lambda: None, refresh=refresh)
             self.assertTrue(inspection['eligible'], inspection)
-            restored = await runtime.recovery_restore(hass, **binding,
-                guard=lambda: None, refresh=refresh)
+            async def trace_slow_restore():
+                await asyncio.sleep(45)
+                for task in asyncio.all_tasks():
+                    task.print_stack()
+            probe = asyncio.create_task(trace_slow_restore())
+            try:
+                restored = await runtime.recovery_restore(hass, **binding,
+                    guard=lambda: None, refresh=refresh)
+            finally:
+                probe.cancel()
             self.assertEqual(restored['state'], 'rolled_back', restored)
             self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
             self.assertEqual(path.read_bytes(), original)
