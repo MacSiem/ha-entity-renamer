@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import threading
+from types import CodeType, FunctionType
 
 from .transaction import Refused
 from .reference_planner import _syntax_template
@@ -98,6 +99,15 @@ def _python_source(raw, mapping):
     nodes = list(ast.walk(tree))
     _need(len(nodes) <= 30000)
     parents = {id(child): parent for parent in nodes for child in ast.iter_child_nodes(parent)}
+    defined = {n.name for n in nodes if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    _need(len(defined) == len([n for n in nodes if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]))
+    builtin_calls = {'Path', 'ZoneInfo', 'abs', 'any', 'bool', 'enumerate', 'float', 'int',
+                     'len', 'max', 'print', 'reversed', 'round', 'sorted', 'str', 'sum'}
+    methods = {'append', 'astimezone', 'combine', 'connect', 'date', 'dumps', 'escape', 'execute',
+               'exists', 'extend', 'fetchall', 'fromisoformat', 'fromtimestamp', 'get', 'group',
+               'isoformat', 'join', 'loads', 'lower', 'now', 'open', 'replace', 'resolve', 'run',
+               'search', 'sort', 'split', 'startswith', 'strftime', 'strip', 'timestamp',
+               'total_seconds', 'update'}
     for node in nodes:
         if isinstance(node, ast.Constant) and type(node.value) is str:
             _need(not any(re.search(r'(?<![a-zA-Z0-9_])' + re.escape(identity)
@@ -111,8 +121,22 @@ def _python_source(raw, mapping):
             _need(node.level == 0 and node.module in {'datetime', 'pathlib', 'zoneinfo'}
                   and all(a.asname is None and a.name != '*' for a in node.names))
         if isinstance(node, ast.Name):
+            if node.id == '__name__':
+                parent = parents[id(node)]
+                _need(isinstance(parent, ast.Compare) and parent.left is node and len(parent.ops) == 1
+                      and isinstance(parent.ops[0], ast.Eq) and len(parent.comparators) == 1
+                      and isinstance(parent.comparators[0], ast.Constant)
+                      and parent.comparators[0].value == '__main__')
+                continue
             _need(node.id not in {'eval', 'exec', 'compile', 'getattr', 'setattr',
-                                  'delattr', 'vars', 'globals', 'locals', '__import__'})
+                                  'delattr', 'vars', 'globals', 'locals', '__import__', '__builtins__'}
+                  and not node.id.startswith('__'))
+            if node.id in defined:
+                parent = parents[id(node)]
+                _need(isinstance(node.ctx, ast.Load) and isinstance(parent, ast.Call)
+                      and parent.func is node)
+            if node.id in builtin_calls:
+                _need(not isinstance(node.ctx, (ast.Store, ast.Del)))
             if node.id in ('os', 'subprocess', 'sqlite3', 'sys') and isinstance(node.ctx, ast.Load):
                 parent = parents[id(node)]
                 allowed = {'os': {'environ'}, 'subprocess': {'run'},
@@ -121,6 +145,16 @@ def _python_source(raw, mapping):
                 if parent.attr in ('run', 'connect'):
                     _need(isinstance(parents.get(id(parent)), ast.Call)
                           and parents[id(parent)].func is parent)
+        if isinstance(node, ast.Attribute):
+            _need(not node.attr.startswith('__'))
+            if node.attr in ('execute', 'executemany', 'executescript'):
+                parent = parents.get(id(node))
+                _need(isinstance(parent, ast.Call) and parent.func is node)
+        if isinstance(node, ast.Call):
+            _need((isinstance(node.func, ast.Name) and node.func.id in builtin_calls | defined)
+                  or (isinstance(node.func, ast.Attribute) and node.func.attr in methods))
+        if isinstance(node, ast.arg):
+            _need(node.arg not in defined | builtin_calls)
     calls = [n for n in nodes if isinstance(n, ast.Call)]
     sql = [n for n in calls if isinstance(n.func, ast.Attribute)
            and n.func.attr in ('execute', 'executemany', 'executescript')]
@@ -153,7 +187,10 @@ def _python_source(raw, mapping):
                   and isinstance(n.ctx, (ast.Store, ast.Del)) for n in ast.walk(function)))
     sites = [n for n in calls if isinstance(n.func, ast.Name) and n.func.id == function.name]
     references = [n for n in nodes if isinstance(n, ast.Name) and n.id == function.name]
-    _need(sites and len(references) == len(sites))
+    _need(sites and len(references) == len(sites)
+          and not any(isinstance(n, ast.arg) and n.arg == function.name for n in nodes)
+          and len([n for n in nodes if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and n.name == function.name]) == 1)
     for site in sites:
         _need(len(site.args) >= 2 and isinstance(site.args[1], ast.Subscript)
               and isinstance(site.args[1].value, ast.Name)
@@ -271,6 +308,7 @@ class NativeForeignConsumers:
         from homeassistant.components.mqtt.switch import MqttSwitch
         from homeassistant.components.rest.sensor import RestSensor
         from homeassistant.components.rest.data import RestData
+        from homeassistant.components.rest.coordinator import RestCoordinator
         from homeassistant.components.command_line.sensor import CommandSensor, CommandSensorData
         from .yaml_runtime_observer import _pending_native_work
 
@@ -293,11 +331,13 @@ class NativeForeignConsumers:
                 _need(len(entries) == 1 and entries[0].state.value == 'loaded')
             else:
                 _need(not entries)
-            registry_rows = {row.entity_id: row for row in registry.entities.values()
-                             if row.platform == name and row.disabled_by is None}
+            all_registry_rows = {row.entity_id: row for row in registry.entities.values()
+                                 if row.platform == name}
+            registry_rows = {identity: row for identity, row in all_registry_rows.items()
+                             if row.disabled_by is None}
             foreign_ids.update(registry_rows)
-            _need(not (set(registry_rows) & (set(mapping) | set(mapping.values()))))
-            _need(not any(row.device_id in self.device_ids for row in registry_rows.values()))
+            _need(not (set(all_registry_rows) & (set(mapping) | set(mapping.values()))))
+            _need(not any(row.device_id in self.device_ids for row in all_registry_rows.values()))
             found = {}
             platform_rows = []
             for platform in platforms:
@@ -326,13 +366,38 @@ class NativeForeignConsumers:
                         if name == 'rest':
                             rest = entity.rest
                             _need(type(rest) is RestData and rest._hass is hass)
+                            coordinator = entity._coordinator
+                            resource_template, payload_template = entity._resource_template, None
+                            coordinator_image = None
+                            if coordinator is not None:
+                                _need(type(coordinator) is RestCoordinator and coordinator.hass is hass
+                                      and coordinator.rest is rest)
+                                update = coordinator.update_method
+                                coordinator_image = (id(coordinator), id(update))
+                                if type(update) is FunctionType:
+                                    codes = [v for v in RestCoordinator.__init__.__code__.co_consts
+                                             if type(v) is CodeType and v.co_name == '_async_refresh_with_templates']
+                                    _need(len(codes) == 1 and update.__code__ is codes[0]
+                                          and update.__closure__ is not None)
+                                    cells = dict(zip(update.__code__.co_freevars,
+                                                     (cell.cell_contents for cell in update.__closure__)))
+                                    _need(set(cells) == {'resource_template', 'payload_template', 'rest'}
+                                          and cells['rest'] is rest and resource_template is None)
+                                    resource_template, payload_template = (cells['resource_template'],
+                                                                            cells['payload_template'])
+                                else:
+                                    _need(getattr(update, '__self__', None) is rest
+                                          and getattr(update, '__func__', None) is RestData.async_update)
                             detail = (config, value, id(rest),
-                                      _freeze(entity._resource_template, mapping, strings),
+                                      coordinator_image,
+                                      _freeze(resource_template, mapping, strings),
+                                      _freeze(payload_template, mapping, strings),
                                       _freeze(rest._resource, mapping, strings)
-                                      if entity._resource_template is None else None,
+                                      if resource_template is None else None,
                                       _freeze(rest._headers, mapping, strings),
                                       _freeze(rest._params, mapping, strings),
-                                      _freeze(rest._request_data, mapping, strings))
+                                      _freeze(rest._request_data, mapping, strings)
+                                      if payload_template is None else None)
                         else:
                             data = entity.data
                             _need(type(data) is CommandSensorData and data.hass is hass)
@@ -352,8 +417,13 @@ class NativeForeignConsumers:
                       and not data.discovery_discovered_and_disabled and not data.debug_info_triggers)
                 extra = (id(data), id(data.client),
                          _freeze(data.config, mapping, set()),
-                         tuple(sorted(data.discovery_already_discovered)))
+                         tuple(sorted(data.discovery_already_discovered)),
+                         id(entries[0].data), _freeze(dict(entries[0].data), mapping, set()),
+                         id(entries[0].options), _freeze(dict(entries[0].options), mapping, set()))
             images.append((name, True, tuple(id(e) for e in entries),
+                           tuple(sorted((row.entity_id, row.id, row.unique_id, row.config_entry_id,
+                                         row.device_id, str(row.disabled_by))
+                                        for row in all_registry_rows.values())),
                            tuple(sorted(platform_rows)), extra))
         # A digest keeps config values, which may contain credentials, out of the
         # retained image and every diagnostic message.

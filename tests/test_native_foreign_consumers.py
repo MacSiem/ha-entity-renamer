@@ -3,6 +3,7 @@ from datetime import timedelta
 import importlib
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
 import test_native_helper_quiescence as fixture
@@ -13,6 +14,13 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = fixture.NativeHelperQuiescenceTests.asyncSetUp
     _before_start = fixture.NativeHelperQuiescenceTests._before_start
 
+    async def test_absent_foreign_domains_keep_existing_admission(self):
+        module = importlib.import_module(fixture.fixtures.PACKAGE + '.native_template_yaml_server')
+        self.assertFalse({'mqtt', 'rest', 'command_line'} & set(self.f.hass.config.components))
+        server = SimpleNamespace(hass=self.f.hass)
+        await module._admit_foreign(server, {})
+        self.assertFalse(hasattr(server, 'foreign'))
+
     async def test_rest_runtime_scope_and_source_drift(self):
         from homeassistant.const import __version__
         if __version__ != '2026.11.1':
@@ -21,14 +29,17 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
         from homeassistant.helpers.trigger_template_entity import ValueTemplate
         from homeassistant.components.rest.sensor import RestSensor
         from homeassistant.components.rest.data import RestData
+        from homeassistant.components.rest.coordinator import RestCoordinator
+        from homeassistant.helpers.template import Template
         hass = self.f.hass
         module = importlib.import_module(fixture.fixtures.PACKAGE + '.native_foreign_consumers')
         tx = importlib.import_module(fixture.fixtures.PACKAGE + '.transaction')
         planner = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_plan')
         mapping = {'sensor.old': 'sensor.new'}
         source = "{{ is_state('sensor.other', 'on') }}"
+        resource = "{{ states('sensor.other') }}"
         (self.f.root / 'configuration.yaml').write_text(
-            'rest:\n  - sensor:\n      - value_template: "' + source + '"\n')
+            'rest:\n  - resource_template: "' + resource + '"\n    sensor:\n      - value_template: "' + source + '"\n')
         entry = self.f.entity.async_get_or_create('sensor', 'rest', 'fixture-unique')
         await hass.async_block_till_done()
         platform = EntityPlatform(hass=hass, logger=logging.getLogger(__name__),
@@ -42,6 +53,7 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
         entity._config = {}
         entity._value_template = ValueTemplate(source, hass)
         entity._resource_template = None
+        entity._coordinator = None
         entity.rest = RestData(hass, 'GET', 'http://example.invalid', 'utf-8', None,
                                None, None, None, True, 'python_default', 10)
         platform.entities[entry.entity_id] = entity
@@ -66,6 +78,19 @@ class ForeignConsumerTests(unittest.IsolatedAsyncioTestCase):
                     fence.check()
             finally:
                 fence.close()
+            entity._value_template = ValueTemplate(source, hass)
+            entity._coordinator = RestCoordinator(hass, entity.rest, None,
+                Template(resource, hass), None, timedelta(seconds=60))
+            fence = module.NativeForeignConsumers(hass, mapping, {})
+            try:
+                fence.bind_sources(plan, self.f.root)
+                fence.check(require_sources=True)
+                # URL is the last rendered telemetry, not the resource template.
+                entity.rest._resource = 'http://changed.invalid'
+                fence.check(require_sources=True)
+            finally:
+                fence.close()
+            entity._coordinator = None
             entity._value_template = ValueTemplate("{{ 1 }}", hass)
             fence = module.NativeForeignConsumers(hass, mapping, {})
             try:
@@ -157,10 +182,59 @@ def report(con, room, start):
         module._python_source(source.encode(), mapping)
         for changed in (
             source.replace('sensor.other', 'sensor.old'),
+            source.replace('sensor.other', 'sensor.new'),
             source.replace('    return con.execute', "    entity_id = 'sensor.' + room\n    return con.execute"),
             source.replace('    cfg = ROOMS[room]', "    alias = ROOMS.get(room)\n    alias['item'] = 'sensor.' + room\n    cfg = ROOMS[room]"),
             source.replace('    cfg = ROOMS[room]', "    ROOMS[room]['item'] = 'sensor.' + room\n    cfg = ROOMS[room]"),
             source.replace('    cfg = ROOMS[room]', "    ROOMS[room].update({'item': 'sensor.' + room})\n    cfg = ROOMS[room]"),
+            source.replace('    cfg = ROOMS[room]', "    __builtins__['ex' + 'ec'](room)\n    cfg = ROOMS[room]"),
+            source.replace('    cfg = ROOMS[room]', "    query = con.execute\n    cfg = ROOMS[room]"),
+            source.replace('    cfg = ROOMS[room]', "    invoke_unknown(room)\n    cfg = ROOMS[room]"),
         ):
             with self.assertRaises(tx.Refused):
                 module._python_source(changed.encode(), mapping)
+
+    async def test_command_source_is_bound_and_drift_refused(self):
+        from homeassistant.const import __version__
+        if __version__ != '2026.11.1':
+            self.skipTest('Core 11.1 only')
+        from homeassistant.helpers.entity_platform import EntityPlatform
+        from homeassistant.components.command_line.sensor import CommandSensor, CommandSensorData
+        hass = self.f.hass
+        module = importlib.import_module(fixture.fixtures.PACKAGE + '.native_foreign_consumers')
+        tx = importlib.import_module(fixture.fixtures.PACKAGE + '.transaction')
+        planner = importlib.import_module(fixture.fixtures.PACKAGE + '.yaml_plan')
+        mapping = {'sensor.old': 'sensor.new'}
+        command = 'python3 /config/fixture.py'
+        (self.f.root / 'configuration.yaml').write_text(
+            'command_line:\n  - sensor:\n      command: ' + command + '\n')
+        script = self.f.root / 'fixture.py'
+        script.write_text("import subprocess\nsubprocess.run(['ffmpeg', '-version'], timeout=1)\n")
+        entry = self.f.entity.async_get_or_create('sensor', 'command_line', 'fixture-command')
+        await hass.async_block_till_done()
+        platform = EntityPlatform(hass=hass, logger=logging.getLogger(__name__),
+            domain='sensor', platform_name='command_line', platform=None,
+            scan_interval=timedelta(seconds=30), entity_namespace=None)
+        platform.async_prepare()
+        platform._setup_complete = True
+        entity = object.__new__(CommandSensor)
+        entity.hass, entity.entity_id = hass, entry.entity_id
+        entity._config, entity._value_template = {}, None
+        entity.data = CommandSensorData(hass, command, 10, 'sensor', 'fixture')
+        platform.entities[entry.entity_id] = entity
+        hass.config.components.add('command_line')
+        try:
+            fence = module.NativeForeignConsumers(hass, mapping, {})
+            try:
+                plan = planner.plan_yaml(self.f.root, mapping)
+                fence.bind_sources(plan, self.f.root)
+                fence.check(require_sources=True)
+                script.write_text("import subprocess\nsubprocess.run(['ffmpeg', 'sensor.old'])\n")
+                with self.assertRaises(tx.Refused):
+                    fence.check()
+            finally:
+                fence.close()
+        finally:
+            platform.entities.clear()
+            hass.config.components.remove('command_line')
+            await platform.async_destroy()
