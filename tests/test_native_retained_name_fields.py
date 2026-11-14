@@ -18,6 +18,82 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
     data = server.NativeTemplateYAMLServerTests.data
     stimulus = server.NativeTemplateYAMLServerTests.stimulus
 
+    async def restored_source(self):
+        from types import MappingProxyType
+        from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+        runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        entry = ConfigEntry(domain='threshold', title='Restored fixture owner', data={},
+            options={'name': 'Restored fixture helper', 'entity_id': 'sensor.unrelated_fixture',
+                     'lower': 20, 'upper': None, 'hysteresis': 0},
+            discovery_keys=MappingProxyType({}), source='user', version=1,
+            minor_version=1, subentries_data=[], unique_id='restored-fixture-owner')
+        await hass.config_entries.async_add(entry)
+        await hass.async_block_till_done()
+        self.assertIs(entry.state, ConfigEntryState.LOADED)
+        device = self.f.device.async_get_or_create(config_entry_id=entry.entry_id,
+            identifiers={('threshold', 'restored-fixture-device')}, name='Restored fixture device')
+        await self.producer.platform.async_remove_entity(old)
+        row = self.f.entity.async_update_entity(old, config_entry_id=entry.entry_id, device_id=device.id)
+        row.write_unavailable_state(hass)
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        self.assertEqual(hass.states.get(old).attributes.get('restored'), True)
+        return runtime, mapping, uuids, original, device
+
+    async def test_loaded_restored_source_id_name_apply_inverse(self):
+        runtime, mapping, uuids, original, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        review = await runtime.native_yaml_prepare(hass, mapping,
+            entity_names={old: 'Restored reviewed source'}, actor_id='synthetic-admin',
+            guard=lambda: None, refresh=refresh)
+        result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+            actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        self.assertEqual(result['state'], 'applied')
+        row = self.f.entity.async_get(new)
+        self.assertEqual((row.id, row.device_id, row.name),
+                         (uuids[old], device.id, 'Restored reviewed source'))
+        self.assertIsNone(hass.states.get(old))
+        self.assertEqual(hass.states.get(new).state, 'unavailable')
+        self.assertTrue(hass.states.get(new).attributes['restored'])
+        self.assertEqual(hass.states.get(new).attributes['friendly_name'], 'Restored reviewed source')
+        reverse = await runtime.native_yaml_reverse(hass, review['operation_id'], review['fingerprint'],
+            guard=lambda: None, refresh=refresh)
+        self.assertEqual(reverse['state'], 'rolled_back')
+        row = self.f.entity.async_get(old)
+        self.assertEqual((row.id, row.device_id, row.name), (uuids[old], device.id, None))
+        self.assertIsNone(hass.states.get(new))
+        self.assertEqual(hass.states.get(old).state, 'unavailable')
+        self.assertTrue(hass.states.get(old).attributes['restored'])
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
+    async def test_loaded_restored_source_object_appearance_refuses(self):
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        runtime, mapping, uuids, original, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        async def refresh():
+            self.assertTrue(runtime.operation_lock.locked())
+        review = await runtime.native_yaml_prepare(hass, mapping,
+            entity_names={old: 'Restored reviewed source'}, actor_id='synthetic-admin',
+            guard=lambda: None, refresh=refresh)
+        appeared = type(self.producer)()
+        appeared._attr_unique_id = self.producer.unique_id
+        await hass.data[DATA_INSTANCES]['sensor'].async_add_entities([appeared])
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        self.assertEqual((self.f.entity.async_get(old).id, self.f.entity.async_get(old).device_id),
+                         (uuids[old], device.id))
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
     async def test_selected_name_and_id_retained_fresh_apply_inverse(self):
         runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
         hass = self.f.hass

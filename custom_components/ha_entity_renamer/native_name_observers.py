@@ -66,16 +66,19 @@ class NativeNameObserver:
         return {'snapshot_revision': revision(read_entry(self.hass, row.config_entry_id)),
                 'state': entry.state.value}
 
-    def _sample(self, row):
+    def _sample(self, row, *, loaded_restored=False):
         entity, state, entry = self._object(row), self.hass.states.get(row.entity_id), self._entry(row)
         active = entity is not None
         if not active:
-            require(state is None or (entry is not None and entry['state'] == 'not_loaded'
+            require(state is None or (entry is not None and (entry['state'] == 'not_loaded'
+                    or loaded_restored and entry['state'] == 'loaded')
                     and row.disabled_by in (None, 'config_entry')
                     and state.state == 'unavailable' and state.attributes.get('restored') is True),
                     'name_inactive_state_present')
             require(row.disabled_by is not None or (entry is not None and
-                    entry['state'] == 'not_loaded'), 'name_unexplained_runtime_absence')
+                    (entry['state'] == 'not_loaded' or loaded_restored
+                     and entry['state'] == 'loaded' and state is not None)),
+                    'name_unexplained_runtime_absence')
         else:
             require(row.disabled_by is None and (entry is None or entry['state'] == 'loaded'),
                     'name_active_lifecycle_mismatch')
@@ -97,7 +100,19 @@ class NativeNameObserver:
         if row.device_id is None:
             return
         entity = self._object(row)
+        if change.runtime_before_json:
+            saved = json.loads(change.runtime_before_json)['entities'][row.id]
+            if not saved['active']:
+                require(entity is None, 'readd_inactive_object_appeared')
         if entity is None and row.disabled_by is not None:
+            return
+        if entity is None and self._loaded_restored(change):
+            _, state, entry, active = self._sample(row, loaded_restored=True)
+            device = dr.async_get(self.hass).async_get(row.device_id)
+            require(not active and state is not None and entry is not None
+                    and entry['state'] == 'loaded' and device is not None
+                    and row.config_entry_id in device.config_entries,
+                    'readd_restored_device_unverified')
             return
         require(entity is not None, 'readd_device_runtime_missing')
         platform = entity.platform
@@ -122,6 +137,13 @@ class NativeNameObserver:
         for key in set(info) - {'identifiers', 'connections'}:
             require(hasattr(device, key) and getattr(device, key) == info[key],
                     'readd_device_metadata_changed')
+
+    def _loaded_restored(self, change):
+        # Core 11's registry restore listener moves the native placeholder on
+        # ID updates. Do not extend name-only/device or other Core paths.
+        return (self._version() in ('2026.11.0', '2026.11.1')
+                and change.kind == 'entity' and bool(change.mapping)
+                and change.before.get('name') != change.after.get('name'))
 
     def _device_subscription(self, entity, row):
         """Prove Core 2026 will deliver this device's name update to this entity."""
@@ -155,7 +177,7 @@ class NativeNameObserver:
         devices = self.io.document('device')
         device_ids = {row.device_id for row in rows if row.device_id is not None}
         for row in rows:
-            entity, state, entry, active = self._sample(row)
+            entity, state, entry, active = self._sample(row, loaded_restored=self._loaded_restored(change))
             if version in ('2026.11.0', '2026.11.1'):
                 # Core 11 clears compat_name on an entity-name update and may
                 # rewrite related entity fields in the device-name listener.
@@ -214,7 +236,7 @@ class NativeNameObserver:
             require(_content(native_rows[row.id]) == _content(expected)
                     and list(registry_identity(row)) == saved['identity'],
                     'name_entity_identity_or_preferences_changed')
-            entity, state, entry, active = self._sample(row)
+            entity, state, entry, active = self._sample(row, loaded_restored=self._loaded_restored(change))
             expected_entry = saved['entry']
             if expected_documents is not None and expected_entry is not None:
                 # This full image is reconstructed from ORIGINAL and completed
