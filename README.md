@@ -27,13 +27,34 @@ The installation steps below are for this public release.
 
 The HACS minimum of 2025.6.0 is a coarse installation filter, not a claim
 that all later Home Assistant versions support the migration backend. Native
-write paths use exact checks for 2025.6.0, 2026.10.2 and 2026.10.4, with
-additional family-specific restrictions; Powercalc 1.26.1 is unsupported on
-2025.6 and its qualified paths require the specified 2026.10 versions. Core
-2026.4, intermediate versions and betas are not qualified for these paths.
+write paths have version and family-specific checks; availability depends on
+the exact operation and its dependencies. In particular, a read-only result on
+2025.6 is not evidence of migration support. Intermediate versions and betas
+are not covered by the tested scopes below.
 Some read-only functions may remain available; unverified paths refuse or
 report incomplete data rather than granting migration authority. See the
 [candidate migration guide](MIGRATION.md).
+
+### Tested versions and scope
+
+The following results cover selected synthetic configurations of the unreleased
+candidate. They do not establish compatibility with every setup or combination.
+
+| Versions | Tested scope and limits |
+|---|---|
+| Home Assistant Core 2026.11.1; Powercalc 1.27.0 | A mixed real-card flow applied a reviewed batch and a separately reviewed fresh inverse. Product checks covered the selected registry changes, Powercalc, Energy, Utility Meter, HomeKit, Template, Automation, Script, dashboard and history consumers. |
+| Core 2026.10.4 and 2026.11.1 | Targeted Energy cost continuity checks included transiently unavailable metadata. These checks do not establish the full mixed-flow result on 2026.10.4. |
+| Core 2026.11.0 | Historical scoped native testing and source equivalence are available; no exact latest-candidate pass is claimed. |
+| Core 2025.6.0 | Read-only behavior and refusal of an active card were checked. Migration support was not tested or established. |
+| Powercalc 1.26.1 | No passing test is claimed for this exact version. It is unsupported on Core 2025.6. |
+| HACS 2.0.5; Renamer 4.6.1, transition 4.6.2 and candidate 5.0.0 | A scoped installation and transition were tested through a controlled feed; this does not prove public feed propagation. |
+| button-card 7.0.1; Bubble Card version unknown | Historical rendering included the actual button-card file and a card UI test. The Bubble Card version was not established; no general custom-card compatibility is claimed. |
+
+In the mixed flow, the product's forward and fresh-inverse checks completed,
+but a subsequent test-fixture network check reported an error, so that complete
+test run is not reported as a pass. A separate native HomeKit lifecycle test
+verified the fixture check and its handling of an additional listener. These
+results remain limited to the tested configurations.
 
 ## How the unreleased candidate works
 
