@@ -44,6 +44,36 @@ def _yaml_factory_for_plan(preparations, plan):
     raise Refused('yaml_original_profile_unavailable')
 
 
+def _review_session_binding(session):
+    """Revalidate the same prepared plan and changes across review awaits."""
+    from dataclasses import asdict
+    from .native_input_baseline import _receipt_bytes
+    from .native_registry_receipts import _freeze_json, _exact_json_equal
+    from .prepared import encode_change
+    from .transaction import Refused
+    plan, operation, receipt = session.plan, session.operation_id, session.receipt
+    entries = getattr(session, 'registry_changes', None)
+    is_entry = entries is None
+    changes = (session.registry_change,) if is_entry else tuple(entries)
+    plan_image = _freeze_json(asdict(plan))
+    change_images = _freeze_json([encode_change(change) for change in changes])
+    receipt_image = _receipt_bytes(receipt)
+    def check():
+        current = getattr(session, 'registry_changes', None)
+        if is_entry:
+            current = (session.registry_change,) if current is None else ()
+        else:
+            current = () if current is None else tuple(current)
+        if (session.plan is not plan or session.operation_id != operation
+                or session.receipt is not receipt or len(current) != len(changes)
+                or any(a is not b for a, b in zip(current, changes, strict=True))
+                or not _exact_json_equal(asdict(plan), plan_image)
+                or not _exact_json_equal([encode_change(change) for change in current], change_images)
+                or _receipt_bytes(receipt) != receipt_image):
+            raise Refused('review_preparation_changed')
+    return plan, operation, changes, is_entry, check
+
+
 @dataclass(frozen=True)
 class _PreparedReview:
     """Server-retained Plan and optional read-only execution admission pins."""
@@ -199,11 +229,7 @@ class Runtime:
                 raise
             try:
                 current()
-                plan, operation = session.plan, session.operation_id
-                registry_changes = getattr(session, 'registry_changes', None)
-                is_entry = registry_changes is None
-                if is_entry:
-                    registry_changes = (session.registry_change,)
+                plan, operation, registry_changes, is_entry, check_session = _review_session_binding(session)
                 count = sum(change.kind == 'entity' for change in registry_changes)
                 devices = sum(change.kind == 'device' for change in registry_changes)
                 changes = []
@@ -217,6 +243,7 @@ class Runtime:
                     changes.append({**target, 'fields': fields})
                 baseline, composition = await self.preparations.async_resolve_composition(
                     plan.native_inputs, hass=hass, guard=current, receipt=session.receipt)
+                check_session()
                 from .dependency_review import dependency_files
                 receipt = baseline.receipt
                 # Aggregate only the admitted planned YAML scope. Paths, YAML,
@@ -341,6 +368,7 @@ class Runtime:
                 if foreign is not None:
                     foreign.check(require_sources=True)
                     foreign.expiry = hass.loop.call_later(900, foreign.close)
+                check_session()
                 self.reviews[operation] = _PreparedReview(actor_id, plan, count,
                     hass.loop.time() + 900, admission, own, trace_admission, template_admission,
                     getattr(session, 'review_admission', None), foreign,

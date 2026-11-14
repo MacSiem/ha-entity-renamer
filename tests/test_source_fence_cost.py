@@ -222,6 +222,62 @@ class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
                 await task
         self.assertEqual(set(store.plans), before)
 
+    async def test_review_session_binding_rejects_change_across_await(self):
+        from types import SimpleNamespace
+        from dataclasses import replace
+        fixture = await mixed.base.fixture()
+        spec = importlib.util.spec_from_file_location(mixed.base.PACKAGE + '.review_runtime',
+            mixed.base.COMPONENT / '__init__.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for drift in ('operation', 'plan', 'changes', 'receipt'):
+            chain = fixture['chain']
+            session = SimpleNamespace(plan=chain.plan, operation_id=chain.operation_id,
+                registry_changes=list(chain.changes), receipt=chain.original_receipt)
+            _, _, _, _, check = module._review_session_binding(session)
+            check()
+            await asyncio.sleep(0)
+            if drift == 'operation': session.operation_id = 'other'
+            elif drift == 'plan': session.plan = replace(session.plan)
+            elif drift == 'changes': session.registry_changes = []
+            else: session.receipt = replace(session.receipt)
+            with self.assertRaises(ValueError):
+                check()
+
+    async def test_async_resolve_refuses_payload_drift_and_cancel(self):
+        from contextlib import asynccontextmanager
+        from types import SimpleNamespace
+        fixture = await mixed.base.fixture()
+        store, chain = fixture['preparations'], fixture['chain']
+        reference = chain.plan.native_inputs
+        for mode in ('payload', 'cancel'):
+            entered, release = asyncio.Event(), asyncio.Event()
+            async def executor(function):
+                entered.set()
+                await release.wait()
+                return function()
+            @asynccontextmanager
+            async def pin(_hass, _receipt, *, guard):
+                async def verify(): guard()
+                yield chain.baseline, verify
+            hass = SimpleNamespace(async_add_executor_job=executor)
+            with patch.object(mixed.base.baseline, 'pinned_original_inputs', pin), \
+                 patch.object(mixed.base.prepared.PreparedStore, 'resolve_composition',
+                              return_value=(chain.baseline, object())):
+                task = asyncio.create_task(store.async_resolve_composition(reference,
+                    hass=hass, guard=lambda: None, receipt=chain.original_receipt))
+                await entered.wait()
+                row = store.plans[reference[0]]['payload']
+                original = row['codec']
+                if mode == 'payload': row['codec'] += 'A'
+                else: task.cancel()
+                release.set()
+                try:
+                    with self.assertRaises(ValueError if mode == 'payload' else asyncio.CancelledError):
+                        await task
+                finally:
+                    row['codec'] = original
+
     async def test_runtime_projection_is_detached_from_accepted_evidence(self):
         fixture = await mixed.mixed_fixture()
         chain = fixture['chain']

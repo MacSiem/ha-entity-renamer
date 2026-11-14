@@ -386,6 +386,42 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
                 path.rename(replacement)
                 moved.rename(path)
 
+    async def test_preparation_lock_rechecks_pinned_path_before_write(self):
+        from types import SimpleNamespace
+        prepared = importlib.import_module(PACKAGE + '.prepared')
+        original = await self.capture()
+        writes = []
+        async def load(): return None, False
+        async def save(value): writes.append(value)
+        store = prepared.PreparedStore(SimpleNamespace(load=load, save=save))
+        await store.initialize()
+        entered = asyncio.Event()
+        create = store.create
+        async def watched_create(*args, **kwargs):
+            entered.set()
+            return await create(*args, **kwargs)
+        path = self.root / '.storage/core.entity_registry'
+        moved, replacement = path.with_suffix('.original'), path.with_suffix('.replacement')
+        await store.lock.acquire()
+        try:
+            with patch.object(store, 'create', watched_create):
+                task = asyncio.create_task(store.create_native_inputs('lock-drift', original,
+                    hass=self.hass, guard=self.guard))
+                await asyncio.wait_for(entered.wait(), 30)
+                raw = path.read_bytes()
+                path.rename(moved)
+                path.write_bytes(raw)
+                store.lock.release()
+                try:
+                    with self.assertRaises((ValueError, OSError)):
+                        await task
+                finally:
+                    path.rename(replacement)
+                    moved.rename(path)
+        finally:
+            if store.lock.locked(): store.lock.release()
+        self.assertEqual(writes, [])
+
     async def test_pinned_original_inputs_refuses_manager_drift(self):
         original = await self.capture()
         async with baseline.pinned_original_inputs(self.hass, self.receipt, guard=self.guard) as (observed, verify):
