@@ -9,7 +9,7 @@ import test_native_template_forward_consumers as fixture
 
 
 @unittest.skipUnless(fixture.forward.fixtures.HAS_HA, 'native HA dependencies required')
-class NativePrepareLivenessTests(fixture.NativeTemplateForwardConsumerTests):
+class NativePrepareLivenessTests(fixture.forward.NativeTemplateForwardTests):
     async def test_scale_prepare_resamples_and_rejects_changed_code(self):
         from homeassistant import block_async_io
         from homeassistant.const import __version__
@@ -22,8 +22,11 @@ class NativePrepareLivenessTests(fixture.NativeTemplateForwardConsumerTests):
             f'  liveness_{i}:\n    sequence:\n      - variables: {{sample: {i}}}\n'
             for i in range(120))
         await hass.async_add_executor_job((root / 'configuration.yaml').write_text, config)
-        await hass.services.async_call('automation', 'reload', blocking=True)
-        await hass.services.async_call('script', 'reload', blocking=True)
+        from homeassistant.config import async_hass_config_yaml
+        from homeassistant.setup import async_setup_component
+        parsed = await async_hass_config_yaml(hass)
+        self.assertTrue(await async_setup_component(hass, 'automation', parsed))
+        self.assertTrue(await async_setup_component(hass, 'script', parsed))
         await hass.async_block_till_done()
         await self._flush_documents()
         runtime = await self._runtime(module)
