@@ -50,25 +50,25 @@ _CURRENT_ENTITY_TERNARY = re.compile(
 
 _JS_QUOTED = re.compile(r"'[^'\\\\]*'|\"[^\"\\\\]*\"")
 _JS_ENTITY_TOKEN = re.compile(r'(?<![A-Za-z0-9_.])([a-z_][a-z0-9_]*\.[a-z0-9_]+)(?![A-Za-z0-9_.])', re.ASCII)
-_JS_PREFIX_LOOKUP = (r"states\[\(S\+\(\{S:S,S:S\}\[user\.id\]\|\|S\)\)\]\?\.state")
+_JS_PREFIX_LOOKUP = (r"states\[\(@\+\(\{@:@,@:@\}\[user\.id\]\|\|@\)\)\]\?\.state")
 _JS_FINITE_PREFIX = tuple(re.compile(x, re.ASCII) for x in (
-    r"\[\[\[return\(" + _JS_PREFIX_LOOKUP + r"===S\)\?S:S;?\]\]\]",
-    r"\[\[\[constselected=" + _JS_PREFIX_LOOKUP + r";returnS\+\(selected\|\|S\);?\]\]\]",
-    r"\[\[\[constselected=" + _JS_PREFIX_LOOKUP + r";constcount=variables\.[A-Za-z_$][\w$]*\[selected\];returncount===undefined\?S:T;?\]\]\]",
+    r"\[\[\[return\(" + _JS_PREFIX_LOOKUP + r"===@\)\?@:@;?\]\]\]",
+    r"\[\[\[constselected=" + _JS_PREFIX_LOOKUP + r";return@\+\(selected\|\|@\);?\]\]\]",
+    r"\[\[\[constselected=" + _JS_PREFIX_LOOKUP + r";constcount=variables\.[A-Za-z_$][\w$]*\[selected\];returncount===undefined\?@:#;?\]\]\]",
 ))
 _JS_LIST_LOOKUP = re.compile(
-    r"\[\[\[returnvariables\.source_entities\.every\(id=>Number\.isFinite\(Number\.parseFloat\(states\[id\]\?\.state\)\)\)\?S:S;?\]\]\]", re.ASCII)
+    r"\[\[\[returnvariables\.source_entities\.every\(id=>Number\.isFinite\(Number\.parseFloat\(states\[id\]\?\.state\)\)\)\?@:@;?\]\]\]", re.ASCII)
 
 
 _TABLE_START = re.compile(r"\A\[\[\[\s*const\s+C\s*=\s*")
-_TABLE_COMMON = (";constW=states[S];constn=e=>{consts=states[e];"
+_TABLE_COMMON = (";constW=states[@];constn=e=>{consts=states[e];"
     "constv=s?parseFloat(s.state):NaN;returnisNaN(v)?null:v;};"
-    "constf1=x=>(x===null||x===undefined||isNaN(x))?S:"
-    "Number(x).toLocaleString(S,{minimumFractionDigits:1,maximumFractionDigits:1});")
+    "constf1=x=>(x===null||x===undefined||isNaN(x))?@:"
+    "Number(x).toLocaleString(@,{minimumFractionDigits:1,maximumFractionDigits:1});")
 _TABLE_ENDS = frozenset({
-    "return(C[W?.state]||[null,S])[1];]]]",
-    "lett=n(S);if(t===null)t=W?.attributes?.temperature??null;"
-    "leth=n(S);if(h===null)h=W?.attributes?.humidity??null;returnT;]]]",
+    "return(C[W?.state]||[null,@])[1];]]]",
+    "lett=n(@);if(t===null)t=W?.attributes?.temperature??null;"
+    "leth=n(@);if(h===null)h=W?.attributes?.humidity??null;return#;]]]",
 })
 
 
@@ -97,14 +97,14 @@ def _unchanged_literal_table(text, mapping):
         if '\\' in body:
             return match.group(0)
         expressions = re.findall(r'\$\{([^}]*)\}', body)
-        normalized = [re.sub(r'\s+', '', _JS_QUOTED.sub('S', part)) for part in expressions]
-        if normalized != ['f1(t)', 'h===null?S:Math.round(h)']:
+        normalized = [re.sub(r'\s+', '', _JS_QUOTED.sub('@', part)) for part in expressions]
+        if normalized != ['f1(t)', 'h===null?@:Math.round(h)']:
             return match.group(0)
         if '${' in re.sub(r'\$\{[^}]*\}', '', body):
             return match.group(0)
-        return 'T'
+        return '#'
     tail = re.sub(r'`([^`]*)`', output_template, tail)
-    tail = re.sub(r'\s+', '', _JS_QUOTED.sub('S', tail))
+    tail = re.sub(r'\s+', '', _JS_QUOTED.sub('@', tail))
     return any(tail == _TABLE_COMMON + ending for ending in _TABLE_ENDS)
 
 
@@ -118,12 +118,12 @@ def _unchanged_finite_expression(text, variables, mapping):
     def template(match):
         body = match.group(1)
         body = body.replace('${selected}', '').replace('${count}', '')
-        return 'T' if '${' not in body and '\\' not in body else match.group(0)
+        return '#' if '${' not in body and '\\' not in body else match.group(0)
     normalized = re.sub(r'`([^`]*)`', template, text)
     literals = []
     def quote(match):
         literals.append(match.group(0)[1:-1])
-        return 'S'
+        return '@'
     normalized = _JS_QUOTED.sub(quote, normalized)
     normalized = re.sub(r'\s+', '', normalized)
     if _JS_LIST_LOOKUP.fullmatch(normalized):

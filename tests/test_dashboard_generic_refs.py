@@ -111,6 +111,8 @@ class GenericDashboardReferences(unittest.TestCase):
         table = '[[[ const C = {"x": ["x", "icon"]}' + common
         self.assertIsNone(plan_button_expression(table, mapping)[1])
         self.assertIsNotNone(plan_button_expression(table.replace('states[e]', 'states[other]'), mapping)[1])
+        self.assertIsNotNone(plan_button_expression(table.replace("states['sensor.foreign']", 'states[S]'), mapping)[1])
+        self.assertIsNotNone(plan_button_expression(source.replace("?'on':'off'", '?S:S'), mapping, {'source_entities': ['sensor.old']})[1])
         encoded = table.replace('"icon"', '"sensor' + chr(92) + 'u002eold"')
         self.assertIsNotNone(plan_button_expression(encoded, mapping)[1])
 
