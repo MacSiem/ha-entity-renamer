@@ -20,6 +20,10 @@ from .native_input_baseline import (
 from .yaml_plan import Limits, _Reader
 
 
+_SETTLE_TIMEOUT = 65.0
+_SETTLE_INTERVAL = 1.0
+
+
 class DiscoveryNativeInputsError(ValueError):
     """Sanitized discovery refusal, without source values or underlying text."""
 
@@ -219,14 +223,34 @@ Cancellation drains executor work before any held descriptor can be released.
                 or os.path.normpath(root) != root or __version__ not in _SCHEMAS):
             _reject()
         location = _SourceLocation(__version__, root)
-        managers = _Managers(hass, location)
+        managers = _Managers(hass, location, allow_pending=True)
 
-        def check():
+        def check(*, allow_pending=False):
             guard()
             if type(hass.config.config_dir) is not str or hass.config.config_dir != root:
                 _reject()
-            managers.check()
+            managers.check(allow_pending=allow_pending)
 
+        # Wait only for native work already in flight; never start, cancel, or
+        # flush a Store write. Keep the original identities and manager image
+        # across every await, then begin the ordinary fully fenced capture.
+        deadline = hass.loop.time() + _SETTLE_TIMEOUT
+        while any(managers.pending_for(store) for store in managers.stores):
+            remaining = deadline - hass.loop.time()
+            if remaining <= 0:
+                flags = ('data', 'write_lock', 'delay_handle', 'final_listener', 'load_future')
+                pending = []
+                for key, store in zip(_KEYS, managers.stores, strict=True):
+                    state = (store._data is not None, store._write_lock.locked(),
+                             store._delay_handle is not None,
+                             store._unsub_final_write_listener is not None,
+                             store._load_future is not None)
+                    pending.extend((key, flag) for flag, active in zip(flags, state, strict=True) if active)
+                logging.getLogger(__name__).warning('Native discovery Store settle timeout: %s', pending)
+                _reject()
+            await asyncio.sleep(min(_SETTLE_INTERVAL, remaining))
+            check(allow_pending=True)
+        check()
         pinned = _DiscoveryPinned(location, managers.initial)
         check()
         observed = await _drained(hass.async_add_executor_job, pinned.capture)

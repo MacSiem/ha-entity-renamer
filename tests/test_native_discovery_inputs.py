@@ -185,6 +185,10 @@ class DiscoveryNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(observed, 'receipt'))
 
     async def test_pending_store_refuses_without_settling(self):
+        with patch.object(subject, '_SETTLE_TIMEOUT', 0):
+            await self._assert_pending_refuses()
+
+    async def _assert_pending_refuses(self):
         for manager in self.fixture.managers:
             store = manager._store
             for name in ('_data', '_delay_handle', '_unsub_final_write_listener', '_load_future'):
@@ -203,6 +207,38 @@ class DiscoveryNativeTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(subject.DiscoveryNativeInputsError): await self.observe()
             finally:
                 store._write_lock.release()
+
+    async def test_native_delayed_write_settles_before_observation(self):
+        store = self.fixture.managers[0]._store
+        store.async_delay_save(self.fixture.managers[0]._data_to_save, 0.05)
+        with patch.object(subject, '_SETTLE_INTERVAL', 0.02):
+            observed = await self.observe()
+        self.assertFalse(subject._Managers.pending_for(store))
+        self.assertEqual(observed.files[0].raw, Path(store.path).read_bytes())
+
+    async def test_wait_rejects_manager_drift_and_releases_on_cancel(self):
+        store = self.fixture.managers[0]._store
+        await store._write_lock.acquire()
+        try:
+            with patch.object(subject, '_SETTLE_INTERVAL', 0.02):
+                task = asyncio.create_task(self.observe())
+                await asyncio.sleep(0.01)
+                from homeassistant.helpers import entity_registry as er
+                old = self.fixture.hass.data[er.DATA_REGISTRY]
+                self.fixture.hass.data[er.DATA_REGISTRY] = object()
+                try:
+                    with self.assertRaises(subject.DiscoveryNativeInputsError):
+                        await task
+                finally:
+                    self.fixture.hass.data[er.DATA_REGISTRY] = old
+                task = asyncio.create_task(self.observe())
+                await asyncio.sleep(0.01)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertTrue(store._write_lock.locked())
+        finally:
+            store._write_lock.release()
 
     async def test_runtime_version_root_and_native_identity_changes_refuse(self):
         import homeassistant.const as const
