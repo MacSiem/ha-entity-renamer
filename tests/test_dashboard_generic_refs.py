@@ -62,7 +62,7 @@ class GenericDashboardReferences(unittest.TestCase):
         mapping = {'sensor.old': 'sensor.new'}
         config = {'conditions': [{'entity': 'sensor.old', 'state': ['sensor.old', 'on']}],
                   'target': {'area_id': {'popup': {'entity': 'sensor.old'}}},
-                  'filter': {'include': [{'name': 'entity_id', 'value': r'^sensor\\.old$'}]}}
+                  'filter': {'include': [{'name': 'entity_id', 'value': r'^sensor\.old$'}]}}
         result = plan_dashboard(config, mapping)
         self.assertEqual(result.value['conditions'][0]['state'], ['sensor.new', 'on'])
         self.assertEqual(result.value['target']['area_id']['popup']['entity'], 'sensor.new')
@@ -93,6 +93,66 @@ class GenericDashboardReferences(unittest.TestCase):
             dependency_dashboards([PreparedDashboard(snap, before, revision(before))], mapping)
         with self.assertRaises(PlanError):
             v = {}; v['child'] = v; plan_dashboard(v, mapping)
+
+
+class GenericDashboardNativeIntegration(unittest.TestCase):
+    def test_discovery_review_and_receipt_for_change_and_no_change(self):
+        from unittest.mock import patch
+        from custom_components.ha_entity_renamer.dashboard_receipts import validate_prepared
+        from custom_components.ha_entity_renamer.discovery import _consumer_family
+        from custom_components.ha_entity_renamer.lovelace_native import NativeLovelace
+        from custom_components.ha_entity_renamer.native_discovery_consumers import ConsumerOutcome, DashboardEvidence
+        from custom_components.ha_entity_renamer.native_registry import PreparedRegistryChange
+        mapping = {'sensor.old': 'sensor.new'}
+        before = {'views': [{'cards': [{'type': 'custom:foreign', 'entity': 'sensor.old'}]}]}
+        snap = Snapshot(Dashboard(None, 'lovelace', 'id'), before, revision(before), (7, 100, 'a' * 64))
+        outcome = ConsumerOutcome('COMPLETE', '', DashboardEvidence((snap,), (), 'inventory', ()))
+        family = _consumer_family('dashboard', outcome, mapping)
+        self.assertEqual((family.status, family.blockers), ('COMPLETE', ()))
+        native = NativeLovelace(None)
+        planned = plan_dashboard(before, mapping)
+        change = native.prepare(snap, planned)
+        self.assertEqual(len(dependency_dashboards([change], mapping)), 1)
+        registry = PreparedRegistryChange('entity', 'registry-id',
+            '{"entity_id":"sensor.old"}', '{"entity_id":"sensor.new"}')
+        composition = SimpleNamespace(prepared_digests=(('registry-ref', 'digest'),))
+        preparations = SimpleNamespace(resolve_composition=lambda _: ('baseline', composition),
+                                       resolve=lambda *_: object())
+        step = SimpleNamespace(adapter='registry', prepared_ref='registry-ref')
+        chain = SimpleNamespace(preparations=preparations, baseline='baseline',
+            plan=SimpleNamespace(native_inputs='inputs', steps=(step,)),
+            original_receipt=SimpleNamespace(source_files=(('.storage/lovelace', 'a' * 64, 7, 100),)))
+        with patch('custom_components.ha_entity_renamer.prepared.decode_change', return_value=registry):
+            validate_prepared(chain, change)
+            with self.assertRaises(Exception):
+                validate_prepared(chain, PreparedDashboard(snap, before, revision(before)))
+            with self.assertRaises(Exception):
+                validate_prepared(chain, PreparedDashboard(snap, {}, revision({})))
+        unchanged = {'views': [{'cards': [{'type': 'custom:foreign', 'title': 'A'}]}]}
+        no_change = plan_dashboard(unchanged, mapping)
+        self.assertFalse(no_change.markers)
+        self.assertFalse(no_change.changes)
+        self.assertEqual(dependency_dashboards([], mapping), [])
+
+    def test_registered_yaml_route_qualifies_source_and_foreign_bytes(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from custom_components.ha_entity_renamer.dashboard_yaml_semantics import qualify_dashboard_yaml
+        from custom_components.ha_entity_renamer.yaml_plan import plan_yaml
+        mapping = {'sensor.old': 'sensor.new'}
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'configuration.yaml').write_text('{}\n')
+            raw = ("views:\n- cards:\n  - type: custom:other\n"
+                   "    entity: sensor.old\n    title: sensor.old\n").encode()
+            (root / 'board.yaml').write_bytes(raw)
+            plan = plan_yaml(root, mapping, yaml_dashboards=('board.yaml',))
+            before, after = qualify_dashboard_yaml(plan, 'board.yaml', raw, mapping)
+            self.assertEqual(before['views'][0]['cards'][0]['entity'], 'sensor.old')
+            self.assertEqual(after['views'][0]['cards'][0]['entity'], 'sensor.new')
+            self.assertEqual(after['views'][0]['cards'][0]['title'], 'sensor.old')
+            with self.assertRaises(ValueError):
+                qualify_dashboard_yaml(plan, 'board.yaml', raw + b'\n', mapping)
 
 
 if __name__ == '__main__': unittest.main()
