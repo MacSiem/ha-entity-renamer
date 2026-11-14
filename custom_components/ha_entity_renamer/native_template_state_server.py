@@ -657,6 +657,34 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 'helper_dependency_unsupported')
         bridge = NativeRegistryBridge(NativeRegistryIO(self.hass), self.recorder)
         registry = []
+        bulk = {}
+        if registry_only and not candidate_own and not mixed_powercalc and not external_domains:
+            requests = []
+            for old, new in sorted(self.mapping.items()):
+                source = [row for row in rows if row['entity_id'] == old]
+                _need(len(source) == 1 and not any(row['entity_id'] == new for row in rows),
+                      'source_uuid_required')
+                fields = {'entity_id': new}
+                if old in self.entity_names:
+                    fields['name'] = self.entity_names[old]
+                requests.append(('entity', source[0]['id'], fields))
+            for entity_id, name in sorted(self.entity_names.items()):
+                if entity_id in self.mapping:
+                    continue
+                source = [row for row in rows if row['entity_id'] == entity_id]
+                _need(len(source) == 1 and source[0]['platform'] not in ('automation', 'script'),
+                      'selected_name_source_required')
+                if source[0].get('name') != name:
+                    requests.append(('entity', source[0]['id'], {'name': name}))
+            device_rows = documents['core.device_registry']['data']['devices']
+            for identity, name in sorted(self.device_names.items()):
+                source = [row for row in device_rows if row['id'] == identity]
+                _need(len(source) == 1, 'selected_device_source_required')
+                if source[0].get('name_by_user') != name:
+                    requests.append(('device', identity, {'name_by_user': name}))
+            prepared_many = await bridge.prepare_many(requests, self._scope)
+            self._scope()
+            bulk = {(item.kind, item.identity): item for item in prepared_many}
         for old, new in sorted(self.mapping.items()):
             source = [row for row in rows if row['entity_id'] == old]
             _need(len(source) == 1 and not any(row['entity_id'] == new for row in rows),
@@ -669,7 +697,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 inventory.check()
                 service_audit.check()
                 service_recipients.check()
-            prepared = await bridge.prepare('entity', source[0]['id'], fields, self._scope)
+            prepared = (bulk[('entity', source[0]['id'])] if bulk else
+                        await bridge.prepare('entity', source[0]['id'], fields, self._scope))
             self._scope()
             if prepared.runtime_before_json and not registry_only:
                 saved = json.loads(prepared.runtime_before_json)['entities'][prepared.identity]
@@ -761,7 +790,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             _need(len(source) == 1 and source[0]['platform'] not in ('automation', 'script'),
                   'selected_name_source_required')
             if source[0].get('name') != name:
-                registry.append(await bridge.prepare('entity', source[0]['id'], {'name': name}, self._scope))
+                registry.append(bulk[('entity', source[0]['id'])] if bulk else
+                                await bridge.prepare('entity', source[0]['id'], {'name': name}, self._scope))
                 self._scope()
         device_rows = documents['core.device_registry']['data']['devices']
         for identity, name in sorted(self.device_names.items()):
@@ -771,7 +801,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 _need(not any(row.get('device_id') == identity and row.get('platform') == 'powercalc'
                               for row in rows), 'powercalc_device_owner_unsupported')
             if source[0].get('name_by_user') != name:
-                registry.append(await bridge.prepare('device', identity, {'name_by_user': name}, self._scope))
+                registry.append(bulk[('device', identity)] if bulk else
+                                await bridge.prepare('device', identity, {'name_by_user': name}, self._scope))
                 self._scope()
         if mixed_powercalc:
             from .native_template_state_yaml import capture_mixed_powercalc_yaml

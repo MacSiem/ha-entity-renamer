@@ -503,7 +503,7 @@ class NativeRegistryBridge:
                             'script', 'script', destination['unique_id']) is not None):
                     raise RegistryConflict('registry_unique_destination_occupied')
 
-    async def prepare(self, kind, identity, updates, guard):
+    def _prepare_change(self, kind, identity, updates, guard):
         guard()
         if kind not in ("entity", "device") or not self.io.running():
             raise RegistryConflict("unsupported_registry_or_lifecycle")
@@ -525,6 +525,11 @@ class NativeRegistryBridge:
         change = PreparedRegistryChange(kind, identity, json.dumps(before, sort_keys=True),
                                         json.dumps(after, sort_keys=True))
         self._fresh(change, before, guard)
+        return change
+
+    async def prepare(self, kind, identity, updates, guard):
+        change = self._prepare_change(kind, identity, updates, guard)
+        before = change.before
         recorder_before, history_before = {}, {}
         if change.mapping:
             recorder_before = await self.recorder.preflight(change.mapping)
@@ -544,6 +549,72 @@ class NativeRegistryBridge:
         if evidence.position != "before":
             raise RegistryConflict("before_state_unverified:" + evidence.reason)
         return change
+
+    async def prepare_many(self, requests, guard):
+        """Prepare ordinary registry changes with shared read-only barriers."""
+        from dataclasses import replace
+        from .recorder_guard import prepare as recorder_prepare, verify_rollback
+        from .history_guard import _project
+
+        changes = [self._prepare_change(kind, identity, updates, guard)
+                   for kind, identity, updates in requests]
+        if len({(c.kind, c.identity) for c in changes}) != len(changes):
+            raise RegistryConflict('duplicate_registry_identity')
+        mappings = [c.mapping for c in changes if c.mapping]
+        combined = {old: new for mapping in mappings for old, new in mapping.items()}
+        if len(combined) != len(mappings) or len(set(combined.values())) != len(combined):
+            raise RegistryConflict('duplicate_registry_mapping')
+
+        def fence():
+            guard()
+            for change in changes:
+                self._fresh(change, change.before, lambda: None)
+
+        fence()
+        baselines, histories = [], []
+        if mappings:
+            metadata = await self.recorder.snapshot(combined)
+            fence()
+            baselines = [recorder_prepare(m, _project(metadata, m)) for m in mappings]
+            histories = await self._history().capture_many(mappings, fence)
+            fence()
+        iterator = iter(zip(baselines, histories))
+        changes = [replace(c, recorder_before_json=json.dumps(pair[0], sort_keys=True),
+                           history_before_json=json.dumps(pair[1], sort_keys=True))
+                   if c.mapping else replace(c, recorder_before_json='{}', history_before_json='{}')
+                   for c in changes for pair in ([next(iterator)] if c.mapping else [(None, None)])]
+        capture = getattr(self.io, 'capture_runtime', None)
+        if capture is not None:
+            for i, change in enumerate(changes):
+                await self.io.settle(change)
+                fence()
+                changes[i] = replace(change, runtime_before_json=capture(change))
+        for change in changes:
+            await self.io.settle(change)
+            fence()
+        current = None
+        if mappings:
+            current = await self.recorder.snapshot(combined)
+            fence()
+            valid_history = await self._history().verify_many(histories, fence)
+            fence()
+            if not all(valid_history):
+                raise RegistryConflict('before_state_unverified:scoped_evidence_incomplete')
+        runtimes = [self.runtime_probe(change, change.before) for change in changes]
+        disks = {}
+        for kind in dict.fromkeys(c.kind for c in changes):
+            disks[kind] = await self.io.disk(kind)
+            fence()
+        for change, runtime in zip(changes, runtimes):
+            durable = self._matches(change, _row(disks[change.kind], change.kind, change.identity), change.before)
+            metadata_ok = (not change.mapping or verify_rollback(
+                change.mapping, json.loads(change.recorder_before_json), _project(current, change.mapping)))
+            if (durable is not True or runtime is not True
+                    or self.runtime_probe(change, change.before) is not True or not metadata_ok
+                    or self.io.pending(change.kind)):
+                raise RegistryConflict('before_state_unverified:scoped_evidence_incomplete')
+        fence()
+        return changes
 
     async def inspect(self, change):
         """Read-only recovery: BEFORE / AFTER / CONFLICT / UNKNOWN; no retry."""

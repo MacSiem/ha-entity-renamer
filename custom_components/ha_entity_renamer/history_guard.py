@@ -75,10 +75,53 @@ def _read(recorder, state_ids, statistic_ids, expected=None):
         return _read_session(session, state_ids, statistic_ids, expected)
 
 
+def _read_many(recorder, requests):
+    from homeassistant.components.recorder.util import session_scope
+    with session_scope(session=recorder.get_session(), read_only=True) as session:
+        return [_read_session(session, states, statistics, expected)
+                for states, statistics, expected in requests]
+
+
+def _project(metadata, mapping):
+    ids = set(mapping) | set(mapping.values())
+    return {kind: {key: value for key, value in rows.items() if key in ids}
+            for kind, rows in metadata.items()}
+
+
 class NativeHistoryGuard:
     def __init__(self, recorder_guard):
         self.guard = recorder_guard
         self.recorder = recorder_guard.instance
+
+    async def capture_many(self, mappings, fence):
+        combined = {old: new for mapping in mappings for old, new in mapping.items()}
+        metadata = await self.guard.snapshot(combined)
+        fence()
+        requests = []
+        for mapping in mappings:
+            part = _project(metadata, mapping)
+            states = sorted({row['metadata_id'] for row in part['states'].values()})
+            statistics = sorted({row['id'] for row in part['statistics'].values()})
+            requests.append((states, statistics, None))
+        content = await self.recorder.async_add_executor_job(_read_many, self.recorder, requests)
+        fence()
+        after = await self.guard.snapshot(combined)
+        fence()
+        if after != metadata:
+            raise HistoryConflict('history_metadata_changed_during_capture')
+        return [{'schema': 1, 'state_ids': states, 'statistic_ids': statistics, 'content': item}
+                for (states, statistics, _), item in zip(requests, content)]
+
+    async def verify_many(self, snapshots, fence):
+        # Snapshots were generated locally by capture_many, with the same schema
+        # and ceilings as capture(); no externally supplied receipt enters here.
+        await self.guard.snapshot({})
+        fence()
+        requests = [(item['state_ids'], item['statistic_ids'], item['content'])
+                    for item in snapshots]
+        current = await self.recorder.async_add_executor_job(_read_many, self.recorder, requests)
+        fence()
+        return [value == snapshot['content'] for value, snapshot in zip(current, snapshots)]
 
     async def capture(self, mapping):
         metadata = await self.guard.snapshot(mapping)
