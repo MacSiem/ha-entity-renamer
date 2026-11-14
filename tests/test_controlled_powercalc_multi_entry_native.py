@@ -789,7 +789,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
             await pulse()
             self.assertTrue(all(Decimal(counter_values(inventory())[uid][0]) > Decimal(initial[uid][0])
                                 for uid in ('fixture-group-a_energy', 'fixture-group-b_energy')))
-            native_dummy_mdns(hass)
+            native_dummy_mdns(hass, homekit_entry=bridge_entry if browser_ui else None)
         finally:
             # Preserve coroutine locations before fixture teardown when UI
             # reports an unresolved Energy effect; do not capture arguments.

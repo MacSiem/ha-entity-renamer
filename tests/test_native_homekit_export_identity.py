@@ -31,7 +31,7 @@ class HomeKitExportIdentityTests(unittest.IsolatedAsyncioTestCase):
         source = Source(); await component.async_add_entities([source]); await hass.async_block_till_done()
         old, new = source.entity_id, 'switch.synthetic_hap_source_renamed'
         def yaml(entity):
-            return ('homekit:\n  name: Synthetic Bridge\n  port: 21197\n'
+            return ('homekit:\n  name: Synthetic Bridge\n  port: 21198\n'
                     '  ip_address: 192.0.2.1\n  advertise_ip: 192.0.2.1\n'
                     f'  filter:\n    include_entities:\n      - {entity}\n')
         config = root/'configuration.yaml'; config.write_text(yaml(old))
@@ -39,6 +39,17 @@ class HomeKitExportIdentityTests(unittest.IsolatedAsyncioTestCase):
         await hass.async_block_till_done()
         await hass.services.async_call('homekit', 'reload', {}, blocking=True); await hass.async_block_till_done()
         entry = hass.config_entries.async_entries('homekit')[0]
+        from ordinary_network_scope import native_dummy_mdns
+        import socket
+        def verify_network():
+            proof = native_dummy_mdns(hass, homekit_entry=entry)
+            self.assertEqual(proof['hap_listener']['address'], ['192.0.2.1', 21198])
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as foreign:
+                foreign.bind(('192.0.2.1', 0))
+                foreign.listen()
+                with self.assertRaisesRegex(ValueError, 'dummy_foreign_socket_unverified'):
+                    native_dummy_mdns(hass, homekit_entry=entry)
+        verify_network()
         helper = importlib.import_module(fixture.PACKAGE + '.helper_native')
         planner = importlib.import_module(fixture.PACKAGE + '.helper_plan')
         identity = importlib.import_module(fixture.PACKAGE + '.native_homekit_filter')
@@ -59,12 +70,14 @@ class HomeKitExportIdentityTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await hass.config_entries.async_unload(entry.entry_id)); await settle()
             base.entity.async_update_entity(source_id, new_entity_id=target_id); await settle()
             await helper.apply_entry(hass, plan, guard=lambda:None, settle=settle,
-                record_intent=intent, verify_runtime=verify)
+                record_intent=intent, verify_runtime=verify, validate_snapshot=verify)
             self.assertTrue(await hass.config_entries.async_setup(entry.entry_id)); await settle()
             config.write_text(yaml(target_id))
             await hass.services.async_call('homekit', 'reload', {}, blocking=True); await settle()
             aid, bridge = exported(target_id)
             self.assertEqual((aid, bridge), (before_aid, before_bridge))
         await transition(old, new)
+        verify_network()
         await transition(new, old)
+        verify_network()
         self.assertEqual(helper.read_entry(hass, entry.entry_id), original)

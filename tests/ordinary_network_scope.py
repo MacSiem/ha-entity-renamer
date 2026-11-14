@@ -24,7 +24,7 @@ def _ipv6_interface(raw):
     return ipaddress.IPv6Address(int(raw, 16))
 
 
-def native_dummy_mdns(hass):
+def native_dummy_mdns(hass, *, homekit_entry=None):
     """Read Core's actual Zeroconf transport FDs and the kernel namespace."""
     from homeassistant.components.zeroconf import DATA_INSTANCE
     from homeassistant.components.zeroconf.models import HaAsyncZeroconf, HaZeroconf
@@ -76,7 +76,34 @@ def native_dummy_mdns(hass):
         inodes.append(match.group(1))
     if len(set(inodes)) != 3:
         raise ValueError('dummy_zeroconf_duplicate_socket')
+    hap_inode = None
+    if homekit_entry is not None:
+        from homeassistant.components.homekit import HomeKit
+        from homeassistant.components.homekit.accessories import HomeDriver
+        from pyhap.hap_server import HAPServer
+        if not any(entry is homekit_entry for entry in hass.config_entries.async_entries('homekit')):
+            raise ValueError('dummy_hap_entry_unverified')
+        native = homekit_entry.runtime_data.homekit
+        if type(native) is not HomeKit or type(native.driver) is not HomeDriver:
+            raise ValueError('dummy_hap_owner_unverified')
+        driver = native.driver
+        hap = driver.http_server
+        if (type(hap) is not HAPServer or hap.accessory_handler is not driver
+                or driver.loop is not hass.loop or hap.loop is not hass.loop
+                or hap.server is None or not hap.server.is_serving()
+                or len(hap.server.sockets) != 1):
+            raise ValueError('dummy_hap_server_unverified')
+        listener = hap.server.sockets[0]
+        if (listener.family != socket.AF_INET or listener.type != socket.SOCK_STREAM
+                or listener.getsockname() != ('192.0.2.1', 21198)
+                or listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) != 1):
+            raise ValueError('dummy_hap_listener_unverified')
+        match = re.fullmatch(r'socket:\[(\d+)\]', os.readlink('/proc/self/fd/' + str(listener.fileno())))
+        if match is None or match.group(1) in inodes:
+            raise ValueError('dummy_hap_inode_unverified')
+        hap_inode = match.group(1)
     seen = []
+    hap_seen = False
     for table in ('tcp', 'tcp6', 'udp', 'udp6'):
         for line in (Path('/proc/net') / table).read_text().splitlines()[1:]:
             fields = line.split()
@@ -85,6 +112,12 @@ def native_dummy_mdns(hass):
             local = (ipaddress.IPv4Address(struct.pack('<I', int(address_hex, 16))) if table in ('tcp', 'udp')
                      else _ipv6_proc(address_hex))
             if local.is_loopback:
+                continue
+            if (hap_inode is not None and table == 'tcp' and str(local) == '192.0.2.1'
+                    and int(port, 16) == 21198 and int(remote_hex, 16) == 0
+                    and int(remote_port, 16) == 0 and fields[3] == '0A'
+                    and fields[9] == hap_inode and not hap_seen):
+                hap_seen = True
                 continue
             if (table not in ('udp', 'udp6') or int(port, 16) != 5353 or int(remote_hex, 16) != 0
                     or int(remote_port, 16) != 0 or fields[3] != '07' or fields[9] not in inodes):
@@ -96,9 +129,14 @@ def native_dummy_mdns(hass):
     if (len(seen) != 3 or {row[1] for row in seen} != set(inodes)
             or sorted(row[2] for row in seen) != ['ipv4', 'ipv6-linklocal', 'ipv6-wildcard']):
         raise ValueError('dummy_mdns_socket_membership_unverified')
-    return {'kind': 'native-zeroconf-dummy-v1', 'ifindex': index, 'iflink': link,
+    if hap_inode is not None and not hap_seen:
+        raise ValueError('dummy_hap_socket_membership_unverified')
+    result = {'kind': 'native-zeroconf-dummy-v1', 'ifindex': index, 'iflink': link,
             'virtual_without_device': True, 'ipv4': address, 'no_external_routes': True,
             'reader_inodes': sorted(inodes), 'sockets': sorted([list(row) for row in seen])}
+    if hap_inode is not None:
+        result['hap_listener'] = {'address': ['192.0.2.1', 21198], 'inode': hap_inode}
+    return result
 
 
 def network_quiet(network):
