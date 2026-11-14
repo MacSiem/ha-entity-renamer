@@ -636,36 +636,76 @@ class NativeRegistryBridge:
                 if change.kind == 'device' or not change.mapping:
                     await asyncio.sleep(0)
                     fence()
-        await settle_batch()
+        await self.inspect_many_before(changes, guard)
+        return changes
+
+    async def inspect_many_before(self, changes, guard):
+        """Fresh collective BEFORE readback for an ordinary immutable batch."""
+        from .recorder_guard import verify_rollback
+        from .history_guard import _project
+        changes = tuple(changes)
+        device_ids = {c.identity for c in changes if c.kind == 'device'}
+        membership = getattr(self.io, 'device_memberships', None)
+        original_members = membership(device_ids) if membership is not None else None
+        mappings = [c.mapping for c in changes if c.mapping]
+        combined = {old: new for mapping in mappings for old, new in mapping.items()}
+        if (len({(c.kind, c.identity) for c in changes}) != len(changes)
+                or len(combined) != len(mappings) or len(set(combined.values())) != len(combined)):
+            raise RegistryConflict('duplicate_registry_mapping')
+
+        def fence():
+            guard()
+            for change in changes:
+                self._fresh(change, change.before, lambda: None)
+            if membership is not None and membership(device_ids) != original_members:
+                raise RegistryConflict('device_entity_membership_changed')
+
+        def runtime_batch(group):
+            # Accepted images are detached and used only during this synchronous
+            # phase. Never carry a live, source or disk proof across an await.
+            if self.native_images is not None and type(self.io) is NativeRegistryIO:
+                documents = self.native_images()
+                return [self.io.runtime(c, c.before, expected_documents=documents) for c in group]
+            return [self.runtime_probe(c, c.before) for c in group]
+
         fence()
+        settle_many = getattr(self.io, 'settle_many', None)
+        if settle_many is not None:
+            await settle_many(changes)
+            fence()
+        else:
+            for change in changes:
+                await self.io.settle(change)
+                fence()
         current = None
         if mappings:
             current = await self.recorder.snapshot(combined)
             fence()
-            valid_history = await self._history().verify_many(histories, fence)
+            histories = [json.loads(c.history_before_json) for c in changes if c.mapping]
+            valid = await self._history().verify_many(histories, fence)
             fence()
-            if not all(valid_history):
+            if not all(valid):
                 raise RegistryConflict('before_state_unverified:scoped_evidence_incomplete')
         for kind in dict.fromkeys(c.kind for c in changes):
             group = [change for change in changes if change.kind == kind]
-            runtimes = [self.runtime_probe(change, change.before) for change in group]
+            runtimes = runtime_batch(group)
             disk = await self.io.disk(kind)
             fence()
-            for change, runtime in zip(group, runtimes):
+            after_runtime = runtime_batch(group)
+            for change, runtime, runtime_after in zip(group, runtimes, after_runtime):
                 durable = self._matches(change, _row(disk, kind, change.identity), change.before)
                 metadata_ok = (not change.mapping or verify_rollback(
                     change.mapping, json.loads(change.recorder_before_json), _project(current, change.mapping)))
-                if (durable is not True or runtime is not True
-                        or self.runtime_probe(change, change.before) is not True or not metadata_ok
-                        or self.io.pending(kind)):
+                if (durable is not True or runtime is not True or runtime_after is not True
+                        or not metadata_ok or self.io.pending(kind)):
                     raise RegistryConflict('before_state_unverified:scoped_evidence_incomplete')
             del disk
-        if any(self.runtime_probe(change, change.before) is not True for change in changes):
+        if any(result is not True for result in runtime_batch(changes)):
             raise RegistryConflict('before_state_unverified:runtime_changed')
         if any(self.io.pending(kind) for kind in {c.kind for c in changes}):
             raise RegistryConflict('before_state_unverified:native_persistence_pending')
         fence()
-        return changes
+        return True
 
     async def inspect(self, change):
         """Read-only recovery: BEFORE / AFTER / CONFLICT / UNKNOWN; no retry."""

@@ -29,7 +29,7 @@ class BatchHistory:
     async def verify_many(self, snapshots, fence):
         await asyncio.sleep(0)
         fence()
-        return [True] * len(snapshots)
+        return [snapshot.get('content') != ['corrupt'] for snapshot in snapshots]
 
 
 class PrepareManyTests(unittest.IsolatedAsyncioTestCase):
@@ -125,3 +125,17 @@ class PrepareManyTests(unittest.IsolatedAsyncioTestCase):
         io.settle_many = settle_many
         with self.assertRaisesRegex(Conflict, 'device_entity_membership_changed'):
             await bridge.prepare_many([('device', 'device', {'name_by_user': 'After'})], lambda: None)
+
+    async def test_final_before_uses_original_metadata_and_history(self):
+        from dataclasses import replace
+        io, recorder, bridge = self.make(3)
+        requests = [('entity', str(i), {'entity_id': f'sensor.new_{i}'}) for i in range(3)]
+        changes = await bridge.prepare_many(requests, lambda: None)
+        self.assertTrue(await bridge.inspect_many_before(changes, lambda: None))
+        altered = list(changes)
+        altered[1] = replace(altered[1], history_before_json='{"content":["corrupt"]}')
+        with self.assertRaises(Conflict):
+            await bridge.inspect_many_before(altered, lambda: None)
+        recorder.baseline['states']['sensor.old_1']['metadata_id'] = 99
+        with self.assertRaises(Conflict):
+            await bridge.inspect_many_before(changes, lambda: None)

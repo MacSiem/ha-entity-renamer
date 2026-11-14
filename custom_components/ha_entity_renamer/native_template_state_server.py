@@ -685,6 +685,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             prepared_many = await bridge.prepare_many(requests, self._scope)
             self._scope()
             bulk = {(item.kind, item.identity): item for item in prepared_many}
+        self._bulk_registry_preparation = bool(bulk)
         for old, new in sorted(self.mapping.items()):
             source = [row for row in rows if row['entity_id'] == old]
             _need(len(source) == 1 and not any(row['entity_id'] == new for row in rows),
@@ -1066,12 +1067,16 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         wanted = Position.BEFORE if rollback or initial else Position.AFTER
         bridge = NativeRegistryBridge(NativeRegistryIO(self.hass), self.recorder,
                                        native_images=self.chain.accepted_documents)
-        for change in self.registry_changes:
-            actual = await bridge.inspect(change)
+        if initial and getattr(self, '_bulk_registry_preparation', False):
+            await bridge.inspect_many_before(self.registry_changes, self._scope)
             self._scope()
-            if actual.position != wanted.value:
-                _log_registry_mismatch(actual, wanted)
-            _need(actual.position == wanted.value, 'source_identity_or_history_changed')
+        else:
+            for change in self.registry_changes:
+                actual = await bridge.inspect(change)
+                self._scope()
+                if actual.position != wanted.value:
+                    _log_registry_mismatch(actual, wanted)
+                _need(actual.position == wanted.value, 'source_identity_or_history_changed')
         state = self.chain.reconstruct_inputs()
         position = await self.observer.position_at_inputs(self.change, state)
         # Let HA service timers and sockets before the next full graph check.
