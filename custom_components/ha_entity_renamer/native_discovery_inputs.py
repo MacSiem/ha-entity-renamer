@@ -223,24 +223,24 @@ Cancellation drains executor work before any held descriptor can be released.
                 or os.path.normpath(root) != root or __version__ not in _SCHEMAS):
             _reject()
         location = _SourceLocation(__version__, root)
-        managers = _Managers(hass, location, allow_pending=True)
+        admission = _Managers(hass, location, identity_only=True)
 
-        def check(*, allow_pending=False):
+        def check_admission():
             guard()
             if type(hass.config.config_dir) is not str or hass.config.config_dir != root:
                 _reject()
-            managers.check(allow_pending=allow_pending)
+            admission.check_identity()
 
         # Wait only for native work already in flight; never start, cancel, or
-        # flush a Store write. Keep the original identities and manager image
-        # across every await, then begin the ordinary fully fenced capture.
+        # flush a Store write. Pin native identities across every await; only
+        # sample manager contents once all five pending flags have cleared.
         deadline = hass.loop.time() + _SETTLE_TIMEOUT
-        while any(managers.pending_for(store) for store in managers.stores):
+        while any(managers.pending_for(store) for store in admission.stores):
             remaining = deadline - hass.loop.time()
             if remaining <= 0:
                 flags = ('data', 'write_lock', 'delay_handle', 'final_listener', 'load_future')
                 pending = []
-                for key, store in zip(_KEYS, managers.stores, strict=True):
+                for key, store in zip(_KEYS, admission.stores, strict=True):
                     state = (store._data is not None, store._write_lock.locked(),
                              store._delay_handle is not None,
                              store._unsub_final_write_listener is not None,
@@ -249,8 +249,17 @@ Cancellation drains executor work before any held descriptor can be released.
                 logging.getLogger(__name__).warning('Native discovery Store settle timeout: %s', pending)
                 _reject()
             await asyncio.sleep(min(_SETTLE_INTERVAL, remaining))
-            check(allow_pending=True)
-        check()
+            check_admission()
+        check_admission()
+        managers = _Managers(hass, location)
+        check_admission()
+
+        def check():
+            guard()
+            if type(hass.config.config_dir) is not str or hass.config.config_dir != root:
+                _reject()
+            managers.check()
+
         pinned = _DiscoveryPinned(location, managers.initial)
         check()
         observed = await _drained(hass.async_add_executor_job, pinned.capture)

@@ -441,7 +441,7 @@ def assert_baseline_receipt(baseline, receipt):
 
 
 class _Managers:
-    def __init__(self, hass, receipt, *, allow_pending=False):
+    def __init__(self, hass, receipt, *, identity_only=False):
         from homeassistant.helpers import entity_registry as er, device_registry as dr
         from homeassistant.config_entries import ConfigEntries, ConfigEntryStore
         from homeassistant.const import __version__
@@ -467,13 +467,16 @@ class _Managers:
         self.store_io_managers = tuple(io._manager for io in self.store_io)
         if any(type(store) is not cls for store, cls in zip(self.stores, store_classes, strict=True)):
             _fail('native_input_store_unsupported')
-        self._initial_native_images = self._native_images(allow_pending=allow_pending)
-        self.initial = self._canonical_documents(self._initial_native_images)
+        if identity_only:
+            self._native_images(identity_only=True)
+        else:
+            self._initial_native_images = self._native_images()
+            self.initial = self._canonical_documents(self._initial_native_images)
 
     def sample(self):
         return self._canonical_documents(self._native_images())
 
-    def _native_images(self, *, allow_pending=False):
+    def _native_images(self, *, identity_only=False):
         from homeassistant.const import __version__
         if (__version__ != self.version or self.hass.state is not self.running
                 or Path(self.hass.config.config_dir).resolve() != Path(self.receipt.config_root)
@@ -508,7 +511,7 @@ class _Managers:
                         store._serialize_in_event_loop is not (key == _KEYS[2])
                         or store._max_readable_version != schema[0])):
                 _fail('native_input_store_changed')
-            if not allow_pending and self.pending_for(store):
+            if not identity_only and self.pending_for(store):
                 _fail('native_input_native_write_pending')
             if self.version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
                 if (key == _KEYS[0] and self.version in ('2026.11.0', '2026.11.1')
@@ -518,6 +521,8 @@ class _Managers:
                     _fail('native_input_manager_not_loaded')
                 if key == _KEYS[2] and not manager._initialized.is_set():
                     _fail('native_input_manager_not_loaded')
+            if identity_only:
+                continue
             # Native fragments, datetime, sets and subentries use HA's actual encoder.
             raw = self.encoder(manager._data_to_save())
             if type(raw) is not bytes or len(raw) > MAX_FILE_BYTES:
@@ -531,6 +536,9 @@ class _Managers:
                 or store._delay_handle is not None or store._unsub_final_write_listener is not None
                 or store._load_future is not None)
 
+    def check_identity(self):
+        self._native_images(identity_only=True)
+
     def _canonical_documents(self, images):
         documents = []
         for key, raw in zip(_KEYS, images, strict=True):
@@ -541,14 +549,14 @@ class _Managers:
             _fail('native_input_limit')
         return tuple(documents)
 
-    def check(self, *, allow_pending=False):
+    def check(self):
         # This is fresh native serialization after ALL lifecycle/store checks,
         # compared with the immutable bytes validated at construction. Exact
         # bytes cannot introduce a new duplicate key, schema or JSON value.
         # Different bytes retain the old strict canonical comparison, including
         # its tolerance for equivalent JSON ordering/whitespace. Never adopt a
         # later image or cache a live observation as the new expectation.
-        images = self._native_images(allow_pending=allow_pending)
+        images = self._native_images()
         if images == self._initial_native_images:
             return
         if self._canonical_documents(images) != self.initial:
