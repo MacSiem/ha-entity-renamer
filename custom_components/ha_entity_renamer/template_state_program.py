@@ -232,6 +232,12 @@ def _project(semantic, mapping, active):
     entity_variables = _get(cfg, 'variables')
     context_variables = _get(result[2], 'variables')
     variables = entity_variables if entity_variables is not None else context_variables
+    def shadows_this(value):
+        if value is None:
+            return False
+        raw = value.get('$variables', value) if type(value) is dict else value
+        return any(name == 'this' for name, _ in _pairs(raw))
+    self_unshadowed = not (shadows_this(entity_variables) or shadows_this(context_variables))
     if variables is not None:
         raw = (variables.get('$variables', variables) if type(variables) is dict else None)
         _need(raw is not None, 'template_state_variables_descriptor_required')
@@ -248,8 +254,12 @@ def _project(semantic, mapping, active):
                 layouts[name] = shape
     def visit(value, path):
         if type(value) is dict and set(value) == {'$template'}:
+            scoped_bindings = bindings
+            if (self_unshadowed and path and path[0] == 3
+                    and not any(part in ('variables', 'turn_on', 'turn_off') for part in path if type(part) is str)):
+                scoped_bindings = {**bindings, 'this': ('native_self', ())}
             text, markers, sinks, bad = analyze_template_bindings(
-                value['$template'], chosen, bindings,
+                value['$template'], chosen, scoped_bindings,
                 output_reference=bool(path and path[-1] in aliases
                     and 'variables' in path))
             # The reference planner supplies exact spans; never str.replace.
