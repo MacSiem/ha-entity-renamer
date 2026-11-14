@@ -79,7 +79,9 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((row.id, row.name), (uuids[old], 'Synthetic foreign edit'))
         self.assertIsNone(self.f.entity.async_get(new))
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
-        self.assertIsNone(await runtime.journal.load(review['operation_id']))
+        record = await runtime.journal.load(review['operation_id'])
+        self.assertEqual((record.status, record.reason, record.phases),
+                         ('refused', 'prewrite_refused', ('pending', 'pending')))
         with self.assertRaises(self.module('transaction').Refused):
             await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
                 actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
@@ -88,7 +90,7 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         await hass.async_block_till_done()
         await self._flush_documents()
 
-    async def test_dependent_automation_name_and_id_refuses_without_effect(self):
+    async def test_dependent_automation_name_and_id_uses_controlled_reload(self):
         runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
@@ -99,18 +101,24 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
         await hass.services.async_call('automation', 'reload', {}, blocking=True)
         await hass.async_block_till_done()
         await self._flush_documents()
-        before = path.read_bytes()
         async def refresh():
             self.assertTrue(runtime.operation_lock.locked())
-        with self.assertRaises((ValueError, self.module('transaction').Refused)):
-            await runtime.native_yaml_prepare(hass, mapping,
-                entity_names={old: 'Reviewed source'}, actor_id='synthetic-admin',
-                guard=lambda: None, refresh=refresh)
-        self.assertEqual((self.f.entity.async_get(old).id, self.f.entity.async_get(old).name),
-                         (uuids[old], None))
-        self.assertIsNone(self.f.entity.async_get(new))
-        self.assertEqual(path.read_bytes(), before)
-        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+        review = await runtime.native_yaml_prepare(hass, mapping,
+            entity_names={old: 'Reviewed source'}, actor_id='synthetic-admin',
+            guard=lambda: None, refresh=refresh)
+        plan = runtime.reviews[review['operation_id']].plan
+        baseline, composition = runtime.preparations.resolve_composition(plan.native_inputs)
+        self.assertIn('automation', baseline.receipt.changed_domains)
+        self.assertEqual(type(composition).__name__, 'ControlledReloadComposition')
+        result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+            actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        self.assertEqual(result['state'], 'applied')
+        self.assertEqual((self.f.entity.async_get(new).id, self.f.entity.async_get(new).name),
+                         (uuids[old], 'Reviewed source'))
+        self.assertIsNone(self.f.entity.async_get(old))
+        self.assertIn(new, path.read_text())
+        self.assertNotIn(old, path.read_text())
+        self.assertEqual(hass.states.get(new).attributes['friendly_name'], 'Reviewed source')
 
     async def test_id_name_name_only_and_device_in_one_retained_plan(self):
         from types import MappingProxyType
