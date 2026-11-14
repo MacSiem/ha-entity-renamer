@@ -76,16 +76,57 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertEqual(result['state'], 'applied')
         self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
         self.assertEqual(self.f.device.async_get(device.id).name_by_user, 'Reviewed device')
+        await hass.services.async_call('script', 'corpus_unrelated', {}, blocking=True)
+        await hass.services.async_call('automation', 'trigger', {'entity_id': next(iter(before_automation))}, blocking=True)
         result = await runtime.native_yaml_reverse(hass, review['operation_id'], review['fingerprint'],
             guard=lambda: None, refresh=refresh)
         self.assertEqual(result['state'], 'rolled_back')
         self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
         self.assertIsNone(self.f.entity.async_get(new))
         self.assertEqual(self.f.device.async_get(device.id).name_by_user, old_device_name)
+        await hass.services.async_call('script', 'corpus_unrelated', {}, blocking=True)
+        await hass.services.async_call('automation', 'trigger', {'entity_id': next(iter(before_automation))}, blocking=True)
         self.assertEqual((self.f.root / 'configuration.yaml').read_bytes(), before_config)
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
         self.assertEqual({state.entity_id: state.state for state in hass.states.async_all('automation')}, before_automation)
         self.assertEqual({state.entity_id: state.state for state in hass.states.async_all('script')}, before_scripts)
+
+    async def test_registry_device_refuses_automation_owner_before_effect(self):
+        runtime, mapping, uuids, original, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        automation = next(iter(hass.states.async_all('automation'))).entity_id
+        self.f.entity.async_update_entity(automation, device_id=device.id)
+        await hass.async_block_till_done()
+        await self._flush_documents()
+        async def refresh(): pass
+        with self.assertRaises(self.module('transaction').Refused):
+            await runtime.native_yaml_prepare(hass, mapping,
+                entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
+                actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        self.assertFalse(runtime.reviews)
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertIsNone(self.f.device.async_get(device.id).name_by_user)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
+    async def test_registry_device_source_drift_refuses_before_effect(self):
+        runtime, mapping, uuids, original, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        async def refresh(): pass
+        review = await runtime.native_yaml_prepare(hass, mapping,
+            entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
+            actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        path = self.f.root / 'configuration.yaml'
+        path.write_bytes(path.read_bytes() + b'\n# synthetic external drift\n')
+        with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertIsNone(self.f.device.async_get(device.id).name_by_user)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
     async def test_real_ws_first_and_502(self):
         from homeassistant.config_entries import ConfigEntry, ConfigEntryDisabler

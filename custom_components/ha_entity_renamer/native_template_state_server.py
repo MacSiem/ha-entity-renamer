@@ -596,8 +596,18 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                                      if row.get('entity_id') == entity_id]) == 1
                         and hits[0].get('platform') not in ('template', 'automation', 'script')
                         for entity_id in self.mapping))
+            # Registry-only ordinary owners leave A/S configuration and native
+            # registrations unchanged. The existing full source/runtime sampler
+            # continues to fence those peers through every registry transition.
+            # Never admit an A/S-owned entity or a device containing one here.
+            unchanged_device_peers = (registry_only and not self.mixed_state and bool(self.device_names)
+                and set(self.entity_names) <= set(self.mapping)
+                and all(row.get('platform') not in ('automation', 'script')
+                        and row.get('entity_id', '').split('.', 1)[0] not in ('automation', 'script')
+                        for row in source_rows if row.get('entity_id') in self.mapping
+                        or row.get('device_id') in self.device_names))
             _need(controlled_reload or (self.mixed_state and dashboard_storage is not None and mixed_source_names)
-                  or combined_registry_names or not self.consumers.runtime_sample[0],
+                  or combined_registry_names or unchanged_device_peers or not self.consumers.runtime_sample[0],
                   'selected_names_dependent_lifecycle_unsupported')
         baseline = await async_capture_native_input_baseline(self.hass, self.receipt, guard=self._scope)
         self._scope()
