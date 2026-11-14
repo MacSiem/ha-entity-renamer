@@ -442,7 +442,7 @@ class NativeTemplateYAMLRuntimeReadback:
             _need(False, 'synchronous_guard_required')
         _need(value is None or value is True, 'guard_rejected')
         _need(type(self.hass.config.config_dir) is str
-              and self.hass.config.config_dir == self.receipt.config_root
+              and str(Path(self.hass.config.config_dir).resolve()) == self.receipt.config_root
               and type(state) is AcceptedInputState
               and state.original_json == self.chain.baseline.receipt_json
               and self.chain.matches_input_state(

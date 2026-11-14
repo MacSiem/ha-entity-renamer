@@ -321,7 +321,7 @@ class NativeTemplateStateYAMLRuntimeReadback:
         composition = assert_state_yaml_composition(self.chain, change)
         _need(composition.state_config_program == self.program
               and change.receipt == self.receipt
-              and self.hass.config.config_dir == self.receipt.config_root,
+              and str(Path(self.hass.config.config_dir).resolve()) == self.receipt.config_root,
               'template_state_yaml_runtime_binding_changed')
 
     def _check(self, state, live):

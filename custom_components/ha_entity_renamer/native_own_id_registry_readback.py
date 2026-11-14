@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from pathlib import Path
 
 from .native_template_state_yaml import NativeTemplateStateYAMLRuntimeReadback
 from .transaction import Position, Refused
@@ -61,7 +62,7 @@ class NativeOwnIDRegistryReadback(NativeTemplateStateYAMLRuntimeReadback):
               'own_registry_preparation_changed')
         self.composition_check()
         _need(self.chain.original_receipt == self.receipt
-              and self.hass.config.config_dir == self.receipt.config_root,
+              and str(Path(self.hass.config.config_dir).resolve()) == self.receipt.config_root,
               'own_registry_original_changed')
 
     def _check(self, state, live):

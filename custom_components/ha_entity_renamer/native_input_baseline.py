@@ -447,7 +447,7 @@ class _Managers:
         from homeassistant.helpers.json import _orjson_bytes_default_encoder
         if __version__ not in _SCHEMAS or receipt.version != __version__:
             _fail('native_input_runtime_unsupported')
-        if hass.state is not CoreState.running or Path(hass.config.config_dir) != Path(receipt.config_root):
+        if hass.state is not CoreState.running or Path(hass.config.config_dir).resolve() != Path(receipt.config_root):
             _fail('native_input_lifecycle_or_root')
         self.hass, self.receipt = hass, receipt
         self.version, self.running = __version__, CoreState.running
@@ -474,7 +474,7 @@ class _Managers:
     def _native_images(self):
         from homeassistant.const import __version__
         if (__version__ != self.version or self.hass.state is not self.running
-                or Path(self.hass.config.config_dir) != Path(self.receipt.config_root)
+                or Path(self.hass.config.config_dir).resolve() != Path(self.receipt.config_root)
                 or any(actual is not original for actual, original in zip(
                     (self.hass.data.get(self.keys[0]), self.hass.data.get(self.keys[1]),
                      self.hass.config_entries), self.managers, strict=True))):
@@ -497,7 +497,8 @@ class _Managers:
             if (manager._store is not store or store.hass is not self.hass
                     or store.key != key or (type(store.version), type(store.minor_version)) != (int, int)
                     or (store.version, store.minor_version) != schema
-                    or Path(store.path) != Path(self.receipt.config_root) / '.storage' / key
+                    or Path(store.path).name != key or Path(store.path).parent.name != '.storage'
+                    or Path(store.path).parent.parent.resolve() != Path(self.receipt.config_root)
                     or store._read_only or getattr(store, '_load_empty', False)
                     or store._encoder is not None or io._private
                     or io._atomic_writes is not (key != _KEYS[2])

@@ -370,6 +370,18 @@ class NativeBaselineTests(unittest.IsolatedAsyncioTestCase):
         return await baseline.async_capture_native_input_baseline(
             self.hass, receipt or self.receipt, guard=self.guard)
 
+    async def test_native_baseline_accepts_canonical_config_root_alias(self):
+        with tempfile.TemporaryDirectory(dir=self.root.parent) as directory:
+            alias = Path(directory) / 'config-alias'
+            alias.symlink_to(self.root, target_is_directory=True)
+            original = self.hass.config.config_dir
+            self.hass.config.config_dir = str(alias)
+            try:
+                captured = await self.capture()
+                self.assertEqual(captured.receipt, self.receipt)
+            finally:
+                self.hass.config.config_dir = original
+
     async def test_actual_native_serialization_and_store_full_baseline(self):
         from homeassistant.helpers.json import _orjson_bytes_default_encoder
         captured = await self.capture()

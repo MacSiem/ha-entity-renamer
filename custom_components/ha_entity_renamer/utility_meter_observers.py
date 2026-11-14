@@ -13,6 +13,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation, localcontext
 from importlib import import_module
 import json
+from pathlib import Path
 
 from .helper_native import read_entry
 from .helper_plan import plan_helper, snapshot_equal
@@ -365,7 +366,7 @@ class NativeUtilityMeterObservers:
         from .native_registry_receipts import RegistryReceiptChain, _config_projection
         require(type(chain) is RegistryReceiptChain and getattr(self, '_native_chain', None) is None
                 and chain.version == self.core
-                and chain.original_receipt.config_root == self.hass.config.config_dir,
+                and chain.original_receipt.config_root == str(Path(self.hass.config.config_dir).resolve()),
                 'utility_native_chain_binding')
         docs = {row.key: json.loads(row.raw) for row in chain.baseline.files}
         entities = docs['core.entity_registry']['data']['entities']
