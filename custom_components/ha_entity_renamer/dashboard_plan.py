@@ -370,6 +370,34 @@ def plan_dashboard(config, mapping):
         if type(value) is not dict:
             block(path); return
         kind = value.get('type')
+        # HA Tools cards' observed default profiles contain no configured entity
+        # references. Admit only the exact type-only profile; their other options
+        # have independent schemas and must not inherit this qualification.
+        ha_tools_default = {'custom:ha-purge-cache', 'custom:ha-yaml-checker',
+            'custom:ha-data-exporter', 'custom:ha-baby-tracker', 'custom:ha-chore-tracker',
+            'custom:ha-log-email', 'custom:ha-network-map', 'custom:ha-trace-viewer',
+            'custom:ha-automation-analyzer', 'custom:ha-storage-monitor',
+            'custom:ha-backup-manager', 'custom:ha-security-check', 'custom:ha-device-health',
+            'custom:ha-sentence-manager', 'custom:ha-encoding-fixer',
+            'custom:ha-frigate-privacy', 'custom:ha-vacuum-water-monitor'}
+        if role == 'card' and kind in ha_tools_default:
+            if set(value) != {'type'}: block(path, 'unsupported_ha_tools_card_config')
+            return
+        if role == 'card' and kind in {'custom:ha-energy-optimizer', 'custom:ha-energy-insights',
+                                       'custom:ha-energy-email', 'custom:ha-smart-reports'}:
+            # These bounded options are presentation/tariff values. Optimizer's
+            # power_entity is read as a state key and must be rewritten.
+            for key, child in value.items():
+                p = path + (key,)
+                if key == 'type': continue
+                if key == 'power_entity' and kind == 'custom:ha-energy-optimizer':
+                    ref(child, p); continue
+                if key in {'energy_price', 'peak_rate', 'off_peak_rate'} and type(child) in (int, float):
+                    if key == 'energy_price' or kind == 'custom:ha-energy-optimizer': continue
+                if key == 'currency' and type(child) is str: continue
+                if key == 'energy_tariff_mode' and type(child) is str and kind != 'custom:ha-smart-reports': continue
+                block(p, 'unsupported_ha_tools_card_config')
+            return
         if role == 'card' and kind == 'custom:ha-entity-renamer':
             # Our card reads registry/state afresh; these config fields only
             # control presentation (HAEntityRenamer.setConfig/render). Never
