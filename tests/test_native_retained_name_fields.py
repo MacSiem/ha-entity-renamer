@@ -34,6 +34,14 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
             await hass.services.async_call('template', 'reload', {}, blocking=True)
             await hass.async_block_till_done()
             original = path.read_bytes()
+            if live_dependent:
+                live = next(source for source in mapping if source != old)
+                config = self.f.root / 'configuration.yaml'
+                config.write_text(config.read_text().replace('variables: {retained: unrelated}',
+                    'variables: {retained: "{{ states(\'' + live + '\') }}"}', 1))
+                await hass.services.async_call('automation', 'reload', {}, blocking=True)
+                await hass.async_block_till_done()
+                await self._flush_documents()
         entry = ConfigEntry(domain='threshold', title='Restored fixture owner', data={},
             options={'name': 'Restored fixture helper', 'entity_id': 'sensor.unrelated_fixture',
                      'lower': 20, 'upper': None, 'hysteresis': 0},
@@ -160,7 +168,6 @@ class NativeRetainedNameFieldsTests(unittest.IsolatedAsyncioTestCase):
                                     'name_restored_native_attributes_changed'):
             await runtime.native_yaml_prepare(hass, mapping,
                 entity_names={old: 'Restored reviewed source'},
-                device_names={device.id: 'Reviewed fixture device'},
                 actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
         self.assertEqual(hass.states.get(old).attributes['foreign'], 'preserve')
         self.assertIsNone(self.f.entity.async_get(new))

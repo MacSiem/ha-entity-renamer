@@ -805,8 +805,9 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                 continue
             saved = json.loads(change.runtime_before_json)['entities'][change.identity]
             if not saved['active'] and saved['entry'] is not None and saved['entry']['state'] == 'loaded':
-                _need(not self.mixed_state or controlled_reload,
-                      'restored_source_scope_unsupported')
+                _need(change.before.get('platform') not in ('template', 'automation', 'script')
+                      and (not self.mixed_state or controlled_reload),
+                      'restored_source_actor_unsupported')
                 # The registry executes sorted mapping steps. Compare the sealed
                 # SAME ORIGINAL program on the actual edge, even when earlier
                 # sources have already moved. The reverse traverses this edge in
