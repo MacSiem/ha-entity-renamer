@@ -5,10 +5,10 @@ from datetime import timedelta
 from decimal import Decimal
 import logging
 
-from test_powercalc_public_cold_native import PowercalcColdPhase
+from test_controlled_powercalc_actual_native import ControlledActualGraphTests
 
 
-class EnergyCostContinuityNativeTests(PowercalcColdPhase):
+class EnergyCostContinuityNativeTests(ControlledActualGraphTests):
     async def _setup_vendor_forward(self):
         from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
         from homeassistant.helpers.entity_component import EntityComponent
@@ -96,3 +96,25 @@ class EnergyCostContinuityNativeTests(PowercalcColdPhase):
         self.source.async_write_ha_state()
         await hass.async_block_till_done()
         self.assertAlmostEqual(new_cost.native_value, before + 3.0)
+
+    async def test_transfer_restores_callback_on_exception(self):
+        from homeassistant.components.energy.data import async_get_manager
+        from homeassistant.components.energy.sensor import SensorManager
+        from homeassistant.setup import async_setup_component
+        from custom_components.ha_entity_renamer.energy_cost_continuity import transfer
+
+        hass = self.f.hass
+        manager = await async_get_manager(hass)
+        self.assertTrue(await async_setup_component(hass, 'energy', {}))
+        await hass.async_block_till_done()
+        listeners = [fn for fn in manager._update_listeners
+                     if type(getattr(fn, '__self__', None)) is SensorManager
+                     and getattr(fn, '__func__', None) is SensorManager._process_manager_data]
+        self.assertEqual(len(listeners), 1)
+        sensor_manager = listeners[0].__self__
+        original = sensor_manager.async_add_entities
+        with self.assertRaisesRegex(RuntimeError, 'injected failure'):
+            with transfer(hass, manager, {}):
+                self.assertIsNot(sensor_manager.async_add_entities, original)
+                raise RuntimeError('injected failure')
+        self.assertIs(sensor_manager.async_add_entities, original)
