@@ -279,6 +279,7 @@ class DiscoveryNativeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retry_admission_rejects_native_and_other_source_drift(self):
         backend = importlib.import_module('custom_components.ha_entity_renamer')
+        refused = importlib.import_module('custom_components.ha_entity_renamer.transaction').Refused
         baseline = await self.fixture.capture()
         observed = await self.observe()
         updated = backend._retry_receipt(baseline, observed)
@@ -289,7 +290,7 @@ class DiscoveryNativeTests(unittest.IsolatedAsyncioTestCase):
             elif change == 'manager_json': row = replace(row, manager_json=b'{}')
             else: row = replace(row, identity=(*row.identity[:2], row.identity[2] ^ 0o100))
             changed = replace(observed, files=(row, *observed.files[1:]))
-            with self.subTest(change=change), self.assertRaises(ValueError):
+            with self.subTest(change=change), self.assertRaises(refused):
                 backend._retry_receipt(baseline, changed)
         (self.fixture.root / 'configuration.yaml').write_bytes(b'script: {foreign: true}\n')
         with self.assertRaises(ValueError):
