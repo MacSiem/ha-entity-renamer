@@ -33,6 +33,7 @@ class NativeRegistryReceiptsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(io.row(kind, identity), nr._row(io.document(kind), kind, identity))
             with self.assertRaisesRegex(nr.RegistryConflict, 'identity_missing_or_ambiguous'):
                 io.row(kind, 'missing-identity')
+        f.entity.async_update_entity(f.row.entity_id, device_id=None)
         before = io.row('entity', f.row.id)
         after = dict(before, entity_id='sensor.renamer_destination_test')
         change = nr.PreparedRegistryChange('entity', f.row.id, json.dumps(before), json.dumps(after))

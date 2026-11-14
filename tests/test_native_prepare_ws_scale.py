@@ -83,6 +83,8 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         await hass.services.async_call('automation', 'trigger', {'entity_id': next(iter(before_automation))}, blocking=True)
         self.assertIsNotNone(hass.states.get('script.corpus_unrelated').attributes.get('last_triggered'))
         self.assertIsNotNone(hass.states.get(next(iter(before_automation))).attributes.get('last_triggered'))
+        first_script_run = hass.states.get('script.corpus_unrelated').attributes['last_triggered']
+        first_automation_run = hass.states.get(next(iter(before_automation))).attributes['last_triggered']
         result = await runtime.native_yaml_reverse(hass, review['operation_id'], review['fingerprint'],
             guard=lambda: None, refresh=refresh)
         self.assertEqual(result['state'], 'rolled_back')
@@ -91,10 +93,25 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertEqual(self.f.device.async_get(device.id).name_by_user, old_device_name)
         await hass.services.async_call('script', 'corpus_unrelated', {}, blocking=True)
         await hass.services.async_call('automation', 'trigger', {'entity_id': next(iter(before_automation))}, blocking=True)
+        self.assertGreater(hass.states.get('script.corpus_unrelated').attributes['last_triggered'], first_script_run)
+        self.assertGreater(hass.states.get(next(iter(before_automation))).attributes['last_triggered'], first_automation_run)
         self.assertEqual((self.f.root / 'configuration.yaml').read_bytes(), before_config)
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
         self.assertEqual({state.entity_id: state.state for state in hass.states.async_all('automation')}, before_automation)
         self.assertEqual({state.entity_id: state.state for state in hass.states.async_all('script')}, before_scripts)
+
+    async def test_prepare_refuses_missing_selected_entity_and_device(self):
+        runtime, mapping, uuids, original, device = await self.restored_source()
+        hass = self.f.hass
+        async def refresh(): pass
+        for kwargs in ({'entity_names': {'sensor.missing_selected': 'Missing'}},
+                       {'device_names': {'missing-device-id': 'Missing'}}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(self.module('transaction').Refused):
+                    await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                        guard=lambda: None, refresh=refresh, **kwargs)
+                self.assertFalse(runtime.reviews)
+                self.assertEqual(await runtime.journal.active(), ())
 
     async def test_registry_device_refuses_automation_owner_before_effect(self):
         runtime, mapping, uuids, original, device = await self.restored_source()
