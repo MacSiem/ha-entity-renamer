@@ -119,7 +119,7 @@ class EnergyCostContinuityNativeTests(ControlledActualGraphTests):
                 raise RuntimeError('injected failure')
         self.assertIs(sensor_manager.async_add_entities, original)
 
-    async def test_capture_rejects_unknown_renamed_source_without_removing_cost(self):
+    async def test_unknown_source_rebind_preserves_cost_until_recovery(self):
         import probatio
         from homeassistant.components.energy.data import async_get_manager, ENERGY_SOURCE_SCHEMA
         from homeassistant.components.energy.sensor import EnergyCostSensor
@@ -159,13 +159,45 @@ class EnergyCostContinuityNativeTests(ControlledActualGraphTests):
         self.source.async_write_ha_state()
         await hass.async_block_till_done()
         self.assertEqual(hass.states.get(row['after_source']).state, 'unknown')
+        unknown = hass.states.get(row['after_source'])
+        hass.states.async_set(row['after_source'], 'invalid', unknown.attributes)
         with self.assertRaisesRegex(PersistenceError, 'energy_generated_cost_continuity_unqualified'):
             capture(hass, cost, row)
-        self.assertAlmostEqual(cost.native_value, 7.5)
-        self.assertIsNotNone(hass.states.get(cost_id))
+        hass.states.async_set(row['after_source'], 'unknown', unknown.attributes)
+        baseline = cost._last_energy_sensor_state
+        cost._last_energy_sensor_state = None
+        with self.assertRaisesRegex(PersistenceError, 'energy_generated_cost_continuity_unqualified'):
+            capture(hass, cost, row)
+        cost._last_energy_sensor_state = baseline
+        registry = self.f.entity.async_get(cost_id)
+        row.update(source_registry_id=self.f.entity.async_get(row['after_source']).id,
+                   entity_id=cost_id, registry_id=registry.id, unique_id=registry.unique_id)
+        captured = capture(hass, cost, row)
+        from custom_components.ha_entity_renamer.energy_cost_continuity import transfer
+        from homeassistant.helpers.event import async_track_state_change_event
+        zero = []
+        def observe(event):
+            state = event.data.get('new_state')
+            if state and state.state in ('0', '0.0'):
+                zero.append(state.state)
+        self.addCleanup(async_track_state_change_event(hass, cost_id, observe))
+        await cost.async_remove()
+        updated = deepcopy(manager.data)
+        updated['energy_sources'][0]['stat_energy_from'] = row['after_source']
+        with transfer(hass, manager, {row['after_source']: (row, captured)}):
+            await manager.async_update(updated)
+        await hass.async_block_till_done()
+        replacement = [e for p in async_get_platforms(hass, 'energy') for e in p.entities.values()
+                       if type(e) is EnergyCostSensor and e.entity_id == cost_id]
+        self.assertEqual(len(replacement), 1)
+        self.assertAlmostEqual(replacement[0].native_value, 7.5)
         self.source._attr_native_value = Decimal('112')
         self.source.async_write_ha_state()
         await hass.async_block_till_done()
-        captured = capture(hass, cost, row)
-        self.assertEqual(captured[0].state, '112')
-        self.assertAlmostEqual(captured[2], 7.5)
+        self.assertAlmostEqual(replacement[0].native_value, 9.0)
+        self.assertEqual(zero, [])
+        from homeassistant.core import State
+        replacement[0]._last_energy_sensor_state = State(row['before_source'], 'unknown',
+                                                        captured[1].attributes)
+        with self.assertRaisesRegex(PersistenceError, 'energy_generated_cost_continuity_unqualified'):
+            capture(hass, replacement[0], row)

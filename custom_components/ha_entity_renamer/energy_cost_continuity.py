@@ -14,6 +14,7 @@ def _need(value):
 
 def capture(hass, entity, row):
     """Capture only a settled cost and matching live source before native removal."""
+    from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
     from homeassistant.core import State
     source = hass.states.get(row['after_source'])
     baseline = entity._last_energy_sensor_state
@@ -21,8 +22,11 @@ def capture(hass, entity, row):
           and baseline.entity_id == row['before_source']
           and source.entity_id == row['after_source'])
     try:
-        _need(all(value.is_finite() and value >= 0 for value in
-                  (Decimal(source.state), Decimal(baseline.state))))
+        previous = Decimal(baseline.state)
+        _need(previous.is_finite() and previous >= 0)
+        if source.state not in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+            current = Decimal(source.state)
+            _need(current.is_finite() and current >= 0)
     except (InvalidOperation, ValueError):
         _need(False)
     for key in ('unit_of_measurement', 'state_class'):

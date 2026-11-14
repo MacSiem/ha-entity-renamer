@@ -103,6 +103,11 @@ class EnergyCostUtilityContinuityTests(ControlledActualGraphTests):
         continuity_row = {'before_source':energy_id, 'after_source':new_energy,
                           'source_registry_id':source_registry_id, 'entity_id':new,
                           'registry_id':cost_identity[0], 'unique_id':cost_identity[1]}
+        # Model the transient unavailable publication of the real Powercalc source.
+        source_state = hass.states.get(new_energy)
+        hass.states.async_set(new_energy, 'unavailable', source_state.attributes)
+        await hass.async_block_till_done()
+        self.assertEqual(hass.states.get(new_energy).state, 'unavailable')
         captured = capture(hass, costs[0], continuity_row)
         zero_events = []
         from homeassistant.helpers.event import async_track_state_change_event
@@ -133,6 +138,8 @@ class EnergyCostUtilityContinuityTests(ControlledActualGraphTests):
         self.assertEqual(zero_events, [])
         self.assertEqual(current_cost[0].native_value, captured[2])
         self.assertEqual(Decimal(str(sensors()['p4_short_meter'].native_value)), meter_before)
+        self.entities['fixture-meter-10_energy'].async_write_ha_state()
+        await hass.async_block_till_done()
         before_pulse_inspect = await wrapper.inspect(step)
         print('REBIND_INSPECT_BEFORE_PULSE', repr(before_pulse_inspect), flush=True)
         await pulse()
@@ -142,6 +149,7 @@ class EnergyCostUtilityContinuityTests(ControlledActualGraphTests):
             if state and Decimal(state.state) > source_before and meter_after > meter_before: break
             await asyncio.sleep(.05)
         observe('after_pulse_before_inspect')
+        self.assertEqual(zero_events, [])
         self.assertGreater(Decimal(hass.states.get(new).state), source_before)
         self.assertGreater(meter_after, meter_before)
         self.assertEqual(meter_after - meter_before, Decimal(hass.states.get(new).state) - source_before)
