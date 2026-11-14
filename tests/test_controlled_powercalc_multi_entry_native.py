@@ -337,7 +337,7 @@ class ControlledMultiEntryTests(ControlledActualGraphTests):
                             '  ip_address: 192.0.2.1\n  advertise_ip: 192.0.2.1\n'
                             '  filter:\n    include_entities:\n      - ' + sources[0] + '\n'
                             'utility_meter:\n  p4_meter_a:\n    source: ' + cost_ids[0] +
-                            '\n    cycle: daily\n  p4_meter_b:\n    source: ' + cost_ids[1] +
+                            '\n    cycle: weekly\n  p4_meter_b:\n    source: ' + cost_ids[1] +
                             '\n    cycle: weekly\n')
                 config = await async_hass_config_yaml(hass)
                 for domain in programs:
