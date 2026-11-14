@@ -30,6 +30,25 @@ def _need(value, reason):
         raise Refused('template_state_server_' + reason)
 
 
+def _log_registry_mismatch(actual, wanted):
+    """Emit only fixed diagnostic codes and strictly typed evidence flags."""
+    reasons = frozenset({'registry_identity_missing_or_ambiguous', 'registry_revision_conflict',
+        'registry_destination_occupied', 'live_state_changed_during_readback',
+        'native_persistence_pending', 'scoped_evidence_incomplete', 'native_readback_failed'})
+    reason = getattr(actual, 'reason', None)
+    position = getattr(actual, 'position', None)
+    reason = reason if type(reason) is str and reason in reasons else 'other'
+    position = position if type(position) is str and position in ('before', 'after', 'conflict', 'unknown') else 'other'
+    expected = wanted.value if wanted is Position.BEFORE or wanted is Position.AFTER else 'other'
+    flags = tuple(value if type(value) is bool else None for value in (
+        getattr(actual, 'identity', None), getattr(actual, 'runtime', None),
+        getattr(actual, 'durability', None), getattr(actual, 'recorder_metadata', None),
+        getattr(actual, 'complete_history', None)))
+    logging.getLogger(__name__).warning(
+        'Registry evidence mismatch: reason=%s position=%s wanted=%s identity=%s runtime=%s durability=%s metadata=%s history=%s',
+        reason, position, expected, *flags)
+
+
 def _powercalc_group_helper_coverage(plans, rows, previous, mapping):
     """Qualify only the metadata of the proven group, never unknown helpers."""
     if previous is None:
@@ -1009,6 +1028,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         for change in self.registry_changes:
             actual = await bridge.inspect(change)
             self._scope()
+            if actual.position != wanted.value:
+                _log_registry_mismatch(actual, wanted)
             _need(actual.position == wanted.value, 'source_identity_or_history_changed')
         state = self.chain.reconstruct_inputs()
         position = await self.observer.position_at_inputs(self.change, state)

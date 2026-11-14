@@ -36,10 +36,10 @@ def prove_methods(root, pins, refs):
         if path.resolve() != path or not path.is_relative_to(root):
             raise ValueError('native_unload_code_path')
         relative = path.relative_to(root).as_posix()
-        raw = path.read_bytes()
-        if relative not in pins or hashlib.sha256(raw).hexdigest() != pins[relative]:
-            raise ValueError('native_unload_source_pin')
         if str(path) not in compiled:
+            raw = path.read_bytes()
+            if relative not in pins or hashlib.sha256(raw).hexdigest() != pins[relative]:
+                raise ValueError('native_unload_source_pin')
             compiled[str(path)] = compiled_code_objects(raw, str(path), sys.flags.optimize)
         qualifier = ('Entity.__async_remove_impl' if name == '_Entity__async_remove_impl'
                      else name if inspect.ismodule(owner) else owner.__name__ + '.' + name)
