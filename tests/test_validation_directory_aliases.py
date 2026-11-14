@@ -72,6 +72,42 @@ class DirectoryAliasTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(validation.YAMLValidationError):
             validation.assert_validation_current(native)
 
+    async def test_candidate_staging_preserves_alias_and_fence(self):
+        storage = self.root / '.storage'
+        storage.mkdir()
+        for key in baseline._KEYS:
+            (storage / key).write_bytes(b'{}')
+        receipt = self.stage()
+        patch = self.plan.patches[0]
+        config = self.root / patch.path
+        before_bytes = config.read_bytes()
+        config.write_bytes(patch.proposed_bytes)
+        accepted = importlib.import_module(fixture.PACKAGE + '.accepted_input_state')
+        candidate = importlib.import_module(fixture.PACKAGE + '.native_candidate_validation')
+        transaction = importlib.import_module(fixture.PACKAGE + '.yaml_transaction')
+        sources = {}
+        for path, _, _, _ in receipt.source_files:
+            source = self.root / path
+            info = source.stat()
+            sources[path] = [fixture.digest(source.read_bytes()), info.st_dev, info.st_ino,
+                             info.st_mode, info.st_uid, info.st_gid]
+        state = accepted.AcceptedInputState(baseline._receipt_bytes(receipt), 'head', sources, {})
+        info = config.stat()
+        change = SimpleNamespace(files=(transaction.YAMLFile(patch.path, before_bytes.hex(),
+                                patch.proposed_bytes.hex(), info.st_dev, info.st_ino),))
+        with tempfile.TemporaryDirectory(dir=self.parent) as directory:
+            before, after = Path(directory) / 'before', Path(directory) / 'after'
+            before.mkdir(); after.mkdir()
+            candidate._stage(state, receipt, change, False, before, after)
+            for stage in (before, after):
+                link = stage / 'custom_components/alias_fixture'
+                self.assertTrue(link.is_symlink())
+                self.assertEqual(link.resolve(), stage / self.target.relative_to(self.root))
+            self.alias.unlink()
+            self.alias.symlink_to(self.target.parent, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                state.assert_current(receipt)
+
     async def test_retarget_replacement_rejected(self):
         receipt = self.stage()
         other = self.components / 'other'; other.mkdir()
