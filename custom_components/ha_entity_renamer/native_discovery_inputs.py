@@ -36,9 +36,8 @@ def _reject():
     raise DiscoveryNativeInputsError('native_discovery_inputs_rejected') from None
 
 
-async def _drain_native_write(coro):
+async def _drain_native_write(task):
     """Keep the caller's scope until an admitted native write has finished."""
-    task = asyncio.create_task(coro)
     cancelled = False
     while not task.done():
         try:
@@ -255,26 +254,28 @@ Cancellation drains executor work before any held descriptor can be released.
                     _reject()
                 admission.check_identity()
 
-            # Snapshot only already queued work. Never adopt a later write as work
-            # to complete, and never write while a Store load is in progress.
+            # Admit only stores with already queued work. Native Store retains
+            # responsibility for selecting the latest data under its write lock.
             deadline = hass.loop.time() + _SETTLE_TIMEOUT
-            queued = tuple(store._data for store in admission.stores)
-            for store, data in zip(admission.stores, queued, strict=True):
-                if data is None:
+            queued = tuple(store._data is not None for store in admission.stores)
+            for store, was_queued in zip(admission.stores, queued, strict=True):
+                if not was_queued:
                     continue
-                while store._load_future is not None:
+                while store._load_future is not None or store._write_lock.locked():
                     remaining = deadline - hass.loop.time()
                     if remaining <= 0:
                         _reject()
                     await asyncio.sleep(min(_SETTLE_INTERVAL, remaining))
                     check_admission()
-                    if store._data is not data:
-                        _reject()
                 check_admission()
-                if hass.loop.time() >= deadline or store._data is not data:
+                if (hass.loop.time() >= deadline
+                        or any(not waiter.cancelled() for waiter in (store._write_lock._waiters or ()))):
                     _reject()
                 waited = True
-                await _drain_native_write(store._async_handle_write_data())
+                # Eager entry acquires the free lock before another task can
+                # start a load, while Store still chooses its latest _data.
+                task = hass.async_create_task_internal(store._async_handle_write_data(), eager_start=True)
+                await _drain_native_write(task)
                 check_admission()
                 # A concurrent reschedule is foreign work, not a second flush.
                 if admission.pending_for(store):
