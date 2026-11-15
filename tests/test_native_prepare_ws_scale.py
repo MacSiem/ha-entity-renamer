@@ -197,12 +197,143 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                 injected.append((Path(store.path).stat().st_ino, Path(store.path).read_bytes()))
                 store.async_delay_save(manager._data_to_save, 0.05)
             return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
-        with patch.object(native, 'async_observe_discovery_inputs', observe):
+        backend = __import__('custom_components.ha_entity_renamer', fromlist=['Runtime'])
+        original_retry = backend._retry_pending_review
+        retries = []
+        async def retry(*args, **kwargs):
+            retries.append(True)
+            return await original_retry(*args, **kwargs)
+        with patch.object(native, 'async_observe_discovery_inputs', observe), \
+             patch.object(backend, '_retry_pending_review', retry):
             await self.test_registry_device_with_unrelated_automation_script_apply_inverse()
+        self.assertEqual(retries, [True])
         self.assertEqual(len(injected), 1)
         before, raw = injected[0]
         self.assertNotEqual(Path(self.f.hass.config_entries._store.path).stat().st_ino, before)
         self.assertEqual(Path(self.f.hass.config_entries._store.path).read_bytes(), raw)
+
+    async def test_pre_baseline_pending_restarts_before_review(self):
+        inputs = self.module('native_input_baseline')
+        original = inputs.async_capture_native_input_baseline
+        seen = []
+        async def capture(hass, receipt, *, guard):
+            if not seen:
+                seen.append(True)
+                hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 0.05)
+            return await original(hass, receipt, guard=guard)
+        with patch.object(inputs, 'async_capture_native_input_baseline', capture):
+            await self.test_registry_device_with_unrelated_automation_script_apply_inverse()
+        self.assertEqual(seen, [True])
+
+    async def test_initial_pending_twice_refuses_without_effect(self):
+        import inspect
+        runtime, mapping, _, _, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        native = self.module('native_discovery_inputs')
+        original = native.async_observe_discovery_inputs
+        seen = []
+        async def observe(hass, *, guard, settle=False, on_settle=None):
+            frames = inspect.stack()
+            initial = any(frame.function == 'position_at_inputs'
+                          and frame.frame.f_locals.get('propagate_pending') is True
+                          for frame in frames)
+            accepted = any(frame.function == 'async_observe_accepted_state_bindings'
+                           for frame in frames)
+            if initial and accepted and not settle and len(seen) < 2:
+                seen.append(True)
+                hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 0.05)
+            return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
+        async def refresh(): pass
+        with patch.object(native, 'async_observe_discovery_inputs', observe):
+            with self.assertRaisesRegex(self.module('transaction').Refused, 'review_native_settle_repeated'):
+                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                    entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
+                    guard=lambda: None, refresh=refresh)
+        self.assertEqual(seen, [True, True])
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+        self.assertIsNotNone(self.f.entity.async_get(old))
+        self.assertIsNone(self.f.entity.async_get(new))
+
+    async def test_initial_pending_refuses_source_change_during_settle(self):
+        import inspect
+        runtime, mapping, _, _, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        native = self.module('native_discovery_inputs')
+        original = native.async_observe_discovery_inputs
+        injected = []
+        async def observe(hass, *, guard, settle=False, on_settle=None):
+            frames = inspect.stack()
+            initial = any(frame.function == 'position_at_inputs'
+                          and frame.frame.f_locals.get('propagate_pending') is True
+                          for frame in frames)
+            accepted = any(frame.function == 'async_observe_accepted_state_bindings'
+                           for frame in frames)
+            if initial and accepted and not settle and not injected:
+                injected.append(True)
+                hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 0.05)
+            result = await original(hass, guard=guard, settle=settle, on_settle=on_settle)
+            if settle and injected == [True]:
+                injected.append('changed')
+                path = self.f.root / 'configuration.yaml'
+                path.write_bytes(path.read_bytes() + b'\n# foreign source change\n')
+            return result
+        async def refresh(): pass
+        with patch.object(native, 'async_observe_discovery_inputs', observe):
+            with self.assertRaises(ValueError):
+                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                    entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
+                    guard=lambda: None, refresh=refresh)
+        self.assertEqual(injected, [True, 'changed'])
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+        self.assertIsNotNone(self.f.entity.async_get(old))
+        self.assertIsNone(self.f.entity.async_get(new))
+
+    async def test_initial_pending_cancel_cleans_preparation(self):
+        import inspect
+        runtime, mapping, _, _, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        native = self.module('native_discovery_inputs')
+        retention = self.module('review_retention')
+        original = native.async_observe_discovery_inputs
+        entered = asyncio.Event()
+        injected = []
+        async def observe(hass, *, guard, settle=False, on_settle=None):
+            frames = inspect.stack()
+            initial = any(frame.function == 'position_at_inputs'
+                          and frame.frame.f_locals.get('propagate_pending') is True
+                          for frame in frames)
+            accepted = any(frame.function == 'async_observe_accepted_state_bindings'
+                           for frame in frames)
+            if initial and accepted and not settle and not injected:
+                injected.append(True)
+                hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 30)
+            if settle and injected:
+                entered.set()
+                await asyncio.Event().wait()
+            return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
+        async def refresh(): pass
+        with patch.object(native, 'async_observe_discovery_inputs', observe):
+            task = asyncio.create_task(runtime.native_yaml_prepare(hass, mapping,
+                actor_id='synthetic-admin', entity_names={old: 'Reviewed fixture'},
+                device_names={device.id: 'Reviewed device'}, guard=lambda: None, refresh=refresh))
+            await asyncio.wait_for(entered.wait(), 180)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertFalse(runtime.operation_lock.locked())
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+        self.assertIsNotNone(self.f.entity.async_get(old))
+        self.assertIsNone(self.f.entity.async_get(new))
+        async with runtime.operation_lock:
+            stores, _ = await retention.async_reclaim_reviews(hass, keep=runtime.reviews, guard=lambda: None)
+        self.assertFalse(any(row['payload'].get('kind') == 'ordinary_review_lease'
+                             for row in stores.plans.values() if type(row['payload']) is dict))
 
     async def test_retry_refuses_foreign_source_change_before_effect(self):
         runtime, mapping, _, _, device = await self.restored_source()

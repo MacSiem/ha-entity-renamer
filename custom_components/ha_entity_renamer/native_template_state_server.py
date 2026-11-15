@@ -1058,6 +1058,11 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         try:
             return await self._check_common(rollback, initial=initial)
         except Exception as error:
+            from .native_input_baseline import NativeInputWritePending
+            from .native_discovery_inputs import DiscoveryNativeWritePending
+            if initial and getattr(self, '_preparing_review', False) and isinstance(
+                    error, (NativeInputWritePending, DiscoveryNativeWritePending)):
+                logging.getLogger(__name__).warning('Native Store pending during pre-review initial readback')
             from .yaml_validation_worker import _checker_diagnostic
             logging.getLogger(__name__).warning('Migration state verification unavailable: %s',
                                                _checker_diagnostic(error))
