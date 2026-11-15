@@ -42,7 +42,8 @@ class NativeDiscoveryConsumersTests(unittest.IsolatedAsyncioTestCase):
         self.yaml = LovelaceYAML(self.hass, 'different-route', self.yaml_metadata)
         self.managers = {None: self.default, 'private-board': self.named,
                          'different-route': self.yaml}
-        kwargs = {'resource_mode' if self.version == '2026.10.2' else 'mode': 'storage'}
+        kwargs = {'resource_mode' if self.version in ('2026.10.2', '2026.10.4',
+                  '2026.11.0', '2026.11.1') else 'mode': 'storage'}
         self.data = LovelaceData(**kwargs, dashboards=self.managers, resources=None,
             yaml_dashboards={'different-route': self.yaml_metadata})
         self.hass.data[LOVELACE_DATA] = self.data
