@@ -541,8 +541,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                 self.assertEqual(reversed_result['state'], 'rolled_back')
             else:
                 reason = 'review_selected_source_changed' if mode == 'selected' else 'review_source_invalidated_repeated'
-                error_type = receipt_error if mode == 'other' else self.module('transaction').Refused
-                with self.assertRaisesRegex(error_type, reason):
+                with self.assertRaisesRegex(self.module('transaction').Refused, reason):
                     await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
                         entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
                 self.assertFalse(runtime.reviews)
@@ -613,7 +612,8 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                 reason = ('review_selected_source_changed' if mode == 'selected' else
                           'registry_receipt_input_graph_changed' if mode == 'other' else
                           'review_source_invalidated_repeated')
-                with self.assertRaisesRegex(self.module('transaction').Refused, reason):
+                error_type = receipt_error if mode == 'other' else self.module('transaction').Refused
+                with self.assertRaisesRegex(error_type, reason):
                     await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
                         entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
                 self.assertFalse(runtime.reviews)
