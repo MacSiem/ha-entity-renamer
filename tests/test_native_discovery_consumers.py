@@ -150,6 +150,42 @@ class NativeDiscoveryConsumersTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(light_calls), 1)
         self.assertEqual(len(full_calls), observations[0] + 1)
 
+    async def test_final_guard_identity_and_drift_after_physical_read(self):
+        import inspect
+        discovery = importlib.import_module(fixture.PACKAGE + '.discovery')
+        fence = importlib.import_module(fixture.PACKAGE + '.discovery_final_fence')
+        (self.root / 'configuration.yaml').write_text('script: {}\n')
+        calls = {}
+        reject = False
+        def original():
+            if reject:
+                raise RuntimeError('guard drift')
+            frame = inspect.currentframe().f_back
+            if frame.f_code.co_name == 'current':
+                calls[frame] = calls.get(frame, 0) + 1
+        capture = await discovery.async_discover(self.hass,
+            {'entities': [{'entity_id': 'sensor.old', 'proposed_entity_id': 'sensor.new'}]},
+            original)
+        self.assertTrue(calls)
+        self.assertTrue(all(count == 1 for count in calls.values()))
+        calls.clear()
+        distinct = []
+        def output():
+            if inspect.currentframe().f_back.f_code.co_name == 'current':
+                distinct.append(True)
+        await fence.async_finalize_discovery(self.hass, capture, output)
+        self.assertTrue(calls)
+        self.assertEqual(len(distinct), len(calls))
+        settled = fence._settled_physical
+        async def drift(*args):
+            nonlocal reject
+            result = await settled(*args)
+            reject = True
+            return result
+        with patch.object(fence, '_settled_physical', drift):
+            with self.assertRaisesRegex(RuntimeError, 'guard drift'):
+                await fence.async_finalize_discovery(self.hass, capture, original)
+
     async def test_server_discovery_does_not_adopt_later_dashboard_image(self):
         discovery = importlib.import_module(fixture.PACKAGE + '.discovery')
         (self.root / 'configuration.yaml').write_text('script: {}\n')

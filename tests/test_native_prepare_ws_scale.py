@@ -1105,6 +1105,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         from homeassistant.helpers.json import _orjson_bytes_default_encoder
         from types import MappingProxyType
         self.scale_script_count = 244
+        self.scale_script_variables = 32
         runtime, mapping, _, _ = await self.data(variant='sensor', source_consumers=True)
         hass = self.f.hass
         accepted = self.module('accepted_input_state').AcceptedInputState
@@ -1261,5 +1262,6 @@ asyncio.run(main())'''
             replies = [json.loads(line) for line in stdout.decode().splitlines() if line.startswith('{')]
             self.assertTrue(replies and replies[0]['ping_count'] > 0)
             self.assertLess(replies[0]['max_ping_rtt'], 20)
+            self.assertLess(replies[0]['max_probe_gap'], 20)
             self.assertTrue(physical_threads, 'pre-review physical guard was not exercised')
             print(f'ws_pre_review_physical_executor_calls={len(physical_threads)}', flush=True)

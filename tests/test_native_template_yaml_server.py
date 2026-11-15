@@ -53,8 +53,10 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
                     'script:\n  corpus_unrelated:\n    sequence:\n'
                     '    - variables: {retained: unrelated}\n')
                 for index in range(getattr(self, 'scale_script_count', 0)):
+                    extra = ''.join(f', retained_{i}: sensor.unrelated_{index}_{i}'
+                                    for i in range(getattr(self, 'scale_script_variables', 0)))
                     handle.write(f'  scale_source_{index}:\n    sequence:\n'
-                                 '    - variables: {retained: unrelated}\n')
+                                 f'    - variables: {{retained: unrelated{extra}}}\n')
             config = await async_hass_config_yaml(hass)
             for domain in ('automation', 'script'):
                 self.assertTrue(await async_setup_component(hass, domain, config))

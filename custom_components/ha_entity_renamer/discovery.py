@@ -636,7 +636,8 @@ async def async_discover(hass, proposal, guard, *, _expected_yaml=None, _owned_s
     async def finish(output_guard):
         def current():
             guard()
-            output_guard()
+            if output_guard is not guard:
+                output_guard()
         current()
         if (recorder is not None and metadata is not None and historical is not None
                 and any(families[k].status == 'COMPLETE' for k in ('history','statistics'))):
