@@ -660,11 +660,18 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         bridge = NativeRegistryBridge(NativeRegistryIO(self.hass), self.recorder)
         registry = []
         bulk = {}
-        if registry_only and not candidate_own and not mixed_powercalc and not external_domains:
+        entity_rows = {}
+        for row in rows:
+            entity_rows.setdefault(row['entity_id'], []).append(row)
+        device_rows = documents['core.device_registry']['data']['devices']
+        device_index = {}
+        for row in device_rows:
+            device_index.setdefault(row['id'], []).append(row)
+        if not candidate_own and not mixed_powercalc and not external_domains:
             requests = []
             for old, new in sorted(self.mapping.items()):
-                source = [row for row in rows if row['entity_id'] == old]
-                _need(len(source) == 1 and not any(row['entity_id'] == new for row in rows),
+                source = entity_rows.get(old, [])
+                _need(len(source) == 1 and not entity_rows.get(new),
                       'source_uuid_required')
                 fields = {'entity_id': new}
                 if old in self.entity_names:
@@ -673,14 +680,13 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             for entity_id, name in sorted(self.entity_names.items()):
                 if entity_id in self.mapping:
                     continue
-                source = [row for row in rows if row['entity_id'] == entity_id]
+                source = entity_rows.get(entity_id, [])
                 _need(len(source) == 1 and source[0]['platform'] not in ('automation', 'script'),
                       'selected_name_source_required')
                 if source[0].get('name') != name:
                     requests.append(('entity', source[0]['id'], {'name': name}))
-            device_rows = documents['core.device_registry']['data']['devices']
             for identity, name in sorted(self.device_names.items()):
-                source = [row for row in device_rows if row['id'] == identity]
+                source = device_index.get(identity, [])
                 _need(len(source) == 1, 'selected_device_source_required')
                 if source[0].get('name_by_user') != name:
                     requests.append(('device', identity, {'name_by_user': name}))
@@ -689,8 +695,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             bulk = {(item.kind, item.identity): item for item in prepared_many}
         self._bulk_registry_preparation = bool(bulk)
         for old, new in sorted(self.mapping.items()):
-            source = [row for row in rows if row['entity_id'] == old]
-            _need(len(source) == 1 and not any(row['entity_id'] == new for row in rows),
+            source = entity_rows.get(old, [])
+            _need(len(source) == 1 and not entity_rows.get(new),
                   'source_uuid_required')
             fields = {'entity_id': new}
             if old in self.entity_names:
@@ -789,16 +795,15 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         for entity_id, name in sorted(self.entity_names.items()):
             if entity_id in self.mapping:
                 continue
-            source = [row for row in rows if row['entity_id'] == entity_id]
+            source = entity_rows.get(entity_id, [])
             _need(len(source) == 1 and source[0]['platform'] not in ('automation', 'script'),
                   'selected_name_source_required')
             if source[0].get('name') != name:
                 registry.append(bulk[('entity', source[0]['id'])] if bulk else
                                 await bridge.prepare('entity', source[0]['id'], {'name': name}, self._scope))
                 self._scope()
-        device_rows = documents['core.device_registry']['data']['devices']
         for identity, name in sorted(self.device_names.items()):
-            source = [row for row in device_rows if row['id'] == identity]
+            source = device_index.get(identity, [])
             _need(len(source) == 1, 'selected_device_source_required')
             if mixed_powercalc:
                 _need(not any(row.get('device_id') == identity and row.get('platform') == 'powercalc'

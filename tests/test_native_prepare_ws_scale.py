@@ -116,6 +116,30 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
             singles = [await bridge.prepare(*request, lambda: None) for request in requests[:size]]
             self.assertEqual(batch, singles)
 
+    async def test_mixed_yaml_sources_use_one_registry_batch(self):
+        runtime, mapping, uuids, original = await self.data(
+            variant='sensor', source_consumers=True, multiple=True)
+        bridge = self.module('native_registry').NativeRegistryBridge
+        prepare_many = bridge.prepare_many
+        batches = []
+        async def counted(subject, requests, guard):
+            batches.append(tuple((kind, identity) for kind, identity, _ in requests))
+            return await prepare_many(subject, requests, guard)
+        async def refresh(): pass
+        with patch.object(bridge, 'prepare_many', counted):
+            review = await runtime.native_yaml_prepare(self.f.hass, mapping,
+                actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(len(batches[0]), 2)
+        plan = runtime.reviews[review['operation_id']].plan
+        self.assertEqual([step.adapter for step in plan.steps].count('registry'), 2)
+        self.assertIn('yaml', [step.adapter for step in plan.steps])
+        self.assertFalse(await runtime.journal.all())
+        for old, new in mapping.items():
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+            self.assertIsNone(self.f.entity.async_get(new))
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
     async def test_runtime_session_drift_at_resolve_await_refuses_review(self):
         runtime, mapping, uuids, original, device = await self.restored_source()
         hass = self.f.hass
