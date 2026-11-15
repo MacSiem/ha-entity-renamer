@@ -335,6 +335,73 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertFalse(any(row['payload'].get('kind') == 'ordinary_review_lease'
                              for row in stores.plans.values() if type(row['payload']) is dict))
 
+    async def test_initial_pending_timeout_refuses_without_effect(self):
+        import inspect
+        runtime, mapping, _, _, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        native = self.module('native_discovery_inputs')
+        original = native.async_observe_discovery_inputs
+        injected = []
+        async def observe(hass, *, guard, settle=False, on_settle=None):
+            frames = inspect.stack()
+            initial = any(frame.function == 'position_at_inputs'
+                          and frame.frame.f_locals.get('propagate_pending') is True
+                          for frame in frames)
+            accepted = any(frame.function == 'async_observe_accepted_state_bindings'
+                           for frame in frames)
+            if initial and accepted and not settle and not injected:
+                injected.append(True)
+                hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 30)
+            return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
+        async def refresh(): pass
+        with patch.object(native, 'async_observe_discovery_inputs', observe), \
+             patch.object(native, '_SETTLE_TIMEOUT', 0.05), \
+             patch.object(native, '_SETTLE_INTERVAL', 0.01):
+            with self.assertRaises(native.DiscoveryNativeInputsError):
+                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                    entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
+                    guard=lambda: None, refresh=refresh)
+        self.assertEqual(injected, [True])
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+        self.assertIsNotNone(self.f.entity.async_get(old))
+        self.assertIsNone(self.f.entity.async_get(new))
+
+    async def test_post_effect_pending_never_retries_prepare(self):
+        runtime, mapping, _, _, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        async def refresh(): pass
+        review = await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+            entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
+            guard=lambda: None, refresh=refresh)
+        observer = self.module('native_template_state_yaml').NativeTemplateStateYAMLRuntimeReadback
+        original = observer.position_at_inputs
+        backend = __import__('custom_components.ha_entity_renamer', fromlist=['Runtime'])
+        injected, retries = [], []
+        async def position(instance, change, state, **kwargs):
+            if self.f.entity.async_get(new) is not None and not injected:
+                self.assertFalse(kwargs.get('propagate_pending', False))
+                injected.append(True)
+                hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 30)
+            return await original(instance, change, state, **kwargs)
+        async def retry(*args, **kwargs):
+            retries.append(True)
+            raise AssertionError('post-effect prepare retry')
+        with patch.object(observer, 'position_at_inputs', position), \
+             patch.object(backend, '_retry_pending_review', retry):
+            try:
+                result = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                    actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+            except Exception:
+                result = None
+        self.assertEqual(injected, [True])
+        self.assertFalse(retries)
+        if result is not None:
+            self.assertNotEqual(result['state'], 'applied')
+        self.assertFalse(runtime.reviews)
+
     async def test_retry_refuses_foreign_source_change_before_effect(self):
         runtime, mapping, _, _, device = await self.restored_source()
         hass = self.f.hass
