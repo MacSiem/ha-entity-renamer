@@ -580,6 +580,29 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertNotIn('.storage', line)
         module._review_source_current(before, before, state)
 
+    async def test_review_token_inventory_diagnostics_are_closed_and_strict(self):
+        from types import SimpleNamespace
+        module = self.module('native_template_state_yaml')
+        state = SimpleNamespace(source_directories=(('.', (), None),),
+                                _sources={'private-source.yaml': ()})
+        a = ('private-source.yaml', (1, 2, 3, 4, 5, 6))
+        b = ('/private/native.py', (1, 2, 3, 4, 5, 6))
+        cases = [((b, a), (a, b), ('inventory:order',)),
+                 ((a, b, b), (a, b), ('inventory:count', 'inventory:key_set',
+                                       'inventory:added_native_file')),
+                 ((a,), (a, b), ('inventory:count', 'inventory:key_set',
+                                 'inventory:removed_native_file')),
+                 ((a, ('/private/other.py', b[1])), (a, b),
+                  ('inventory:key_set', 'inventory:added_native_file',
+                   'inventory:removed_native_file'))]
+        for current, expected, categories in cases:
+            with self.subTest(categories=categories), self.assertLogs(module.__name__, level='WARNING') as logs:
+                with self.assertRaises(module.ReviewSourceInvalidated):
+                    module._review_source_current(current, expected, state)
+            for category in categories:
+                self.assertIn(category, logs.output[0])
+            self.assertNotIn('private', logs.output[0])
+
     async def test_review_token_change_replans(self):
         await self._review_token_replan('success')
 

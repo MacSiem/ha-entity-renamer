@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass, fields
+from collections import Counter
 import inspect
 import logging
 import json
@@ -32,11 +33,26 @@ def _review_source_current(current, expected, state):
     sources = set(state._sources)
     fields = ('device', 'inode', 'mode', 'size', 'mtime', 'ctime')
     changed = set()
+    old_keys = Counter(key for key, _ in expected)
+    new_keys = Counter(key for key, _ in current)
     if len(current) != len(expected):
-        changed.add('inventory')
+        changed.add('inventory:count')
+    if old_keys != new_keys:
+        changed.add('inventory:key_set')
+        def category(key):
+            if key == 'root':
+                return 'root'
+            if key in directories:
+                return 'directory_full' if directories[key] is None else 'directory_scoped'
+            if key in sources:
+                return 'source_file'
+            return 'native_file' if key.startswith('/') else 'scoped_child'
+        changed.update('inventory:added_' + category(key) for key in new_keys - old_keys)
+        changed.update('inventory:removed_' + category(key) for key in old_keys - new_keys)
+    elif tuple(key for key, _ in current) != tuple(key for key, _ in expected):
+        changed.add('inventory:order')
     for (old_key, old), (new_key, new) in zip(expected, current):
         if old_key != new_key:
-            changed.add('inventory')
             continue
         if old == new:
             continue
