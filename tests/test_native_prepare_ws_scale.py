@@ -356,6 +356,37 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertIsNone(self.f.entity.async_get(new))
         self.assertNotEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
+    async def test_initial_review_worker_cancel_drains_without_effect(self):
+        runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        accepted = self.module('accepted_input_state').AcceptedInputState
+        physical = accepted.prepare_review_identity
+        entered, release = threading.Event(), threading.Event()
+        def held(*args):
+            entered.set()
+            if not release.wait(60):
+                raise AssertionError('test worker was not released')
+            return physical(*args)
+        async def refresh(): pass
+        with patch.object(accepted, 'prepare_review_identity', held):
+            task = asyncio.create_task(runtime.native_yaml_prepare(hass, mapping,
+                actor_id='synthetic-admin', entity_names={old: 'Reviewed fixture'},
+                guard=lambda: None, refresh=refresh))
+            try:
+                self.assertTrue(await hass.async_add_executor_job(entered.wait, 120))
+                task.cancel()
+            finally:
+                release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertFalse(runtime.operation_lock.locked())
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
     async def test_initial_pending_cancel_cleans_preparation(self):
         import inspect
         runtime, mapping, _, _, device = await self.restored_source()
@@ -647,6 +678,8 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         physical_threads = []
         def checked_physical(state, *args):
             physical_threads.append(threading.get_ident())
+            print(f'ws_pre_review_source_files={len(state.source_files)} '
+                  f'source_directories={len(state.source_directories)}', flush=True)
             if threading.get_ident() == loop_thread:
                 raise AssertionError('pre-review physical guard ran on HA event loop')
             return physical(state, *args)
