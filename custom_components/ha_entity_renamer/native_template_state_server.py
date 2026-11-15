@@ -1087,7 +1087,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
         state = self.chain.reconstruct_inputs()
         if initial and getattr(self, '_preparing_review', False):
             position = await self.observer.position_at_inputs(
-                self.change, state, propagate_pending=True)
+                self.change, state, propagate_pending=True, pre_review=True)
         else:
             position = await self.observer.position_at_inputs(self.change, state)
         # Let HA service timers and sockets before the next full graph check.

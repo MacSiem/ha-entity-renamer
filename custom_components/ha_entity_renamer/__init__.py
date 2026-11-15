@@ -185,6 +185,13 @@ def _review_session_binding(session):
                 or not _exact_json_equal([encode_change(change) for change in current], change_images)
                 or _receipt_bytes(receipt) != receipt_image):
             raise Refused('review_preparation_changed')
+        # The INITIAL observer's executor proof must still describe the same
+        # sources after discovery and every other review await.
+        observer = getattr(session, 'observer', None)
+        witness = getattr(observer, '_composite', None) or getattr(observer, '_last_runtime', None)
+        base = getattr(witness, 'base', witness)
+        if getattr(base, 'review_identity', None) is not None:
+            witness.check()
     return plan, operation, changes, is_entry, check
 
 

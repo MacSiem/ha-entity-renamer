@@ -334,6 +334,57 @@ class AcceptedInputState:
         finally:
             os.close(reader.root)
 
+    def _review_identity(self, original, native):
+        """Cheap, conservative change token for an already checked graph.
+
+        Directory timestamps fence membership; file ctime catches in-place
+        rewrites even when the writer restores mtime. No bytes are adopted.
+        """
+        from .native_input_baseline import _signature
+        from .yaml_validation import _assert_links
+        self._bound(original)
+        reader = _PhysicalReader(original.config_root, Limits(max_file_bytes=MAX_FILE_BYTES))
+        try:
+            _assert_links(reader, Path(original.config_root), original.source_links or ())
+            root = os.stat(original.config_root)
+            if (root.st_dev, root.st_ino) != (os.fstat(reader.root).st_dev, os.fstat(reader.root).st_ino):
+                _fail('input_graph_changed')
+            result = [('root', _signature(root))]
+            for directory, _, _ in self.source_directories:
+                fd = os.dup(reader.root) if directory == '.' else reader.open(directory, directory=True)
+                try:
+                    result.append((directory, _signature(os.fstat(fd))))
+                finally:
+                    os.close(fd)
+            for path in self._sources:
+                if path == '.storage/repairs.issue_registry' and original.checker_repairs_snapshot is not None:
+                    continue
+                fd = reader.open(path)
+                try:
+                    result.append((path, _signature(os.fstat(fd))))
+                finally:
+                    os.close(fd)
+            paths = [native.root / name for name in native.pins]
+            paths.extend(path for path, _ in native.icon_proof.paths.values())
+            for path in paths:
+                if path.resolve() != path:
+                    _fail('input_native_source_changed')
+                result.append((str(path), _signature(os.stat(path, follow_symlinks=False))))
+            self._bound(original)
+            return tuple(result)
+        finally:
+            os.close(reader.root)
+
+    def prepare_review_identity(self, original, native):
+        """Run in an executor; bind full byte/graph checks to stat tokens."""
+        before = self._review_identity(original, native)
+        self.assert_current(original)
+        native.sources()
+        after = self._review_identity(original, native)
+        if before != after:
+            _fail('input_source_changed')
+        return after
+
     def _native_observation_fence(self, original):
         """Sample native only; this private fence is never accepted chain state.
 

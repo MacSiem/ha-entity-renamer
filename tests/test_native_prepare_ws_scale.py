@@ -292,6 +292,61 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertIsNotNone(self.f.entity.async_get(old))
         self.assertIsNone(self.f.entity.async_get(new))
 
+    async def test_initial_review_source_rewrite_after_worker_refuses(self):
+        runtime, mapping, uuids, original, _ = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        baseline = self.module('native_input_baseline')
+        drain = baseline._drained
+        changed = []
+        async def injected(executor, function):
+            result = await drain(executor, function)
+            if 'detached' in function.__code__.co_freevars and not changed:
+                path = self.f.root / 'template.yaml'
+                data, info = path.read_bytes(), path.stat()
+                path.write_bytes(data.replace(b'sensor', b'SENSOR', 1))
+                os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+                changed.append(True)
+            return result
+        async def refresh(): pass
+        with patch.object(baseline, '_drained', injected):
+            with self.assertRaises((ValueError, self.module('transaction').Refused)):
+                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                    guard=lambda: None, refresh=refresh)
+        self.assertEqual(changed, [True])
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertNotEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
+    async def test_initial_review_source_rewrite_after_discovery_refuses(self):
+        runtime, mapping, uuids, original, _ = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        discovery = self.module('discovery_final_fence')
+        finalize = discovery.async_finalize_discovery
+        changed = []
+        async def injected(*args, **kwargs):
+            result = await finalize(*args, **kwargs)
+            path = self.f.root / 'template.yaml'
+            data, info = path.read_bytes(), path.stat()
+            path.write_bytes(data.replace(b'sensor', b'SENSOR', 1))
+            os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+            changed.append(True)
+            return result
+        async def refresh(): pass
+        with patch.object(discovery, 'async_finalize_discovery', injected):
+            with self.assertRaises((ValueError, self.module('transaction').Refused)):
+                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                    guard=lambda: None, refresh=refresh)
+        self.assertEqual(changed, [True])
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertNotEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
     async def test_initial_pending_cancel_cleans_preparation(self):
         import inspect
         runtime, mapping, _, _, device = await self.restored_source()

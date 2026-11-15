@@ -358,7 +358,7 @@ class NativeTemplateStateYAMLRuntimeReadback:
         return Position.UNKNOWN  # No implicit accepted/live input adoption.
 
     async def position_at_inputs(self, change, state, *, live_intent=None,
-                                 live_context=None, live_calls=(), propagate_pending=False):
+                                 live_context=None, live_calls=(), propagate_pending=False, pre_review=False):
         from .native_template_state_binding import (async_observe_accepted_state_bindings,
                                                     _StateRuntime)
         from .native_discovery_inputs import async_observe_discovery_inputs
@@ -373,14 +373,30 @@ class NativeTemplateStateYAMLRuntimeReadback:
                 runtime_original=self.runtime_original, entry_witness=self.entry_witness, **live)
             self._check(state, live)
             runtime = self.native
-            await _settled_executor(self.hass, runtime.sources)
-            self._check(state, live)
+            if pre_review:
+                # The physical worker gets no chain/HA callbacks. The original
+                # state is rebound on the event loop on both sides of await.
+                from copy import copy
+                from .native_input_baseline import _drained
+                _need(state._live_check is None, 'template_state_review_live_input')
+                detached = copy(state)
+                detached._evidence_check = None
+                identity = await _drained(self.hass.async_add_executor_job,
+                    lambda: detached.prepare_review_identity(self.receipt, runtime.native))
+                self._check(state, live)
+                runtime.bindings()
+                _need(state._review_identity(self.receipt, runtime.native) == identity,
+                      'template_state_review_source_changed')
+            else:
+                await _settled_executor(self.hass, runtime.sources)
+                self._check(state, live)
+                identity = None
             observed = await async_observe_discovery_inputs(self.hass,
                                                 guard=lambda: self._check(state, live))
             self._check(state, live)
             sample = self._sample(runtime, state, live)
             _need(sample[1].same_bindings(snapshot), 'template_state_runtime_changed')
-            witness = _TemplateStateRuntimeCheck(self, state, live, runtime, observed, sample)
+            witness = _TemplateStateRuntimeCheck(self, state, live, runtime, observed, sample, identity)
             witness.check()
             self._last_runtime = witness
             return sample[0]
@@ -416,15 +432,21 @@ class _TemplateStateRuntimeCheck:
     runtime: object
     observed: object
     sample: tuple
+    review_identity: tuple | None = None
 
     def check(self):
         from .native_discovery_inputs import assert_discovery_managers_current
         from .native_template_accepted_consumers import _documents
         owner = self.owner
         owner._check(self.state, self.live)
-        self.runtime.sources()
-        self.runtime.bindings()
-        self.state.assert_current(owner.receipt)
+        if self.review_identity is None:
+            self.runtime.sources()
+            self.runtime.bindings()
+            self.state.assert_current(owner.receipt)
+        else:
+            self.runtime.bindings()
+            _need(self.state._review_identity(owner.receipt, self.runtime.native) == self.review_identity,
+                  'template_state_review_source_changed')
         assert_discovery_managers_current(owner.hass, self.observed,
                                           guard=lambda: owner._check(self.state, self.live))
         _documents(self.state, self.observed)
