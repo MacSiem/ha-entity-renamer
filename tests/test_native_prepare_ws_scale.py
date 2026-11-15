@@ -580,6 +580,38 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertNotIn('.storage', line)
         module._review_source_current(before, before, state)
 
+    async def test_review_dynamic_icon_pins_are_checked_in_worker(self):
+        import test_native_template_metadata_server as metadata
+        runtime, mapping, uuids, original = await metadata.NativeTemplateMetadataServerTests.data(
+            self, variant='sensor', source_consumers=True)
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        accepted = self.module('accepted_input_state').AcceptedInputState
+        physical = accepted.prepare_review_identity
+        loop_thread = threading.get_ident()
+        observed = []
+        def checked(state, receipt, native):
+            self.assertNotEqual(threading.get_ident(), loop_thread)
+            before = len(native.icon_proof.paths)
+            result = physical(state, receipt, native)
+            observed.append((before, len(native.icon_proof.paths)))
+            return result
+        async def refresh(): pass
+        with patch.object(accepted, 'prepare_review_identity', checked):
+            review = await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
+            self.assertTrue(observed)
+            self.assertTrue(all(before > 0 and before == after for before, after in observed), observed)
+            applied = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+            self.assertEqual(applied['state'], 'applied')
+            self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+            reversed_result = await runtime.native_yaml_reverse(hass, review['operation_id'],
+                review['fingerprint'], guard=lambda: None, refresh=refresh)
+            self.assertEqual(reversed_result['state'], 'rolled_back')
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
     async def test_review_token_inventory_diagnostics_are_closed_and_strict(self):
         from types import SimpleNamespace
         module = self.module('native_template_state_yaml')
