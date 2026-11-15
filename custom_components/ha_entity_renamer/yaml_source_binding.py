@@ -391,7 +391,8 @@ def _runtime_rows_sample(hass, evidence, registry_rows, *, expected_projections=
     return tuple(rows), tuple(sorted(blockers)), tuple(tokens)
 
 
-async def async_bind_original_runtime(hass, receipt, evidence, *, guard, owned_automation=None):
+async def async_bind_original_runtime(hass, receipt, evidence, *, guard, owned_automation=None,
+                                      propagate_pending=False):
     """Detached source/runtime observation before preparation; never a write fence.
 
     The exact ORIGINAL receipt guards all staging/auxiliary inputs. Existing
@@ -427,6 +428,9 @@ async def async_bind_original_runtime(hass, receipt, evidence, *, guard, owned_a
     except PermissionError:
         raise
     except ValueError as error:
+        from .native_discovery_inputs import DiscoveryNativeWritePending
+        if propagate_pending and isinstance(error, DiscoveryNativeWritePending):
+            raise
         from .yaml_validation_worker import _checker_diagnostic
         logging.getLogger(__name__).warning('Native source inputs unavailable: %s',
                                            _checker_diagnostic(error))
@@ -447,6 +451,9 @@ async def async_bind_original_runtime(hass, receipt, evidence, *, guard, owned_a
     except PermissionError:
         raise
     except (ValueError, KeyError, AttributeError, TypeError) as error:
+        from .native_input_baseline import NativeInputWritePending
+        if propagate_pending and isinstance(error, NativeInputWritePending):
+            raise
         from .yaml_validation_worker import _checker_diagnostic
         logging.getLogger(__name__).warning('Native source observation unavailable: %s',
                                            _checker_diagnostic(error))

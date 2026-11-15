@@ -358,7 +358,7 @@ class NativeTemplateStateYAMLRuntimeReadback:
         return Position.UNKNOWN  # No implicit accepted/live input adoption.
 
     async def position_at_inputs(self, change, state, *, live_intent=None,
-                                 live_context=None, live_calls=()):
+                                 live_context=None, live_calls=(), propagate_pending=False):
         from .native_template_state_binding import (async_observe_accepted_state_bindings,
                                                     _StateRuntime)
         from .native_discovery_inputs import async_observe_discovery_inputs
@@ -387,6 +387,10 @@ class NativeTemplateStateYAMLRuntimeReadback:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            from .native_input_baseline import NativeInputWritePending
+            from .native_discovery_inputs import DiscoveryNativeWritePending
+            if propagate_pending and isinstance(error, (NativeInputWritePending, DiscoveryNativeWritePending)):
+                raise
             from .yaml_validation_worker import _checker_diagnostic
             logging.getLogger(__name__).warning('Template runtime observation unavailable: %s',
                                                _checker_diagnostic(error))

@@ -99,7 +99,7 @@ class _UnchangedConsumers:
         obj.check()
         return obj
 
-    async def bind_sources(self, receipt, evidence, *, guard, owned_automation=None):
+    async def bind_sources(self, receipt, evidence, *, guard, owned_automation=None, propagate_pending=False):
         from .yaml_source_binding import async_bind_original_runtime, _RuntimeSourceSampler
         from .native_discovery_inputs import async_observe_discovery_inputs
         from .discovery import _runtime_family
@@ -111,7 +111,8 @@ class _UnchangedConsumers:
                                                 include_row_diagnostics=False)
                 _need(family.status == 'COMPLETE' and token is not None,
                       domain + '_runtime_unqualified')
-        bound = await async_bind_original_runtime(self.hass, receipt, evidence, guard=guard, owned_automation=owned_automation)
+        bound = await async_bind_original_runtime(self.hass, receipt, evidence, guard=guard,
+            owned_automation=owned_automation, propagate_pending=propagate_pending)
         guard()
         if not bound.verified:
             # Internal fixed codes only: never source bodies, IDs or paths.
@@ -236,7 +237,8 @@ class NativeTemplateForward:
     _coordinator = NativeTemplateReverse._coordinator
 
     @classmethod
-    async def prepare(cls, hass, mapping, *, guard, refresh, review_id=None):
+    async def prepare(cls, hass, mapping, *, guard, refresh, review_id=None,
+                      _review_native=None, _review_retry=False):
         from . import Runtime
         from homeassistant.core import HomeAssistant
         from .manifest import parse_manifest
@@ -389,9 +391,11 @@ class NativeTemplateForward:
             # YAML patches and Template YAML remain outside this private writer.
             _need(not obj.evidence.template_sources.ledger.definitions,
                   'other_source_scope_unsupported')
-            await obj._unchanged_consumers.bind_sources(obj.receipt, obj.evidence, guard=scope)
+            await obj._unchanged_consumers.bind_sources(obj.receipt, obj.evidence, guard=scope,
+                propagate_pending=review_id is not None)
             scope()
             baseline = await async_capture_native_input_baseline(hass, obj.receipt, guard=scope)
+            obj._review_baseline = baseline
             scope()
             source_history = await obj.history.capture(obj.mapping)
             scope()
@@ -430,9 +434,21 @@ class NativeTemplateForward:
             if review_id is not None:
                 obj.review_admission = NativeTemplateReviewPin(obj)
             return obj
-        except BaseException:
-            obj.failed = True
-            obj.close()
+        except BaseException as error:
+            try:
+                from .native_input_baseline import NativeInputWritePending
+                from .native_discovery_inputs import DiscoveryNativeWritePending
+                if review_id is not None and isinstance(error, (NativeInputWritePending, DiscoveryNativeWritePending)):
+                    from .transaction import Refused
+                    if _review_retry:
+                        raise Refused('review_native_settle_repeated') from None
+                    from . import _retry_pending_review
+                    await _retry_pending_review(hass, scope, _review_native,
+                        receipt=getattr(obj, 'receipt', None),
+                        baseline=getattr(obj, '_review_baseline', None))
+            finally:
+                obj.failed = True
+                obj.close()
             raise
 
     @classmethod

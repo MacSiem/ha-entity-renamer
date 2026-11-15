@@ -46,6 +46,10 @@ class NativeInputBaselineError(ValueError):
     """Sanitized refusal; no raw document, values or underlying exception text."""
 
 
+class NativeInputWritePending(NativeInputBaselineError):
+    """A known Store write is pending; no native input was adopted."""
+
+
 def _fail(reason='native_input_baseline_rejected'):
     raise NativeInputBaselineError(reason) from None
 
@@ -512,7 +516,15 @@ class _Managers:
                         or store._max_readable_version != schema[0])):
                 _fail('native_input_store_changed')
             if not identity_only and self.pending_for(store):
-                _fail('native_input_native_write_pending')
+                import logging
+                flags = ('data', 'write_lock', 'delay_handle', 'final_listener', 'load_future')
+                state = (store._data is not None, store._write_lock.locked(),
+                         store._delay_handle is not None,
+                         store._unsub_final_write_listener is not None,
+                         store._load_future is not None)
+                logging.getLogger(__name__).warning('Native Store pending: store=%s flags=%s',
+                    key, tuple(flag for flag, active in zip(flags, state, strict=True) if active))
+                raise NativeInputWritePending('native_input_native_write_pending') from None
             if self.version in ('2026.10.2', '2026.10.4', '2026.11.0', '2026.11.1'):
                 if (key == _KEYS[0] and self.version in ('2026.11.0', '2026.11.1')
                         and not manager._loaded_event.is_set()):

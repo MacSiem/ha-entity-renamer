@@ -430,7 +430,10 @@ async def async_discover(hass, proposal, guard, *, _expected_yaml=None, _owned_s
         bound = None
         for name in ('entity_registry', 'device_registry', 'config_entries', 'template', 'powercalc'):
             families[name] = _unknown(name, 'read_access_denied', denied=True)
-    except (ValueError, OSError, KeyError, TypeError):
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        from .native_discovery_inputs import DiscoveryNativeWritePending
+        if _settle_native and isinstance(error, DiscoveryNativeWritePending):
+            raise
         bound = None
         for name in ('entity_registry', 'device_registry', 'config_entries', 'template', 'powercalc'):
             families[name] = _unknown(name, 'native_input_unavailable')
@@ -527,7 +530,10 @@ async def async_discover(hass, proposal, guard, *, _expected_yaml=None, _owned_s
             guard()
             if final != native:
                 raise ValueError('changed')
-        except (ValueError, OSError):
+        except (ValueError, OSError) as error:
+            from .native_discovery_inputs import DiscoveryNativeWritePending
+            if _settle_native and isinstance(error, DiscoveryNativeWritePending):
+                raise
             for name in ('entity_registry', 'device_registry', 'config_entries', 'template', 'powercalc'):
                 families[name] = _unknown(name, 'source_changed_during_capture')
             bound = None

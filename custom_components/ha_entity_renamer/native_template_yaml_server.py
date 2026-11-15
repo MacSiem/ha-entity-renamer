@@ -391,7 +391,7 @@ class NativeTemplateYAMLServer:
 
     @classmethod
     async def prepare(cls, hass, mapping, *, guard, refresh, entity_names=None, device_names=None,
-                      review_id=None, _mixed_powercalc=False):
+                      review_id=None, _mixed_powercalc=False, _review_native=None, _review_retry=False):
         from .manifest import parse_manifest
         _need(type(_mixed_powercalc) is bool and type(mapping) is dict and (bool(mapping) or not _mixed_powercalc)
               and all(type(k) is str and type(v) is str for k, v in mapping.items()), 'mapping_required')
@@ -423,14 +423,28 @@ class NativeTemplateYAMLServer:
         obj.mixed_powercalc = _mixed_powercalc
         obj.mapping, obj.entity_names, obj.device_names = dict(mapping), names, devices
         obj.review_id = review_id
+        obj._preparing_review = review_id is not None
         try:
             await _admit_foreign(obj, devices)
             async with obj.locks.hold(obj._scope):
                 await obj._prepare()
             obj._scope()
+            obj._preparing_review = False
             return obj
-        except BaseException:
-            obj.close()
+        except BaseException as error:
+            try:
+                from .native_input_baseline import NativeInputWritePending
+                from .native_discovery_inputs import DiscoveryNativeWritePending
+                if review_id is not None and isinstance(error, (NativeInputWritePending, DiscoveryNativeWritePending)):
+                    from .transaction import Refused
+                    if _review_retry:
+                        raise Refused('review_native_settle_repeated') from None
+                    from . import _retry_pending_review
+                    await _retry_pending_review(hass, obj._scope, _review_native,
+                        receipt=getattr(obj, 'receipt', None),
+                        baseline=getattr(obj, '_review_baseline', None))
+            finally:
+                obj.close()
             raise
 
     async def _prepare(self):

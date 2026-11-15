@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import os
 
 from .native_input_baseline import (
-    MAX_FILE_BYTES, MAX_TOTAL_BYTES, NativeInputBaselineError, _KEYS, _Managers, _SCHEMAS, _drained,
+    MAX_FILE_BYTES, MAX_TOTAL_BYTES, NativeInputBaselineError, NativeInputWritePending, _KEYS, _Managers, _SCHEMAS, _drained,
     _envelope, _json, _open_absolute_directory, _signature,
 )
 from .yaml_plan import Limits, _Reader
@@ -26,6 +26,10 @@ _SETTLE_INTERVAL = 1.0
 
 class DiscoveryNativeInputsError(ValueError):
     """Sanitized discovery refusal, without source values or underlying text."""
+
+
+class DiscoveryNativeWritePending(DiscoveryNativeInputsError):
+    """The native observation refused a pending Store write."""
 
 
 def _reject():
@@ -277,6 +281,8 @@ Cancellation drains executor work before any held descriptor can be released.
         return observed
     except asyncio.CancelledError:
         raise
+    except NativeInputWritePending:
+        raise DiscoveryNativeWritePending('native_input_native_write_pending') from None
     except PermissionError:
         raise PermissionError('native_discovery_inputs_permission_denied') from None
     except Exception as error:

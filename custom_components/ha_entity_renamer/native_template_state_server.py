@@ -569,7 +569,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
               and bundle.candidate_sources.sources.source_matched, 'modern_template_state_sources_required')
         bind_sources = (self.consumers.bind_prefix_sources if not controlled_reload and (domains in (('script',), ('script', 'template')) or automation_prefix)
                         else self.consumers.bind_sources)
-        await bind_sources(self.receipt, self.evidence, guard=self._scope)
+        await bind_sources(self.receipt, self.evidence, guard=self._scope,
+                           propagate_pending=getattr(self, '_preparing_review', False))
         self._scope()
         if controlled_reload and ('automation' in domains or (owned_script and self.hass.data.get('automation') is not None) or any(
                 row.get('entity_id') in self.mapping and row.get('platform') == 'automation' for row in source_rows)):
@@ -610,6 +611,7 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                   or combined_registry_names or unchanged_device_peers or not self.consumers.runtime_sample[0],
                   'selected_names_dependent_lifecycle_unsupported')
         baseline = await async_capture_native_input_baseline(self.hass, self.receipt, guard=self._scope)
+        self._review_baseline = baseline
         self._scope()
         pc_previous = pc_energy_physical = None
         pc_metadata = []
@@ -1078,7 +1080,11 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
                     _log_registry_mismatch(actual, wanted)
                 _need(actual.position == wanted.value, 'source_identity_or_history_changed')
         state = self.chain.reconstruct_inputs()
-        position = await self.observer.position_at_inputs(self.change, state)
+        if initial and getattr(self, '_preparing_review', False):
+            position = await self.observer.position_at_inputs(
+                self.change, state, propagate_pending=True)
+        else:
+            position = await self.observer.position_at_inputs(self.change, state)
         # Let HA service timers and sockets before the next full graph check.
         # Scope and the runtime witness are revalidated immediately afterwards.
         await asyncio.sleep(0.001)

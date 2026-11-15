@@ -20,13 +20,13 @@ def _need(value):
 
 
 class MixedYAMLConsumers(_UnchangedConsumers):
-    async def bind_sources(self, receipt, evidence, *, guard):
+    async def bind_sources(self, receipt, evidence, *, guard, propagate_pending=False):
         # Keep the original native source/bijection admission in full. Only the
         # later phase comparison uses the separately sealed candidate hashes.
-        await super().bind_sources(receipt, evidence, guard=guard)
+        await super().bind_sources(receipt, evidence, guard=guard, propagate_pending=propagate_pending)
         self.bind_phases(receipt, evidence, self.observed, Position.BEFORE)
 
-    async def bind_prefix_sources(self, receipt, evidence, *, guard):
+    async def bind_prefix_sources(self, receipt, evidence, *, guard, propagate_pending=False):
         # No domain reload ticket even during private prefix preparation.
         # Keep the full ORIGINAL sampler until the actual chain is bound.
         _need(getattr(self, 'phases', None) is None)
@@ -35,7 +35,8 @@ class MixedYAMLConsumers(_UnchangedConsumers):
             from .native_automation_owned_graph import OwnedAutomationGraph
             owned = await OwnedAutomationGraph.with_duration(self.hass, guard=guard)
             self.owned_automation = owned
-        await super().bind_sources(receipt, evidence, guard=guard, owned_automation=owned)
+        await super().bind_sources(receipt, evidence, guard=guard, owned_automation=owned,
+                                   propagate_pending=propagate_pending)
 
     def bind_phases(self, receipt, evidence, observed, position):
         phases = DependentYAMLRuntime(self.hass, evidence, observed, receipt, position=position,

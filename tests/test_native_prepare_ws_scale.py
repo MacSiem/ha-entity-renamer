@@ -161,7 +161,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         original = native.async_observe_discovery_inputs
         injected = []
         async def observe(hass, *, guard, settle=False, on_settle=None):
-            if settle and not injected:
+            if settle and on_settle is not None and not injected:
                 manager = hass.config_entries
                 store = manager._store
                 before = Path(store.path).stat().st_ino
@@ -169,7 +169,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                 store.async_delay_save(manager._data_to_save, 0.05)
                 injected.append((before, raw))
             result = await original(hass, guard=guard, settle=settle, on_settle=on_settle)
-            if settle and len(injected) == 1:
+            if settle and on_settle is not None and len(injected) == 1:
                 before, raw = injected[0]
                 self.assertNotEqual(Path(hass.config_entries._store.path).stat().st_ino, before)
                 self.assertEqual(Path(hass.config_entries._store.path).read_bytes(), raw)
@@ -178,6 +178,31 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         with patch.object(native, 'async_observe_discovery_inputs', observe):
             await self.test_registry_device_with_unrelated_automation_script_apply_inverse()
         self.assertEqual(len(injected), 2)
+
+    async def test_initial_accepted_state_pending_restarts_before_review(self):
+        import inspect
+        native = self.module('native_discovery_inputs')
+        original = native.async_observe_discovery_inputs
+        injected = []
+        async def observe(hass, *, guard, settle=False, on_settle=None):
+            frames = inspect.stack()
+            initial = any(frame.function == 'position_at_inputs'
+                          and frame.frame.f_locals.get('propagate_pending') is True
+                          for frame in frames)
+            accepted = any(frame.function == 'async_observe_accepted_state_bindings'
+                           for frame in frames)
+            if initial and accepted and not settle and not injected:
+                manager = hass.config_entries
+                store = manager._store
+                injected.append((Path(store.path).stat().st_ino, Path(store.path).read_bytes()))
+                store.async_delay_save(manager._data_to_save, 0.05)
+            return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
+        with patch.object(native, 'async_observe_discovery_inputs', observe):
+            await self.test_registry_device_with_unrelated_automation_script_apply_inverse()
+        self.assertEqual(len(injected), 1)
+        before, raw = injected[0]
+        self.assertNotEqual(Path(self.f.hass.config_entries._store.path).stat().st_ino, before)
+        self.assertEqual(Path(self.f.hass.config_entries._store.path).read_bytes(), raw)
 
     async def test_retry_refuses_foreign_source_change_before_effect(self):
         runtime, mapping, _, _, device = await self.restored_source()
@@ -188,7 +213,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         injected = False
         async def observe(hass, *, guard, settle=False, on_settle=None):
             nonlocal injected
-            if settle and not injected:
+            if settle and on_settle is not None and not injected:
                 injected = True
                 hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 0.05)
                 callback = on_settle
@@ -222,7 +247,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         calls = 0
         async def observe(hass, *, guard, settle=False, on_settle=None):
             nonlocal injected
-            if settle and not injected:
+            if settle and on_settle is not None and not injected:
                 injected = True
                 hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 0.05)
             return await original_observe(hass, guard=guard, settle=settle, on_settle=on_settle)
