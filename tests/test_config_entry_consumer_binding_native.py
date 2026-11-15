@@ -23,7 +23,7 @@ class NativeConfigEntryConsumerBindingTests(unittest.IsolatedAsyncioTestCase):
             'test_actual_native_serialization_and_store_full_baseline')
         await self.f.asyncSetUp()
         self.addAsyncCleanup(self.f.asyncTearDown)
-        self.assertIn(self.f.version, ('2025.6.0', '2026.10.2'))
+        self.assertIn(self.f.version, ('2025.6.0', '2026.10.2', '2026.11.1'))
         self.binding = importlib.import_module(fixtures.PACKAGE + '.native_configentry_binding')
         self.helper = importlib.import_module(fixtures.PACKAGE + '.helper_native')
         self.discovery_inputs = importlib.import_module(fixtures.PACKAGE + '.native_discovery_inputs')

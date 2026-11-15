@@ -183,6 +183,11 @@ class Pure(unittest.TestCase):
   self.assertEqual(result.entries,1)
   self.assertIs(result.can_write,False)
   self.assertIs(result.can_promote,False)
+ def test_supported_november_core_binds_matching_sources(self):
+  for version in ('2026.11.0','2026.11.1'):
+   with self.subTest(version=version):
+    n,p=fixture();n.version=version
+    self.assertEqual(self.bind(n,p).entries,1)
  def test_reordered_complete_plan_set_does_not_duplicate(self):
   source=[item('cfg-1'),item('cfg-2')]
   n,p=fixture(source,[plan(source[1]),plan(source[0])])
