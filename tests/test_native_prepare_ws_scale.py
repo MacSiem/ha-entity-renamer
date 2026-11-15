@@ -483,6 +483,63 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertIsNone(self.f.entity.async_get(new))
         self.assertNotEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
+    async def test_loader_source_mutation_refuses_review(self):
+        from homeassistant import loader
+        runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        load = loader.async_get_custom_components
+        changed = []
+        async def mutate(*args, **kwargs):
+            result = await load(*args, **kwargs)
+            if not changed:
+                path = self.f.root / 'template.yaml'
+                path.write_bytes(path.read_bytes() + b'\n# changed during loader\n')
+                changed.append(True)
+            return result
+        async def refresh(): pass
+        with patch.object(loader, 'async_get_custom_components', mutate):
+            with self.assertRaises((ValueError, self.module('transaction').Refused)):
+                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                    entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
+        self.assertEqual(changed, [True])
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+
+    async def test_nested_preparation_mutation_after_discovery_refuses_review(self):
+        runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        server = self.module('native_template_state_server').NativeTemplateStateServer
+        discovery = self.module('discovery')
+        prepare, discover = server.prepare.__func__, discovery.async_discover
+        sessions, changed = [], []
+        async def capture(cls, *args, **kwargs):
+            session = await prepare(cls, *args, **kwargs)
+            sessions.append(session)
+            return session
+        async def mutate(*args, **kwargs):
+            result = await discover(*args, **kwargs)
+            session = sessions[0]
+            payload = session.preparations.plans[session.plan.native_inputs[0]]['payload']
+            payload['composition']['unexpected_nested_change'] = True
+            changed.append(True)
+            return result
+        async def refresh(): pass
+        with patch.object(server, 'prepare', classmethod(capture)), \
+             patch.object(discovery, 'async_discover', mutate):
+            with self.assertRaises((ValueError, self.module('transaction').Refused)):
+                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                    entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
+        self.assertEqual(changed, [True])
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
     async def test_initial_review_source_rewrite_after_discovery_refuses(self):
         runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
         hass = self.f.hass
@@ -1109,6 +1166,22 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         runtime, mapping, _, _ = await self.data(variant='sensor', source_consumers=True)
         hass = self.f.hass
         accepted = self.module('accepted_input_state').AcceptedInputState
+        discovery = self.module('discovery')
+        final_fence = self.module('discovery_final_fence')
+        scan, finalize = discovery._scan_yaml, final_fence.async_finalize_discovery
+        pipeline_counts = Counter()
+        def counted_scan(*args, **kwargs):
+            pipeline_counts['plan'] += 1
+            return scan(*args, **kwargs)
+        async def counted_finalize(*args, **kwargs):
+            pipeline_counts['finalize'] += 1
+            return await finalize(*args, **kwargs)
+        scan_patch = patch.object(discovery, '_scan_yaml', counted_scan)
+        final_patch = patch.object(final_fence, 'async_finalize_discovery', counted_finalize)
+        scan_patch.start()
+        final_patch.start()
+        self.addCleanup(scan_patch.stop)
+        self.addCleanup(final_patch.stop)
         physical = accepted.prepare_review_identity
         loop_thread = threading.get_ident()
         physical_threads = []
@@ -1227,6 +1300,7 @@ asyncio.run(main())'''
         for label, payload in zip(('FIRST1', 'BATCH502'), cases):
             if only and label != only:
                 continue
+            pipeline_counts.clear()
             process = await asyncio.create_subprocess_exec('python3', '-c', client,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             data = json.dumps(dict(url=f'ws://127.0.0.1:{hass.http.server_port}/api/websocket',
@@ -1263,5 +1337,6 @@ asyncio.run(main())'''
             self.assertTrue(replies and replies[0]['ping_count'] > 0)
             self.assertLess(replies[0]['max_ping_rtt'], 20)
             self.assertLess(replies[0]['max_probe_gap'], 20)
+            self.assertEqual(pipeline_counts, {'plan': 1, 'finalize': 1})
             self.assertTrue(physical_threads, 'pre-review physical guard was not exercised')
             print(f'ws_pre_review_physical_executor_calls={len(physical_threads)}', flush=True)

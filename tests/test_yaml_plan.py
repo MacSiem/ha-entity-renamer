@@ -8,6 +8,31 @@ from custom_components.ha_entity_renamer.yaml_plan import Limits, YAMLPlanError,
 
 
 class YAMLPlannerTests(unittest.TestCase):
+    def test_source_verifier_detects_content_identity_and_membership_drift(self):
+        import os
+        from custom_components.ha_entity_renamer.yaml_plan import verify_plan_sources
+        self.put('configuration.yaml', 'sensor: !include_dir_list sources\n')
+        self.put('sources/nested/one.yaml', 'entity_id: sensor.foo\n')
+        plan = self.plan()
+        self.assertTrue(verify_plan_sources(self.root, plan))
+        source = self.root / 'sources/nested/one.yaml'
+        before = source.stat()
+        source.write_bytes(source.read_bytes().replace(b'sensor.foo', b'sensor.bar'))
+        os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertFalse(verify_plan_sources(self.root, plan))
+        source.write_text('entity_id: sensor.foo\n')
+        replacement = self.root / 'replacement.yaml'
+        replacement.write_bytes(source.read_bytes())
+        replacement.replace(source)
+        self.assertFalse(verify_plan_sources(self.root, plan))
+        plan = self.plan()
+        self.put('sources/nested/new.yaml', 'entity_id: sensor.foo\n')
+        self.assertFalse(verify_plan_sources(self.root, plan))
+        plan = self.plan()
+        (self.root / 'sources/nested/link').symlink_to('one.yaml')
+        with self.assertRaises(YAMLPlanError):
+            verify_plan_sources(self.root, plan)
+
     def test_named_source_replacement_during_read_is_never_a_valid_snapshot(self):
         import os
         from unittest.mock import patch

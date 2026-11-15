@@ -321,6 +321,27 @@ def plan_yaml(
             os.close(reader.root)
 
 
+def verify_plan_sources(config_root: str | Path, plan: Plan) -> bool:
+    """Recheck every input of a freshly planned graph without replanning it."""
+    if type(plan) is not Plan:
+        raise YAMLPlanError('invalid source plan')
+    reader = _Reader(config_root, Limits())
+    try:
+        for expected in plan.files:
+            data, info = reader.read(expected.path)
+            actual = FileSnapshot(expected.path, hashlib.sha256(data).hexdigest(),
+                                  len(data), info.st_dev, info.st_ino)
+            if actual != expected:
+                return False
+        expected_dirs = {row.path: row for row in plan.directories}
+        for path in expected_dirs:
+            if not any(str(parent) in expected_dirs for parent in PurePosixPath(path).parents):
+                reader.listing(path)
+        return reader.directories == expected_dirs
+    finally:
+        os.close(reader.root)
+
+
 def _yaml_bindings(tree, inherited_key, mapping, issue, max_nodes, *, script_parameters=None,
                    script_arguments=None, input_bindings=None):
     """File-local, schema-selected HA variable producers and all their uses.

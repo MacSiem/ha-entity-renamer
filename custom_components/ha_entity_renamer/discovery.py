@@ -469,10 +469,11 @@ async def async_discover(hass, proposal, guard, *, _expected_yaml=None, _owned_s
                 if (file is None or file.sha256 != source.sha256
                         or (file.device, file.inode) != source.file_identity[:2]):
                     raise ValueError('yaml_dashboard_source_changed')
-        yaml_again = await _drained(hass.async_add_executor_job,
-            lambda: _scan_yaml(hass.config.config_dir, mapping, yaml_roots, _owned_script_services))
+        from .yaml_plan import verify_plan_sources
+        yaml_unchanged = await _drained(hass.async_add_executor_job,
+            lambda: verify_plan_sources(hass.config.config_dir, yaml))
         guard()
-        if yaml_again != yaml:
+        if not yaml_unchanged:
             families['yaml_sources'] = _unknown('yaml_sources', 'source_changed_during_capture')
     except PermissionError:
         families['yaml_sources'] = _unknown('yaml_sources', 'read_access_denied', denied=True)
@@ -542,10 +543,11 @@ async def async_discover(hass, proposal, guard, *, _expected_yaml=None, _owned_s
     # last graph comparison. Keep the first graph; never adopt the later one.
     if families['yaml_sources'].status == 'COMPLETE':
         try:
-            final_yaml = await _drained(hass.async_add_executor_job,
-                lambda: _scan_yaml(hass.config.config_dir, mapping, yaml_roots, _owned_script_services))
+            from .yaml_plan import verify_plan_sources
+            yaml_unchanged = await _drained(hass.async_add_executor_job,
+                lambda: verify_plan_sources(hass.config.config_dir, yaml))
             guard()
-            if final_yaml != yaml:
+            if not yaml_unchanged:
                 families['yaml_sources'] = _unknown('yaml_sources', 'source_changed_during_capture')
                 conflicts.append('source_changed_during_capture')
         except PermissionError:
@@ -619,8 +621,10 @@ async def async_discover(hass, proposal, guard, *, _expected_yaml=None, _owned_s
                     raise ValueError('discovery_native_source_changed')
             finally:
                 pinned.close()
-        if yaml is not None and _scan_yaml(hass.config.config_dir, mapping, yaml_roots, _owned_script_services) != yaml:
-            raise ValueError('discovery_yaml_source_changed')
+        if yaml is not None:
+            from .yaml_plan import verify_plan_sources
+            if not verify_plan_sources(hass.config.config_dir, yaml):
+                raise ValueError('discovery_yaml_source_changed')
 
     def physical():
         try:

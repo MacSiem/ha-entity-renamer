@@ -470,7 +470,6 @@ class Runtime:
                 # Its unverified families are limitations, not proof of an
                 # affected reference and not an automatic custom-integration ban.
                 from .discovery import async_discover
-                from .discovery_final_fence import async_finalize_discovery
                 from .native_template_state_composition import ControlledReloadComposition, ControlledReloadEntryComposition
                 from .controlled_script_composition import ControlledScriptComposition, is_controlled_script
                 names = entity_names or {}
@@ -499,18 +498,19 @@ class Runtime:
                     # profile inputs are verified by the existing PC fence.
                     from dataclasses import replace
                     expected_yaml = replace(expected_yaml, powercalc_inputs=None)
+                from homeassistant import loader
+                custom = await loader.async_get_custom_components(hass)
+                session._scope()
                 settled = []
-                capture = await async_discover(hass, proposal, session._scope,
+                capture = await async_discover(hass, proposal, session._operation_scope,
                     _expected_yaml=expected_yaml,
                     _owned_script_services=owned_script, _settle_native=True,
                     _on_native_settle=settled.append, _consumer_guard=session._operation_scope)
+                session._scope()
                 if settled:
                     if retry:
                         raise Refused('review_native_settle_repeated')
                     raise _ReviewRetry()
-                from homeassistant import loader
-                custom = await loader.async_get_custom_components(hass)
-                capture = await async_finalize_discovery(hass, capture, session._scope)
                 if capture.conflicts:
                     raise Refused('review_discovery_source_changed')
                 limitations = [{'source': row.name, 'status': row.status,
@@ -518,7 +518,6 @@ class Runtime:
                     'blockers': list(row.blockers)} for row in capture.families
                     if row.status != 'COMPLETE' or row.blockers]
                 current()
-                session._scope()
                 limitations.extend({'source': 'config_entry:' + row['domain'] + '/' + row['entry_id'],
                     'status': 'UNKNOWN', 'reason': 'dynamic_reference_unverified', 'blockers': row['reasons']}
                     for row in getattr(session, 'config_entry_limitations', ()))
