@@ -335,6 +335,39 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertFalse(any(row['payload'].get('kind') == 'ordinary_review_lease'
                              for row in stores.plans.values() if type(row['payload']) is dict))
 
+    async def test_initial_pending_refuses_foreign_native_change(self):
+        import inspect
+        runtime, mapping, _, _, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        native = self.module('native_discovery_inputs')
+        original = native.async_observe_discovery_inputs
+        injected = []
+        async def observe(hass, *, guard, settle=False, on_settle=None):
+            frames = inspect.stack()
+            initial = any(frame.function == 'position_at_inputs'
+                          and frame.frame.f_locals.get('propagate_pending') is True
+                          for frame in frames)
+            accepted = any(frame.function == 'async_observe_accepted_state_bindings'
+                           for frame in frames)
+            if initial and accepted and not settle and not injected:
+                injected.append(True)
+                hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 0.2)
+                hass.loop.call_later(0.02, lambda: self.f.entity.async_update_entity(
+                    old, name='Foreign native change'))
+            return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
+        async def refresh(): pass
+        with patch.object(native, 'async_observe_discovery_inputs', observe):
+            with self.assertRaises((ValueError, self.module('transaction').Refused)):
+                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                    entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
+                    guard=lambda: None, refresh=refresh)
+        self.assertEqual(injected, [True])
+        self.assertEqual(self.f.entity.async_get(old).name, 'Foreign native change')
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+
     async def test_initial_pending_timeout_refuses_without_effect(self):
         import inspect
         runtime, mapping, _, _, device = await self.restored_source()
