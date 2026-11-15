@@ -293,7 +293,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertIsNone(self.f.entity.async_get(new))
 
     async def test_initial_review_source_rewrite_after_worker_refuses(self):
-        runtime, mapping, uuids, original, _ = await self.restored_source(registry_only=False)
+        runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
         baseline = self.module('native_input_baseline')
@@ -321,7 +321,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertNotEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
     async def test_initial_review_source_rewrite_after_discovery_refuses(self):
-        runtime, mapping, uuids, original, _ = await self.restored_source(registry_only=False)
+        runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
         discovery = self.module('discovery_final_fence')
@@ -630,7 +630,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         from homeassistant.helpers import entity_registry as er
         from homeassistant.helpers.json import _orjson_bytes_default_encoder
         from types import MappingProxyType
-        runtime, mapping, _, _, _ = await self.restored_source(registry_only=False)
+        runtime, mapping, _, _ = await self.data(variant='sensor', source_consumers=True)
         hass = self.f.hass
         accepted = self.module('accepted_input_state').AcceptedInputState
         physical = accepted.prepare_review_identity
