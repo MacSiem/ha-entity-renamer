@@ -492,7 +492,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         changed = []
         async def mutate(*args, **kwargs):
             result = await load(*args, **kwargs)
-            if not changed:
+            if len(changed) < 2:
                 path = self.f.root / 'template.yaml'
                 path.write_bytes(path.read_bytes() + b'\n# changed during loader\n')
                 changed.append(True)
@@ -502,7 +502,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
             with self.assertRaises((ValueError, self.module('transaction').Refused)):
                 await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
                     entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
-        self.assertEqual(changed, [True])
+        self.assertEqual(changed, [True, True])
         self.assertFalse(runtime.reviews)
         self.assertFalse(await runtime.journal.all())
         self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
