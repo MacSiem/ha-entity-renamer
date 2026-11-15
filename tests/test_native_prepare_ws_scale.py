@@ -529,6 +529,15 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                 review = await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
                     entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
                 self.assertIn(review['operation_id'], runtime.reviews)
+                applied = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                    actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+                self.assertEqual(applied['state'], 'applied')
+                self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+                self.assertIsNone(self.f.entity.async_get(old))
+                self.assertNotEqual((self.f.root / 'template.yaml').read_bytes(), original)
+                reversed_result = await runtime.native_yaml_reverse(hass, review['operation_id'],
+                    review['fingerprint'], guard=lambda: None, refresh=refresh)
+                self.assertEqual(reversed_result['state'], 'rolled_back')
             else:
                 reason = 'review_selected_source_changed' if mode == 'selected' else 'review_source_invalidated_repeated'
                 with self.assertRaisesRegex(self.module('transaction').Refused, reason):
@@ -537,7 +546,8 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                 self.assertFalse(runtime.reviews)
         self.assertEqual(attempts, [False, True])
         self.assertEqual(len(invalidated), 2 if mode == 'twice' else 1)
-        self.assertFalse(await runtime.journal.all())
+        if mode != 'success':
+            self.assertFalse(await runtime.journal.all())
         self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
         self.assertIsNone(self.f.entity.async_get(new))
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
