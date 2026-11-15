@@ -503,7 +503,7 @@ class Runtime:
                 capture = await async_discover(hass, proposal, session._scope,
                     _expected_yaml=expected_yaml,
                     _owned_script_services=owned_script, _settle_native=True,
-                    _on_native_settle=settled.append)
+                    _on_native_settle=settled.append, _consumer_guard=session._operation_scope)
                 if settled:
                     if retry:
                         raise Refused('review_native_settle_repeated')

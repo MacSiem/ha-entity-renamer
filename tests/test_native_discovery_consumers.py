@@ -119,6 +119,37 @@ class NativeDiscoveryConsumersTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(preview['migration_ready'])
         self.assertNotIn('sensor.old', json.dumps(preview))
 
+    async def test_discovery_consumer_scope_and_full_fences(self):
+        discovery = importlib.import_module(fixture.PACKAGE + '.discovery')
+        (self.root / 'configuration.yaml').write_text('script: {}\n')
+        original = subject.async_observe_discovery_consumers
+        full_calls, light_calls, observations = [], [], []
+        drift = False
+        def full():
+            full_calls.append(True)
+            if drift:
+                raise RuntimeError('global drift')
+        def light():
+            light_calls.append(True)
+        async def observe(*args, **kwargs):
+            nonlocal drift
+            self.assertIs(kwargs['guard'], light)
+            before = len(full_calls)
+            result = await original(*args, **kwargs)
+            self.assertEqual(len(full_calls), before)
+            observations.append(before)
+            drift = True
+            return result
+        with patch.object(subject, 'async_observe_discovery_consumers', observe):
+            with self.assertRaisesRegex(RuntimeError, 'global drift'):
+                await discovery.async_discover(self.hass,
+                    {'entities': [{'entity_id': 'sensor.old', 'proposed_entity_id': 'sensor.new'}]},
+                    full, _consumer_guard=light)
+        self.assertEqual(len(observations), 1)
+        self.assertGreater(observations[0], 0)
+        self.assertGreater(len(light_calls), 1)
+        self.assertEqual(len(full_calls), observations[0] + 1)
+
     async def test_server_discovery_does_not_adopt_later_dashboard_image(self):
         discovery = importlib.import_module(fixture.PACKAGE + '.discovery')
         (self.root / 'configuration.yaml').write_text('script: {}\n')

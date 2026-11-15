@@ -373,7 +373,7 @@ def _scan_yaml(root, mapping, yaml_roots, owned_script_services):
 
 
 async def async_discover(hass, proposal, guard, *, _expected_yaml=None, _owned_script_services=(),
-                         _settle_native=False, _on_native_settle=None):
+                         _settle_native=False, _on_native_settle=None, _consumer_guard=None):
     """Capture native sources and dependent families without any mutation API."""
     from homeassistant.const import __version__
     from .native_discovery_inputs import async_observe_discovery_inputs
@@ -438,7 +438,7 @@ async def async_discover(hass, proposal, guard, *, _expected_yaml=None, _owned_s
         for name in ('entity_registry', 'device_registry', 'config_entries', 'template', 'powercalc'):
             families[name] = _unknown(name, 'native_input_unavailable')
     guard()
-    consumers = await async_observe_discovery_consumers(hass, guard=guard)
+    consumers = await async_observe_discovery_consumers(hass, guard=_consumer_guard or guard)
     guard()
     for name in ('dashboard', 'energy'):
         families[name] = _consumer_family(name, getattr(consumers, name), mapping)
@@ -512,7 +512,7 @@ async def async_discover(hass, proposal, guard, *, _expected_yaml=None, _owned_s
         for name in ('history', 'statistics'):
             families[name] = _unknown(name, 'recorder_scope_unavailable')
     guard()
-    final_consumers = await async_observe_discovery_consumers(hass, guard=guard)
+    final_consumers = await async_observe_discovery_consumers(hass, guard=_consumer_guard or guard)
     guard()
     for name in ('dashboard', 'energy'):
         first, final = getattr(consumers, name), getattr(final_consumers, name)

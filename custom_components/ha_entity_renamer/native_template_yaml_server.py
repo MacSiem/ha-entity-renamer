@@ -333,11 +333,14 @@ class NativeTemplateYAMLServer:
         obj.bound = obj.used = obj.closed = False
         powercalc_present = 'powercalc' in hass.config.components
 
-        def scope():
+        def operation_scope():
             _authorize(guard)
             _need(not obj.closed and hass.data.get(DATA_RUNTIME) is runtime
                   and runtime.loaded and not runtime.unloading
                   and runtime.operation_lock is obj.lock and obj.lock.locked(), 'runtime_scope_lost')
+
+        def scope():
+            operation_scope()
             obj.scene_fence.check()
             _need(('powercalc' in hass.config.components) is powercalc_present
                   and (not powercalc_scope or powercalc_present), 'powercalc_scope_unsupported')
@@ -358,7 +361,7 @@ class NativeTemplateYAMLServer:
                 _need(runtime.journal is obj.journal and runtime.preparations is obj.preparations,
                       'runtime_cache_replaced')
                 obj._preparation_current()
-        obj._scope = scope
+        obj._scope, obj._operation_scope = scope, operation_scope
         from .native_empty_scene import NativeEmptySceneFence
         obj.scene_fence = NativeEmptySceneFence(hass)
         try:
