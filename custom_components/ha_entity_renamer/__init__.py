@@ -41,7 +41,8 @@ def _review_selected_sources(hass, mapping, entity_names, device_names):
             if not row.id or not row.unique_id or row.device_id != identity:
                 raise Refused('selected_device_source_required')
             rows[row.id] = io.row('entity', row.id)
-    return _freeze_json({'entities': rows, 'devices': devices})
+    return _freeze_json({'entities': dict(sorted(rows.items())),
+                         'devices': dict(sorted(devices.items()))})
 
 
 def _retry_difference(old, new):
