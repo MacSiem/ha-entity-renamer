@@ -541,7 +541,8 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                 self.assertEqual(reversed_result['state'], 'rolled_back')
             else:
                 reason = 'review_selected_source_changed' if mode == 'selected' else 'review_source_invalidated_repeated'
-                with self.assertRaisesRegex(self.module('transaction').Refused, reason):
+                error_type = receipt_error if mode == 'other' else self.module('transaction').Refused
+                with self.assertRaisesRegex(error_type, reason):
                     await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
                         entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
                 self.assertFalse(runtime.reviews)
@@ -554,6 +555,107 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
         self.assertIsNone(self.f.entity.async_get(new))
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
+    async def _final_history_source_replan(self, mode):
+        runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        accepted = self.module('accepted_input_state').AcceptedInputState
+        receipt_error = self.module('native_registry_receipts').RegistryReceiptError
+        server = self.module('native_template_yaml_server').NativeTemplateYAMLServer
+        current, final = accepted.assert_current, server._final_history
+        prepare_once = type(runtime)._native_yaml_prepare_once
+        loop_thread = threading.get_ident()
+        active = []
+        attempts, changes, errors = [], [], []
+        async def wrapped_final(owner, state, witness, **kwargs):
+            active.append((state, kwargs.get('pre_review', False)))
+            try:
+                return await final(owner, state, witness, **kwargs)
+            finally:
+                active.pop()
+        def changed_source(state, receipt):
+            in_history = bool(active) and active[-1][0] is state
+            pre_review = in_history and active[-1][1]
+            after_effect = in_history and not pre_review and self.f.entity.async_get(new) is not None
+            should_change = ((pre_review and mode != 'post' and (not changes or mode == 'twice'))
+                             or (mode == 'post' and after_effect and not changes))
+            if should_change:
+                self.assertNotEqual(threading.get_ident(), loop_thread)
+                if mode == 'other':
+                    changes.append(True)
+                    raise receipt_error('registry_receipt_input_graph_changed')
+                path = self.f.root / 'template.yaml'
+                path.write_bytes(path.read_bytes() + b'\n# external final-history change\n')
+                changes.append(True)
+            try:
+                return current(state, receipt)
+            except receipt_error as error:
+                if should_change:
+                    self.assertEqual(error.args, ('registry_receipt_input_source_changed',))
+                    errors.append(error.args)
+                raise
+        async def wrapped_prepare(subject, *args, **kwargs):
+            attempts.append(kwargs['retry'])
+            if kwargs['retry']:
+                self.assertFalse(subject.reviews)
+                self.assertFalse(any(row['payload'].get('kind') == 'ordinary_review_lease'
+                    for row in subject.preparations.plans.values() if type(row['payload']) is dict))
+                if mode == 'selected':
+                    self.f.entity.async_update_entity(old, new_unique_id='rebound-review-identity')
+                    await self._flush_documents()
+            return await prepare_once(subject, *args, **kwargs)
+        async def refresh(): pass
+        with patch.object(server, '_final_history', wrapped_final), \
+             patch.object(accepted, 'assert_current', changed_source), \
+             patch.object(type(runtime), '_native_yaml_prepare_once', wrapped_prepare):
+            if mode in ('selected', 'twice', 'other'):
+                reason = ('review_selected_source_changed' if mode == 'selected' else
+                          'registry_receipt_input_graph_changed' if mode == 'other' else
+                          'review_source_invalidated_repeated')
+                with self.assertRaisesRegex(self.module('transaction').Refused, reason):
+                    await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                        entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
+                self.assertFalse(runtime.reviews)
+                self.assertFalse(await runtime.journal.all())
+            else:
+                review = await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                    entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
+                if mode == 'post':
+                    with self.assertRaises((ValueError, self.module('transaction').Refused)):
+                        await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                            actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+                else:
+                    applied = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
+                        actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
+                    self.assertEqual(applied['state'], 'applied')
+                    self.assertEqual(self.f.entity.async_get(new).id, uuids[old])
+                    reversed_result = await runtime.native_yaml_reverse(hass, review['operation_id'],
+                        review['fingerprint'], guard=lambda: None, refresh=refresh)
+                    self.assertEqual(reversed_result['state'], 'rolled_back')
+                    self.assertEqual((self.f.root / 'template.yaml').read_bytes(),
+                                     original + b'\n# external final-history change\n')
+        self.assertEqual(attempts, [False] if mode in ('post', 'other') else [False, True])
+        self.assertEqual(len(changes), 2 if mode == 'twice' else 1)
+        self.assertEqual(len(errors), 0 if mode == 'other' else len(changes))
+        if mode != 'post':
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+            self.assertIsNone(self.f.entity.async_get(new))
+
+    async def test_final_history_source_change_replans(self):
+        await self._final_history_source_replan('success')
+
+    async def test_final_history_selected_drift_refuses(self):
+        await self._final_history_source_replan('selected')
+
+    async def test_final_history_source_change_twice_refuses(self):
+        await self._final_history_source_replan('twice')
+
+    async def test_final_history_other_error_does_not_retry(self):
+        await self._final_history_source_replan('other')
+
+    async def test_final_history_source_change_after_effect_does_not_retry(self):
+        await self._final_history_source_replan('post')
 
     async def test_review_token_diagnostic_categories_are_closed(self):
         from types import SimpleNamespace

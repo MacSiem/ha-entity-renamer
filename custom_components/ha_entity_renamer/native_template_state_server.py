@@ -1113,7 +1113,8 @@ class NativeTemplateStateServer(NativeTemplateYAMLServer):
             await self.dashboard_phase.verify_yaml(state, self.composition.yaml_plan, self.mapping,
                 self.change if self.receipt.proposed_files else None,
                 original=rollback or initial, guard=self._scope)
-        await self._final_history(state, witness)
+        await self._final_history(state, witness,
+            pre_review=initial and getattr(self, '_preparing_review', False))
         return True
 
     async def _full(self, rollback):

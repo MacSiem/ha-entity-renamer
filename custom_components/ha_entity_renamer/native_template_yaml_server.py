@@ -664,7 +664,7 @@ class NativeTemplateYAMLServer:
         await self._final_history(state, witness)
         return True
 
-    async def _final_history(self, state, witness):
+    async def _final_history(self, state, witness, *, pre_review=False):
         # Source + finite histories share the LAST physical worker. All native
         # manager/registration checks are the synchronous suffix on its return.
         from homeassistant.components.recorder import get_instance
@@ -696,7 +696,14 @@ class NativeTemplateYAMLServer:
         def physical():
             self.consumers.physical()
             self.observer.native.sources()
-            state.assert_current(self.receipt)
+            try:
+                state.assert_current(self.receipt)
+            except RegistryReceiptError as error:
+                if (pre_review and type(error) is RegistryReceiptError
+                        and error.args == ('registry_receipt_input_source_changed',)):
+                    from .native_template_state_yaml import ReviewSourceInvalidated
+                    raise ReviewSourceInvalidated('template_state_review_source_changed') from error
+                raise
         def compare():
             physical()
             with session_scope(session=instance.get_session(), read_only=True) as sql:
