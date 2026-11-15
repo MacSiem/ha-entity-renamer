@@ -548,6 +548,7 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
                              {'template.yaml', 'mixed_automations.yaml', 'mixed_scripts.yaml'})
             self.assertTrue(all(row['references'] for row in review['dependencies']['files']))
             binding = {key: review[key] for key in ('operation_id', 'fingerprint')}
+            self.assertEqual(events, {'automation': [], 'script': []})
             plan = runtime.reviews[binding['operation_id']].plan
             original_receipt = runtime.preparations.resolve_composition(plan.native_inputs)[0].receipt_json
             if uncertain_complete:
@@ -576,7 +577,7 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
                     result = await self._request(ws, 2, 'apply', **binding)
                 self.assertTrue(result['success'], result)
                 self.assertEqual(result['result']['state'], 'applied')
-            self.assertEqual(events, {'automation': [], 'script': []})
+            print(f'mixed_transition_events={events}', flush=True)
             record = await runtime.journal.load(binding['operation_id'])
             self.assertEqual(record.plan, plan)
             if uncertain_complete:
@@ -594,9 +595,12 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
                 for row in self.f.entity.entities.values()
                 if row.platform in ('automation', 'script'))), dependents)
             for value in (11, 13):
+                previous = {domain: len(items) for domain, items in events.items()}
                 await self.stimulus(value)
                 await hass.services.async_call('script', 'mixed_source', {}, blocking=True, context=Context())
                 await hass.async_block_till_done()
+                self.assertGreater(len(events['automation']), previous['automation'])
+                self.assertGreater(len(events['script']), previous['script'])
                 self.assertEqual(events['automation'][-1], str(value))
                 self.assertEqual(events['script'][-1], str(value))
             self.assertTrue(await history.verify(source_history))
@@ -688,9 +692,12 @@ class NativeQueuePrepareAuthTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
                 self.assertIsNone(self.f.entity.async_get(new))
             for value in (17, 19):
+                previous = {domain: len(items) for domain, items in events.items()}
                 await self.stimulus(value)
                 await hass.services.async_call('script', 'mixed_source', {}, blocking=True, context=Context())
                 await hass.async_block_till_done()
+                self.assertGreater(len(events['automation']), previous['automation'])
+                self.assertGreater(len(events['script']), previous['script'])
                 self.assertEqual(events['automation'][-1], str(value))
                 self.assertEqual(events['script'][-1], str(value))
             self.assertTrue(await history.verify(source_history))
