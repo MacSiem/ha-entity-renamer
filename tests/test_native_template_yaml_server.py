@@ -52,6 +52,9 @@ class NativeTemplateYAMLServerTests(unittest.IsolatedAsyncioTestCase):
                     '  actions:\n  - variables: {retained: unrelated}\n'
                     'script:\n  corpus_unrelated:\n    sequence:\n'
                     '    - variables: {retained: unrelated}\n')
+                for index in range(getattr(self, 'scale_script_count', 0)):
+                    handle.write(f'  scale_source_{index}:\n    sequence:\n'
+                                 '    - variables: {retained: unrelated}\n')
             config = await async_hass_config_yaml(hass)
             for domain in ('automation', 'script'):
                 self.assertTrue(await async_setup_component(hass, domain, config))

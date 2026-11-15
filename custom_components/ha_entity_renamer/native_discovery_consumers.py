@@ -72,12 +72,19 @@ def _guarded(awaitable, guard):
     """Fence every suspension, including awaits inside the reused native reader."""
     iterator = awaitable.__await__()
     try:
+        # Readers may complete without suspending; still let HA service timers
+        # before the full fence and before entering the native reader.
+        yield None
         guard()
         yielded = next(iterator)
         while True:
             guard()
             try:
                 value = yield yielded
+                # A completed native await may resume immediately. Give HA's
+                # timers and sockets a turn before the fresh post-await fence;
+                # cancellation is still thrown into the native iterator below.
+                yield None
             except BaseException as error:
                 guard()
                 yielded = iterator.throw(error)
@@ -310,20 +317,20 @@ async def async_observe_discovery_consumers(hass, *, guard):
     first_dashboard = first_energy = None
     if lovelace is not None:
         try:
-            first_dashboard = await _guarded(_dashboards(hass, lovelace, version,
-                dashboard_baseline, guard), guard)
+            first_dashboard = await _dashboards(hass, lovelace, version,
+                dashboard_baseline, guard)
         except Exception as error:
             dashboard = _failure(error)
     if energy_native is not None:
         try:
-            first_energy = await _guarded(_energy(hass, energy_native, version,
-                energy_baseline, guard), guard)
+            first_energy = await _energy(hass, energy_native, version,
+                energy_baseline, guard)
         except Exception as error:
             energy = _failure(error)
     if first_dashboard is not None:
         try:
-            final = await _guarded(_dashboards(hass, lovelace, version,
-                dashboard_baseline, guard), guard)
+            final = await _dashboards(hass, lovelace, version,
+                dashboard_baseline, guard)
             if final != first_dashboard:
                 raise PersistenceError('consumer_dashboard_changed')
             dashboard = ConsumerOutcome('COMPLETE', '', first_dashboard)
@@ -331,8 +338,8 @@ async def async_observe_discovery_consumers(hass, *, guard):
             dashboard = _failure(error)
     if first_energy is not None:
         try:
-            final = await _guarded(_energy(hass, energy_native, version,
-                energy_baseline, guard), guard)
+            final = await _energy(hass, energy_native, version,
+                energy_baseline, guard)
             if final != first_energy:
                 raise PersistenceError('consumer_energy_changed')
             energy = ConsumerOutcome('COMPLETE', '', first_energy)

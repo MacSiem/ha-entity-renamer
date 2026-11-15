@@ -327,12 +327,51 @@ class GuardBoundaryTests(unittest.IsolatedAsyncioTestCase):
         async def capture():
             return await subject._guarded(native_reader(), guard)
         task = asyncio.create_task(capture())
-        await asyncio.sleep(0)
+        while 'entered' not in events:
+            await asyncio.sleep(0)
         first.set_result(None)
-        await asyncio.sleep(0)
+        while 'after-first' not in events:
+            await asyncio.sleep(0)
         self.assertEqual(events, ['entered', 'after-first'])
         revoked = True
         second.set_result(None)
         with self.assertRaises(PermissionError):
             await task
         self.assertEqual(events, ['entered', 'after-first'])
+
+    async def test_synchronous_reader_yields_then_checks_freshness(self):
+        events = []
+        revoked = False
+        def guard():
+            if revoked:
+                raise PermissionError('revoked')
+        async def native_reader():
+            events.append('read')
+        task = asyncio.create_task(subject._guarded(native_reader(), guard))
+        await asyncio.sleep(0)
+        self.assertEqual(events, [])
+        revoked = True
+        with self.assertRaises(PermissionError):
+            await task
+        self.assertEqual(events, [])
+
+    async def test_cancel_during_post_await_yield_closes_native_reader(self):
+        loop = asyncio.get_running_loop()
+        pending = loop.create_future()
+        events = []
+        async def native_reader():
+            try:
+                events.append('entered')
+                await pending
+                events.append('resumed')
+            finally:
+                events.append('closed')
+        task = asyncio.create_task(subject._guarded(native_reader(), lambda: None))
+        while 'entered' not in events:
+            await asyncio.sleep(0)
+        pending.set_result(None)
+        await asyncio.sleep(0)  # Native future resumed; cooperative yield pending.
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(events, ['entered', 'closed'])
