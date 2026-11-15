@@ -20,6 +20,15 @@ from .yaml_plan import Limits, _Reader
 from .yaml_validation import assert_proposal_matches, assert_validation_current
 
 
+class ReviewSourceInvalidated(Refused):
+    """The INITIAL review's checked source token no longer matches."""
+
+
+def _review_source_current(current, expected):
+    if current != expected:
+        raise ReviewSourceInvalidated('template_state_review_source_changed')
+
+
 def _identity_payload(value):
     payload = asdict(value)
     if value.receipt.checker_repairs_snapshot is None:
@@ -385,8 +394,7 @@ class NativeTemplateStateYAMLRuntimeReadback:
                     lambda: detached.prepare_review_identity(self.receipt, runtime.native))
                 self._check(state, live)
                 runtime.bindings()
-                _need(state._review_identity(self.receipt, runtime.native) == identity,
-                      'template_state_review_source_changed')
+                _review_source_current(state._review_identity(self.receipt, runtime.native), identity)
             else:
                 await _settled_executor(self.hass, runtime.sources)
                 self._check(state, live)
@@ -405,7 +413,8 @@ class NativeTemplateStateYAMLRuntimeReadback:
         except Exception as error:
             from .native_input_baseline import NativeInputWritePending
             from .native_discovery_inputs import DiscoveryNativeWritePending
-            if propagate_pending and isinstance(error, (NativeInputWritePending, DiscoveryNativeWritePending)):
+            if (pre_review and isinstance(error, ReviewSourceInvalidated)) or (
+                    propagate_pending and isinstance(error, (NativeInputWritePending, DiscoveryNativeWritePending))):
                 raise
             from .yaml_validation_worker import _checker_diagnostic
             logging.getLogger(__name__).warning('Template runtime observation unavailable: %s',
@@ -445,8 +454,8 @@ class _TemplateStateRuntimeCheck:
             self.state.assert_current(owner.receipt)
         else:
             self.runtime.bindings()
-            _need(self.state._review_identity(owner.receipt, self.runtime.native) == self.review_identity,
-                  'template_state_review_source_changed')
+            _review_source_current(self.state._review_identity(owner.receipt, self.runtime.native),
+                                   self.review_identity)
         assert_discovery_managers_current(owner.hass, self.observed,
                                           guard=lambda: owner._check(self.state, self.live))
         _documents(self.state, self.observed)

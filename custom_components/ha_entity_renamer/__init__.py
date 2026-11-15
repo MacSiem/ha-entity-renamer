@@ -279,15 +279,18 @@ class Runtime:
         if type(device_names) is dict:
             device_names = dict(device_names)
         selection = []
+        from .native_template_state_yaml import ReviewSourceInvalidated
         for attempt in range(2):
             try:
                 return await self._native_yaml_prepare_once(hass, mapping, actor_id=actor_id,
                     guard=guard, refresh=refresh, entity_names=entity_names,
                     device_names=device_names, retry=bool(attempt), selection=selection)
-            except _ReviewRetry:
+            except (_ReviewRetry, ReviewSourceInvalidated) as error:
                 if attempt:
                     from .transaction import Refused
-                    raise Refused('review_native_settle_repeated') from None
+                    reason = ('review_source_invalidated_repeated' if isinstance(error, ReviewSourceInvalidated)
+                              else 'review_native_settle_repeated')
+                    raise Refused(reason) from None
                 # A new attempt begins only after the abandoned lease is reclaimed.
                 from .native_template_reverse import _authorize
                 from .review_retention import async_reclaim_reviews

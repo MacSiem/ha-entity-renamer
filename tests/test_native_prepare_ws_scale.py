@@ -487,6 +487,70 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertIsNone(self.f.entity.async_get(new))
         self.assertNotEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
+    async def _review_token_replan(self, mode):
+        runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        discovery = self.module('discovery_final_fence')
+        finalize = discovery.async_finalize_discovery
+        accepted = self.module('accepted_input_state').AcceptedInputState
+        physical = accepted.prepare_review_identity
+        prepare_once = type(runtime)._native_yaml_prepare_once
+        worker_finished = threading.Event()
+        attempts, invalidated = [], []
+        def marked(*args):
+            result = physical(*args)
+            worker_finished.set()
+            return result
+        async def wrapped(subject, *args, **kwargs):
+            attempts.append(kwargs['retry'])
+            if kwargs['retry']:
+                self.assertFalse(subject.reviews)
+                self.assertFalse(any(row['payload'].get('kind') == 'ordinary_review_lease'
+                    for row in subject.preparations.plans.values() if type(row['payload']) is dict))
+                if mode == 'selected':
+                    self.f.entity.async_update_entity(old, new_unique_id='rebound-review-identity')
+                    await self._flush_documents()
+            return await prepare_once(subject, *args, **kwargs)
+        async def injected(*args, **kwargs):
+            result = await finalize(*args, **kwargs)
+            if worker_finished.is_set() and (not invalidated or mode == 'twice'):
+                path = self.f.root / 'template.yaml'
+                data = path.read_bytes()
+                path.write_bytes(data)  # Real ctime/mtime change, same source bytes.
+                invalidated.append(True)
+                worker_finished.clear()
+            return result
+        async def refresh(): pass
+        with patch.object(discovery, 'async_finalize_discovery', injected), \
+             patch.object(accepted, 'prepare_review_identity', marked), \
+             patch.object(type(runtime), '_native_yaml_prepare_once', wrapped):
+            if mode == 'success':
+                review = await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                    entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
+                self.assertIn(review['operation_id'], runtime.reviews)
+            else:
+                reason = 'review_selected_source_changed' if mode == 'selected' else 'review_source_invalidated_repeated'
+                with self.assertRaisesRegex(self.module('transaction').Refused, reason):
+                    await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                        entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
+                self.assertFalse(runtime.reviews)
+        self.assertEqual(attempts, [False, True])
+        self.assertEqual(len(invalidated), 2 if mode == 'twice' else 1)
+        self.assertFalse(await runtime.journal.all())
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
+    async def test_review_token_change_replans(self):
+        await self._review_token_replan('success')
+
+    async def test_review_token_change_selected_drift_refuses(self):
+        await self._review_token_replan('selected')
+
+    async def test_review_token_change_twice_refuses(self):
+        await self._review_token_replan('twice')
+
     async def test_initial_review_worker_cancel_drains_without_effect(self):
         runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
         hass = self.f.hass
