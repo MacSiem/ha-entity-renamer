@@ -349,7 +349,7 @@ class AcceptedInputState:
             root = os.stat(original.config_root)
             if (root.st_dev, root.st_ino) != (os.fstat(reader.root).st_dev, os.fstat(reader.root).st_ino):
                 _fail('input_graph_changed')
-            result = [('root', _signature(root))]
+            result = [('root', _signature(root)[:3])]
             for directory, _, names in self.source_directories:
                 fd = os.dup(reader.root) if directory == '.' else reader.open(directory, directory=True)
                 try:
