@@ -363,7 +363,10 @@ class AcceptedInputState:
                                     and original.checker_repairs_snapshot is not None):
                                 continue
                             try:
-                                child = _signature(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                                child = _signature(info)
+                                if stat.S_ISDIR(info.st_mode):
+                                    child = child[:3]
                             except FileNotFoundError:
                                 child = None
                             result.append((directory + '/' + name, child))

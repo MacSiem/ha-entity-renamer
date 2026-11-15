@@ -30,7 +30,8 @@ class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
             selected.write_bytes(b'first')
             state = SimpleNamespace(_bound=lambda _original: None,
                 _sources={'.storage/selected': ()},
-                source_directories=(('.storage', (), ('selected', 'absent', 'repairs.issue_registry')),))
+                source_directories=(('.', (), ('.storage',)),
+                    ('.storage', (), ('selected', 'absent', 'repairs.issue_registry'))))
             original = SimpleNamespace(config_root=root, source_links=(), checker_repairs_snapshot=True)
             native = SimpleNamespace(root=Path(root), pins={}, icon_proof=SimpleNamespace(paths={}))
             identity = lambda: accepted.AcceptedInputState._review_identity(state, original, native)

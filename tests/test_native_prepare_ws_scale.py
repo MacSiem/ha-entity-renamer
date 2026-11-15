@@ -398,7 +398,8 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         async def injected(executor, function):
             result = await drain(executor, function)
             import inspect
-            state = inspect.getclosurevars(function).nonlocals.get('detached')
+            state = (inspect.getclosurevars(function).nonlocals.get('detached')
+                     if inspect.isfunction(function) and 'detached' in function.__code__.co_freevars else None)
             accepted = self.module('accepted_input_state').AcceptedInputState
             if type(state) is accepted and not changed:
                 scopes = {path: names for path, _, names in state.source_directories}
@@ -428,7 +429,8 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         async def injected(executor, function):
             result = await drain(executor, function)
             import inspect
-            state = inspect.getclosurevars(function).nonlocals.get('detached')
+            state = (inspect.getclosurevars(function).nonlocals.get('detached')
+                     if inspect.isfunction(function) and 'detached' in function.__code__.co_freevars else None)
             accepted = self.module('accepted_input_state').AcceptedInputState
             if type(state) is accepted and not changed:
                 path = self.f.root / 'template.yaml'
