@@ -376,6 +376,9 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
             try:
                 self.assertTrue(await hass.async_add_executor_job(entered.wait, 120))
                 task.cancel()
+                await asyncio.sleep(0.05)  # Deliver cancellation while the worker is held.
+                self.assertFalse(task.done())
+                self.assertTrue(runtime.operation_lock.locked())
             finally:
                 release.set()
             with self.assertRaises(asyncio.CancelledError):
