@@ -6,7 +6,7 @@ const {JSDOM} = require('jsdom');
 
 function fixture() {
   const dom = new JSDOM('', {runScripts:'dangerously', url:'http://localhost/'});
-  dom.window.eval(readFileSync(join(__dirname,'../ha-entity-renamer.js'),'utf8'));
+  dom.window.eval(readFileSync(join(__dirname,'../custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8'));
   const card = dom.window.document.createElement('ha-entity-renamer');
   dom.window.document.body.append(card);
   const connection = new dom.window.EventTarget(); connection.connected = true;

@@ -1,0 +1,571 @@
+"""Actual product source registry + modern Template YAML + fresh reverse.
+
+Owner executes on both pinned Cores through FIFO. Real Coordinator, immutable
+preparations, native registry effects, file calls, check_config, reload and chain
+receipts. Only the producer receives ordinary events; no helper output seeds.
+"""
+import asyncio
+import importlib
+import os
+import sys
+import traceback
+import unittest
+from unittest.mock import patch
+
+import test_native_template_consumers as consumers
+import test_receipted_helper_native as lifecycle_fixture
+
+fixture = consumers.fixture
+
+
+@unittest.skipUnless(fixture.fixtures.HAS_HA, 'actual pinned HA required')
+class NativeTemplateYAMLActivationTests(unittest.IsolatedAsyncioTestCase):
+    with_yaml = True
+    asyncSetUp = consumers.NativeTemplateConsumerTests.asyncSetUp
+    _before_start = lifecycle_fixture.NativeReceiptedHelperTests._before_start
+    _flush_documents = consumers.NativeTemplateConsumerTests._flush_documents
+    prepare = consumers.NativeTemplateConsumerTests.prepare
+    emit = consumers.NativeTemplateConsumerTests.emit
+
+    def module(self, name):
+        return importlib.import_module(fixture.fixtures.PACKAGE + '.' + name)
+
+    async def transaction(self, *, fault=None, variant='sensor', uidless=False):
+        from homeassistant.core import Context
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        unknown_errors = []
+        await self.prepare('yaml', variant=variant, uidless=uidless)
+        binary_prerequisites = None
+        if variant == 'binary_sensor' and not uidless:
+            binary_prerequisites = await self.assert_binary_native_prerequisites()
+        # Reuse the native source-clock fixture's retained descriptor method.
+        # VirtioFS can recycle a closed replacement inode between two reads.
+        mutator = self.module('yaml_transaction')
+        actual_write = mutator.apply_file_patch
+        def retain_actual_replacement(*args, **kwargs):
+            result = actual_write(*args, **kwargs)
+            fd = os.open(self.f.root / result['path'], os.O_RDONLY | os.O_NOFOLLOW)
+            self.addCleanup(os.close, fd)
+            info = os.fstat(fd)
+            self.assertEqual((info.st_dev, info.st_ino, info.st_mode),
+                             tuple(result['after_identity']))
+            return result
+        self.enterContext(patch.object(mutator, 'apply_file_patch', retain_actual_replacement))
+        hass, receipt = self.f.hass, self.receipt
+        self.assertEqual(receipt.changed_domains, ('template',))
+        self.assertTrue(receipt.ready_for_apply,
+                        (receipt.unsupported_domains, binary_prerequisites)
+                        if binary_prerequisites is not None else receipt.unsupported_domains)
+        self.assertIsNotNone(self.evidence.template_candidate_sources)
+        original = await self.module('native_input_baseline').async_capture_native_input_baseline(
+            hass, receipt, guard=lambda: None)
+        prep, tx = self.module('prepared'), self.module('transaction')
+        preparations = prep.native_prepared_store(hass)
+        await preparations.initialize()
+        recorder = self.module('recorder_guard').NativeRecorderGuard(hass)
+        history = self.module('history_guard').NativeHistoryGuard(recorder)
+        helper_history = await history.capture({entity_id: entity_id
+            for entity_id, _ in self.consumer_identities.values()})
+        nr = self.module('native_registry')
+        source_uuid = self.f.entity.async_get(self.source_id).id
+        io = nr.NativeRegistryIO(hass)
+        bridge = nr.NativeRegistryBridge(io, recorder)
+        source = await bridge.prepare('entity', source_uuid,
+                                      {'entity_id': 'sensor.accepted_next'}, lambda: None)
+        change = await fixture.fixtures.validation._settled_executor(
+            hass, self.module('yaml_transaction')._capture, receipt, self.plan)
+        changes, scopes, digests, steps = (source, change), ('registry', 'yaml'), {}, []
+        for index, (item, scope) in enumerate(zip(changes, scopes)):
+            ref = 'template-yaml-' + str(index)
+            digests[ref] = await preparations.create(ref, prep.encode_change(item))
+            steps.append(tx.Step(ref, scope, item.identity, item.before_revision,
+                                 item.after_revision, ref))
+        composition = None
+        if uidless:
+            source_history = await history.capture({self.source_id: 'sensor.accepted_next'})
+            composition = self.module('native_template_composition').TemplateComposition(
+                self.evidence, tuple(sorted(digests.items())), source_history, helper_history,
+                self.evidence.sha256, self.physical_consumers)
+        inputs = await preparations.create_native_inputs('template-yaml-inputs', original,
+                                                         composition=composition)
+        plan = tx.Plan('template-yaml-apply', scopes, scopes, tuple(steps),
+                       ('exact-modern-yaml-state-sensors' if variant == 'sensor'
+                        else 'exact-modern-yaml-state-entities-v2'), scopes, inputs)
+        journal = self.module('journal').native_journal(hass)
+        await journal.initialize()
+        rr = self.module('native_registry_receipts')
+        store = rr.native_registry_receipt_store(hass, preparations)
+        await store.initialize()
+        operation = 'template-yaml-operation'
+        chain = await rr.RegistryReceiptChain.start(store, operation, plan, receipt, digests)
+        bridge = nr.NativeRegistryBridge(io, recorder, native_images=chain.accepted_documents)
+        observation_state = chain.reconstruct_inputs()
+        async def observe(input_state=None):
+            nonlocal observation_state
+            if input_state is None:
+                try:
+                    observation_state = chain.reconstruct_inputs()
+                except rr.RegistryReceiptError:
+                    self.assertIsNotNone(chain.active)
+                    self.assertEqual(store.read(chain.active.reference[0])['payload']['kind'],
+                                     'registry_intent')
+                input_state = observation_state
+            return await self.module('native_input_observation').async_observe_native_inputs(
+                hass, receipt, guard=lambda: None, input_state=input_state)
+        locks = self.module('yaml_editor_locks').NativeYAMLEditorLocks(hass)
+        self.assertGreaterEqual(len(locks.enumerate()), 3)
+        proofs = []
+        fault_observations = []
+        def current_consumer():
+            return next(entity for platform in async_get_platforms(hass, 'template')
+                        if platform.domain == self.consumer_domain
+                        for entity in platform.entities.values() if entity.unique_id == self.consumer_key)
+        def detach_actual_consumer():
+            current_consumer()._template_result_info._track_state_changes.async_remove()
+            fault_observations.append('actual_detach')
+        accepted_observer = self.module('native_template_accepted_consumers')
+        def compose(log):
+            # Fresh runtime observer/adapters for reverse, bound to SAME original
+            # writer and immutable preparations; no replacement baseline/receipt.
+            observer = self.module('native_template_yaml').NativeTemplateYAMLRuntimeReadback(
+                hass, chain, self.evidence, guard=lambda: None)
+            async def common(rollback):
+                wanted = tx.Position.BEFORE if rollback else tx.Position.AFTER
+                state = chain.reconstruct_inputs()
+                state.assert_current(receipt)
+                self.assertTrue(await history.verify(helper_history))
+                if (await bridge.inspect(source)).position != wanted.value:
+                    return False
+                if await observer.position_at_inputs(change, state) is not wanted:
+                    return False
+                actual = await accepted_observer.async_observe_accepted_template_consumers(
+                    hass, chain, self.evidence, guard=lambda: None)
+                if actual.yaml_position != ('original' if rollback else 'proposed'):
+                    return False
+                entities = [row for row in actual.rows if row.kind == 'entity']
+                return (len(entities) == len(self.consumer_identities)
+                        and {(row.platform, row.key) for row in entities} == set(self.consumer_identities)
+                        and all(row.consumer_verified and row.source_verified
+                                and (row.entity_id, row.registry_id) == self.consumer_identities[row.platform, row.key]
+                                for row in entities)
+                        and actual.evidence_sha256 == self.evidence.sha256)
+            async def full(rollback):
+                if not await common(rollback):
+                    return False
+                async with locks.hold(lambda: None):
+                    proof = await self.module('native_candidate_validation').async_revalidate_accepted_candidate(
+                        hass, chain, log.load, self.f.root.parent, lambda: None)
+                    self.assertEqual(proof.fingerprint, plan.fingerprint)
+                    self.assertEqual(proof.direction, 'rollback' if rollback else 'forward')
+                    self.assertEqual(proof.head, chain.reconstruct_inputs().head)
+                    proofs.append(proof)
+                return True
+            resolver = lambda ref: prep.decode_change(preparations.resolve(ref, digests[ref]))
+            registry = self.module('native_registry_transaction').ReceiptedRegistryTransactionAdapter(
+                bridge, resolver, chain, observe, log.load, lambda: None,
+                full_verify=lambda _: common(False), full_verify_rollback=lambda _: common(True))
+            yaml = self.module('native_yaml_transaction').ReceiptedYAMLTransactionAdapter(
+                hass, resolver, locks, observer, chain, observe, log.load, lambda: None,
+                context=Context(), full_verify=lambda _: full(False),
+                full_verify_rollback=lambda _: full(True))
+            if fault == 'adapter_detach':
+                real_position, real_read = yaml._runtime_position, yaml._read
+                final_getter = []
+                async def remember_true_getter(change, state):
+                    value = await real_position(change, state)
+                    record = await log.load(operation)
+                    if (record is not None and record.phases == ('verified', 'verified')):
+                        self.assertIs(value, tx.Position.AFTER)
+                        final_getter.append(value)
+                    return value
+                async def detach_after_actual_adapter_read(*args):
+                    value = await real_read(*args)
+                    # This is AFTER the actual adapter read/checkpoint, after
+                    # its genuine final getter. No positive result is changed.
+                    if final_getter and not fault_observations:
+                        detach_actual_consumer()
+                    return value
+                yaml._runtime_position = remember_true_getter
+                yaml._read = detach_after_actual_adapter_read
+            if fault == 'terminal_detach':
+                real_save = log.save
+                async def detach_after_actual_save(record):
+                    value = await real_save(record)
+                    if record.status == 'applied' and not fault_observations:
+                        detach_actual_consumer()
+                    return value
+                log.save = detach_after_actual_save
+            coordinator = self.module('native_template_yaml').compose_template_yaml_coordinator(
+                {'registry': registry, 'yaml': yaml}, log, lambda: None,
+                required_scopes=scopes)
+            actual_unknown = coordinator._unknown
+            async def remember_actual_exception(record, reason):
+                # Observe the real caught exception; preserve its native result.
+                if (error := sys.exception()) is not None:
+                    unknown_errors.append(''.join(traceback.format_exception(error)))
+                return await actual_unknown(record, reason)
+            coordinator._unknown = remember_actual_exception
+            return coordinator, observer
+        coordinator, observer = compose(journal)
+        self.assertIs(await observer.position_at_inputs(change, chain.reconstruct_inputs()),
+                      tx.Position.BEFORE)
+        if fault == 'cancel_reload':
+            discovery = importlib.import_module('homeassistant.helpers.discovery')
+            native_code = discovery.async_load_platform.__code__
+            monitor = sys.monitoring
+            key = next((key for key in range(6) if monitor.get_tool(key) is None), None)
+            self.assertIsNotNone(key)
+            captured = {'tasks': (), 'locks_held': False, 'native_starts': 0,
+                        'native_pending': False, 'cancel_requested': False}
+            running = None
+            def native_started(code, offset):
+                frame = sys._getframe(1)
+                try:
+                    if (frame.f_code is not native_code
+                            or frame.f_locals.get('hass') is not hass
+                            or frame.f_locals.get('platform') != 'template'):
+                        return
+                    captured['native_starts'] += 1
+                    if captured['tasks'] or running is None:
+                        return
+                    # Eager discovery can finish before _process_config returns
+                    # and before HA registers it in _tasks. Observe its actual
+                    # currently executing Task, without delaying native work.
+                    task = asyncio.current_task()
+                    captured['native_pending'] = (
+                        task is not None and task is not running
+                        and task.get_loop() is hass.loop and not task.done()
+                        and getattr(task.get_coro(), 'cr_code', None) is native_code)
+                    if not captured['native_pending']:
+                        return
+                    actual_tasks = self.module('native_template_yaml')._pending_template_tasks(hass)
+                    actual_tasks.add(task)  # sampler deliberately excludes current_task
+                    captured['tasks'] = tuple(actual_tasks)
+                    captured['locks_held'] = all(row[3].locked() for row in locks.enumerate())
+                    captured['cancel_requested'] = running.cancel()
+                finally:
+                    del frame
+            monitor.use_tool_id(key, 'renamer_template_cancel_regression')
+            monitor.register_callback(key, monitor.events.PY_START, native_started)
+            monitor.set_local_events(key, native_code, monitor.events.PY_START)
+            try:
+                running = asyncio.create_task(coordinator.apply(plan, plan.fingerprint, operation))
+                cancelled = False
+                try:
+                    await running
+                except asyncio.CancelledError:
+                    cancelled = True
+                diagnostics = {name: value for name, value in captured.items() if name != 'tasks'}
+                self.assertTrue(captured['tasks'],
+                                f'must observe REAL native reload descendants: {diagnostics}')
+                self.assertTrue(captured['native_pending'], diagnostics)
+                self.assertTrue(captured['cancel_requested'], diagnostics)
+                self.assertTrue(cancelled, diagnostics)
+                self.assertTrue(captured['locks_held'], diagnostics)
+                # Assert BEFORE emergency cleanup: no orphaned own descendant
+                # can outlive lock release/cancellation propagation.
+                self.assertTrue(all(task.done() for task in captured['tasks']))
+                self.assertFalse(self.module('native_template_yaml')._pending_template_tasks(hass))
+                self.assertTrue(all(not row[3].locked() for row in locks.enumerate()))
+                self.assertNotEqual((await journal.load(operation)).status, 'applied')
+                with self.assertRaises(ValueError):
+                    chain.reconstruct_inputs()  # actual pending effect is UNKNOWN
+            finally:
+                monitor.set_local_events(key, native_code, 0)
+                monitor.register_callback(key, monitor.events.PY_START, None)
+                monitor.free_tool_id(key)
+                if running is not None and not running.done():
+                    await asyncio.gather(running, return_exceptions=True)
+                if captured['tasks']:
+                    await asyncio.gather(*captured['tasks'], return_exceptions=True)
+            return
+        if fault in ('schema', 'schema_compiled'):
+            registered = hass.services._services['template']['reload']
+            original_schema = registered.schema
+            invoked = []
+            if fault == 'schema_compiled':
+                # Ordinary native reload builds a genuinely lazy current default
+                # if necessary. Authenticate first; never call an unverified
+                # candidate validator to manufacture a positive proof.
+                observer.assert_reload_current()
+                if observer.native.version == '2026.10.2' and not original_schema._built:
+                    await hass.services.async_call('template','reload',{},
+                                                   blocking=True,context=Context())
+                    await observer.settle_reload()
+                    self.assertTrue(original_schema._built)
+                    observer.assert_reload_current()
+                original_compiled = original_schema._compiled
+                from homeassistant.helpers import service as native_service
+                self.assertIs(original_schema,
+                              native_service.async_register_admin_service.__defaults__[0])
+            def foreign_schema(data):
+                invoked.append(True)
+                raise AssertionError('foreign schema must not execute')
+            def foreign_compiled(*args):
+                invoked.append(args)
+                raise AssertionError('foreign compiled validator must not execute')
+            if fault == 'schema_compiled':
+                original_schema._compiled = foreign_compiled  # Negative-only fault.
+                self.assertIs(registered.schema,original_schema)
+            else:
+                registered.schema = foreign_schema
+            try:
+                with self.assertRaises(ValueError):
+                    observer.assert_reload_current()
+                try:
+                    result = await coordinator.apply(plan, plan.fingerprint, operation)
+                except (tx.Refused, ValueError):
+                    result = None
+                self.assertTrue(result is None or result.status != 'applied')
+                self.assertEqual(invoked, [])
+                self.assertEqual((self.f.root / change.files[0].path).read_bytes(), change.files[0].before)
+            finally:
+                if fault == 'schema_compiled':
+                    original_schema._compiled = original_compiled
+                    self.assertIs(registered.schema,original_schema)
+                else:
+                    registered.schema = original_schema
+            return
+        if fault in ('adapter_detach', 'terminal_detach'):
+            try:
+                result = await coordinator.apply(plan, plan.fingerprint, operation)
+            except (tx.Refused, ValueError):
+                result = None
+            self.assertEqual(fault_observations, ['actual_detach'])
+            self.assertTrue(result is None or result.status != 'applied',
+                            'stale genuine runtime proof must not confirm applied')
+            return
+        result = await coordinator.apply(plan, plan.fingerprint, operation)
+        self.assertEqual(result.status, 'applied', (result.reason, unknown_errors))
+        self.assertEqual(result.phases, ('verified', 'verified'))
+        self.assertEqual(self.producer.entity_id, 'sensor.accepted_next')
+        self.assertEqual(self.f.entity.async_get(self.producer.entity_id).id, source_uuid)
+        self.assertEqual(chain.original_receipt, receipt)
+        self.assertEqual(chain.baseline, original)
+        self.assertEqual(chain.baseline.receipt_json, self.evidence.receipt_json)
+        self.consumer = next(entity for platform in async_get_platforms(hass, 'template')
+            if platform.domain == self.consumer_domain
+            for entity in platform.entities.values() if entity.unique_id == self.consumer_key)
+        for value in ((5, 7, 5) if variant in ('binary_sensor', 'mixed') else (5, 7)):
+            await self.emit(value)
+        observed = await accepted_observer.async_observe_accepted_template_consumers(
+            hass, chain, self.evidence, guard=lambda: None)
+        entity = next(row for row in observed.rows if row.kind == 'entity' and row.platform == self.consumer_domain)
+        self.assertEqual(entity.dependencies, ('sensor.accepted_next',))
+        self.assertEqual(entity.registry_id, self.consumer_uuid)
+        self.assertTrue(entity.source_verified)
+        self.assertFalse(observed.family_complete)
+        if variant == 'mixed':
+            entities = [row for row in observed.rows if row.kind == 'entity']
+            self.assertEqual({(row.platform, row.key) for row in entities},
+                             {('sensor', 'scope-value'), ('binary_sensor', 'scope-value')})
+            for row in entities:
+                self.assertEqual(row.dependencies, ('sensor.accepted_next',))
+                self.assertTrue(row.source_verified, row.reason)
+                self.assertEqual((row.entity_id, row.registry_id), self.consumer_identities[row.platform, row.key])
+        # Reload the durable journal and independently reopen the full chain for
+        # read-only accepted-head proof before composing a fresh reverse writer.
+        fresh_journal = self.module('journal').native_journal(hass)
+        await fresh_journal.initialize()
+        fresh_preparations = prep.native_prepared_store(hass)
+        await fresh_preparations.initialize()
+        fresh_store = rr.native_registry_receipt_store(hass, fresh_preparations)
+        await fresh_store.initialize()
+        reopened = rr.RegistryReceiptChain.reopen(fresh_store, operation, plan, receipt, digests)
+        self.assertTrue(reopened.reconstruct_inputs().same_evidence(chain.reconstruct_inputs()))
+        original_head = original.digest
+        reverse, fresh_observer = compose(fresh_journal)
+        self.assertIsNot(fresh_observer, observer)
+        self.assertIs(await fresh_observer.position_at_inputs(change, chain.reconstruct_inputs()),
+                      tx.Position.AFTER)
+        rolled = await reverse.rollback(operation)
+        self.assertEqual(rolled.status, 'rolled_back', (rolled.reason, unknown_errors))
+        self.assertEqual(rolled.phases, ('undone', 'undone'))
+        self.assertEqual(self.producer.entity_id, self.source_id)
+        self.assertEqual(self.f.entity.async_get(self.source_id).id, source_uuid)
+        self.assertEqual(chain.baseline.digest, original_head)
+        self.assertEqual(chain.original_receipt, receipt)
+        self.consumer = next(entity for platform in async_get_platforms(hass, 'template')
+            if platform.domain == self.consumer_domain
+            for entity in platform.entities.values() if entity.unique_id == self.consumer_key)
+        for value in ((5, 7, 5) if variant in ('binary_sensor', 'mixed') else (5, 7)):
+            await self.emit(value)
+        final = await accepted_observer.async_observe_accepted_template_consumers(
+            hass, chain, self.evidence, guard=lambda: None)
+        entity = next(row for row in final.rows if row.kind == 'entity' and row.platform == self.consumer_domain)
+        self.assertEqual(entity.dependencies, (self.source_id,))
+        self.assertEqual(entity.registry_id, self.consumer_uuid)
+        self.assertTrue(entity.source_verified)
+        if variant == 'mixed':
+            entities = [row for row in final.rows if row.kind == 'entity']
+            self.assertEqual(len(entities), 2)
+            for row in entities:
+                self.assertEqual(row.dependencies, (self.source_id,))
+                self.assertTrue(row.source_verified, row.reason)
+                self.assertEqual((row.entity_id, row.registry_id), self.consumer_identities[row.platform, row.key])
+        self.assertEqual(final.yaml_position, 'original')
+        self.assertEqual([proof.direction for proof in proofs], ['forward', 'rollback'])
+        return chain, change, fresh_observer
+
+    async def assert_binary_native_prerequisites(self):
+        """Genuine native events/source identity BEFORE asking product readiness."""
+        import hashlib
+        from pathlib import Path
+        from types import CodeType, MethodType
+        from homeassistant.const import __version__
+        from homeassistant.components.template import binary_sensor, template_entity
+        pinned = {
+            '2025.6.0': ('BinarySensorTemplate',
+                'bbe0f0b272f8173a5a09386752778ec758ae79f2ecf0e66ecc9d2e0fa31c15a7', '_state'),
+            '2026.10.2': ('StateBinarySensorEntity',
+                'b3e86b88a258760edbdcad2a79e929ee77346888d8d7ff793f1bb97003e3c857', '_attr_is_on'),
+        }
+        self.assertIn(__version__, pinned)
+        class_name, source_sha, attribute = pinned[__version__]
+        self.assertEqual(hashlib.sha256(Path(binary_sensor.__file__).read_bytes()).hexdigest(), source_sha)
+        self.assertIs(type(self.consumer), getattr(binary_sensor, class_name))
+        self.assertTrue(self.consumer.entity_id.startswith('binary_sensor.'))
+        self.assertEqual(self.consumer.unique_id, 'scope-value')
+        for name in ('_delay_cancel', '_delay_on', '_delay_off'):
+            self.assertIsNone(getattr(self.consumer, name))
+        state_template = self.consumer._template
+        self.assertEqual(state_template.template,
+                         "{{ is_state('" + self.source_id + "', '5') }}")
+        self.assertEqual(set(self.consumer._template_attrs), {state_template})
+        slots = self.consumer._template_attrs[state_template]
+        self.assertEqual(len(slots), 1)
+        slot = slots[0]
+        self.assertIs(type(slot), template_entity._TemplateAttribute)
+        self.assertIs(slot._entity, self.consumer)
+        self.assertEqual(slot._attribute, attribute)
+        self.assertIs(slot.template, state_template)
+        self.assertIsNone(slot.validator)
+        self.assertFalse(slot.none_on_template_error)
+        if __version__ == '2025.6.0':
+            self.assertIs(type(slot.on_update), MethodType)
+            self.assertIs(slot.on_update.__self__, self.consumer)
+            self.assertIs(slot.on_update.__func__, binary_sensor.BinarySensorTemplate._update_state)
+            self.assertIsNone(self.consumer._delay_on_raw)
+            self.assertIsNone(self.consumer._delay_off_raw)
+        else:
+            self.assertEqual(set(self.consumer._templates), {'state'})
+            callback = slot.on_update
+            self.assertIn(callback.__code__, [code for code in
+                template_entity.TemplateEntity.setup_state_template.__code__.co_consts
+                if type(code) is CodeType])
+            cells = dict(zip(callback.__code__.co_freevars,
+                             (cell.cell_contents for cell in callback.__closure__ or ())))
+            self.assertEqual(set(cells), {'self', 'attribute', 'on_update', 'validator'})
+            self.assertIs(cells['self'], self.consumer)
+            self.assertEqual(cells['attribute'], '_attr_is_on')
+            self.assertIsNone(cells['validator'])
+            self.assertIs(type(cells['on_update']), MethodType)
+            self.assertIs(cells['on_update'].__self__, self.consumer)
+            self.assertIs(cells['on_update'].__func__, binary_sensor.StateBinarySensorEntity._update_state)
+        sources = self.evidence.template_sources
+        self.assertIsNotNone(sources)
+        self.assertTrue(sources.source_matched)
+        self.assertFalse(sources.ledger.findings)
+        expected_keys = [('template.binary_sensor', 'scope-value'), ('template.state', 'id:scope')]
+        self.assertEqual(sorted((row.domain, row.native_key) for row in sources.ledger.definitions), expected_keys)
+        self.assertEqual(sorted(row[:2] for row in sources.rows), expected_keys)
+        candidate = self.evidence.template_candidate_sources
+        self.assertIsNotNone(candidate)
+        candidate.assert_original(self.receipt, sources)
+        self.assertTrue(candidate.sources.source_matched)
+        row_image = self.module('native_utility_unload_audit')._row
+        source_uuid = self.f.entity.async_get(self.source_id).id
+        consumer_before = row_image(self.f.entity.async_get(self.consumer.entity_id))
+        events = []
+        for value in (5, 7, 5):
+            await self.emit(value)  # Only producer native_value is set; HA updates binary.
+            self.assertEqual(self.f.entity.async_get(self.source_id).id, source_uuid)
+            self.assertEqual(self.f.entity.async_get(self.consumer.entity_id).id, self.consumer_uuid)
+            self.assertEqual(row_image(self.f.entity.async_get(self.consumer.entity_id)), consumer_before)
+            events.append((value, self.f.hass.states.get(self.consumer.entity_id).state))
+        self.assertEqual(events, [(5, 'on'), (7, 'off'), (5, 'on')])
+        return {'binary_native_prerequisites': 'PASS', 'producer_events': events,
+                'core': __version__, 'class': class_name,
+                'source_ledger': 'template.binary_sensor/scope-value',
+                'source_and_consumer_uuid': 'preserved'}
+
+    async def test_uidless_numeric_actual_forward_fresh_reverse_same_original_and_history(self):
+        await self.transaction(uidless=True)
+
+    async def test_uidless_binary_actual_forward_fresh_reverse_same_original_and_history(self):
+        await self.transaction(variant='binary_sensor', uidless=True)
+
+    async def test_uidless_native_detach_never_promotes_stale_bijection(self):
+        await self.transaction(uidless=True, fault='adapter_detach')
+
+    async def test_actual_binary_state_product_forward_and_fresh_reverse_preserve_source_and_uuid(self):
+        await self.transaction(variant='binary_sensor')
+
+    async def test_actual_mixed_sensor_binary_same_unique_key_forward_and_fresh_reverse(self):
+        await self.transaction(variant='mixed')
+
+    async def test_binary_actual_detach_after_true_getter_refuses_final_verify(self):
+        await self.transaction(variant='binary_sensor', fault='adapter_detach')
+
+    async def test_binary_actual_detach_after_terminal_save_refuses_confirmation(self):
+        await self.transaction(variant='binary_sensor', fault='terminal_detach')
+
+    async def test_sensor_only_v1_runtime_digest_and_source_rows_are_unchanged(self):
+        await self.prepare('yaml')
+        worker = self.module('yaml_validation_worker')
+        original = ['state_sensor_v1', "{{ states('" + self.source_id + "') | int(0) * 2 }}",
+                    'Runtime consumer', None, None, None]
+        proposed = ['state_sensor_v1', "{{ states('sensor.accepted_next') | int(0) * 2 }}",
+                    'Runtime consumer', None, None, None]
+        self.assertEqual(self.receipt.runtime_expected, (('template',
+            worker._fingerprint(['template_state_sensors_v1', [['scope-value', worker._fingerprint(original)]]]),
+            worker._fingerprint(['template_state_sensors_v1', [['scope-value', worker._fingerprint(proposed)]]])),))
+        self.assertEqual(next(row[2] for row in self.evidence.template_sources.rows
+                              if row[:2] == ('template.sensor', 'scope-value')),
+                         worker._fingerprint(['template.sensor', 'scope-value', ['id:scope', original]]))
+
+    async def test_actual_product_forward_and_fresh_reverse_preserve_source_and_uuid(self):
+        await self.transaction()
+
+    async def test_other_native_platform_keeps_unsupported_and_all_source_rows(self):
+        await self.prepare('yaml', sibling=True)
+        self.assertIn('template', self.receipt.unsupported_domains)
+        self.assertFalse(self.receipt.ready_for_apply)
+        self.assertTrue(any(row.domain == 'template.binary_sensor'
+                            for row in self.evidence.template_sources.ledger.definitions))
+
+    async def test_actual_detach_after_product_reverse_refuses_runtime_position(self):
+        chain, change, observer = await self.transaction()
+        self.consumer._template_result_info._track_state_changes.async_remove()
+        self.assertIs(await observer.position_at_inputs(change, chain.reconstruct_inputs()),
+                      self.module('transaction').Position.UNKNOWN)
+
+    async def test_time_expression_keeps_unsupported_and_source_inventory(self):
+        await self.prepare('yaml')
+        path = self.f.root / 'template.yaml'
+        path.write_text(path.read_text().replace('* 2', '* 2 + now().hour * 0'))
+        plan = self.module('yaml_plan').plan_yaml(self.f.root,
+            {self.source_id: 'sensor.accepted_next'})
+        self.assertTrue(plan.ready, plan.issues)
+        receipt, evidence = await fixture.fixtures.validation.async_validate_proposed_with_sources(
+            self.f.hass, plan, self.f.root.parent)
+        self.assertIn('template', receipt.unsupported_domains)
+        self.assertFalse(receipt.ready_for_apply)
+        self.assertTrue(evidence.template_sources.source_matched)
+        self.assertTrue(any(row.domain == 'template.sensor'
+                            for row in evidence.template_sources.ledger.definitions))
+
+    async def test_actual_detach_after_true_getter_and_read_refuses_final_verify(self):
+        await self.transaction(fault='adapter_detach')
+
+    async def test_actual_detach_after_terminal_journal_write_refuses_confirmation(self):
+        await self.transaction(fault='terminal_detach')
+
+    async def test_actual_pending_reload_descendants_settle_before_cancel_unlock(self):
+        await self.transaction(fault='cancel_reload')
+
+    async def test_actual_service_schema_drift_refuses_before_foreign_callable(self):
+        await self.transaction(fault='schema')
+
+    async def test_same_native_schema_compiled_drift_refuses_before_write_or_callable(self):
+        await self.transaction(fault='schema_compiled')

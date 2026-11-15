@@ -5,7 +5,7 @@ const path = require('node:path');
 const { JSDOM, VirtualConsole } = require('jsdom');
 
 // Exercise both distributed copies through their registered, connected editor.
-for (const source of ['ha-entity-renamer.js']) {
+for (const source of ['custom_components/ha_entity_renamer/www/ha-entity-renamer.js']) {
   function fixture(config = {
     type: 'custom:ha-entity-renamer', title: 'Before', show_support: false,
     future_setting: { enabled: true, names: ['retained'] },
@@ -188,7 +188,7 @@ for (const source of ['ha-entity-renamer.js']) {
 test('configured title is rendered as plain text and default headings remain localized', () => {
  const dom = new JSDOM('',{runScripts:'dangerously',url:'http://localhost/'});
  try {
-  dom.window.eval(readFileSync(path.join(__dirname,'../ha-entity-renamer.js'),'utf8'));
+  dom.window.eval(readFileSync(path.join(__dirname,'../custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8'));
   const card=dom.window.document.createElement('ha-entity-renamer');dom.window.document.body.append(card);
   card._hass={language:'en',user:{id:'title-admin',is_admin:true},states:{},themes:{}};
   const title='<img src=x onerror=alert(1)> Synthetic QA title';
@@ -203,7 +203,7 @@ test('configured title is rendered as plain text and default headings remain loc
 test('HA editor locale updates label without replacing input, focus or draft selection', () => {
  const dom=new JSDOM('',{runScripts:'dangerously',pretendToBeVisual:true,url:'http://localhost/'});
  try {
-  dom.window.eval(readFileSync(path.join(__dirname,'../ha-entity-renamer.js'),'utf8'));
+  dom.window.eval(readFileSync(path.join(__dirname,'../custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8'));
   const editor=dom.window.document.createElement('ha-entity-renamer-editor');editor.setConfig({title:'Synthetic draft'});dom.window.document.body.append(editor);
   editor.hass={language:'en'};const input=editor.shadowRoot.querySelector('#cf_title');input.focus();input.setSelectionRange(2,8,'backward');
   editor.hass={language:'pl'};

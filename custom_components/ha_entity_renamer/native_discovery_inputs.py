@@ -1,0 +1,355 @@
+"""Detached, read-only native discovery snapshot before YAML validation.
+
+This is neither a ValidationReceipt nor a preparation baseline. Its descriptors
+close before return; it gives no continuing fence, adoption, readiness or effect
+authorization. The caller holds its discovery coordinator/editor scope throughout
+the call and must independently validate any later plan against current sources.
+The explicit pre-review settle path may complete already queued Store writes.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass
+import os
+
+from .native_input_baseline import (
+    MAX_FILE_BYTES, MAX_TOTAL_BYTES, NativeInputBaselineError, NativeInputWritePending, _KEYS, _Managers, _SCHEMAS, _drained,
+    _envelope, _json, _open_absolute_directory, _signature,
+)
+from .yaml_plan import Limits, _Reader
+
+
+_SETTLE_TIMEOUT = 65.0
+_SETTLE_INTERVAL = 1.0
+
+
+class DiscoveryNativeInputsError(ValueError):
+    """Sanitized discovery refusal, without source values or underlying text."""
+
+
+class DiscoveryNativeWritePending(DiscoveryNativeInputsError):
+    """The native observation refused a pending Store write."""
+
+
+def _reject():
+    raise DiscoveryNativeInputsError('native_discovery_inputs_rejected') from None
+
+
+async def _drain_native_write(task):
+    """Keep the caller's scope until an admitted native write has finished."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    if cancelled:
+        if not task.cancelled():
+            task.exception()
+        raise asyncio.CancelledError
+    return task.result()
+
+
+@dataclass(frozen=True)
+class _SourceLocation:
+    """Only runtime location for _Managers; deliberately no receipt or authority."""
+    version: str
+    config_root: str
+
+
+@dataclass(frozen=True)
+class DiscoveryNativeFile:
+    key: str
+    raw: bytes
+    identity: tuple[int, int, int]  # device, inode, full st_mode
+    uid: int
+    gid: int
+    manager_json: bytes
+
+
+@dataclass(frozen=True)
+class DiscoveryNativeInputs:
+    version: str
+    config_root: str
+    files: tuple[DiscoveryNativeFile, ...]
+
+
+def _metadata(info):
+    return (*_signature(info), info.st_uid, info.st_gid)
+
+
+def _directory_identity(info):
+    # Directory content timestamps may change for unrelated storage keys.
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+
+
+def _read(fd):
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks, size = [], 0
+    while chunk := os.read(fd, min(65536, MAX_FILE_BYTES + 1 - size)):
+        size += len(chunk)
+        if size > MAX_FILE_BYTES:
+            _reject()
+        chunks.append(chunk)
+    return b''.join(chunks)
+
+
+class _DiscoveryPinned:
+    """Hold the actual root/storage/source descriptors across both executor jobs."""
+    def __init__(self, location, documents):
+        self.location, self.documents = location, documents
+        self.reader = None
+        self.storage_fd = None
+        self.root_identity = None
+        self.storage_identity = None
+        self.handles = []
+        self.files = []
+
+    def close(self):
+        for _, fd, _ in self.handles:
+            os.close(fd)
+        self.handles.clear()
+        if self.storage_fd is not None:
+            os.close(self.storage_fd)
+            self.storage_fd = None
+        if self.reader is not None:
+            os.close(self.reader.root)
+            self.reader = None
+
+    def _named(self):
+        fd = _open_absolute_directory(self.location.config_root)
+        try:
+            if _directory_identity(os.fstat(fd)) != self.root_identity:
+                _reject()
+        finally:
+            os.close(fd)
+        if _directory_identity(os.fstat(self.reader.root)) != self.root_identity:
+            _reject()
+        fd = self.reader.open('.storage', directory=True)
+        try:
+            if (_directory_identity(os.fstat(fd)) != self.storage_identity
+                    or _directory_identity(os.fstat(self.storage_fd)) != self.storage_identity):
+                _reject()
+        finally:
+            os.close(fd)
+        for path, held, expected in self.handles:
+            if _metadata(os.fstat(held)) != expected:
+                _reject()
+            fd = self.reader.open(path)
+            try:
+                if _metadata(os.fstat(fd)) != expected:
+                    _reject()
+            finally:
+                os.close(fd)
+
+    def capture(self):
+        try:
+            # _Reader's final root open does not walk ancestors. Bind it to a
+            # separately opened, every-component O_NOFOLLOW root before reads.
+            root_fd = _open_absolute_directory(self.location.config_root)
+            try:
+                self.root_identity = _directory_identity(os.fstat(root_fd))
+                self.reader = _Reader(self.location.config_root,
+                                      Limits(max_file_bytes=MAX_FILE_BYTES))
+                if _directory_identity(os.fstat(self.reader.root)) != self.root_identity:
+                    _reject()
+            finally:
+                os.close(root_fd)
+            self.storage_fd = self.reader.open('.storage', directory=True)
+            self.storage_identity = _directory_identity(os.fstat(self.storage_fd))
+            self._named()
+            total = sum(map(len, self.documents))
+            for key, manager in zip(_KEYS, self.documents, strict=True):
+                path = '.storage/' + key
+                fd = self.reader.open(path)
+                initial = os.fstat(fd)
+                self.handles.append((path, fd, _metadata(initial)))
+                if initial.st_size > MAX_FILE_BYTES:
+                    _reject()
+                raw, sampled = self.reader.read(path)
+                if (_metadata(sampled) != _metadata(initial)
+                        or _metadata(os.fstat(fd)) != _metadata(initial)
+                        or _read(fd) != raw):
+                    _reject()
+                total += len(raw)
+                if total > MAX_TOTAL_BYTES:
+                    _reject()
+                document = _envelope(raw, key, self.location.version)['data']
+                if _json(document) != manager:
+                    # Fixed schema names/counts only; never identifiers or values.
+                    import json
+                    expected = json.loads(manager)
+                    groups = ('entities', 'deleted_entities', 'devices',
+                              'deleted_devices', 'child_devices', 'entries', 'settings')
+                    fields = ('id', 'entity_id', 'unique_id', 'platform', 'name',
+                              'original_name', 'object_id_base', 'device_id',
+                              'config_entry_id', 'config_subentry_id', 'created_at',
+                              'modified_at', 'aliases', 'aliases_v2', 'labels',
+                              'connections', 'identifiers', 'data', 'options',
+                              'disabled_by', 'hidden_by', 'orphaned_timestamp')
+                    changes = []
+                    for group in groups:
+                        before, after = document.get(group), expected.get(group)
+                        if before == after:
+                            continue
+                        if type(before) is list and type(after) is list:
+                            differing = tuple(field for field in fields if any(
+                                type(a) is dict and type(b) is dict and (
+                                    a.get(field) != b.get(field)
+                                    or (field in a) != (field in b))
+                                for a, b in zip(before, after)))
+                            changes.append((group, len(before), len(after), differing))
+                        else:
+                            changes.append((group, 'changed'))
+                    logging.getLogger(__name__).warning(
+                        'Native discovery storage/manager mismatch: %s %s', key, changes)
+                    _reject()
+                self.files.append(DiscoveryNativeFile(key, raw,
+                    (initial.st_dev, initial.st_ino, initial.st_mode),
+                    initial.st_uid, initial.st_gid, manager))
+                os.fsync(fd)
+            os.fsync(self.storage_fd)
+            os.fsync(self.reader.root)
+            self.verify()
+            return DiscoveryNativeInputs(self.location.version,
+                                         self.location.config_root, tuple(self.files))
+        except BaseException:
+            self.close()
+            raise
+
+    def verify(self):
+        self._named()
+        for (_, fd, _), item in zip(self.handles, self.files, strict=True):
+            if _read(fd) != item.raw:
+                _reject()
+        self._named()
+
+
+async def async_observe_discovery_inputs(hass, *, guard, settle=False, on_settle=None):
+    """Observe three existing, settled native documents under caller's scope.
+
+Exact supported versions/store classes/schema/layout/pending-state checks come
+from _Managers. Missing native files refuse even if a manager serializes empty.
+Cancellation drains executor work before any held descriptor can be released.
+"""
+    pinned = None
+    try:
+        from homeassistant.const import __version__
+        guard()
+        root = hass.config.config_dir
+        if (type(root) is not str or not os.path.isabs(root)
+                or os.path.normpath(root) != root or __version__ not in _SCHEMAS):
+            _reject()
+        location = _SourceLocation(__version__, root)
+        waited = False
+        if settle:
+            admission = _Managers(hass, location, identity_only=True)
+
+            def check_admission():
+                guard()
+                if type(hass.config.config_dir) is not str or hass.config.config_dir != root:
+                    _reject()
+                admission.check_identity()
+
+            # Admit only stores with already queued work. Native Store retains
+            # responsibility for selecting the latest data under its write lock.
+            deadline = hass.loop.time() + _SETTLE_TIMEOUT
+            for store in admission.stores:
+                while store._load_future is not None or store._write_lock.locked():
+                    waited = True
+                    remaining = deadline - hass.loop.time()
+                    if remaining <= 0:
+                        _reject()
+                    await asyncio.sleep(min(_SETTLE_INTERVAL, remaining))
+                    check_admission()
+                check_admission()
+                if store._data is None:
+                    continue
+                if (hass.loop.time() >= deadline
+                        or any(not waiter.cancelled() for waiter in (store._write_lock._waiters or ()))):
+                    _reject()
+                waited = True
+                # Eager entry acquires the free lock before another task can
+                # start a load, while Store still chooses its latest _data.
+                task = hass.async_create_task_internal(store._async_handle_write_data(), eager_start=True)
+                await _drain_native_write(task)
+                check_admission()
+                # A concurrent reschedule is foreign work, not a second flush.
+                if admission.pending_for(store):
+                    raise NativeInputWritePending('native_input_native_write_pending')
+            # An already active write with no queued data must finish naturally.
+            while any(admission.pending_for(store) for store in admission.stores):
+                waited = True
+                if any(store._data is not None for store in admission.stores):
+                    raise NativeInputWritePending('native_input_native_write_pending')
+                remaining = deadline - hass.loop.time()
+                if remaining <= 0:
+                    flags = ('data', 'write_lock', 'delay_handle', 'final_listener', 'load_future')
+                    pending = []
+                    for key, store in zip(_KEYS, admission.stores, strict=True):
+                        state = (store._data is not None, store._write_lock.locked(),
+                                 store._delay_handle is not None,
+                                 store._unsub_final_write_listener is not None,
+                                 store._load_future is not None)
+                        pending.extend((key, flag) for flag, active in zip(flags, state, strict=True) if active)
+                    logging.getLogger(__name__).warning('Native discovery Store settle timeout: %s', pending)
+                    _reject()
+                await asyncio.sleep(min(_SETTLE_INTERVAL, remaining))
+                check_admission()
+            check_admission()
+            managers = _Managers(hass, location)
+            check_admission()
+
+        else:
+            managers = _Managers(hass, location)
+
+        def check():
+            guard()
+            if type(hass.config.config_dir) is not str or hass.config.config_dir != root:
+                _reject()
+            managers.check()
+
+        pinned = _DiscoveryPinned(location, managers.initial)
+        check()
+        observed = await _drained(hass.async_add_executor_job, pinned.capture)
+        check()
+        await _drained(hass.async_add_executor_job, pinned.verify)
+        check()
+        if waited and on_settle is not None:
+            on_settle(observed)
+        return observed
+    except asyncio.CancelledError:
+        raise
+    except NativeInputWritePending:
+        raise DiscoveryNativeWritePending('native_input_native_write_pending') from None
+    except PermissionError:
+        raise PermissionError('native_discovery_inputs_permission_denied') from None
+    except Exception as error:
+        if isinstance(error, NativeInputBaselineError) and str(error) == 'native_input_limit':
+            raise DiscoveryNativeInputsError('native_input_limit') from None
+        from .yaml_validation_worker import _checker_diagnostic
+        logging.getLogger(__name__).warning('Native discovery observation unavailable: %s',
+                                           _checker_diagnostic(error))
+        _reject()
+    finally:
+        if pinned is not None:
+            pinned.close()
+
+
+def assert_discovery_managers_current(hass, observed, *, guard):
+    """Synchronous final manager fence after other discovery-family awaits.
+
+    No disk IO or continuing authority. Full native physical readback remains
+    the independent earlier capture; this closes late event-loop manager drift.
+    """
+    guard()
+    if type(observed) is not DiscoveryNativeInputs:
+        _reject()
+    location = _SourceLocation(observed.version, observed.config_root)
+    managers = _Managers(hass, location)
+    if managers.initial != tuple(row.manager_json for row in observed.files):
+        _reject()
+    guard()

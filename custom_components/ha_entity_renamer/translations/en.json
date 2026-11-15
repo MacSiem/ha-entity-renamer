@@ -1,0 +1,14 @@
+{
+  "title": "Entity Renamer",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Entity Renamer"
+      }
+    },
+    "abort": {
+      "already_configured": "Entity Renamer is already configured.",
+      "single_instance_allowed": "Only one Entity Renamer backend can be configured."
+    }
+  }
+}

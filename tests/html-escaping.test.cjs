@@ -8,7 +8,7 @@ const payload='<img src=x onerror=alert(1)> " \' &';
 function fixture(t){
   const dom=new JSDOM('',{runScripts:'dangerously',url:'http://localhost/'});
   t.after(()=>dom.window.close());
-  dom.window.eval(readFileSync(join(__dirname,'../ha-entity-renamer.js'),'utf8'));
+  dom.window.eval(readFileSync(join(__dirname,'../custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8'));
   const card=dom.window.document.createElement('ha-entity-renamer');dom.window.document.body.append(card);
   const did='device-'+payload,oldId='sensor.old_'+payload,newId='sensor.new_'+payload;
   const entry={id:'entry-qa',entity_id:oldId,device_id:did,name:payload,original_name:payload,unique_id:'qa',platform:'qa'};

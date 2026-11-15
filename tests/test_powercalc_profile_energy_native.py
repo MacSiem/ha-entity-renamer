@@ -1,0 +1,604 @@
+"""Real public profiles/native producers, fresh process per case, owner FIFO only.
+
+No profile or calculation replacement. Public W assertions never enter caches,
+receipts or producer power fields. The SAME ORIGINAL is reused after every event.
+"""
+import asyncio
+from decimal import Decimal
+import importlib
+import json
+import logging
+import os
+from pathlib import Path
+from datetime import timedelta
+from types import MappingProxyType
+import threading
+import unittest
+from unittest.mock import patch
+
+import test_native_input_baseline as fixtures
+import test_powercalc_runtime_native as existing
+from test_powercalc_profile_inputs import ProfileLight, InfraredSelector, stage_public_profiles
+
+
+@unittest.skipUnless(fixtures.HAS_HA, 'requires actual pinned HA')
+class PowercalcProfileEnergyNativeTests(unittest.IsolatedAsyncioTestCase):
+    namespace_source_bytes = b'# ORIGINAL public profile native fixture namespace\n'
+    asyncSetUp = existing.PowercalcRuntimeNativeTests.asyncSetUp
+    custom_profile_directories = False
+    _flush_documents = existing.PowercalcRuntimeNativeTests._flush_documents
+    guard = existing.PowercalcRuntimeNativeTests.guard
+
+    async def _setup_real_vendor(self):
+        from homeassistant.config import async_hass_config_yaml
+        from homeassistant.config_entries import ConfigEntry
+        from homeassistant.helpers.entity_component import EntityComponent
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        from homeassistant.setup import async_setup_component
+        from custom_components.powercalc.config_flow import PowercalcConfigFlow
+        from custom_components.powercalc.sensors.power import VirtualPowerSensor
+        from custom_components.powercalc.sensors.energy import VirtualEnergySensor
+        from custom_components.powercalc.sensors.group.custom import GroupedPowerSensor, GroupedEnergySensor
+        from custom_components.powercalc.sensors.group.subtract import SubtractGroupSensor
+        supplied = os.environ.get('POWERCALC_PROFILE_DIR')
+        if not supplied:
+            self.skipTest('requires exact public binary profile bundle; not a PASS')
+        self.profile_root = stage_public_profiles(self.f.root, supplied)
+        hass = self.f.hass
+        self.assertTrue(await async_setup_component(hass, 'network', {}))
+        self.sources = [ProfileLight('Public static'), ProfileLight('Public dynamic', dynamic=True)]
+        component = EntityComponent(logging.getLogger(__name__), 'light', hass, timedelta(seconds=60))
+        await component.async_add_entities(self.sources)
+        self.yaml_source, self.gui_source = [row.entity_id for row in self.sources]
+        self.selector = InfraredSelector(self.gui_source.split('.', 1)[1])
+        selects = EntityComponent(logging.getLogger(__name__), 'select', hass, timedelta(seconds=60))
+        await selects.async_add_entities([self.selector])
+        config = ('powercalc:\n  discovery:\n    enabled: false\n'
+            '  disable_library_download: true\n  enable_analytics: false\n'
+            '  create_energy_sensors: true\n  create_standby_group: false\n'
+            '  create_cost_sensors: false\n  create_utility_meters: false\n'
+            '  energy_sensor_unit_prefix: k\n  energy_integration_method: left\n'
+            '  energy_sensor_precision: 6\n  energy_update_interval: 1\n'
+            '  group_power_update_interval: 0\n  group_energy_update_interval: 0\n'
+            '  sensors:\n    - entity_id: ' + self.yaml_source + '\n'
+            '      unique_id: public-profile-static\n      manufacturer: signify\n'
+            '      model: LWA001\n      create_energy_sensor: true\n')
+        custom = getattr(self, 'custom_profile_directories', False)
+        self.assertIs(type(custom), bool)
+        if custom:
+            config += '      custom_model_directory: powercalc/profiles/signify/LWA001\n'
+        (self.f.root / 'configuration.yaml').write_text(config)
+        self.assertTrue(await async_setup_component(hass, 'powercalc', await async_hass_config_yaml(hass)))
+        def entry(name, unique_id, data):
+            return ConfigEntry(domain='powercalc', title=name, unique_id=unique_id,
+                data={'name': name, **data}, options={}, discovery_keys=MappingProxyType({}),
+                source='user', version=PowercalcConfigFlow.VERSION,
+                minor_version=PowercalcConfigFlow.MINOR_VERSION, subentries_data=[], pref_disable_polling=True)
+        async def add(row):
+            await hass.config_entries.async_add(row)
+            await hass.async_block_till_done()
+            self.assertEqual(row.state.value, 'loaded')
+        def entity(cls, uid):
+            found = [e for p in async_get_platforms(hass, 'powercalc') for e in p.entities.values()
+                     if type(e) is cls and e.unique_id == uid]
+            self.assertEqual(len(found), 1, (cls.__name__, uid))
+            return found[0]
+        self.entry = entry('Public dynamic', 'public-profile-dynamic', {
+            'entity_id': self.gui_source, 'sensor_type': 'virtual_power',
+            'manufacturer': 'lifx', 'model': 'LHB30E27UC10P', 'create_energy_sensor': True,
+            **({'custom_model_directory': 'powercalc/profiles/lifx/LHB30E27UC10P'} if custom else {})})
+        if not getattr(self, 'single_child_group', False):
+            await add(self.entry)
+        else:
+            await hass.async_block_till_done()
+        self.static_power = entity(VirtualPowerSensor, 'public-profile-static')
+        self.static_energy = entity(VirtualEnergySensor, 'public-profile-static_energy')
+        self.dynamic_power = self.dynamic_energy = None
+        if not getattr(self, 'single_child_group', False):
+            self.dynamic_power = entity(VirtualPowerSensor, 'public-profile-dynamic')
+            self.dynamic_energy = entity(VirtualEnergySensor, 'public-profile-dynamic_energy')
+        self.group = entry('Public sum', 'public-profile-sum', {
+            'sensor_type': 'group', 'group_type': 'custom', 'create_energy_sensor': True,
+            'force_calculate_group_energy': False,
+            **getattr(self, 'group_fixture_options', {}),
+            'group_power_entities': [self.static_power.entity_id] + ([] if self.dynamic_power is None else [self.dynamic_power.entity_id]),
+            'group_energy_entities': [self.static_energy.entity_id] + ([] if self.dynamic_energy is None else [self.dynamic_energy.entity_id])})
+        await add(self.group)
+        self.sum_power = entity(GroupedPowerSensor, 'public-profile-sum')
+        self.sum_energy = entity(GroupedEnergySensor, 'public-profile-sum_energy')
+        self.subtract = self.subtract_power = self.subtract_energy = None
+        if not getattr(self, 'omit_subtract', False):
+            self.subtract = entry('Public subtract', 'public-profile-subtract', {
+                'sensor_type': 'group', 'group_type': 'subtract', 'create_energy_sensor': True,
+                'entity_id': self.sum_power.entity_id, 'subtract_entities': [self.dynamic_power.entity_id]})
+            await add(self.subtract)
+            self.subtract_power = entity(SubtractGroupSensor, 'public-profile-subtract')
+            self.subtract_energy = entity(VirtualEnergySensor, 'public-profile-subtract_energy')
+        # Native Energy settings are configuration input, not energy counter data.
+        from homeassistant.components.energy.data import async_get_manager
+        manager = await async_get_manager(hass)
+        preferences = manager.default_preferences()
+        preferences['device_consumption'] = [{'stat_consumption': self.sum_energy.entity_id}]
+        await manager.async_update(preferences)
+        await manager._store.async_save(manager.data)
+        self.graph = (self.static_power, self.dynamic_power, self.static_energy, self.dynamic_energy,
+                      self.sum_power, self.sum_energy, self.subtract_power, self.subtract_energy)
+
+    async def prepare(self):
+        self.subject = importlib.import_module(fixtures.PACKAGE + '.powercalc_source_binding')
+        self.runtime = importlib.import_module(fixtures.PACKAGE + '.powercalc_runtime_observer')
+        planner = importlib.import_module(fixtures.PACKAGE + '.yaml_plan')
+        inputs = importlib.import_module(fixtures.PACKAGE + '.powercalc_profile_inputs')
+        validator = importlib.import_module(fixtures.PACKAGE + '.yaml_validation')
+        plan = planner.plan_yaml(self.f.root, {self.yaml_source: 'light.public_static_target'})
+        self.assertTrue(plan.ready, plan.issues)
+        self.plan = await inputs.async_add_powercalc_source_inputs(self.f.hass, plan, guard=self.guard)
+        self.receipt, self.evidence = await validator.async_validate_proposed_with_powercalc_sources(
+            self.f.hass, self.plan, self.f.root.parent)
+        self.first = self.runtime.capture_powercalc_runtime(self.f.hass, guard=self.guard)
+        return await self.bind()
+
+    async def bind(self):
+        return await self.subject.async_bind_powercalc_sources(self.f.hass,
+            self.receipt, self.evidence, self.first, guard=self.guard)
+
+    def assert_bound(self, result):
+        verified = {row.entity_id: row for row in result.rows if row.source_verified}
+        self.assertEqual(set(verified), {row.entity_id for row in self.graph})
+        self.assertEqual(verified[self.static_power.entity_id].source_registry_id,
+                         self.f.entity.async_get(self.yaml_source).id)
+        dynamic = verified[self.dynamic_power.entity_id]
+        self.assertIn((self.selector.entity_id, dynamic.entity_id, 0), dynamic.edges)
+        subtract = verified[self.subtract_power.entity_id]
+        self.assertEqual(subtract.edges, tuple(sorted(((self.sum_power.entity_id, subtract.entity_id, 1),
+                                          (self.dynamic_power.entity_id, subtract.entity_id, -1)))))
+        self.assertTrue(result.relationships)
+        self.assertFalse(result.family_complete)
+        self.assertFalse(result.migration_ready)
+        self.assertEqual(result.status, 'UNKNOWN')
+        return verified
+
+    async def test_real_public_lut_selector_signed_groups_and_native_energy(self):
+        inputs = importlib.import_module(fixtures.PACKAGE + '.powercalc_profile_inputs')
+        native_read, loop_thread, reads = inputs.read_bundle, threading.get_ident(), []
+        def observe_actual_read(root):
+            # Observe only Renamer's real read. Never return a substitute bundle,
+            # invoke a vendor calculator or change a native producer/counter.
+            self.assertNotEqual(threading.get_ident(), loop_thread)
+            value = native_read(root)
+            reads.append(threading.get_ident())
+            return value
+        with patch.object(inputs, 'read_bundle', observe_actual_read):
+            self.assert_bound(await self.prepare())
+            evidence, capture = self.evidence.sha256, self.first.structural_token
+            original_strategy = self.dynamic_power._strategy_instance
+            await self.sources[0].async_turn_on(brightness=255)
+            for option, watts in [('25%', '2.71'), ('50%', '4.72'), ('100%', '8.52'), ('Disabled', '0.73')]:
+                await self.selector.async_select_option(option)
+                await self.f.hass.async_block_till_done()
+                def power(entity):
+                    return Decimal(self.f.hass.states.get(entity.entity_id).state)
+                self.assertEqual(power(self.static_power), Decimal('8.51'))
+                self.assertEqual(power(self.dynamic_power), Decimal(watts))
+                self.assertEqual(power(self.sum_power), Decimal('8.51') + Decimal(watts))
+                self.assertEqual(power(self.subtract_power), Decimal('8.51'))
+                self.assert_bound(await self.bind())
+                self.assertEqual((self.evidence.sha256, self.first.structural_token), (evidence, capture))
+            self.assertIsNot(self.dynamic_power._strategy_instance, original_strategy)
+            # Wait for real wall-clock native integration, with no synthetic time event.
+            before = self.static_energy._state
+            async with asyncio.timeout(8):
+                while self.static_energy._state is None or self.static_energy._state == before:
+                    await asyncio.sleep(0.02)
+            self.assertGreater(self.static_energy._state, before or Decimal(0))
+            await self.f.hass.async_block_till_done()
+            for entity in (self.static_energy, self.dynamic_energy, self.sum_energy, self.subtract_energy):
+                value = Decimal(self.f.hass.states.get(entity.entity_id).state)
+                self.assertTrue(value.is_finite())
+                self.assertGreater(value, Decimal(0))
+            self.assert_bound(await self.bind())
+        self.assertTrue(reads, 'positive must traverse the actual executor profile read')
+
+    async def test_inactive_raw_gzip_drift_is_not_adopted(self):
+        self.assert_bound(await self.prepare())
+        path = self.profile_root / 'lifx/LHB30E27UC10P/infrared_100/hs.csv.gz'
+        raw = path.read_bytes()
+        try:
+            path.write_bytes(raw + b'\x00')
+            with self.assertRaises(ValueError):
+                await self.bind()
+        finally:
+            path.write_bytes(raw)
+
+    async def test_added_profile_member_invalidates_same_receipt(self):
+        self.assert_bound(await self.prepare())
+        path = self.profile_root / 'signify/LWA001/unselected.json'
+        path.write_bytes(b'{}\n')
+        try:
+            with self.assertRaises(ValueError):
+                await self.bind()
+        finally:
+            path.unlink()
+
+    async def test_real_selector_listener_detach_cannot_keep_graph_proof(self):
+        from homeassistant.helpers import event
+        self.assert_bound(await self.prepare())
+        tracker = self.f.hass.data[event._TRACK_STATE_CHANGE_DATA]
+        tracker.listener()  # Actual native shared EventBus unsubscribe, negative only.
+        await self.selector.async_select_option('25%')
+        await self.f.hass.async_block_till_done()
+        with self.assertRaises(ValueError):
+            await self.bind()  # Energy settings cannot close through the detached graph.
+
+    async def test_actual_loaded_lut_code_drift_is_rejected(self):
+        self.assert_bound(await self.prepare())
+        from custom_components.powercalc.strategy.lut import LutStrategy
+        method, code = LutStrategy.calculate, LutStrategy.calculate.__code__
+        try:
+            method.__code__ = code.replace(co_firstlineno=code.co_firstlineno + 1)
+            with self.assertRaises(ValueError):
+                await self.bind()
+        finally:
+            method.__code__ = code
+
+    async def test_actual_loaded_lookup_mode_code_drift_is_rejected(self):
+        self.assert_bound(await self.prepare())
+        from custom_components.powercalc.strategy.lut import LookupMode
+        method = LookupMode.from_color_mode
+        code = method.__code__
+        original = self.evidence, self.first
+        original_bytes = self.evidence.sha256, self.first.structural_token
+        try:
+            # Negative only: the same real dispatch function, no substitute
+            # class/callback and no calculation or producer event under fault.
+            method.__code__ = code.replace(co_firstlineno=code.co_firstlineno + 1)
+            with self.assertRaises(ValueError):
+                await self.bind()
+        finally:
+            method.__code__ = code
+        self.assertIs(self.evidence, original[0])
+        self.assertIs(self.first, original[1])
+        self.assertEqual((self.evidence.sha256, self.first.structural_token), original_bytes)
+        self.assert_bound(await self.bind())
+
+    async def test_actual_gui_source_drift_is_not_rebaselined(self):
+        self.assert_bound(await self.prepare())
+        self.f.hass.config_entries.async_update_entry(self.entry,
+            data={**self.entry.data, 'model': 'LWA001'})
+        await self.f.hass.async_block_till_done()
+        await self._flush_documents()
+        with self.assertRaises(ValueError):
+            await self.bind()
+
+    async def test_profile_edit_after_final_code_read_is_rejected(self):
+        self.assert_bound(await self.prepare())
+        path = self.profile_root / 'lifx/LHB30E27UC10P/infrared_100/model.json'
+        raw, native_sources, calls = path.read_bytes(), self.subject.PowercalcVendor.sources, []
+        def read_then_edit(vendor):
+            value = native_sources(vendor)
+            calls.append(vendor)
+            if len(calls) == 2:
+                path.write_bytes(raw + b'\n')
+            return value
+        try:
+            with patch.object(self.subject.PowercalcVendor, 'sources', read_then_edit):
+                with self.assertRaises(ValueError):
+                    await self.bind()
+        finally:
+            path.write_bytes(raw)
+        self.assertEqual(len(calls), 2)
+
+
+@unittest.skipUnless(fixtures.HAS_HA, 'requires actual pinned HA')
+class PowercalcMixedGraphNativeTests(unittest.IsolatedAsyncioTestCase):
+    namespace_source_bytes = b'# ORIGINAL mixed Powercalc native fixture namespace\n'
+    asyncSetUp = existing.PowercalcRuntimeNativeTests.asyncSetUp
+    _flush_documents = existing.PowercalcRuntimeNativeTests._flush_documents
+    guard = existing.PowercalcRuntimeNativeTests.guard
+    prepare = PowercalcProfileEnergyNativeTests.prepare
+    bind = PowercalcProfileEnergyNativeTests.bind
+
+    async def _setup_real_vendor(self):
+        from homeassistant.config_entries import ConfigEntry
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        from homeassistant.setup import async_setup_component
+        hass = self.f.hass
+        if self._testMethodName == 'test_mixed_yaml_group_controlled_apply_and_fresh_reverse':
+            import test_receipted_helper_native as recorder_fixture
+            self.with_yaml = True
+            await recorder_fixture.NativeReceiptedHelperTests._before_start(self, hass, self.f.root)
+            self.assertTrue(await async_setup_component(hass, 'homeassistant', {}))
+        await self._add_graph_lights()
+        fixed, linear, model, gui = [source.entity_id for source in self.sources]
+        self.profile_root = stage_public_profiles(self.f.root, os.environ['POWERCALC_PROFILE_DIR'])
+        self.config = f"""powercalc:
+  discovery:
+    enabled: false
+  disable_library_download: true
+  enable_analytics: false
+  create_energy_sensors: true
+  create_standby_group: false
+  create_cost_sensors: false
+  create_utility_meters: false
+  energy_sensor_unit_prefix: k
+  energy_integration_method: left
+  energy_sensor_precision: 6
+  group_power_update_interval: 0
+  group_energy_update_interval: 0
+  sensors:
+    - create_group: First graph group
+      unique_id: graph-first
+      entities:
+        - entity_id: {fixed}
+          unique_id: graph-fixed
+          create_energy_sensor: true
+          fixed:
+            power: 5
+        - entity_id: {model}
+          unique_id: graph-model
+          manufacturer: signify
+          model: LWA001
+          custom_model_directory: powercalc/profiles/signify/LWA001
+          create_energy_sensor: true
+    - create_group: Second graph group
+      unique_id: graph-second
+      entities:
+        - entity_id: {fixed}
+        - entity_id: {linear}
+          unique_id: graph-linear
+          create_energy_sensor: true
+          linear:
+            min_power: 2
+            max_power: 12
+"""
+        path = self.f.root / 'configuration.yaml'
+        path.write_text(self.config)
+        await self._load_graph()
+        from custom_components.powercalc.config_flow import PowercalcConfigFlow
+        self.entry = ConfigEntry(domain='powercalc', title='Graph entry', unique_id='graph-entry',
+            data={'name': 'Graph entry', 'entity_id': gui, 'sensor_type': 'virtual_power',
+                  'create_energy_sensor': True, 'fixed': {'power': 7}},
+            options={}, discovery_keys=MappingProxyType({}), source='user',
+            version=PowercalcConfigFlow.VERSION, minor_version=PowercalcConfigFlow.MINOR_VERSION,
+            subentries_data=[], pref_disable_polling=True)
+        await hass.config_entries.async_add(self.entry)
+        await hass.async_block_till_done()
+        self.assertEqual(self.entry.state.value, 'loaded')
+        self.entities = {entity.unique_id: entity for platform in async_get_platforms(hass, 'powercalc')
+                         for entity in platform.entities.values()}
+
+    async def _add_graph_lights(self):
+        from homeassistant.helpers.entity_component import EntityComponent
+        from homeassistant.setup import async_setup_component
+
+        hass = self.f.hass
+        self.assertIn(self.f.version, ('2026.11.0', '2026.11.1'))
+        self.assertTrue(await async_setup_component(hass, 'network', {}))
+        self.sources = [ProfileLight(name) for name in ('Graph fixed', 'Graph linear',
+                         'Graph model', 'Graph entry')]
+        component = EntityComponent(logging.getLogger(__name__), 'light', hass, timedelta(seconds=60))
+        await component.async_add_entities(self.sources)
+        self.yaml_source = self.sources[2].entity_id
+
+    async def _load_graph(self):
+        from homeassistant.config import async_hass_config_yaml
+        from homeassistant.helpers.discovery import async_load_platform
+        from homeassistant.setup import async_setup_component
+
+        hass = self.f.hass
+        # A reference-only member reuses an already configured native leaf.
+        # Load its owner first so HA's concurrent YAML dispatch cannot skip it.
+        config = await async_hass_config_yaml(hass)
+        first, second = config['powercalc']['sensors']
+        initial = {**config, 'powercalc': {**config['powercalc'], 'sensors': [first]}}
+        self.assertTrue(await async_setup_component(hass, 'powercalc', initial))
+        await hass.async_block_till_done()
+        await async_load_platform(hass, 'sensor', 'powercalc',
+                                  {**second, 'discovery_type': 'user_yaml'}, config)
+        await hass.async_block_till_done()
+
+    async def test_mixed_yaml_group_graph_reopens_and_refuses_drift(self):
+        original = importlib.import_module(fixtures.PACKAGE + '.yaml_source_binding')
+        codec = importlib.import_module(fixtures.PACKAGE + '.powercalc_composition')
+        before = await self.prepare()
+        expected = {'graph-first', 'graph-second', 'graph-fixed', 'graph-linear',
+                    'graph-model', 'graph-entry'}
+        expected |= {uid + '_energy' for uid in expected}
+        self.assertEqual(set(self.entities), expected)
+        rows = {uid: next(row for row in before.rows if row.entity_id == entity.entity_id)
+                for uid, entity in self.entities.items()}
+        self.assertEqual({uid for uid, row in rows.items() if row.source_verified}, expected,
+                         {uid: row.reason for uid, row in rows.items()})
+        self.assertEqual(rows['graph-entry'].origin, 'entry:' + self.entry.entry_id)
+        self.assertEqual(rows['graph-fixed'].origin, 'yaml:graph-fixed')
+        for uid, row in rows.items():
+            self.assertEqual(row.registry_id, self.entities[uid].registry_entry.id)
+            self.assertTrue(row.runtime_identities)
+        for group, members in [('graph-first', ('graph-fixed', 'graph-model')),
+                               ('graph-second', ('graph-fixed', 'graph-linear'))]:
+            for suffix in ('', '_energy'):
+                self.assertEqual(rows[group + suffix].origin, 'yaml:' + group)
+                self.assertEqual(rows[group + suffix].edges,
+                    tuple(sorted((rows[member + suffix].entity_id, rows[group + suffix].entity_id, 1)
+                                 for member in members)))
+        self.assertFalse(before.migration_ready)
+
+        encoded = codec._typed(self.evidence, original.OriginalSourceEvidence, encode=True)
+        self.evidence = codec._typed(json.loads(json.dumps(encoded)),
+                                     original.OriginalSourceEvidence, encode=False)
+        self.assertEqual(await self.bind(), before)
+
+        second_group = self.entities['graph-second']
+        second_group._entities = {self.entities['graph-linear'].entity_id}
+        with self.assertRaises(ValueError):
+            await self.bind()
+        second_group._entities.add(self.entities['graph-fixed'].entity_id)
+
+        (self.f.root / 'configuration.yaml').write_text(
+            self.config.replace('model: LWA001', 'model: unknown-model')
+                       .replace('          custom_model_directory: powercalc/profiles/signify/LWA001\n', ''))
+        with self.assertRaisesRegex(ValueError, 'native_config_rejected') as error:
+            await self.prepare()
+        self.assertIn('profile_unresolved', ' '.join(error.exception.__notes__))
+
+    async def test_mixed_yaml_group_controlled_apply_and_fresh_reverse(self):
+        from homeassistant.core import State, callback
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.helpers.entity_platform import async_get_platforms
+        from homeassistant.helpers.restore_state import DATA_RESTORE_STATE
+        hass, root = self.f.hass, self.f.root
+        await self._flush_documents()
+        backend = importlib.import_module('custom_components.ha_entity_renamer')
+        runtime = backend.Runtime('mixed-powercalc-fixture', None, None)
+        hass.data[backend.DATA_RUNTIME] = runtime
+
+        async def refresh():
+            self.guard()
+
+        from custom_components.powercalc.sensors.group.custom import GroupedEnergySensor
+        from custom_components.powercalc.sensors.energy import VirtualEnergySensor
+
+        def counters():
+            return {obj.registry_entry.id: obj for platform in async_get_platforms(hass, 'powercalc')
+                    for obj in platform.entities.values()
+                    if type(obj) in (GroupedEnergySensor, VirtualEnergySensor)}
+
+        for obj in counters().values():
+            if type(obj) is VirtualEnergySensor:
+                await obj.async_calibrate('0.010023004')
+        await hass.async_block_till_done()
+        for obj in counters().values():
+            if type(obj) is GroupedEnergySensor:
+                obj._set_native_value(Decimal('1.234567891') if 'first' in obj.unique_id
+                                      else Decimal('2.345678912'))
+                obj.async_write_ha_state()
+        await hass.async_block_till_done()
+        pss = hass.data['powercalc_group_storage']
+        pss.set_entity_state('sensor.unrelated_group', 'sensor.unrelated_member',
+                             State('sensor.unrelated_member', '41.125'))
+        await pss.persist_states()
+        pss_path = root / '.storage' / 'powercalc_group'
+        entry_path = root / '.storage' / 'core.config_entries'
+        foreign_pss = json.loads(pss_path.read_bytes())['data']['sensor.unrelated_group']
+        entry_bytes = entry_path.read_bytes()
+        original_entry = dict(self.entry.data)
+        restore = hass.data[DATA_RESTORE_STATE]
+        await restore.async_dump_states()
+        from homeassistant.util import dt as dt_util
+        from homeassistant.components.recorder.tasks import StatisticsTask
+        from custom_components.ha_entity_renamer.recorder_guard import NativeRecorderGuard
+        recorder = get_instance(hass)
+        # Use native compilation so selected groups already own statistics
+        # metadata before the continuity snapshot, regardless of wall-clock phase.
+        history = NativeRecorderGuard(hass)
+        await history.async_synchronize()
+        now = dt_util.utcnow()
+        period = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
+        recorder.queue_task(StatisticsTask(period, False))
+        await history.async_synchronize()
+        start = {uid: (obj.entity_id, str(obj._native_value_exact)
+                       if type(obj) is GroupedEnergySensor else str(obj._state))
+                 for uid, obj in counters().items()}
+        self.assertEqual(len(start), 6)
+        groups = [self.entities[key].entity_id for key in ('graph-first_energy', 'graph-second_energy')]
+        mapping = {self.yaml_source: 'light.graph_renamed_model',
+                   **{name: 'sensor.renamed_' + name.split('.')[1] for name in groups}}
+        first = {}
+        watch = False
+
+        @callback
+        def published(event):
+            row = event.data.get('new_state')
+            if watch and row is not None and row.state not in ('unknown', 'unavailable'):
+                first.setdefault(row.entity_id, row.state)
+
+        remove = hass.bus.async_listen('state_changed', published)
+        self.addCleanup(remove)
+        actor = 'controlled-graph-native'
+        selected_source = {self.yaml_source: mapping[self.yaml_source]}
+        source_only = await runtime.native_yaml_prepare(hass, selected_source, actor_id=actor,
+            guard=self.guard, refresh=refresh)
+        self.assertEqual(source_only['entity_count'], 1)
+        self.assertEqual(source_only['dependencies']['config_entries'], [])
+        group = self.entities['graph-second']
+        shared = self.entities['graph-fixed'].entity_id
+        group._entities.remove(shared)
+        try:
+            with self.assertRaises((ValueError, backend.transaction.Refused)):
+                await runtime.native_yaml_prepare(hass, mapping, actor_id=actor,
+                    guard=self.guard, refresh=refresh)
+        finally:
+            group._entities.add(shared)
+        self.assertEqual(entry_path.read_bytes(), entry_bytes)
+        review = await runtime.native_yaml_prepare(hass, mapping, actor_id=actor,
+            guard=self.guard, refresh=refresh)
+        operation, fingerprint = review['operation_id'], review['fingerprint']
+        import sys
+        trace = []
+        monitor = sys.monitoring
+        tool = next(i for i in range(6) if monitor.get_tool(i) is None)
+        monitor.use_tool_id(tool, 'controlled graph fixture exceptions')
+
+        def raised(code, offset, error):
+            if ('/custom_components/ha_entity_renamer/' in code.co_filename
+                    and isinstance(error, (ValueError, RuntimeError, AttributeError, KeyError))):
+                trace.append((Path(code.co_filename).name, code.co_name, str(error)))
+
+        from custom_components.ha_entity_renamer.transaction import Refused
+        def observe(code, offset, error):
+            if isinstance(error, Refused) and '/custom_components/ha_entity_renamer/' in code.co_filename:
+                trace.append((Path(code.co_filename).name, code.co_name, str(error)))
+                if code.co_name == '_need' and str(error) == 'template_yaml_server_history_identity_changed':
+                    local = sys._getframe(1).f_back.f_locals
+                    snapshot, current = local['snapshot'], local['metadata']
+                    print('CONTROLLED_GRAPH_METADATA', repr((local['ids'], snapshot['state_ids'],
+                          snapshot['statistic_ids'], current)), flush=True)
+            else:
+                raised(code, offset, error)
+
+        watch = True
+        try:
+            monitor.register_callback(tool, monitor.events.RAISE, observe)
+            monitor.set_events(tool, monitor.events.RAISE)
+            result = await runtime.native_yaml_apply(hass, operation, fingerprint, actor_id=actor,
+                guard=self.guard, refresh=refresh)
+        except Exception:
+            record = await runtime.journal.load(operation)
+            print('CONTROLLED_GRAPH_FAILURE', json.dumps({
+                'status': None if record is None else record.status,
+                'reason': None if record is None else record.reason,
+                'phases': None if record is None else record.phases,
+                'trace': list(dict.fromkeys(trace))[-40:]}), flush=True)
+            raise
+        finally:
+            watch = False
+            monitor.set_events(tool, 0)
+            monitor.register_callback(tool, monitor.events.RAISE, None)
+            monitor.free_tool_id(tool)
+        self.assertEqual(result['state'], 'applied', result)
+        for uid, obj in counters().items():
+            name, expected = start[uid]
+            self.assertEqual(obj.entity_id, mapping.get(name, name))
+            actual = obj._native_value_exact if type(obj) is GroupedEnergySensor else obj._state
+            self.assertEqual(Decimal(expected).as_tuple(), actual.as_tuple())
+            self.assertEqual(Decimal(first[obj.entity_id]), Decimal(hass.states.get(obj.entity_id).state))
+        self.assertEqual(hass.config_entries.async_get_entry(self.entry.entry_id).data, original_entry)
+        self.assertEqual(entry_path.read_bytes(), entry_bytes)
+        self.assertEqual(json.loads(pss_path.read_bytes())['data']['sensor.unrelated_group'], foreign_pss)
+        await restore.async_dump_states()  # legitimate native refresh before fresh reverse
+        first.clear()
+        watch = True
+        result = await runtime.native_yaml_reverse(hass, operation, fingerprint,
+            guard=self.guard, refresh=refresh)
+        watch = False
+        self.assertEqual(result['state'], 'rolled_back', result)
+        self.assertEqual((root / 'configuration.yaml').read_text(), self.config)
+        self.assertEqual(entry_path.read_bytes(), entry_bytes)
+        self.assertEqual(json.loads(pss_path.read_bytes())['data']['sensor.unrelated_group'], foreign_pss)
+        self.assertEqual(set(counters()), set(start))
+        for uid, obj in counters().items():
+            name, expected = start[uid]
+            self.assertEqual(obj.entity_id, name)
+            actual = obj._native_value_exact if type(obj) is GroupedEnergySensor else obj._state
+            self.assertEqual(Decimal(expected).as_tuple(), actual.as_tuple())
+            self.assertEqual(Decimal(first[name]), Decimal(hass.states.get(name).state))

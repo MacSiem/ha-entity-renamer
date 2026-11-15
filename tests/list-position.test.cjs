@@ -5,7 +5,7 @@ const {join} = require('node:path');
 const {JSDOM} = require('jsdom');
 function fixture(language='en') {
  const dom=new JSDOM('',{runScripts:'dangerously',url:'http://localhost/'});
- dom.window.eval(readFileSync(join(__dirname,'../ha-entity-renamer.js'),'utf8'));
+ dom.window.eval(readFileSync(join(__dirname,'../custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8'));
  const card=dom.window.document.createElement('ha-entity-renamer');dom.window.document.body.append(card);
  card._lang=language;card._hass={language,user:{id:'admin',is_admin:true},states:{},config:{time_zone:'Pacific/Auckland'}};
  card._devices=[{id:'one',name:'QA Device'}];

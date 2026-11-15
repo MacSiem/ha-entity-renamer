@@ -4,7 +4,7 @@ const { readFileSync } = require('node:fs');
 const { JSDOM, VirtualConsole } = require('jsdom');
 function fixture() {
   const dom = new JSDOM('', {runScripts:'dangerously',url:'http://qa.invalid/',virtualConsole:new VirtualConsole()});
-  dom.window.eval(readFileSync(require('node:path').join(__dirname,'../ha-entity-renamer.js'),'utf8'));
+  dom.window.eval(readFileSync(require('node:path').join(__dirname,'../custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8'));
   const card = dom.window.document.createElement('ha-entity-renamer');
   card._hass={user:{id:'first',is_admin:true},language:'en',themes:{},states:{}};
   card.setConfig({show_support:false});

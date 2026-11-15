@@ -1,4 +1,4 @@
-/* HA Tools split — ha-entity-renamer v4.6.1 (2026-10-29) — single-tool standalone repo */
+/* HA Tools split — ha-entity-renamer v5.0.0 legacy compatibility card (4.6.1 workflow; not the integration) — single-tool standalone repo */
 (function() {
 'use strict';
 
@@ -1397,6 +1397,111 @@ class HAEntityRenamer extends HTMLElement {
     // Internal transaction flows may need Queue or Log even on a restricted card.
     return _RENAMER_TABS.filter(tab => configured.includes(tab) || tab === this._activeTab);
   }
+  _bridgeNoticePreference() {
+    const id = this._hass?.user?.id;
+    if (typeof id !== 'string' || !id.trim()) return null;
+    const key = 'ha-entity-renamer-migration-notice-v2:' + encodeURIComponent(JSON.stringify([location.origin, id]));
+    if (!this._bridgeNotice || this._bridgeNotice.key !== key) {
+      let dismissed = false;
+      try { dismissed = localStorage.getItem(key) === '1'; } catch (_) {}
+      this._bridgeNotice = {key, dismissed};
+    }
+    return this._bridgeNotice;
+  }
+  _hacsMigrationKey() {
+    const id = this._hass?.user?.id;
+    return typeof id === 'string' && id.trim() ? 'ha-entity-renamer-hacs-switch-v1:' + encodeURIComponent(JSON.stringify([location.origin, id])) : null;
+  }
+  _hacsMigrationText(key) {
+    const pl = this._lang === 'pl';
+    const texts = {
+      busy: pl ? 'Sprawdzanie i przełączanie wpisu HACS…' : 'Checking and switching the HACS entry…',
+      done: pl ? 'Wpis Integration jest gotowy. Otwórz HACS, pobierz Entity Renamer i postępuj według przewodnika.' : 'The Integration entry is ready. Open HACS, download Entity Renamer, and follow the guide.',
+      stopped: pl ? 'Nie udało się potwierdzić stanu. Nie ponawiaj przełączenia w ciemno; sprawdź HACS i przewodnik migracji.' : 'The result could not be confirmed. Do not repeat the switch blindly; check HACS and the migration guide.',
+      blocked: pl ? 'Przełączenie niedostępne: sprawdź uprawnienia administratora, połączenie, HACS 2.0.5 i stan repozytorium.' : 'Switch unavailable: check administrator access, connection, HACS 2.0.5, and repository state.'
+    };
+    return texts[key] || '';
+  }
+  async _hacsSwitchCall(hass, request) {
+    let timer;
+    try {
+      return await Promise.race([
+        hass.callWS(request),
+        new Promise((_, reject) => { timer = window.setTimeout(() => reject(new Error('HACS response timeout')), 15000); })
+      ]);
+    } finally { window.clearTimeout(timer); }
+  }
+  async _switchHacsRepository() {
+    if (this._hacsSwitchBusy || this._hass?.user?.is_admin !== true || this._hass?.connection?.connected !== true || !this.isConnected) return;
+    const {hass, current} = this._captureRead();
+    const key = this._hacsMigrationKey();
+    const connected = () => current() && this.isConnected && this._hass?.user?.is_admin === true && this._hass?.connection?.connected === true;
+    const id = '1234394331', full = 'MacSiem/ha-entity-renamer';
+    const pl = this._lang === 'pl';
+    const prompt = pl
+      ? 'Wykonaj i sprawdź kopię Home Assistant. Poczekaj na zakończenie pobierania i aktualizacji w HACS; nie uruchamiaj innych w trakcie. Przełączyć wyłącznie wpis HACS Entity Renamer z Dashboard na Integration? Nie usuwa to plików, zasobów, historii ani danych HA i nie zmienia nazw. Potem samodzielnie pobierzesz integrację w HACS.'
+      : 'Make and verify a Home Assistant backup. Wait for HACS downloads and updates to finish; do not start others during this step. Switch only the Entity Renamer HACS entry from Dashboard to Integration? This does not delete files, resources, history or HA data and does not rename anything. You will download the integration in HACS yourself afterwards.';
+    if (!key || !window.confirm(prompt)) return;
+    this._hacsSwitchBusy = true; this._hacsSwitchStatus = 'busy'; this.render();
+    let mutationStarted = false;
+    const readRepo = async () => {
+      try { return await this._hacsSwitchCall(hass, {type:'hacs/repository/info', repository_id:id}); }
+      catch (e) { if (e?.code === 'repository_not_found') return null; throw e; }
+    };
+    try {
+      const previous = localStorage.getItem(key);
+      if (previous === 'inflight') { this._hacsSwitchStatus = 'stopped'; return; }
+      const info = await this._hacsSwitchCall(hass, {type:'hacs/info'});
+      if (!connected() || info?.version !== '2.0.5' || info?.disabled_reason || info?.startup || info?.has_pending_tasks) throw new Error('HACS unavailable or busy');
+      const before = await readRepo();
+      if (!connected()) throw new Error('session changed');
+      if (before?.id === id && before?.full_name === full && before?.category === 'integration') {
+        this._hacsSwitchStatus = 'done'; return;
+      }
+      if (previous || before?.id !== id || before?.full_name !== full || before?.category !== 'plugin' || before?.installed !== true) throw new Error('unexpected repository state');
+      // Recheck synchronously: another card may have started while the reads were pending.
+      if (localStorage.getItem(key)) throw new Error('another attempt already started');
+      // Persist before the first effect. An interrupted or uncertain attempt is never replayed automatically.
+      localStorage.setItem(key, 'inflight');
+      mutationStarted = true;
+      if (localStorage.getItem(key) !== 'inflight' || !connected()) throw new Error('attempt marker or session unavailable');
+      await this._hacsSwitchCall(hass, {type:'hacs/repositories/remove', repository:id});
+      if (!connected() || await readRepo() !== null) throw new Error('unregister not confirmed');
+      if (!connected()) throw new Error('session changed');
+      await this._hacsSwitchCall(hass, {type:'hacs/repositories/add', repository:full, category:'integration'});
+      if (!connected()) throw new Error('session changed');
+      const after = await readRepo();
+      if (!connected() || after?.id !== id || after?.full_name !== full || after?.category !== 'integration' || after?.installed !== false) throw new Error('integration registration not confirmed');
+      localStorage.setItem(key, 'done'); this._hacsSwitchStatus = 'done';
+    } catch (_) {
+      this._hacsSwitchStatus = mutationStarted ? 'stopped' : 'blocked';
+    } finally {
+      this._hacsSwitchBusy = false; this.render();
+      this.shadowRoot.getElementById('hacsSwitch')?.focus({preventScroll:true});
+    }
+  }
+  _renderBridgeNotice() {
+    const state = this._bridgeNoticePreference();
+    if (!state) return '';
+    const pl = this._lang === 'pl';
+    if (state.dismissed) return `<button type="button" class="btn btn-outline bridge-reopen" id="bridgeNoticeOpen">${pl ? 'Informacja o migracji' : 'Migration information'}</button>`;
+    return `<section class="bridge-notice" role="region" aria-labelledby="bridgeNoticeTitle">
+      <h2 id="bridgeNoticeTitle">${pl ? 'Informacja o migracji' : 'Migration information'}</h2>
+      <p>${pl ? 'Entity Renamer jest dostępny jako jeden pakiet Integration (karta i backend). Ta starsza karta nadal działa; aby korzystać z nowych funkcji, zainstaluj i skonfiguruj integrację według przewodnika migracji.' : 'Entity Renamer is available as one Integration package (card and backend). This legacy card continues to work; install and configure the integration using the migration guide to use the new features.'}</p>
+      <p>${pl ? 'Przed migracją wykonaj pełną kopię zapasową Home Assistant i przeczytaj przewodnik. Przejście do integracji może wymagać jednorazowej migracji.' : 'Before migrating, make a full Home Assistant backup and read the guide. Switching to the integration may require a one-time migration.'}</p>
+      <a href="https://github.com/MacSiem/ha-entity-renamer/blob/main/MIGRATION.md" target="_blank" rel="noopener noreferrer">${pl ? 'Przewodnik migracji' : 'Migration guide'}</a>
+      ${this._hass?.user?.is_admin === true ? `<p>${pl ? 'Przed przełączeniem zakończ wszystkie pobierania i aktualizacje w HACS.' : 'Finish all HACS downloads and updates before switching.'}</p><button type="button" class="btn btn-outline" id="hacsSwitch" ${this._hacsSwitchBusy ? 'disabled' : ''}>${pl ? 'Przygotuj migrację w HACS' : 'Prepare migration in HACS'}</button><p role="status" aria-live="polite">${_esc(this._hacsMigrationText(this._hacsSwitchStatus))}</p>` : ''}
+      <button type="button" class="btn btn-outline" id="bridgeNoticeDismiss">${pl ? 'Zamknij informację' : 'Dismiss information'}</button>
+    </section>`;
+  }
+  _setBridgeNoticeDismissed(dismissed) {
+    const state = this._bridgeNoticePreference();
+    if (!state) return;
+    state.dismissed = dismissed;
+    try { localStorage.setItem(state.key, dismissed ? '1' : '0'); } catch (_) {}
+    this.render();
+    this.shadowRoot.getElementById(dismissed ? 'bridgeNoticeOpen' : 'bridgeNoticeDismiss')?.focus({preventScroll:true});
+  }
   _helpPreference() {
     const account = this._hass?.user?.id || null;
     if (!this._helpState || this._helpState.account !== account) {
@@ -2745,6 +2850,7 @@ class HAEntityRenamer extends HTMLElement {
 
   render() {
     if (!this._hass) return;
+    const bridgeFocus = this.shadowRoot.activeElement?.id;
     createUiV3({language:this._lang}).applyTheme(this);
     const listViewport = _rememberListViewport(this);
     const openAutomaticDevices = new Set(Array.from(this.shadowRoot.querySelectorAll('[data-auto-group][open]'), group => group.dataset.autoGroup));
@@ -3124,6 +3230,12 @@ class HAEntityRenamer extends HTMLElement {
         :host input[type=checkbox] { accent-color:var(--_hat-primary-fill); }
         :host .btn-primary:disabled { opacity:1;background:var(--_hat-chip);color:var(--_hat-text-2);box-shadow:none; }
 
+        .bridge-notice { margin:8px 0 12px;padding:12px;border:1px solid var(--bento-border,var(--divider-color));border-radius:8px;background:var(--bento-bg,var(--primary-background-color));color:var(--bento-text,var(--primary-text-color));font-size:14px; }
+        .bridge-notice h2 { margin:0 0 8px;font-size:14px; }
+        .bridge-notice p { margin:8px 0; }
+        .bridge-notice a { color:inherit;text-decoration:underline; }
+        .bridge-notice .btn { margin-inline-start:8px; }
+        .bridge-reopen { margin:4px 0 8px; }
         .renamer-help { margin:8px 0 12px;font-size:14px; }
         .renamer-help summary { cursor:pointer;min-height:44px;align-content:center; }
         .renamer-help summary:focus-visible { outline:3px solid var(--primary-color);outline-offset:2px; }
@@ -3139,6 +3251,7 @@ class HAEntityRenamer extends HTMLElement {
       <div class="subtitle">${this._registryCount(this._devices.length,'device')} • ${this._registryCount(this._entities.length,'entity')}
         </div>
 
+      ${this._renderBridgeNotice()}
       ${this._renderHelp()}
       ${this._message ? `<div class="msg ${this._message.type}">${this._loading ? '<span class="spinner"></span> ' : ''}${this._message.outcome ? createUiV3({language:this._lang}).statusHtml(this._message.outcome) : ''} ${_esc(this._message.text || '')}</div>` : ''}
       ${this._renderApplyResult()}
@@ -3168,6 +3281,7 @@ class HAEntityRenamer extends HTMLElement {
     if (this._familyNavWidth > 0) this._syncHelpWidth(this._familyNavWidth);
     _restoreFamilyRowFocus(this,familyRowFocus);
     _restoreListViewport(this,listViewport);
+    if (bridgeFocus === 'bridgeNoticeOpen' || bridgeFocus === 'bridgeNoticeDismiss') this.shadowRoot.getElementById(bridgeFocus)?.focus({preventScroll:true});
   }
 
 
@@ -3440,6 +3554,9 @@ class HAEntityRenamer extends HTMLElement {
   _attachEvents() {
     const root = this.shadowRoot;
     const t = this._t;
+    root.getElementById('bridgeNoticeDismiss')?.addEventListener('click', () => this._setBridgeNoticeDismissed(true));
+    root.getElementById('bridgeNoticeOpen')?.addEventListener('click', () => this._setBridgeNoticeDismissed(false));
+    root.getElementById('hacsSwitch')?.addEventListener('click', () => this._switchHacsRepository());
     root.getElementById('exportRenameLog')?.addEventListener('click', e => this._openRenameExport(e.currentTarget));
     root.getElementById('reviewLegacyHistory')?.addEventListener('click', () => this._reviewLegacyHistory());
 

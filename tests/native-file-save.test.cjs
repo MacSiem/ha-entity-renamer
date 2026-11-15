@@ -4,7 +4,7 @@ const {readFileSync}=require('node:fs');
 const {JSDOM}=require('jsdom');
 function fixture(t,format='json'){
  const dom=new JSDOM('',{runScripts:'dangerously',url:'http://localhost/'});t.after(()=>dom.window.close());
- dom.window.eval(readFileSync(require('node:path').join(__dirname,'../ha-entity-renamer.js'),'utf8'));
+ dom.window.eval(readFileSync(require('node:path').join(__dirname,'../custom_components/ha_entity_renamer/www/ha-entity-renamer.js'),'utf8'));
  const card=dom.window.document.createElement('ha-entity-renamer');dom.window.document.body.append(card);
  const connection=new dom.window.EventTarget();connection.connected=true;
  card._hass={user:{id:'native-admin',is_admin:true},connection,language:'en',states:{},callWS:async()=>{throw Error('Saving must not access HA');}};card._bindRenameExportEvents();
