@@ -221,12 +221,77 @@ class DiscoveryNativeTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_delayed_write_settles_before_observation(self):
         manager = self.fixture.managers[2]
         store = manager._store
-        store.async_delay_save(manager._data_to_save, 0.05)
+        store.async_delay_save(manager._data_to_save, 3600)
         with patch.object(subject, '_SETTLE_INTERVAL', 0.02), \
              patch.object(subject, '_SETTLE_TIMEOUT', 2):
             observed = await self.observe()
         self.assertFalse(subject._Managers.pending_for(store))
         self.assertEqual(observed.files[2].raw, Path(store.path).read_bytes())
+
+    async def test_native_write_failure_cannot_accept_stale_disk(self):
+        from homeassistant.helpers.storage import Store, WriteError
+        manager = self.fixture.entity
+        store = manager._store
+        manager.async_update_entity(self.fixture.other.entity_id, name='foreign change')
+        self.assertIsNotNone(store._data)
+        async def fail(instance, data):
+            if instance is store:
+                raise WriteError('injected')
+        with patch.object(Store, '_async_write_data', fail):
+            with self.assertRaises(subject.DiscoveryNativeInputsError):
+                await self.observe()
+
+    async def test_native_write_cancellation_drains_and_identity_is_rechecked(self):
+        from homeassistant.helpers.storage import Store
+        from homeassistant.helpers import entity_registry as er
+        store = self.fixture.entity._store
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = Store._async_write_data
+        async def gated(instance, data):
+            if instance is store:
+                entered.set()
+                await release.wait()
+            await original(instance, data)
+        with patch.object(Store, '_async_write_data', gated):
+            store.async_delay_save(self.fixture.entity._data_to_save, 3600)
+            task = asyncio.create_task(self.observe())
+            await entered.wait()
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertFalse(store._write_lock.locked())
+            entered.clear(); release.clear()
+            store.async_delay_save(self.fixture.entity._data_to_save, 3600)
+            task = asyncio.create_task(self.observe())
+            await entered.wait()
+            old = self.fixture.hass.data[er.DATA_REGISTRY]
+            self.fixture.hass.data[er.DATA_REGISTRY] = object()
+            try:
+                release.set()
+                with self.assertRaises(subject.DiscoveryNativeInputsError):
+                    await task
+            finally:
+                self.fixture.hass.data[er.DATA_REGISTRY] = old
+
+    async def test_reschedule_during_native_write_refuses_without_second_flush(self):
+        from homeassistant.helpers.storage import Store
+        manager = self.fixture.entity
+        store = manager._store
+        original = Store._async_write_data
+        calls = []
+        async def reschedule(instance, data):
+            if instance is store:
+                calls.append(1)
+                store.async_delay_save(manager._data_to_save, 3600)
+            await original(instance, data)
+        store.async_delay_save(manager._data_to_save, 3600)
+        with patch.object(Store, '_async_write_data', reschedule):
+            with self.assertRaises(subject.DiscoveryNativeWritePending):
+                await self.observe()
+        self.assertEqual(calls, [1])
 
     async def test_active_native_write_settles_before_observation(self):
         from homeassistant.helpers.storage import Store

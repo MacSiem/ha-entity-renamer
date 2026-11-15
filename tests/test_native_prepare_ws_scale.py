@@ -166,7 +166,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                 store = manager._store
                 before = Path(store.path).stat().st_ino
                 raw = Path(store.path).read_bytes()
-                store.async_delay_save(manager._data_to_save, 0.05)
+                store.async_delay_save(manager._data_to_save, 3600)
                 injected.append((before, raw))
             result = await original(hass, guard=guard, settle=settle, on_settle=on_settle)
             if settle and on_settle is not None and len(injected) == 1:
@@ -195,7 +195,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                 manager = hass.config_entries
                 store = manager._store
                 injected.append((Path(store.path).stat().st_ino, Path(store.path).read_bytes()))
-                store.async_delay_save(manager._data_to_save, 0.05)
+                store.async_delay_save(manager._data_to_save, 3600)
             return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
         backend = __import__('custom_components.ha_entity_renamer', fromlist=['Runtime'])
         original_retry = backend._retry_pending_review
@@ -337,6 +337,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
 
     async def test_initial_pending_refuses_foreign_native_change(self):
         import inspect
+        from homeassistant.helpers.storage import Store
         runtime, mapping, _, _, device = await self.restored_source()
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
@@ -352,12 +353,16 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                            for frame in frames)
             if initial and accepted and not settle and not injected:
                 injected.append(True)
-                hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 0.2)
-                hass.loop.call_later(0.02, lambda: self.f.entity.async_update_entity(
-                    old, name='Foreign native change'))
+                hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 3600)
             return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
+        original_write = Store._async_write_data
+        async def write(store, data):
+            if store is hass.config_entries._store:
+                self.f.entity.async_update_entity(old, name='Foreign native change')
+            await original_write(store, data)
         async def refresh(): pass
-        with patch.object(native, 'async_observe_discovery_inputs', observe):
+        with patch.object(native, 'async_observe_discovery_inputs', observe), \
+             patch.object(Store, '_async_write_data', write):
             with self.assertRaises((ValueError, self.module('transaction').Refused)):
                 await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
                     entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
@@ -385,7 +390,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                            for frame in frames)
             if initial and accepted and not settle and not injected:
                 injected.append(True)
-                hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 30)
+                hass.config_entries._store._load_future = hass.loop.create_future()
             return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
         async def refresh(): pass
         with patch.object(native, 'async_observe_discovery_inputs', observe), \
@@ -396,6 +401,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                     entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
                     guard=lambda: None, refresh=refresh)
         self.assertEqual(injected, [True])
+        hass.config_entries._store._load_future = None
         self.assertFalse(runtime.reviews)
         self.assertFalse(await runtime.journal.all())
         self.assertIsNotNone(self.f.entity.async_get(old))

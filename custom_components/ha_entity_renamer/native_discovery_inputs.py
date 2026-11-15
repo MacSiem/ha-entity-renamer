@@ -4,7 +4,7 @@ This is neither a ValidationReceipt nor a preparation baseline. Its descriptors
 close before return; it gives no continuing fence, adoption, readiness or effect
 authorization. The caller holds its discovery coordinator/editor scope throughout
 the call and must independently validate any later plan against current sources.
-No manager factory, load, save, flush, migration or native mutation is called.
+The explicit pre-review settle path may complete already queued Store writes.
 """
 from __future__ import annotations
 
@@ -34,6 +34,24 @@ class DiscoveryNativeWritePending(DiscoveryNativeInputsError):
 
 def _reject():
     raise DiscoveryNativeInputsError('native_discovery_inputs_rejected') from None
+
+
+async def _drain_native_write(coro):
+    """Keep the caller's scope until an admitted native write has finished."""
+    task = asyncio.create_task(coro)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    if cancelled:
+        if not task.cancelled():
+            task.exception()
+        raise asyncio.CancelledError
+    return task.result()
 
 
 @dataclass(frozen=True)
@@ -237,12 +255,35 @@ Cancellation drains executor work before any held descriptor can be released.
                     _reject()
                 admission.check_identity()
 
-            # Wait only for native work already in flight; never start, cancel, or
-            # flush a Store write. Pin native identities across every await; only
-            # sample manager contents once all five pending flags have cleared.
+            # Snapshot only already queued work. Never adopt a later write as work
+            # to complete, and never write while a Store load is in progress.
             deadline = hass.loop.time() + _SETTLE_TIMEOUT
+            queued = tuple(store._data for store in admission.stores)
+            for store, data in zip(admission.stores, queued, strict=True):
+                if data is None:
+                    continue
+                while store._load_future is not None:
+                    remaining = deadline - hass.loop.time()
+                    if remaining <= 0:
+                        _reject()
+                    await asyncio.sleep(min(_SETTLE_INTERVAL, remaining))
+                    check_admission()
+                    if store._data is not data:
+                        _reject()
+                check_admission()
+                if hass.loop.time() >= deadline or store._data is not data:
+                    _reject()
+                waited = True
+                await _drain_native_write(store._async_handle_write_data())
+                check_admission()
+                # A concurrent reschedule is foreign work, not a second flush.
+                if admission.pending_for(store):
+                    raise NativeInputWritePending('native_input_native_write_pending')
+            # An already active write with no queued data must finish naturally.
             while any(admission.pending_for(store) for store in admission.stores):
                 waited = True
+                if any(store._data is not None for store in admission.stores):
+                    raise NativeInputWritePending('native_input_native_write_pending')
                 remaining = deadline - hass.loop.time()
                 if remaining <= 0:
                     flags = ('data', 'write_lock', 'delay_handle', 'final_listener', 'load_future')
