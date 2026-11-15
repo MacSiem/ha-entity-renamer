@@ -347,7 +347,7 @@ class GuardBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 raise PermissionError('revoked')
         async def native_reader():
             events.append('read')
-        task = asyncio.create_task(subject._guarded(native_reader(), guard))
+        task = asyncio.ensure_future(subject._guarded(native_reader(), guard))
         await asyncio.sleep(0)
         self.assertEqual(events, [])
         revoked = True
@@ -366,7 +366,7 @@ class GuardBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 events.append('resumed')
             finally:
                 events.append('closed')
-        task = asyncio.create_task(subject._guarded(native_reader(), lambda: None))
+        task = asyncio.ensure_future(subject._guarded(native_reader(), lambda: None))
         while 'entered' not in events:
             await asyncio.sleep(0)
         pending.set_result(None)
@@ -375,3 +375,44 @@ class GuardBoundaryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
         self.assertEqual(events, ['entered', 'closed'])
+
+    async def test_close_before_start_closes_native_coroutine(self):
+        async def native_reader():
+            return 1
+        native = native_reader()
+        guarded = subject._guarded(native, lambda: None)
+        self.assertIsNone(guarded.send(None))
+        guarded.close()
+        self.assertIsNone(native.cr_frame)
+
+    async def test_reader_exception_is_preserved_and_guard_runs(self):
+        calls = []
+        async def native_reader():
+            await asyncio.sleep(0)
+            raise ValueError('reader failure')
+        with self.assertRaisesRegex(ValueError, 'reader failure'):
+            await subject._guarded(native_reader(), lambda: calls.append(True))
+        self.assertGreaterEqual(len(calls), 2)
+
+    async def test_guard_failure_during_reader_exception_closes_reader(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        revoked, closed = False, []
+        def guard():
+            if revoked:
+                raise PermissionError('revoked')
+        async def native_reader():
+            try:
+                entered.set()
+                await release.wait()
+                raise ValueError('reader failure')
+            finally:
+                closed.append(True)
+        async def capture():
+            return await subject._guarded(native_reader(), guard)
+        task = asyncio.create_task(capture())
+        await entered.wait()
+        revoked = True
+        release.set()
+        with self.assertRaises(PermissionError):
+            await task
+        self.assertEqual(closed, [True])
