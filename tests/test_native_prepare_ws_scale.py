@@ -225,6 +225,101 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
             await self.test_registry_device_with_unrelated_automation_script_apply_inverse()
         self.assertEqual(seen, [True])
 
+    async def test_initial_foreign_device_change_replans_and_preserves_apply_inverse(self):
+        import inspect
+        native = self.module('native_discovery_inputs')
+        original = native.async_observe_discovery_inputs
+        runtime_class = __import__('custom_components.ha_entity_renamer', fromlist=['Runtime']).Runtime
+        prepare_once = runtime_class._native_yaml_prepare_once
+        attempts, foreign = [], []
+        async def wrapped(runtime, *args, **kwargs):
+            attempts.append(kwargs['retry'])
+            if kwargs['retry']:
+                self.assertFalse(any(row['payload'].get('kind') == 'ordinary_review_lease'
+                    for row in runtime.preparations.plans.values() if type(row['payload']) is dict))
+                self.assertFalse(runtime.reviews)
+            return await prepare_once(runtime, *args, **kwargs)
+        async def observe(hass, *, guard, settle=False, on_settle=None):
+            frames = inspect.stack()
+            initial = any(frame.function == 'position_at_inputs'
+                          and frame.frame.f_locals.get('propagate_pending') is True for frame in frames)
+            accepted = any(frame.function == 'async_observe_accepted_state_bindings' for frame in frames)
+            if initial and accepted and not settle and not foreign:
+                entry = hass.config_entries.async_entries('threshold')[0]
+                row = self.f.device.async_get_or_create(config_entry_id=entry.entry_id,
+                    identifiers={('threshold', 'foreign-retry-device')}, name='Foreign retained')
+                foreign.append(row.id)
+                self.f.device._store.async_delay_save(self.f.device._data_to_save, 3600)
+            return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
+        with patch.object(native, 'async_observe_discovery_inputs', observe), \
+             patch.object(runtime_class, '_native_yaml_prepare_once', wrapped):
+            await self.test_registry_device_with_unrelated_automation_script_apply_inverse()
+        self.assertEqual(attempts, [False, True])
+        self.assertEqual(len(foreign), 1)
+        self.assertEqual(self.f.device.async_get(foreign[0]).name, 'Foreign retained')
+
+    async def _selected_retry_drift(self, kind):
+        import inspect
+        from homeassistant.helpers.storage import Store
+        from homeassistant.helpers.entity_registry import RegistryEntryDisabler
+        runtime, mapping, uuids, original, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        if kind == 'remove-member':
+            member = self.f.entity.async_get_or_create('sensor', 'threshold', 'retry-peer-remove',
+                config_entry=hass.config_entries.async_get_entry(self.f.entity.async_get(old).config_entry_id),
+                device_id=device.id, disabled_by=RegistryEntryDisabler.USER)
+            await self._flush_documents()
+        native = self.module('native_discovery_inputs')
+        observe_original = native.async_observe_discovery_inputs
+        write_original = Store._async_write_data
+        triggered, changed = [], []
+        async def observe(hass, *, guard, settle=False, on_settle=None):
+            frames = inspect.stack()
+            initial = any(frame.function == 'position_at_inputs'
+                          and frame.frame.f_locals.get('propagate_pending') is True for frame in frames)
+            accepted = any(frame.function == 'async_observe_accepted_state_bindings' for frame in frames)
+            if initial and accepted and not settle and not triggered:
+                triggered.append(True)
+                hass.config_entries._store.async_delay_save(hass.config_entries._data_to_save, 3600)
+            return await observe_original(hass, guard=guard, settle=settle, on_settle=on_settle)
+        async def write(store, data):
+            if store is hass.config_entries._store and not changed:
+                changed.append(True)
+                if kind == 'identity':
+                    self.f.entity.async_update_entity(old, new_unique_id='foreign-rebound-identity')
+                elif kind == 'remove-member':
+                    self.f.entity.async_remove(member.entity_id)
+                else:
+                    self.f.entity.async_get_or_create('sensor', 'threshold', 'retry-peer-add',
+                        config_entry=hass.config_entries.async_get_entry(self.f.entity.async_get(old).config_entry_id),
+                        device_id=device.id, disabled_by=RegistryEntryDisabler.USER)
+            await write_original(store, data)
+        async def refresh(): pass
+        with patch.object(native, 'async_observe_discovery_inputs', observe), \
+             patch.object(Store, '_async_write_data', write):
+            with self.assertRaisesRegex((ValueError, self.module('transaction').Refused),
+                                        'review_selected_source_changed'):
+                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                    entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
+                    guard=lambda: None, refresh=refresh)
+        self.assertEqual((triggered, changed), ([True], [True]))
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+        self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+        self.assertIsNone(self.f.entity.async_get(new))
+        self.assertIsNone(self.f.device.async_get(device.id).name_by_user)
+        self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
+    async def test_retry_selected_unique_id_change_refuses(self):
+        await self._selected_retry_drift('identity')
+
+    async def test_retry_selected_device_member_added_refuses(self):
+        await self._selected_retry_drift('add-member')
+
+    async def test_retry_selected_device_member_removed_refuses(self):
+        await self._selected_retry_drift('remove-member')
+
     async def test_initial_pending_twice_refuses_without_effect(self):
         import inspect
         runtime, mapping, _, _, device = await self.restored_source()
@@ -256,7 +351,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertIsNotNone(self.f.entity.async_get(old))
         self.assertIsNone(self.f.entity.async_get(new))
 
-    async def test_initial_pending_refuses_source_change_during_settle(self):
+    async def test_initial_pending_replans_source_change_during_settle(self):
         import inspect
         runtime, mapping, _, _, device = await self.restored_source()
         hass = self.f.hass
@@ -282,12 +377,12 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
             return result
         async def refresh(): pass
         with patch.object(native, 'async_observe_discovery_inputs', observe):
-            with self.assertRaises(ValueError):
-                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
-                    entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
-                    guard=lambda: None, refresh=refresh)
+            review = await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
+                guard=lambda: None, refresh=refresh)
         self.assertEqual(injected, [True, 'changed'])
-        self.assertFalse(runtime.reviews)
+        self.assertIn(review['operation_id'], runtime.reviews)
+        self.assertIn(b'# foreign source change', (self.f.root / 'configuration.yaml').read_bytes())
         self.assertFalse(await runtime.journal.all())
         self.assertIsNotNone(self.f.entity.async_get(old))
         self.assertIsNone(self.f.entity.async_get(new))
@@ -539,7 +634,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
             self.assertNotEqual(result['state'], 'applied')
         self.assertFalse(runtime.reviews)
 
-    async def test_retry_refuses_foreign_source_change_before_effect(self):
+    async def test_discovery_retry_replans_foreign_source_change(self):
         runtime, mapping, _, _, device = await self.restored_source()
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
@@ -559,15 +654,14 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                 on_settle = changed
             return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
         async def refresh(): pass
-        error = self.module('yaml_validation').YAMLValidationError
         with patch.object(native, 'async_observe_discovery_inputs', observe):
-            with self.assertRaises(error):
-                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin', entity_names={old: 'Reviewed fixture'},
-                    device_names={device.id: 'Reviewed device'}, guard=lambda: None, refresh=refresh)
+            review = await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin', entity_names={old: 'Reviewed fixture'},
+                device_names={device.id: 'Reviewed device'}, guard=lambda: None, refresh=refresh)
         self.assertTrue(injected)
         self.assertIsNotNone(self.f.entity.async_get(old))
         self.assertIsNone(self.f.entity.async_get(new))
-        self.assertFalse(runtime.reviews)
+        self.assertIn(review['operation_id'], runtime.reviews)
+        self.assertIn(b'# foreign change', (self.f.root / 'configuration.yaml').read_bytes())
         self.assertFalse(await runtime.journal.all())
 
     async def test_cancel_before_retry_reclaims_lease_without_effect(self):

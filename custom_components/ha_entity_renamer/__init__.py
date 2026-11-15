@@ -10,11 +10,38 @@ from .installed_cost_trace import trace_request, trace_owned
 
 
 class _ReviewRetry(Exception):
-    """One pre-effect prepare restart after an unchanged native flush."""
-    def __init__(self, receipt, baseline, native=None):
-        self.receipt = receipt
-        self.baseline = baseline
-        self.native = native
+    """A pre-effect attempt ended; the next attempt must start from scratch."""
+
+
+def _review_selected_sources(hass, mapping, entity_names, device_names):
+    """Pin only selected native rows and selected devices' member rows."""
+    from homeassistant.helpers import entity_registry as er
+    from .native_registry import NativeRegistryIO
+    from .native_registry_receipts import _freeze_json
+    from .transaction import Refused
+    if (type(mapping) is not dict or entity_names is not None and type(entity_names) is not dict
+            or device_names is not None and type(device_names) is not dict):
+        raise Refused('review_selection_invalid')
+    io = NativeRegistryIO(hass)
+    entities = io.registries['entity']
+    rows = {}
+    for entity_id in sorted(set(mapping) | set(entity_names or {})):
+        row = entities.async_get(entity_id)
+        if row is None or row.entity_id != entity_id or not row.id or not row.unique_id:
+            raise Refused('source_uuid_required')
+        rows[row.id] = io.row('entity', row.id)
+    devices = {}
+    for identity in sorted(device_names or {}):
+        try:
+            devices[identity] = io.row('device', identity)
+        except ValueError:
+            raise Refused('selected_device_source_required') from None
+        members = er.async_entries_for_device(entities, identity, include_disabled_entities=True)
+        for row in members:
+            if not row.id or not row.unique_id or row.device_id != identity:
+                raise Refused('selected_device_source_required')
+            rows[row.id] = io.row('entity', row.id)
+    return _freeze_json({'entities': rows, 'devices': devices})
 
 
 def _retry_difference(old, new):
@@ -96,31 +123,11 @@ def _retry_receipt(baseline, observed):
 
 
 async def _retry_pending_review(hass, guard, native, *, receipt=None, baseline=None):
-    """Settle a refused pre-effect attempt, retaining its established sources."""
+    """Drain the pending native save, then discard the entire attempt."""
     from .native_discovery_inputs import async_observe_discovery_inputs
-    from .native_input_baseline import NativeInputBaseline, NativeInputFile, _receipt_bytes, _drained
-    from .transaction import Refused
-    from .yaml_validation import assert_validation_current
-    observed = await async_observe_discovery_inputs(hass, guard=guard, settle=True)
+    await async_observe_discovery_inputs(hass, guard=guard, settle=True)
     guard()
-    if baseline is None and receipt is not None:
-        sources = {path: (digest, dev, ino) for path, digest, dev, ino in receipt.source_files}
-        import hashlib
-        for row in native.files:
-            if sources.get('.storage/' + row.key) != (hashlib.sha256(row.raw).hexdigest(), *row.identity[:2]):
-                raise Refused('review_native_settle_changed')
-        baseline = NativeInputBaseline(_receipt_bytes(receipt), tuple(
-            NativeInputFile(row.key, row.raw, row.identity, row.manager_json) for row in native.files))
-    if baseline is not None:
-        candidate = _retry_receipt(baseline, observed)
-        await _drained(hass.async_add_executor_job, lambda: assert_validation_current(candidate))
-        guard()
-        raise _ReviewRetry(candidate, baseline, native)
-    if any((a.key, a.raw, a.manager_json, a.identity[2]) !=
-           (b.key, b.raw, b.manager_json, b.identity[2])
-           for a, b in zip(native.files, observed.files, strict=True)):
-        raise Refused('review_native_settle_changed')
-    raise _ReviewRetry(None, None, native)
+    raise _ReviewRetry()
 
 
 def CONFIG_SCHEMA(config):
@@ -263,20 +270,39 @@ class Runtime:
 
     @trace_request("prepare")
     async def native_yaml_prepare(self, hass, mapping, *, actor_id, guard, refresh, entity_names=None, device_names=None):
-        retry = None
+        # Freeze the caller's requested selection across an interrupted attempt.
+        if type(mapping) is dict:
+            mapping = dict(mapping)
+        if type(entity_names) is dict:
+            entity_names = dict(entity_names)
+        if type(device_names) is dict:
+            device_names = dict(device_names)
+        selection = []
         for attempt in range(2):
             try:
                 return await self._native_yaml_prepare_once(hass, mapping, actor_id=actor_id,
                     guard=guard, refresh=refresh, entity_names=entity_names,
-                    device_names=device_names, retry=retry)
-            except _ReviewRetry as settled:
+                    device_names=device_names, retry=bool(attempt), selection=selection)
+            except _ReviewRetry:
                 if attempt:
                     from .transaction import Refused
                     raise Refused('review_native_settle_repeated') from None
-                retry = settled
+                # A new attempt begins only after the abandoned lease is reclaimed.
+                from .native_template_reverse import _authorize
+                from .review_retention import async_reclaim_reviews
+                def current():
+                    _authorize(guard)
+                    if hass.data.get(DATA_RUNTIME) is not self or not self.loaded or self.unloading:
+                        from .transaction import Refused
+                        raise Refused('review_runtime_unavailable')
+                async with self.operation_lock:
+                    current()
+                    self.preparations, self.journal = await async_reclaim_reviews(
+                        hass, keep=self.reviews, guard=current)
+                    current()
 
     async def _native_yaml_prepare_once(self, hass, mapping, *, actor_id, guard, refresh,
-                                        entity_names=None, device_names=None, retry=None):
+                                        entity_names=None, device_names=None, retry=False, selection=None):
         """Private ordinary mapping -> server-owned immutable retained review.
 
         No mutation endpoint or family readiness is granted by this method.
@@ -295,19 +321,14 @@ class Runtime:
         async with self.operation_lock:
             await refresh()
             current()
-            if retry is not None and retry.receipt is not None:
-                from .native_input_baseline import _drained
-                from .yaml_validation import assert_validation_current
-                await _drained(hass.async_add_executor_job,
-                               lambda: assert_validation_current(retry.receipt))
-                current()
+            selected = _review_selected_sources(hass, mapping, entity_names, device_names)
+            if retry:
+                if not selection or selection[0] != selected:
+                    raise Refused('review_selected_source_changed')
+            else:
+                selection.append(selected)
             from .native_discovery_inputs import async_observe_discovery_inputs
             native = await async_observe_discovery_inputs(hass, guard=current, settle=True)
-            if retry is not None and retry.native is not None:
-                if any((a.key, a.raw, a.manager_json, a.identity[2]) !=
-                       (b.key, b.raw, b.manager_json, b.identity[2])
-                       for a, b in zip(retry.native.files, native.files, strict=True)):
-                    raise Refused('review_native_settle_changed')
             from .review_retention import async_reclaim_reviews, review_lease
             import uuid
             retained = {}
@@ -342,7 +363,7 @@ class Runtime:
                 if powercalc_selected:
                     session = await NativeTemplateStateServer.prepare(hass, mapping,
                         guard=current, refresh=refresh, entity_names=entity_names,
-                        device_names=device_names, review_id=prefix, _mixed_powercalc=True, _review_native=native, _review_retry=retry is not None)
+                        device_names=device_names, review_id=prefix, _mixed_powercalc=True, _review_native=native, _review_retry=retry)
                 elif hass.config_entries.async_entries('template') and 'powercalc' not in hass.config.components:
                     # YAML dependencies belong to the same ordinary plan. The
                     # legacy one-entry path remains only for no-YAML requests.
@@ -355,17 +376,17 @@ class Runtime:
                     if proposal.patches or not proposal.ready:
                         session = await NativeTemplateStateServer.prepare(hass, mapping,
                             guard=current, refresh=refresh, entity_names=entity_names,
-                            device_names=device_names, review_id=prefix, _review_native=native, _review_retry=retry is not None)
+                            device_names=device_names, review_id=prefix, _review_native=native, _review_retry=retry)
                     else:
                         from .native_template_forward import NativeTemplateForward
                         if entity_names or device_names:
                             raise Refused('template_forward_names_unsupported')
                         session = await NativeTemplateForward.prepare(hass, mapping,
-                            guard=current, refresh=refresh, review_id=prefix, _review_native=native, _review_retry=retry is not None)
+                            guard=current, refresh=refresh, review_id=prefix, _review_native=native, _review_retry=retry)
                 else:
                     session = await NativeTemplateStateServer.prepare(hass, mapping,
                         guard=current, refresh=refresh, entity_names=entity_names,
-                        device_names=device_names, review_id=prefix, _review_native=native, _review_retry=retry is not None)
+                        device_names=device_names, review_id=prefix, _review_native=native, _review_retry=retry)
             except BaseException:
                 # Revocation/uncertain IO can prevent immediate housekeeping.
                 # Its durable lease remains reclaimable at next prepare/setup.
@@ -394,16 +415,6 @@ class Runtime:
                 check_session()
                 from .dependency_review import dependency_files
                 receipt = baseline.receipt
-                if retry is not None and retry.baseline is not None:
-                    from .native_input_baseline import _drained
-                    from .yaml_validation import assert_validation_current
-                    if any((old.raw, old.manager_json) != (new.raw, new.manager_json)
-                           for old, new in zip(retry.baseline.files, baseline.files, strict=True)):
-                        raise Refused('review_native_settle_changed')
-                    await _drained(hass.async_add_executor_job,
-                                   lambda: assert_validation_current(retry.receipt))
-                    current()
-                    check_session()
                 # Aggregate only the admitted planned YAML scope. Paths, YAML,
                 # native keys, receipts and private consumer configuration stay here.
                 from .powercalc_composition import PowercalcComposition
@@ -490,16 +501,9 @@ class Runtime:
                     _owned_script_services=owned_script, _settle_native=True,
                     _on_native_settle=settled.append)
                 if settled:
-                    if retry is not None:
+                    if retry:
                         raise Refused('review_native_settle_repeated')
-                    candidate = _retry_receipt(baseline, settled[0])
-                    from .native_input_baseline import _drained
-                    from .yaml_validation import assert_validation_current
-                    await _drained(hass.async_add_executor_job,
-                                   lambda: assert_validation_current(candidate))
-                    current()
-                    check_session()
-                    raise _ReviewRetry(candidate, baseline)
+                    raise _ReviewRetry()
                 from homeassistant import loader
                 custom = await loader.async_get_custom_components(hass)
                 capture = await async_finalize_discovery(hass, capture, session._scope)
@@ -540,13 +544,8 @@ class Runtime:
                     foreign.check(require_sources=True)
                     foreign.expiry = hass.loop.call_later(900, foreign.close)
                 check_session()
-                if retry is not None and retry.receipt is not None:
-                    from .native_input_baseline import _drained
-                    from .yaml_validation import assert_validation_current
-                    await _drained(hass.async_add_executor_job,
-                                   lambda: assert_validation_current(retry.receipt))
-                    current()
-                    check_session()
+                if retry and _review_selected_sources(hass, mapping, entity_names, device_names) != selection[0]:
+                    raise Refused('review_selected_source_changed')
                 self.reviews[operation] = _PreparedReview(actor_id, plan, count,
                     hass.loop.time() + 900, admission, own, trace_admission, template_admission,
                     getattr(session, 'review_admission', None), foreign,
@@ -561,7 +560,7 @@ class Runtime:
                 from .native_input_baseline import NativeInputWritePending
                 from .native_discovery_inputs import DiscoveryNativeWritePending
                 if isinstance(error, (NativeInputWritePending, DiscoveryNativeWritePending)):
-                    if retry is not None:
+                    if retry:
                         raise Refused('review_native_settle_repeated') from None
                     await _retry_pending_review(hass, session._scope, native,
                         receipt=getattr(session, 'receipt', None),
