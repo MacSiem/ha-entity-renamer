@@ -346,10 +346,10 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         async def refresh(): pass
         with patch.object(discovery, 'async_finalize_discovery', injected), \
              patch.object(accepted, 'prepare_review_identity', marked):
-            with self.assertRaises((ValueError, self.module('transaction').Refused)):
+            with self.assertRaises((ValueError, self.module('transaction').Refused)) as refusal:
                 await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
                     entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
-        self.assertEqual(changed, [True])
+        self.assertEqual(changed, [True], f'earlier refusal: {refusal.exception!r}')
         self.assertFalse(runtime.reviews)
         self.assertFalse(await runtime.journal.all())
         self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
