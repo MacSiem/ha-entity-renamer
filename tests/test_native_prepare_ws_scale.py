@@ -327,16 +327,25 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         discovery = self.module('discovery_final_fence')
         finalize = discovery.async_finalize_discovery
         changed = []
+        worker_finished = threading.Event()
+        accepted = self.module('accepted_input_state').AcceptedInputState
+        physical = accepted.prepare_review_identity
+        def marked(*args):
+            result = physical(*args)
+            worker_finished.set()
+            return result
         async def injected(*args, **kwargs):
             result = await finalize(*args, **kwargs)
-            path = self.f.root / 'template.yaml'
-            data, info = path.read_bytes(), path.stat()
-            path.write_bytes(data.replace(b'sensor', b'SENSOR', 1))
-            os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
-            changed.append(True)
+            if worker_finished.is_set() and not changed:
+                path = self.f.root / 'template.yaml'
+                data, info = path.read_bytes(), path.stat()
+                path.write_bytes(data.replace(b'sensor', b'SENSOR', 1))
+                os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+                changed.append(True)
             return result
         async def refresh(): pass
-        with patch.object(discovery, 'async_finalize_discovery', injected):
+        with patch.object(discovery, 'async_finalize_discovery', injected), \
+             patch.object(accepted, 'prepare_review_identity', marked):
             with self.assertRaises((ValueError, self.module('transaction').Refused)):
                 await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
                     entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
