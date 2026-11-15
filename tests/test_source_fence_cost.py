@@ -53,6 +53,26 @@ class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
             (directory / 'new-full-member').write_bytes(b'new')
             self.assertNotEqual(identity(), full)
 
+    async def test_review_identity_fences_child_directory_and_its_scope(self):
+        import tempfile
+        from types import SimpleNamespace
+        accepted = importlib.import_module(mixed.base.PACKAGE + '.accepted_input_state')
+        with tempfile.TemporaryDirectory() as root:
+            child = Path(root) / 'watched'
+            child.mkdir()
+            state = SimpleNamespace(_bound=lambda _original: None, _sources={},
+                source_directories=(('.', (), ('watched',)), ('watched', (), None)))
+            original = SimpleNamespace(config_root=root, source_links=(), checker_repairs_snapshot=None)
+            native = SimpleNamespace(root=Path(root), pins={}, icon_proof=SimpleNamespace(paths={}))
+            identity = lambda: accepted.AcceptedInputState._review_identity(state, original, native)
+            first = identity()
+            (child / 'new-member').write_bytes(b'member')
+            self.assertNotEqual(identity(), first)
+            before_replace = identity()
+            child.rename(Path(root) / 'previous')
+            child.mkdir()
+            self.assertNotEqual(identity(), before_replace)
+
     async def test_common_yields_and_rechecks_scope_and_witness(self):
         server = importlib.import_module(mixed.base.PACKAGE + '.native_template_state_server')
         registry = importlib.import_module(mixed.base.PACKAGE + '.native_registry')

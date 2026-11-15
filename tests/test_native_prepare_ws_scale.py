@@ -798,23 +798,6 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertIsNone(self.f.device.async_get(device.id).name_by_user)
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
-    async def test_diagnose_review_identity_change(self):
-        witness = self.module('native_template_state_yaml')._TemplateStateRuntimeCheck
-        original = witness.check
-        def inspected(value):
-            if value.review_identity is not None:
-                current = value.state._review_identity(value.owner.receipt, value.runtime.native)
-                if current != value.review_identity:
-                    old, new = dict(value.review_identity), dict(current)
-                    print('review_identity_changed_paths=',
-                          [(name, 'removed' if name not in new else 'added' if name not in old else
-                            [index for index, (a, b) in enumerate(zip(old[name], new[name])) if a != b]
-                            if old[name] is not None and new[name] is not None else 'presence')
-                           for name in set(old) | set(new) if old.get(name) != new.get(name)], flush=True)
-            return original(value)
-        with patch.object(witness, 'check', inspected):
-            await self.test_registry_device_source_drift_refuses_before_effect()
-
     async def test_real_ws_first_and_502(self):
         from homeassistant.config_entries import ConfigEntry, ConfigEntryDisabler
         from homeassistant.helpers import entity_registry as er
