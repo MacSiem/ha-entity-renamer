@@ -418,6 +418,43 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertIsNotNone(self.f.entity.async_get(old))
         self.assertIsNone(self.f.entity.async_get(new))
 
+    async def test_two_background_device_updates_refuse_review_without_effect(self):
+        import inspect
+        runtime, mapping, _, _, device = await self.restored_source()
+        hass = self.f.hass
+        old, new = next(iter(mapping.items()))
+        native = self.module('native_discovery_inputs')
+        original = native.async_observe_discovery_inputs
+        seen = []
+        async def observe(hass, *, guard, settle=False, on_settle=None):
+            frames = inspect.stack()
+            initial = any(frame.function == 'position_at_inputs'
+                          and frame.frame.f_locals.get('propagate_pending') is True
+                          for frame in frames)
+            accepted = any(frame.function == 'async_observe_accepted_state_bindings'
+                           for frame in frames)
+            if initial and accepted and not settle and len(seen) < 2:
+                entry = hass.config_entries.async_entries('threshold')[0]
+                row = self.f.device.async_get_or_create(config_entry_id=entry.entry_id,
+                    identifiers={('threshold', f'background-device-{len(seen)}')},
+                    name='Background')
+                seen.append(row.id)
+                self.assertIsNotNone(self.f.device._store._data)
+            return await original(hass, guard=guard, settle=settle, on_settle=on_settle)
+        async def refresh(): pass
+        with patch.object(native, 'async_observe_discovery_inputs', observe):
+            with self.assertRaisesRegex(self.module('transaction').Refused, 'review_native_settle_repeated'):
+                await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
+                    entity_names={old: 'Reviewed fixture'}, device_names={device.id: 'Reviewed device'},
+                    guard=lambda: None, refresh=refresh)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(len(set(seen)), 2)
+        self.assertTrue(all(self.f.device.async_get(identity) is not None for identity in seen))
+        self.assertFalse(runtime.reviews)
+        self.assertFalse(await runtime.journal.all())
+        self.assertIsNotNone(self.f.entity.async_get(old))
+        self.assertIsNone(self.f.entity.async_get(new))
+
     async def test_initial_pending_replans_source_change_during_settle(self):
         import inspect
         runtime, mapping, _, _, device = await self.restored_source()
