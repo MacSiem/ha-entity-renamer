@@ -350,10 +350,23 @@ class AcceptedInputState:
             if (root.st_dev, root.st_ino) != (os.fstat(reader.root).st_dev, os.fstat(reader.root).st_ino):
                 _fail('input_graph_changed')
             result = [('root', _signature(root))]
-            for directory, _, _ in self.source_directories:
+            for directory, _, names in self.source_directories:
                 fd = os.dup(reader.root) if directory == '.' else reader.open(directory, directory=True)
                 try:
-                    result.append((directory, _signature(os.fstat(fd))))
+                    signature = _signature(os.fstat(fd))
+                    # A selectively observed directory fences its named entries,
+                    # including absences, rather than unrelated sibling writes.
+                    result.append((directory, signature if names is None else signature[:3]))
+                    if names is not None:
+                        for name in names:
+                            if (directory == '.storage' and name == 'repairs.issue_registry'
+                                    and original.checker_repairs_snapshot is not None):
+                                continue
+                            try:
+                                child = _signature(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                            except FileNotFoundError:
+                                child = None
+                            result.append((directory + '/' + name, child))
                 finally:
                     os.close(fd)
             for path in self._sources:

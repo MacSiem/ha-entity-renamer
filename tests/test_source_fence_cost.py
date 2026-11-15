@@ -18,6 +18,40 @@ receipts = mixed.receipts
 
 
 class SourceFenceCostTests(unittest.IsolatedAsyncioTestCase):
+    async def test_review_identity_honors_selective_directory_membership(self):
+        import os
+        import tempfile
+        from types import SimpleNamespace
+        accepted = importlib.import_module(mixed.base.PACKAGE + '.accepted_input_state')
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root) / '.storage'
+            directory.mkdir()
+            selected = directory / 'selected'
+            selected.write_bytes(b'first')
+            state = SimpleNamespace(_bound=lambda _original: None,
+                _sources={'.storage/selected': ()},
+                source_directories=(('.storage', (), ('selected', 'absent', 'repairs.issue_registry')),))
+            original = SimpleNamespace(config_root=root, source_links=(), checker_repairs_snapshot=True)
+            native = SimpleNamespace(root=Path(root), pins={}, icon_proof=SimpleNamespace(paths={}))
+            identity = lambda: accepted.AcceptedInputState._review_identity(state, original, native)
+            first = identity()
+            (directory / 'foreign').write_bytes(b'unrelated')
+            (directory / 'repairs.issue_registry').write_bytes(b'excluded')
+            self.assertEqual(identity(), first)
+            absent = directory / 'absent'
+            absent.write_bytes(b'new')
+            self.assertNotEqual(identity(), first)
+            absent.unlink()
+            self.assertEqual(identity(), first)
+            info = selected.stat()
+            selected.write_bytes(b'other')
+            os.utime(selected, ns=(info.st_atime_ns, info.st_mtime_ns))
+            self.assertNotEqual(identity(), first)
+            state.source_directories = (('.storage', (), None),)
+            full = identity()
+            (directory / 'new-full-member').write_bytes(b'new')
+            self.assertNotEqual(identity(), full)
+
     async def test_common_yields_and_rechecks_scope_and_witness(self):
         server = importlib.import_module(mixed.base.PACKAGE + '.native_template_state_server')
         registry = importlib.import_module(mixed.base.PACKAGE + '.native_registry')
