@@ -506,6 +506,11 @@ async def _settled_executor(hass, function, *args):
     return result
 
 
+def _write_private_request(path, encoded):
+    path.write_text(encoded)
+    path.chmod(0o600)
+
+
 async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, with_sources=False,
                                    powercalc_bundle=None, powercalc_candidate_documents=None, native_helpers=(),
                                    template_reference_mapping=None, template_state_program=False,
@@ -626,22 +631,19 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                 encoded = json.dumps(native_helpers,sort_keys=True,separators=(',',':'),allow_nan=False)
                 if len(encoded.encode()) > 16_000_000:
                     raise YAMLValidationError('native_helpers_request_limit')
-                request.write_text(encoded)
-                request.chmod(0o600)
+                await _settled_executor(hass, _write_private_request, request, encoded)
                 helper_args = ('--native-helpers',str(request))
             state_source_args = ()
             dependent_args = ()
             if dependent_reference_mapping is not None:
                 request = Path(stage) / 'dependent-reference-mapping.json'
-                request.write_text(json.dumps(dependent_reference_mapping,
-                    sort_keys=True, separators=(',', ':'), allow_nan=False))
-                request.chmod(0o600)
+                await _settled_executor(hass, _write_private_request, request,
+                    json.dumps(dependent_reference_mapping, sort_keys=True, separators=(',', ':'), allow_nan=False))
                 dependent_args = ('--dependent-config-program', '--dependent-reference-mapping', str(request))
             if template_reference_mapping is not None:
                 request = Path(stage) / 'template-reference-mapping.json'
-                request.write_text(json.dumps(template_reference_mapping,
-                    sort_keys=True, separators=(',', ':'), allow_nan=False))
-                request.chmod(0o600)
+                await _settled_executor(hass, _write_private_request, request,
+                    json.dumps(template_reference_mapping, sort_keys=True, separators=(',', ':'), allow_nan=False))
                 state_source_args = ('--template-state-source-v3',
                                      '--template-reference-mapping', str(request))
                 if template_state_program:
@@ -650,8 +652,8 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                     state_source_args += ('--template-state-registry-only',)
                 if owned_script_services:
                     request = Path(stage) / 'owned-script-services.json'
-                    request.write_text(json.dumps(list(owned_script_services), separators=(',', ':')))
-                    request.chmod(0o600)
+                    await _settled_executor(hass, _write_private_request, request,
+                        json.dumps(list(owned_script_services), separators=(',', ':')))
                     state_source_args += ('--template-owned-script-services', str(request))
             worker = str(Path(__file__).with_name('yaml_validation_worker.py'))
             process = await asyncio.create_subprocess_exec(
@@ -694,11 +696,13 @@ async def _async_validate_proposed(hass, plan, scratch_parent, *, timeout=120, w
                                 for row in staged[3].definitions))):
                 result['unsupported_domains'] = sorted(
                     set(result['unsupported_domains']) | {'template'})
+            repairs_snapshot = await _settled_executor(hass, _checker_repairs_snapshot,
+                plan, before, directories, dashboard_yaml, dashboard_storage)
             receipt = ValidationReceipt(str(root), sources, directories,
                 tuple(sorted((patch.path, _digest(patch.proposed_bytes)) for patch in plan.patches)),
                 tuple(result['changed_domains']), tuple(result['unsupported_domains']), result['version'],
                 tuple(tuple(row) for row in result.get('runtime_expected', ())),
-                _checker_repairs_snapshot(plan, before, directories, dashboard_yaml, dashboard_storage),
+                repairs_snapshot,
                 staged[-1] or None)
             await _settled_executor(hass, assert_validation_current, receipt)
             if dashboard_yaml is not None:
