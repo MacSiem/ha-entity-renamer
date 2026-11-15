@@ -29,6 +29,38 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         target.parent.mkdir(exist_ok=True)
         shutil.copyfile(Path(__file__).resolve().parents[1] / 'ha-entity-renamer.js', target)
 
+    async def test_pending_arriving_during_active_write_is_drained_once(self):
+        from homeassistant.helpers.storage import Store
+        await self.data(variant='sensor', source_consumers=True)
+        hass, manager = self.f.hass, self.f.device
+        store = manager._store
+        native = self.module('native_discovery_inputs')
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = Store._async_write_data
+        calls = []
+        async def gated_write(instance, data):
+            if instance is store:
+                calls.append(1)
+                if len(calls) == 1:
+                    entered.set()
+                    await release.wait()
+            return await original(instance, data)
+        with patch.object(Store, '_async_write_data', gated_write), \
+             patch.object(native, '_SETTLE_INTERVAL', 0.02), \
+             patch.object(native, '_SETTLE_TIMEOUT', 2):
+            writer = asyncio.create_task(store.async_save(manager._data_to_save()))
+            await entered.wait()
+            observer = asyncio.create_task(native.async_observe_discovery_inputs(
+                hass, guard=lambda: None, settle=True))
+            await asyncio.sleep(0.05)
+            store.async_delay_save(manager._data_to_save, 3600)
+            release.set()
+            await writer
+            observed = await observer
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(native._Managers.pending_for(store))
+        self.assertEqual(observed.files[1].raw, Path(store.path).read_bytes())
+
     async def test_native_disabled_device_members_are_observable(self):
         from homeassistant.helpers import entity_registry as er
         from types import MappingProxyType

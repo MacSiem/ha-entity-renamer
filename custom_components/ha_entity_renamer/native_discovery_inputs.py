@@ -257,17 +257,17 @@ Cancellation drains executor work before any held descriptor can be released.
             # Admit only stores with already queued work. Native Store retains
             # responsibility for selecting the latest data under its write lock.
             deadline = hass.loop.time() + _SETTLE_TIMEOUT
-            queued = tuple(store._data is not None for store in admission.stores)
-            for store, was_queued in zip(admission.stores, queued, strict=True):
-                if not was_queued:
-                    continue
+            for store in admission.stores:
                 while store._load_future is not None or store._write_lock.locked():
+                    waited = True
                     remaining = deadline - hass.loop.time()
                     if remaining <= 0:
                         _reject()
                     await asyncio.sleep(min(_SETTLE_INTERVAL, remaining))
                     check_admission()
                 check_admission()
+                if store._data is None:
+                    continue
                 if (hass.loop.time() >= deadline
                         or any(not waiter.cancelled() for waiter in (store._write_lock._waiters or ()))):
                     _reject()
