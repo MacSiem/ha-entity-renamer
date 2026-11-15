@@ -120,17 +120,27 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         runtime, mapping, uuids, original = await self.data(
             variant='sensor', source_consumers=True, multiple=True)
         bridge = self.module('native_registry').NativeRegistryBridge
-        prepare_many = bridge.prepare_many
-        batches = []
+        prepare_many, prepare, inspect_many = bridge.prepare_many, bridge.prepare, bridge.inspect_many_before
+        batches, singles, inspections = [], [], []
         async def counted(subject, requests, guard):
             batches.append(tuple((kind, identity) for kind, identity, _ in requests))
             return await prepare_many(subject, requests, guard)
+        async def counted_single(subject, *args, **kwargs):
+            singles.append(True)
+            return await prepare(subject, *args, **kwargs)
+        async def counted_inspect(subject, *args, **kwargs):
+            inspections.append(True)
+            return await inspect_many(subject, *args, **kwargs)
         async def refresh(): pass
-        with patch.object(bridge, 'prepare_many', counted):
+        with patch.object(bridge, 'prepare_many', counted), \
+             patch.object(bridge, 'prepare', counted_single), \
+             patch.object(bridge, 'inspect_many_before', counted_inspect):
             review = await runtime.native_yaml_prepare(self.f.hass, mapping,
                 actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
         self.assertEqual(len(batches), 1)
         self.assertEqual(len(batches[0]), 2)
+        self.assertFalse(singles)
+        self.assertGreaterEqual(len(inspections), 2)
         plan = runtime.reviews[review['operation_id']].plan
         self.assertEqual([step.adapter for step in plan.steps].count('registry'), 2)
         self.assertIn('yaml', [step.adapter for step in plan.steps])
@@ -1187,12 +1197,14 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         from types import MappingProxyType
         self.scale_script_count = 244
         self.scale_script_variables = 32
-        runtime, mapping, _, _ = await self.data(variant='sensor', source_consumers=True)
+        runtime, mapping, uuids, original = await self.data(variant='sensor', source_consumers=True)
         hass = self.f.hass
         accepted = self.module('accepted_input_state').AcceptedInputState
         discovery = self.module('discovery')
         final_fence = self.module('discovery_final_fence')
         scan, finalize = discovery._scan_yaml, final_fence.async_finalize_discovery
+        bridge = self.module('native_registry').NativeRegistryBridge
+        prepare_many, inspect_many = bridge.prepare_many, bridge.inspect_many_before
         pipeline_counts = Counter()
         def counted_scan(*args, **kwargs):
             pipeline_counts['plan'] += 1
@@ -1200,12 +1212,24 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         async def counted_finalize(*args, **kwargs):
             pipeline_counts['finalize'] += 1
             return await finalize(*args, **kwargs)
+        async def counted_batch(subject, *args, **kwargs):
+            pipeline_counts['batch'] += 1
+            return await prepare_many(subject, *args, **kwargs)
+        async def counted_inspect(subject, *args, **kwargs):
+            pipeline_counts['inspect_many'] += 1
+            return await inspect_many(subject, *args, **kwargs)
         scan_patch = patch.object(discovery, '_scan_yaml', counted_scan)
         final_patch = patch.object(final_fence, 'async_finalize_discovery', counted_finalize)
+        batch_patch = patch.object(bridge, 'prepare_many', counted_batch)
+        inspect_patch = patch.object(bridge, 'inspect_many_before', counted_inspect)
         scan_patch.start()
         final_patch.start()
+        batch_patch.start()
+        inspect_patch.start()
         self.addCleanup(scan_patch.stop)
         self.addCleanup(final_patch.stop)
+        self.addCleanup(batch_patch.stop)
+        self.addCleanup(inspect_patch.stop)
         physical = accepted.prepare_review_identity
         loop_thread = threading.get_ident()
         physical_threads = []
@@ -1361,6 +1385,14 @@ asyncio.run(main())'''
             self.assertTrue(replies and replies[0]['ping_count'] > 0)
             self.assertLess(replies[0]['max_ping_rtt'], 20)
             self.assertLess(replies[0]['max_probe_gap'], 20)
-            self.assertEqual(pipeline_counts, {'plan': 1, 'finalize': 1})
+            self.assertEqual(pipeline_counts['plan'], 1)
+            self.assertEqual(pipeline_counts['finalize'], 1)
+            self.assertEqual(pipeline_counts['batch'], 1)
+            self.assertGreaterEqual(pipeline_counts['inspect_many'], 2)
+            print(f'ws_pipeline_counts={dict(pipeline_counts)}', flush=True)
+            self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
+            self.assertIsNone(self.f.entity.async_get(new))
+            self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+            self.assertFalse(await runtime.journal.all())
             self.assertTrue(physical_threads, 'pre-review physical guard was not exercised')
             print(f'ws_pre_review_physical_executor_calls={len(physical_threads)}', flush=True)
