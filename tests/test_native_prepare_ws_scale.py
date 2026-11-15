@@ -293,7 +293,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertIsNone(self.f.entity.async_get(new))
 
     async def test_initial_review_source_rewrite_after_worker_refuses(self):
-        runtime, mapping, uuids, original, _ = await self.restored_source()
+        runtime, mapping, uuids, original, _ = await self.restored_source(registry_only=False)
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
         baseline = self.module('native_input_baseline')
@@ -312,7 +312,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         with patch.object(baseline, '_drained', injected):
             with self.assertRaises((ValueError, self.module('transaction').Refused)):
                 await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
-                    guard=lambda: None, refresh=refresh)
+                    entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
         self.assertEqual(changed, [True])
         self.assertFalse(runtime.reviews)
         self.assertFalse(await runtime.journal.all())
@@ -321,7 +321,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         self.assertNotEqual((self.f.root / 'template.yaml').read_bytes(), original)
 
     async def test_initial_review_source_rewrite_after_discovery_refuses(self):
-        runtime, mapping, uuids, original, _ = await self.restored_source()
+        runtime, mapping, uuids, original, _ = await self.restored_source(registry_only=False)
         hass = self.f.hass
         old, new = next(iter(mapping.items()))
         discovery = self.module('discovery_final_fence')
@@ -339,7 +339,7 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         with patch.object(discovery, 'async_finalize_discovery', injected):
             with self.assertRaises((ValueError, self.module('transaction').Refused)):
                 await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
-                    guard=lambda: None, refresh=refresh)
+                    entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
         self.assertEqual(changed, [True])
         self.assertFalse(runtime.reviews)
         self.assertFalse(await runtime.journal.all())
@@ -630,8 +630,20 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         from homeassistant.helpers import entity_registry as er
         from homeassistant.helpers.json import _orjson_bytes_default_encoder
         from types import MappingProxyType
-        runtime, mapping, _, _, _ = await self.restored_source()
+        runtime, mapping, _, _, _ = await self.restored_source(registry_only=False)
         hass = self.f.hass
+        accepted = self.module('accepted_input_state').AcceptedInputState
+        physical = accepted.prepare_review_identity
+        loop_thread = threading.get_ident()
+        physical_threads = []
+        def checked_physical(state, *args):
+            physical_threads.append(threading.get_ident())
+            if threading.get_ident() == loop_thread:
+                raise AssertionError('pre-review physical guard ran on HA event loop')
+            return physical(state, *args)
+        proof_patch = patch.object(accepted, 'prepare_review_identity', checked_physical)
+        proof_patch.start()
+        self.addCleanup(proof_patch.stop)
         entries = []
         for i in range(104):
             entry = ConfigEntry(domain='input_boolean', title=f'Fixture {i}',
@@ -769,3 +781,5 @@ asyncio.run(main())'''
                 print(f'ws_profile_final_case={label} samples={counts.most_common(20)}', flush=True)
             print(f'ws_case={label} exit={process.returncode} result={stdout.decode()} stderr={stderr.decode()}', flush=True)
             self.assertEqual(process.returncode, 0)
+            self.assertTrue(physical_threads, 'pre-review physical guard was not exercised')
+            print(f'ws_pre_review_physical_executor_calls={len(physical_threads)}', flush=True)
