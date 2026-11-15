@@ -522,7 +522,8 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                 worker_finished.clear()
             return result
         async def refresh(): pass
-        with patch.object(discovery, 'async_finalize_discovery', injected), \
+        with self.assertLogs(self.module('native_template_state_yaml').__name__, level='WARNING') as logs, \
+             patch.object(discovery, 'async_finalize_discovery', injected), \
              patch.object(accepted, 'prepare_review_identity', marked), \
              patch.object(type(runtime), '_native_yaml_prepare_once', wrapped):
             if mode == 'success':
@@ -545,12 +546,39 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
                         entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
                 self.assertFalse(runtime.reviews)
         self.assertEqual(attempts, [False, True])
+        self.assertTrue(any('source_file:ctime' in line for line in logs.output), logs.output)
+        self.assertTrue(all('template.yaml' not in line for line in logs.output))
         self.assertEqual(len(invalidated), 2 if mode == 'twice' else 1)
         if mode != 'success':
             self.assertFalse(await runtime.journal.all())
         self.assertEqual(self.f.entity.async_get(old).id, uuids[old])
         self.assertIsNone(self.f.entity.async_get(new))
         self.assertEqual((self.f.root / 'template.yaml').read_bytes(), original)
+
+    async def test_review_token_diagnostic_categories_are_closed(self):
+        from types import SimpleNamespace
+        module = self.module('native_template_state_yaml')
+        state = SimpleNamespace(source_directories=(('.', (), None), ('.storage', (), ('secret',))),
+                                _sources={'private-source.yaml': ()})
+        before = (('root', (1, 2, 3)), ('.', (1, 2, 3, 4, 5, 6)),
+                  ('.storage', (1, 2, 3)), ('.storage/secret', None),
+                  ('private-source.yaml', (1, 2, 3, 4, 5, 6)),
+                  ('/private/native.py', (1, 2, 3, 4, 5, 6)))
+        after = (('root', (1, 2, 3)), ('.', (1, 2, 3, 4, 7, 6)),
+                 ('.storage', (1, 9, 3)), ('.storage/secret', (1, 2, 3, 4, 5, 6)),
+                 ('private-source.yaml', (1, 2, 3, 4, 5, 7)),
+                 ('/private/native.py', (1, 2, 3, 4, 5, 7)))
+        with self.assertLogs(module.__name__, level='WARNING') as logs:
+            with self.assertRaises(module.ReviewSourceInvalidated):
+                module._review_source_current(after, before, state)
+        line = logs.output[0]
+        for category in ('directory_full:mtime', 'directory_scoped:inode',
+                         'scoped_child:presence', 'source_file:ctime', 'native_file:ctime'):
+            self.assertIn(category, line)
+        self.assertNotIn('private', line)
+        self.assertNotIn('secret', line)
+        self.assertNotIn('.storage', line)
+        module._review_source_current(before, before, state)
 
     async def test_review_token_change_replans(self):
         await self._review_token_replan('success')

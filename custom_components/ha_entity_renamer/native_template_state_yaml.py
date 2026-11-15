@@ -24,9 +24,42 @@ class ReviewSourceInvalidated(Refused):
     """The INITIAL review's checked source token no longer matches."""
 
 
-def _review_source_current(current, expected):
-    if current != expected:
-        raise ReviewSourceInvalidated('template_state_review_source_changed')
+def _review_source_current(current, expected, state):
+    if current == expected:
+        return
+    # Report only closed metadata categories: never paths, values, or hashes.
+    directories = {path: names for path, _, names in state.source_directories}
+    sources = set(state._sources)
+    fields = ('device', 'inode', 'mode', 'size', 'mtime', 'ctime')
+    changed = set()
+    if len(current) != len(expected):
+        changed.add('inventory')
+    for (old_key, old), (new_key, new) in zip(expected, current):
+        if old_key != new_key:
+            changed.add('inventory')
+            continue
+        if old == new:
+            continue
+        if old_key == 'root':
+            category = 'root'
+        elif old_key in directories:
+            category = 'directory_full' if directories[old_key] is None else 'directory_scoped'
+        elif old_key in sources:
+            category = 'source_file'
+        elif old_key.startswith('/'):
+            category = 'native_file'
+        else:
+            category = 'scoped_child'
+        if old is None or new is None:
+            changed.add(category + ':presence')
+        else:
+            changed.update(category + ':' + field for field, before, after in zip(fields, old, new)
+                           if before != after)
+            if len(old) != len(new):
+                changed.add(category + ':shape')
+    logging.getLogger(__name__).warning('Review source token changed: %s',
+                                       ','.join(sorted(changed)) or 'unknown')
+    raise ReviewSourceInvalidated('template_state_review_source_changed')
 
 
 def _identity_payload(value):
@@ -394,7 +427,7 @@ class NativeTemplateStateYAMLRuntimeReadback:
                     lambda: detached.prepare_review_identity(self.receipt, runtime.native))
                 self._check(state, live)
                 runtime.bindings()
-                _review_source_current(state._review_identity(self.receipt, runtime.native), identity)
+                _review_source_current(state._review_identity(self.receipt, runtime.native), identity, state)
             else:
                 await _settled_executor(self.hass, runtime.sources)
                 self._check(state, live)
@@ -455,7 +488,7 @@ class _TemplateStateRuntimeCheck:
         else:
             self.runtime.bindings()
             _review_source_current(self.state._review_identity(owner.receipt, self.runtime.native),
-                                   self.review_identity)
+                                   self.review_identity, self.state)
         assert_discovery_managers_current(owner.hass, self.observed,
                                           guard=lambda: owner._check(self.state, self.live))
         _documents(self.state, self.observed)
