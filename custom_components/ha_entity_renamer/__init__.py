@@ -17,6 +17,42 @@ class _ReviewRetry(Exception):
         self.native = native
 
 
+def _retry_difference(old, new):
+    """Closed, value-free diagnostics; never grant authority to retry."""
+    from .native_input_baseline import _json, _loads
+
+    def equal_json(left, right, *, data=False):
+        try:
+            left, right = _loads(left), _loads(right)
+            if data:
+                left, right = left['data'], right['data']
+            return _json(left) == _json(right)
+        except (ValueError, TypeError, KeyError):
+            return None
+
+    return {
+        'key_changed': old.key != new.key,
+        'raw_changed': old.raw != new.raw,
+        'manager_changed': old.manager_json != new.manager_json,
+        'mode_changed': (old.identity is None or new.identity is None
+                         or old.identity[2] != new.identity[2]),
+        'manager_semantic_equal': equal_json(old.manager_json, new.manager_json),
+        'envelope_semantic_equal': equal_json(old.raw, new.raw),
+        'disk_data_semantic_equal': equal_json(old.raw, new.raw, data=True),
+        'old_disk_manager_equal': _equal_json_data_manager(old.raw, old.manager_json),
+        'new_disk_manager_equal': _equal_json_data_manager(new.raw, new.manager_json),
+    }
+
+
+def _equal_json_data_manager(raw, manager):
+    """Compare disk data and manager without emitting either image."""
+    from .native_input_baseline import _json, _loads
+    try:
+        return _json(_loads(raw)['data']) == _json(_loads(manager))
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
 def _retry_receipt(baseline, observed):
     """Bind a retry to the same bytes and all unchanged validation sources.
 
@@ -34,6 +70,12 @@ def _retry_receipt(baseline, observed):
         if (old.key != new.key or old.raw is None or old.identity is None
                 or old.raw != new.raw or old.manager_json != new.manager_json
                 or old.identity[2] != new.identity[2]):
+            import logging
+            try:
+                diagnostic = _retry_difference(old, new)
+            except Exception:
+                diagnostic = {'unavailable': True}
+            logging.getLogger(__name__).warning('Native retry comparison: %s', diagnostic)
             raise Refused('review_native_settle_changed')
         updated['.storage/' + old.key] = (old.sha256, *new.identity[:2])
     if tuple(row.key for row in observed.files) != _KEYS:
