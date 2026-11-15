@@ -432,6 +432,12 @@ class NativeTemplateStateYAMLRuntimeReadback:
             self._check(state, live)
             runtime = self.native
             if pre_review:
+                # Sample this runtime before the physical worker: the separate
+                # observation above has its own lazy native proofs. The worker
+                # must check every source used by the later runtime witness.
+                preliminary = self._sample(runtime, state, live)
+                _need(preliminary[1].same_bindings(snapshot), 'template_state_runtime_changed')
+                self._check(state, live)
                 # The physical worker gets no chain/HA callbacks. The original
                 # state is rebound on the event loop on both sides of await.
                 from copy import copy

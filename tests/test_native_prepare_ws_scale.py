@@ -589,19 +589,29 @@ class NativePrepareWebSocketScaleTests(auth.NativeQueuePrepareAuthTests):
         accepted = self.module('accepted_input_state').AcceptedInputState
         physical = accepted.prepare_review_identity
         loop_thread = threading.get_ident()
-        observed = []
+        observed, samples = [], []
+        readback = self.module('native_template_state_yaml').NativeTemplateStateYAMLRuntimeReadback
+        sample = readback._sample
+        def checked_sample(owner, runtime, state, live):
+            before = len(runtime.native.icon_proof.paths)
+            result = sample(owner, runtime, state, live)
+            samples.append((id(runtime.native), before, len(runtime.native.icon_proof.paths)))
+            return result
         def checked(state, receipt, native):
             self.assertNotEqual(threading.get_ident(), loop_thread)
             before = len(native.icon_proof.paths)
             result = physical(state, receipt, native)
-            observed.append((before, len(native.icon_proof.paths)))
+            observed.append((id(native), before, len(native.icon_proof.paths)))
             return result
         async def refresh(): pass
-        with patch.object(accepted, 'prepare_review_identity', checked):
+        with patch.object(accepted, 'prepare_review_identity', checked), \
+             patch.object(readback, '_sample', checked_sample):
             review = await runtime.native_yaml_prepare(hass, mapping, actor_id='synthetic-admin',
                 entity_names={old: 'Reviewed fixture'}, guard=lambda: None, refresh=refresh)
             self.assertTrue(observed)
-            self.assertTrue(all(before > 0 and before == after for before, after in observed), observed)
+            self.assertTrue(all(before > 0 and before == after for _, before, after in observed), observed)
+            self.assertTrue(any(native_id == observed[0][0] and before == 0 and after > 0
+                                for native_id, before, after in samples), samples)
             applied = await runtime.native_yaml_apply(hass, review['operation_id'], review['fingerprint'],
                 actor_id='synthetic-admin', guard=lambda: None, refresh=refresh)
             self.assertEqual(applied['state'], 'applied')
